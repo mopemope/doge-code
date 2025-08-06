@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use dotenvy::dotenv;
-use tracing::info;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::prelude::*;
 
 use crate::analysis::Analyzer;
@@ -59,26 +59,48 @@ struct AppConfig {
     project_root: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct FileConfig {
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    log_level: Option<String>,
+    project_root: Option<std::path::PathBuf>,
+}
+
 impl AppConfig {
     fn from_cli(cli: Cli) -> Result<Self> {
         let project_root = std::env::current_dir().context("resolve current dir")?;
-        let api_key = cli.api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        let file_cfg = load_file_config().unwrap_or_default();
+        let api_key = cli
+            .api_key
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or(file_cfg.api_key);
         let base_url = if cli.base_url.is_empty() {
             std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
+                .ok()
+                .or(file_cfg.base_url)
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
         } else {
             cli.base_url
         };
         let model = if cli.model.is_empty() {
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string())
+            std::env::var("OPENAI_MODEL")
+                .ok()
+                .or(file_cfg.model)
+                .unwrap_or_else(|| "gpt-4o-mini".to_string())
         } else {
             cli.model
         };
         let log_level = if cli.log_level.is_empty() {
-            std::env::var("DOGE_LOG").unwrap_or_else(|_| "info".to_string())
+            std::env::var("DOGE_LOG")
+                .ok()
+                .or(file_cfg.log_level)
+                .unwrap_or_else(|| "info".to_string())
         } else {
             cli.log_level
         };
+        let project_root = file_cfg.project_root.unwrap_or(project_root);
         Ok(Self {
             no_tui: cli.no_tui,
             base_url,
@@ -88,6 +110,37 @@ impl AppConfig {
             project_root,
         })
     }
+}
+
+fn load_file_config() -> Result<FileConfig> {
+    use std::env;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn candidate_paths() -> Vec<PathBuf> {
+        let mut v = Vec::new();
+        if let Ok(p) = env::var("DOGE_CODE_CONFIG") { v.push(PathBuf::from(p)); }
+        if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
+            v.push(Path::new(&xdg_home).join("doge-code/config.toml"));
+        } else if let Ok(home) = env::var("HOME") {
+            v.push(Path::new(&home).join(".config/doge-code/config.toml"));
+        }
+        if let Ok(dirs) = env::var("XDG_CONFIG_DIRS") {
+            for d in dirs.split(':') { if !d.is_empty() { v.push(Path::new(d).join("doge-code/config.toml")); } }
+        }
+        v
+    }
+
+    for p in candidate_paths() {
+        if p.exists() {
+            let s = fs::read_to_string(&p).with_context(|| format!("read config file: {}", p.display()))?;
+            match toml::from_str::<FileConfig>(&s) {
+                Ok(cfg) => { info!(path=%p.display(), "loaded config file"); return Ok(cfg); }
+                Err(e) => { warn!(path=%p.display(), error=%e.to_string(), "parse config failed"); continue; }
+            }
+        }
+    }
+    Ok(FileConfig::default())
 }
 
 fn init_logging(level: &str) -> Result<()> {
