@@ -95,7 +95,10 @@ impl CommandHandler for TuiExecutor {
                             let rt = tokio::runtime::Handle::current();
                             let model = self.cfg.model.clone(); // used for calls and header
                             if let Some(tx) = &self.ui_tx {
-                                let _ = tx.send(format!("\r[model: {model}]\n"));
+                                // send a transient model hint that will be removed on first token
+                                let _ = tx.send(format!("::model:hint:\r[model: {model}]"));
+                                // ensure next stream starts on a new line placeholder to append into
+                                let _ = tx.send(String::new());
                             }
                             let content = rest.to_string();
                             let c = c.clone();
@@ -119,7 +122,7 @@ impl CommandHandler for TuiExecutor {
                                         while let Some(item) = s.next().await {
                                             if *cancel_rx.borrow() {
                                                 if let Some(tx) = tx.as_ref() {
-                                                    let _ = tx.send("\n[Cancelled]\n".into());
+                                                    let _ = tx.send("[Cancelled]".into());
                                                 }
                                                 break;
                                             }
@@ -135,11 +138,11 @@ impl CommandHandler for TuiExecutor {
                                                 }
                                             };
                                             if let Some(tx) = tx.as_ref() {
-                                                let _ = tx.send(token);
+                                                let _ = tx.send(format!("::append:{token}"));
                                             }
                                         }
                                         if let Some(tx) = tx {
-                                            let _ = tx.send("\n[Done]\n".into());
+                                            let _ = tx.send("[Done]".into());
                                             let _ = tx.send("::status:done".into());
                                         }
                                     }
@@ -165,7 +168,7 @@ impl CommandHandler for TuiExecutor {
                                         };
                                         if let Some(tx) = tx {
                                             let _ = tx.send(out);
-                                            let _ = tx.send("\n[Done]\n".into());
+                                            let _ = tx.send("[Done]".into());
                                             let _ = tx.send("::status:done".into());
                                         }
                                     }

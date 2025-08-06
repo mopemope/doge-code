@@ -18,6 +18,8 @@ pub struct TuiApp {
     pub max_log_lines: usize,
     pub status: Status,
     pub model: Option<String>,
+    // When true, the last inserted model hint line should be removed on first stream token.
+    model_hint_pending: bool,
 }
 
 impl TuiApp {
@@ -33,6 +35,7 @@ impl TuiApp {
             max_log_lines: 500,
             status: Status::Idle,
             model,
+            model_hint_pending: false,
         }
     }
 
@@ -82,6 +85,11 @@ impl TuiApp {
                     match msg.as_str() {
                         "::status:done" => {
                             self.status = Status::Done;
+                            // Safety net: ensure any pending model hint is cleared.
+                            if self.model_hint_pending {
+                                Self::purge_model_hint(&mut self.log);
+                                self.model_hint_pending = false;
+                            }
                         }
                         "::status:cancelled" => {
                             self.status = Status::Cancelled;
@@ -91,6 +99,19 @@ impl TuiApp {
                         }
                         "::status:error" => {
                             self.status = Status::Error;
+                        }
+                        _ if msg.starts_with("::model:hint:") => {
+                            let payload = &msg["::model:hint:".len()..];
+                            self.push_log(payload.to_string());
+                            self.model_hint_pending = true;
+                        }
+                        _ if msg.starts_with("::append:") => {
+                            if self.model_hint_pending {
+                                Self::purge_model_hint(&mut self.log);
+                                self.model_hint_pending = false;
+                            }
+                            let payload = &msg["::append:".len()..];
+                            self.append_stream_token(payload);
                         }
                         _ => self.push_log(msg),
                     }
@@ -209,5 +230,31 @@ impl TuiApp {
         write!(stdout, "{}", plan.input_line)?;
         stdout.flush()?;
         Ok(())
+    }
+}
+
+impl TuiApp {
+    // Remove a transient model hint from the end of the log if present.
+    fn purge_model_hint(log: &mut Vec<String>) {
+        let mut removed = false;
+        for _ in 0..2 {
+            if let Some(last) = log.last() {
+                if last.starts_with("\r[model:") || last.trim().is_empty() {
+                    if last.trim().is_empty() {
+                        log.pop();
+                        continue;
+                    }
+                    log.pop();
+                    removed = true;
+                    break;
+                } else {
+                    break;
+                }
+            }
+        }
+        if removed
+            && !log.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                log.push(String::new());
+            }
     }
 }
