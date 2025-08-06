@@ -73,6 +73,7 @@ impl TuiApp {
     }
 
     fn event_loop(&mut self) -> Result<()> {
+        let mut last_ctrl_c_at: Option<std::time::Instant> = None;
         loop {
             // We cannot downcast trait object safely here; show no model hint in view and instead inject a header line from executor.
             let _model_hint: Option<&str> = None;
@@ -122,6 +123,20 @@ impl TuiApp {
             if crossterm::event::poll(std::time::Duration::from_millis(50))? {
                 match crossterm::event::read()? {
                     crossterm::event::Event::Key(k) => match k.code {
+                        // Handle Ctrl+C before generic Char(c) to avoid being shadowed
+                        crossterm::event::KeyCode::Char('c')
+                            if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            let now = std::time::Instant::now();
+                            if let Some(prev) = last_ctrl_c_at {
+                                if now.duration_since(prev) <= std::time::Duration::from_secs(3) {
+                                    return Ok(());
+                                }
+                            }
+                            last_ctrl_c_at = Some(now);
+                            self.dispatch("/cancel");
+                            self.push_log("[Press Ctrl+C again within 3s to exit]");
+                        }
                         crossterm::event::KeyCode::Esc => {
                             self.dispatch("/cancel");
                         }
@@ -129,10 +144,6 @@ impl TuiApp {
                             let line = std::mem::take(&mut self.input);
                             if line.trim() == "/quit" {
                                 return Ok(());
-                            }
-                            if line.starts_with("/ask ") {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                self.push_log(format!("[{ts}] --------------------------------"));
                             }
                             self.dispatch(&line);
                         }
@@ -252,9 +263,8 @@ impl TuiApp {
                 }
             }
         }
-        if removed
-            && !log.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
-                log.push(String::new());
-            }
+        if removed && !log.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
+            log.push(String::new());
+        }
     }
 }
