@@ -137,6 +137,18 @@ Separators:
 - Absolute paths are rejected; binary writes are not allowed
 - Search skips common binary file types; use a glob include to narrow scope
 
+#### Tools module layout (after refactor)
+
+The filesystem tools are split per operation for maintainability:
+
+- `src/tools/mod.rs` — module wiring and re-exports
+- `src/tools/common.rs` — `FsTools` struct (holds project root)
+- `src/tools/read.rs` — `fs_read` implementation and path normalization
+- `src/tools/write.rs` — `fs_write` implementation (guards project root, creates parents)
+- `src/tools/search.rs` — `fs_search` implementation (regex over globbed files, skips binaries)
+
+Public API remains the same via `pub use` in `tools::mod`.
+
 ## Developer Notes
 
 - Edition: Rust 2024
