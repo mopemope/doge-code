@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+unicode-width = "0.1"
 anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
