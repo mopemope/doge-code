@@ -132,7 +132,6 @@ impl OpenAIClient {
         messages: Vec<ChatMessage>,
     ) -> Result<impl futures::Stream<Item = Result<String>> + '_> {
         use futures::StreamExt;
-        
 
         let url = self.endpoint();
         let req = ChatRequest {
@@ -259,5 +258,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msg.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn chat_once_non200_is_error() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .respond_with(status_code(500).body("oops")),
+        );
+        let client = OpenAIClient::new(server.url_str(""), "test-key").unwrap();
+        let err = client
+            .chat_once(
+                "gpt-test",
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("500"));
+    }
+
+    #[test]
+    fn endpoint_normalization() {
+        let c = OpenAIClient {
+            base_url: "https://api.example.com/v1/".into(),
+            api_key: "x".into(),
+            inner: reqwest::Client::new(),
+        };
+        assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
+        let c2 = OpenAIClient {
+            base_url: "https://api.example.com/".into(),
+            api_key: "x".into(),
+            inner: reqwest::Client::new(),
+        };
+        assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }
 }

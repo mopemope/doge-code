@@ -6,13 +6,11 @@ mod tui;
 use std::{
     io::{self, Write},
     path::PathBuf,
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use dotenvy::dotenv;
-use tokio::sync::Mutex;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -142,151 +140,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_tui(cfg: AppConfig) -> Result<()> {
+async fn run_tui(_cfg: AppConfig) -> Result<()> {
     let mut app = TuiApp::new("doge-code - /help, Esc or /quit to exit");
     app.push_log("Welcome to doge-code TUI");
     app.push_log("Type commands like /ask, /read, /search, /map");
-
-    // Wire streaming: on Enter with /ask, spawn a task to stream tokens and update UI
-    let client = if let Some(key) = cfg.api_key.clone() {
-        Some(OpenAIClient::new(cfg.base_url.clone(), key)?)
-    } else {
-        None
-    };
-    let model = cfg.model.clone();
-
-    // Shared state for a simplistic callback style
-    let app_ref = Arc::new(Mutex::new(app));
-    // Small input loop inside TUI module; we hack a minimal broker here by replacing TuiApp::run with inline loop
-    // Reuse the TUI drawing/event loop from TuiApp but intercept /ask commands via callback
-
-    // Inline reimplementation using the existing TuiApp instance for simplicity
-    let app_ref_clone = app_ref.clone();
-    {
-        use crossterm::event::{Event, KeyCode};
-        use crossterm::{cursor, event, execute, terminal};
-        use std::io::Write;
-        let mut stdout = std::io::stdout();
-        terminal::enable_raw_mode()?;
-        execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
-        let res: Result<()> = loop {
-            {
-                let app = app_ref_clone.lock().await;
-                // draw
-                let (w, h) = terminal::size()?;
-                use crossterm::{
-                    cursor,
-                    terminal::{self, ClearType},
-                };
-                use std::io::Write as _;
-                execute!(
-                    stdout,
-                    terminal::Clear(ClearType::All),
-                    cursor::MoveTo(0, 0)
-                )?;
-                writeln!(stdout, "{}", app.title)?;
-                writeln!(stdout, "{}", "─".repeat(w as usize))?;
-                let max_log_rows = h.saturating_sub(3) as usize;
-                let start = app.log.len().saturating_sub(max_log_rows);
-                for line in &app.log[start..] {
-                    let mut s = line.clone();
-                    if s.len() > (w as usize) {
-                        s.truncate(w as usize);
-                    }
-                    writeln!(stdout, "{s}")?;
-                }
-                execute!(stdout, cursor::MoveTo(0, h.saturating_sub(1)))?;
-                write!(stdout, "> {}", app.input)?;
-                stdout.flush()?;
-            }
-
-            if event::poll(std::time::Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(k) => match k.code {
-                        KeyCode::Esc => {
-                            break Ok(());
-                        }
-                        KeyCode::Enter => {
-                            let mut to_send = String::new();
-                            {
-                                let mut app = app_ref_clone.lock().await;
-                                let line = std::mem::take(&mut app.input);
-                                if line.trim() == "/quit" {
-                                    break Ok(());
-                                }
-                                if let Some(rest) = line.strip_prefix("/ask ") {
-                                    to_send = rest.to_string();
-                                    app.push_log(format!("> {rest}"));
-                                    app.push_log(String::new()); // allocate output line
-                                } else {
-                                    app.push_log(format!("> {line}"));
-                                }
-                            }
-                            if !to_send.is_empty() {
-                                if let Some(ref client) = client {
-                                    let app_ref2 = app_ref_clone.clone();
-                                    let model2 = model.clone();
-                                    let client2 = client.clone();
-                                    tokio::spawn(async move {
-                                        match client2
-                                            .chat_stream(
-                                                &model2,
-                                                vec![ChatMessage {
-                                                    role: "user".into(),
-                                                    content: to_send,
-                                                }],
-                                            )
-                                            .await
-                                        {
-                                            Ok(mut stream) => {
-                                                use futures::StreamExt;
-                                                while let Some(tok) = stream.next().await {
-                                                    match tok {
-                                                        Ok(s) => {
-                                                            let mut app = app_ref2.lock().await;
-                                                            app.append_stream_token(&s);
-                                                        }
-                                                        Err(e) => {
-                                                            let mut app = app_ref2.lock().await;
-                                                            app.push_log(format!(
-                                                                "[stream error] {e}"
-                                                            ));
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                let mut app = app_ref2.lock().await;
-                                                app.push_log(format!("[stream start error] {e}"));
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    let mut app = app_ref_clone.lock().await;
-                                    app.push_log("OPENAI_API_KEY not set; cannot call LLM.");
-                                }
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            let mut app = app_ref_clone.lock().await;
-                            app.input.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            let mut app = app_ref_clone.lock().await;
-                            app.input.push(c);
-                        }
-                        _ => {}
-                    },
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                }
-            }
-        };
-        execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
-        terminal::disable_raw_mode()?;
-        res?;
-    }
+    // For now, keep TUI self-contained without streaming to avoid double render issues.
+    app.run()?;
     Ok(())
 }
 
