@@ -126,6 +126,7 @@ impl OpenAIClient {
             .context("no choices returned")
     }
 
+    #[allow(dead_code)]
     pub async fn chat_stream(
         &self,
         model: &str,

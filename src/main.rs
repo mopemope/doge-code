@@ -53,6 +53,7 @@ struct AppConfig {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    #[allow(dead_code)]
     log_level: String,
     project_root: PathBuf,
 }

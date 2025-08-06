@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 pub struct TuiApp {
     pub title: String,
@@ -137,6 +137,7 @@ impl TuiApp {
         }
     }
 
+    #[allow(dead_code)]
     pub fn append_stream_token(&mut self, s: &str) {
         if let Some(last) = self.log.last_mut() {
             last.push_str(s);
