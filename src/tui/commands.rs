@@ -51,7 +51,6 @@ impl CommandHandler for TuiExecutor {
             "/help" => {
                 ui.push_log(format!("[model: {}]", self.cfg.model));
                 ui.push_log("/help, /map, /tools, /clear, /quit");
-                ui.push_log("/ask <text>");
                 ui.push_log("/read <path> [offset limit]");
                 ui.push_log("/write <path> <text>");
                 ui.push_log("/search <regex> [include_glob]");
@@ -85,7 +84,8 @@ impl CommandHandler for TuiExecutor {
                 Err(e) => ui.push_log(format!("map error: {e}")),
             },
             _ => {
-                if let Some(rest) = line.strip_prefix("/ask ") {
+                if !line.starts_with('/') {
+                    let rest = line;
                     ui.push_log(format!("> {rest}"));
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx.send("::status:streaming".into());
@@ -93,11 +93,9 @@ impl CommandHandler for TuiExecutor {
                     match self.client.as_ref() {
                         Some(c) => {
                             let rt = tokio::runtime::Handle::current();
-                            let model = self.cfg.model.clone(); // used for calls and header
+                            let model = self.cfg.model.clone();
                             if let Some(tx) = &self.ui_tx {
-                                // send a transient model hint that will be removed on first token
                                 let _ = tx.send(format!("::model:hint:\r[model: {model}]"));
-                                // ensure next stream starts on a new line placeholder to append into
                                 let _ = tx.send(String::new());
                             }
                             let content = rest.to_string();
