@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use dotenvy::dotenv;
 use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::prelude::*;
 
 use crate::analysis::Analyzer;
 use crate::llm::{ChatMessage, OpenAIClient};
@@ -90,10 +90,13 @@ impl AppConfig {
 }
 
 fn init_logging(level: &str) -> Result<()> {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(io::stderr))
+    let log_file = std::sync::Arc::new(std::fs::File::create("./debug.log")?);
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(log_file)
         .init();
     info!("logging initialized");
     Ok(())
