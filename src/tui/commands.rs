@@ -42,12 +42,14 @@ impl CommandHandler for TuiExecutor {
         if self.ui_tx.is_none() {
             self.ui_tx = ui.sender();
         }
+        // update header by sending a no-op so draw_with_model can read model from cfg via executor? The view does not own cfg; we will embed model in header via render_plan argument handled in view.
         let line = line.trim();
         if line.is_empty() {
             return;
         }
         match line {
             "/help" => {
+                ui.push_log(format!("[model: {}]", self.cfg.model));
                 ui.push_log("/help, /map, /tools, /clear, /quit");
                 ui.push_log("/ask <text>");
                 ui.push_log("/read <path> [offset limit]");
@@ -91,7 +93,10 @@ impl CommandHandler for TuiExecutor {
                     match self.client.as_ref() {
                         Some(c) => {
                             let rt = tokio::runtime::Handle::current();
-                            let model = self.cfg.model.clone();
+                            let model = self.cfg.model.clone(); // used for calls and header
+                            if let Some(tx) = &self.ui_tx {
+                                let _ = tx.send(format!("\r[model: {model}]\n"));
+                            }
                             let content = rest.to_string();
                             let c = c.clone();
                             let tx = self.ui_tx.clone();
