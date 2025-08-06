@@ -31,12 +31,12 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_tui: bool,
 
-    /// OpenAI-compatible API base URL
-    #[arg(long, default_value = "https://api.openai.com/v1")]
+    /// OpenAI-compatible API base URL (no default; falls back to env OPENAI_BASE_URL or config file)
+    #[arg(long, default_value = "")]
     pub base_url: String,
 
-    /// Model name
-    #[arg(long, default_value = "gpt-4o-mini")]
+    /// Model name (no default; falls back to env OPENAI_MODEL or config file)
+    #[arg(long, default_value = "")]
     pub model: String,
 
     /// API key (set via env OPENAI_API_KEY recommended)
@@ -65,9 +65,12 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(cfg: AppConfig) -> Result<()> {
-    let exec = TuiExecutor::new(cfg)?;
-    let mut app =
-        TuiApp::new("doge-code - /help, Esc or /quit to exit").with_handler(Box::new(exec));
+    let exec = TuiExecutor::new(cfg.clone())?;
+    let mut app = TuiApp::new(
+        "doge-code - /help, Esc or /quit to exit",
+        Some(cfg.model.clone()),
+    )
+    .with_handler(Box::new(exec));
     app.push_log("Welcome to doge-code TUI");
     app.push_log("Type commands like /ask, /read, /search, /map");
     app.run()?;

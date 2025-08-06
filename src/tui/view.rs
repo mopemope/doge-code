@@ -17,10 +17,11 @@ pub struct TuiApp {
     pub(crate) inbox_tx: Option<std::sync::mpsc::Sender<String>>,
     pub max_log_lines: usize,
     pub status: Status,
+    pub model: Option<String>,
 }
 
 impl TuiApp {
-    pub fn new(title: impl Into<String>) -> Self {
+    pub fn new(title: impl Into<String>, model: Option<String>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
             title: title.into(),
@@ -31,6 +32,7 @@ impl TuiApp {
             inbox_tx: Some(tx),
             max_log_lines: 500,
             status: Status::Idle,
+            model,
         }
     }
 
@@ -69,6 +71,8 @@ impl TuiApp {
 
     fn event_loop(&mut self) -> Result<()> {
         loop {
+            // We cannot downcast trait object safely here; show no model hint in view and instead inject a header line from executor.
+            let _model_hint: Option<&str> = None;
             if let Some(rx) = self.inbox_rx.as_ref() {
                 let mut drained = Vec::new();
                 while let Ok(msg) = rx.try_recv() {
@@ -92,7 +96,8 @@ impl TuiApp {
                     }
                 }
             }
-            self.draw()?;
+            let model_hint = self.model.as_deref();
+            self.draw_with_model(model_hint)?;
             if crossterm::event::poll(std::time::Duration::from_millis(50))? {
                 match crossterm::event::read()? {
                     crossterm::event::Event::Key(k) => match k.code {
@@ -142,10 +147,18 @@ impl TuiApp {
         }
     }
 
-    fn draw(&self) -> Result<()> {
+    fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
         let mut stdout = io::stdout();
         let (w, h) = terminal::size()?;
-        let plan = build_render_plan(&self.title, self.status, &self.log, &self.input, w, h);
+        let plan = build_render_plan(
+            &self.title,
+            self.status,
+            &self.log,
+            &self.input,
+            w,
+            h,
+            model,
+        );
         queue!(
             stdout,
             terminal::Clear(ClearType::All),
