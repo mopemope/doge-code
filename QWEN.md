@@ -222,9 +222,12 @@ When tasked with unit test additions or modifications, strictly follow these ste
 LLMのFunction Callingなどで使用するToolを提供します。
 提供する基本的なtoolは以下です。
 
-- fs_search: ファイルを検索する
-- fs_read: ファイルを読む
+- fs_list: 指定されたパスのファイル一覧を返す（深さ指定可能）
+- fs_search: ファイルを検索する（ripgrepを使用可能）
+- fs_read: ファイルを読む（範囲指定も可能）
 - fs_write: ファイルを書く
+- get_symbol_info: 問い合わせに対し、repomapで解析した結果（ファイル名、行数、コードなど）を返す
+- execute_bash: bashコマンドを実行する
 
 ## 技術スタック
 
@@ -249,10 +252,14 @@ https://platform.openai.com/docs/api-reference/chat/create
 - **TUI**: crossterm
 - **CLI**: clap
 
-### 静的解析
+### 静的解析（repomap）
 
 - **パーサー**: tree-sitter
 - **言語サポート**: Rust, TypeScript, Python, JavaScript等
+
+resources以下にtree-sitterで使用する各言語のscmがあります。
+これをrust-embed crateを使用してバイナリに埋め込みます。
+解析結果はsqliteで永続化します。
 
 ### データ処理
 
