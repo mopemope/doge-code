@@ -1,110 +1,22 @@
 use anyhow::Result;
 use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode},
-    execute, queue,
+    cursor, execute, queue,
     style::{Color, ResetColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
-use unicode_width::UnicodeWidthChar;
 
-pub trait CommandHandler {
-    fn handle(&mut self, line: &str, ui: &mut TuiApp);
-    fn sender(&self) -> Option<std::sync::mpsc::Sender<String>> {
-        None
-    }
-}
+use crate::tui::state::{Status, build_render_plan};
 
 pub struct TuiApp {
     pub title: String,
     pub input: String,
     pub log: Vec<String>,
-    handler: Option<Box<dyn CommandHandler + Send>>, // simple callback hook
-    inbox_rx: Option<std::sync::mpsc::Receiver<String>>, // background -> UI messages
-    inbox_tx: Option<std::sync::mpsc::Sender<String>>, // for executors to clone
+    pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
+    pub(crate) inbox_rx: Option<std::sync::mpsc::Receiver<String>>,
+    pub(crate) inbox_tx: Option<std::sync::mpsc::Sender<String>>,
     pub max_log_lines: usize,
     pub status: Status,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Idle,
-    Streaming,
-    Cancelled,
-    Done,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderPlan {
-    header_lines: Vec<String>,
-    log_lines: Vec<String>,
-    input_line: String,
-}
-
-fn build_render_plan(
-    title: &str,
-    status: Status,
-    log: &[String],
-    input: &str,
-    w: u16,
-    h: u16,
-) -> RenderPlan {
-    let w_usize = w as usize;
-    fn truncate_display(s: &str, max: usize) -> String {
-        if max == 0 {
-            return String::new();
-        }
-        let mut width = 0usize;
-        let mut out = String::new();
-        for ch in s.chars() {
-            let ch_w = ch.width().unwrap_or(0);
-            if ch_w == 0 {
-                out.push(ch);
-                continue;
-            }
-            if width + ch_w > max {
-                break;
-            }
-            out.push(ch);
-            width += ch_w;
-        }
-        out
-    }
-    let status_str = match status {
-        Status::Idle => "Idle",
-        Status::Streaming => "Streaming",
-        Status::Cancelled => "Cancelled",
-        Status::Done => "Done",
-        Status::Error => "Error",
-    };
-    let title_full = format!("{title} — [{status_str}]");
-    let title_trim = truncate_display(&title_full, w_usize);
-    let sep = "-".repeat(w_usize);
-    let header_lines = vec![format!("\r{}\n", title_trim), format!("\r{}\n", sep)];
-
-    let max_log_rows = h.saturating_sub(3) as usize;
-    let start = log.len().saturating_sub(max_log_rows);
-    let mut log_lines = Vec::new();
-    for line in &log[start..] {
-        let line = line.trim_end_matches('\n');
-        log_lines.push(format!("\r{}\n", truncate_display(line, w_usize)));
-    }
-
-    let input_prompt = if input.is_empty() {
-        "> ".to_string()
-    } else {
-        format!("> {input}")
-    };
-    let input_trim = truncate_display(&input_prompt, w_usize);
-    let input_line = format!("\r{input_trim}");
-
-    RenderPlan {
-        header_lines,
-        log_lines,
-        input_line,
-    }
 }
 
 impl TuiApp {
@@ -122,7 +34,7 @@ impl TuiApp {
         }
     }
 
-    pub fn with_handler(mut self, h: Box<dyn CommandHandler + Send>) -> Self {
+    pub fn with_handler(mut self, h: Box<dyn crate::tui::commands::CommandHandler + Send>) -> Self {
         self.handler = Some(h);
         self
     }
@@ -148,19 +60,16 @@ impl TuiApp {
                 let _ = terminal::disable_raw_mode();
             }
         }
-
         let mut stdout = io::stdout();
         terminal::enable_raw_mode()?;
         execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
         let _guard = TuiGuard;
-
         self.event_loop()
     }
 
     fn event_loop(&mut self) -> Result<()> {
         loop {
             if let Some(rx) = self.inbox_rx.as_ref() {
-                // Drain safely: collect first to avoid borrow conflict
                 let mut drained = Vec::new();
                 while let Ok(msg) = rx.try_recv() {
                     drained.push(msg);
@@ -184,34 +93,32 @@ impl TuiApp {
                 }
             }
             self.draw()?;
-            if event::poll(std::time::Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(k) => match k.code {
-                        KeyCode::Esc => {
-                            // Map Esc to /cancel instead of quitting
+            if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+                match crossterm::event::read()? {
+                    crossterm::event::Event::Key(k) => match k.code {
+                        crossterm::event::KeyCode::Esc => {
                             self.dispatch("/cancel");
                         }
-                        KeyCode::Enter => {
+                        crossterm::event::KeyCode::Enter => {
                             let line = std::mem::take(&mut self.input);
                             if line.trim() == "/quit" {
                                 return Ok(());
                             }
                             if line.starts_with("/ask ") {
-                                // Insert a faint separator line with timestamp
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 self.push_log(format!("[{ts}] --------------------------------"));
                             }
                             self.dispatch(&line);
                         }
-                        KeyCode::Backspace => {
+                        crossterm::event::KeyCode::Backspace => {
                             self.input.pop();
                         }
-                        KeyCode::Char(c) => {
+                        crossterm::event::KeyCode::Char(c) => {
                             self.input.push(c);
                         }
                         _ => {}
                     },
-                    Event::Resize(_, _) => {}
+                    crossterm::event::Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
@@ -220,7 +127,6 @@ impl TuiApp {
 
     fn dispatch(&mut self, line: &str) {
         if self.handler.is_some() {
-            // Avoid aliasing &mut self across trait call; take args needed and call via temporary
             let mut handler = self.handler.take().unwrap();
             handler.handle(line, self);
             self.handler = Some(handler);
@@ -245,7 +151,6 @@ impl TuiApp {
             terminal::Clear(ClearType::All),
             cursor::MoveTo(0, 0)
         )?;
-        // Header with colors
         if let Some(first) = plan.header_lines.first() {
             queue!(stdout, SetForegroundColor(Color::Cyan))?;
             write!(stdout, "{first}")?;
@@ -259,7 +164,6 @@ impl TuiApp {
         for line in plan.header_lines.iter().skip(2) {
             write!(stdout, "{line}")?;
         }
-        // Log lines: simple heuristic coloring
         for line in &plan.log_lines {
             if line.starts_with("\r> ") {
                 queue!(stdout, SetForegroundColor(Color::Blue))?;
