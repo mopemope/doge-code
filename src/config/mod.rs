@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub log_level: String,
     pub project_root: PathBuf,
     pub llm: LlmConfig,
+    pub enable_stream_tools: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +48,7 @@ pub struct FileConfig {
     pub log_level: Option<String>,
     pub project_root: Option<std::path::PathBuf>,
     pub llm: Option<PartialLlmConfig>,
+    pub enable_stream_tools: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -125,6 +127,11 @@ impl AppConfig {
             log_level,
             project_root,
             llm,
+            enable_stream_tools: std::env::var("DOGE_STREAM_TOOLS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(file_cfg.enable_stream_tools)
+                .unwrap_or(false),
         })
     }
 }

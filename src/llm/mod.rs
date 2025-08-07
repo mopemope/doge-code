@@ -1,6 +1,7 @@
 mod client;
 mod history;
 mod stream;
+mod stream_tools;
 pub mod tool_use;
 
 use reqwest::StatusCode;

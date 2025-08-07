@@ -7,12 +7,32 @@ use tracing::{debug, info};
 use crate::llm::client::{ChatMessage, OpenAIClient};
 
 // Stream types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamChoiceDelta {
     #[serde(default)]
     pub content: String,
     #[serde(default)]
     pub role: Option<String>,
+    // OpenAI-compatible tool_calls (streamed as incremental deltas)
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolCallDelta {
+    pub index: Option<usize>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>, // "function"
+    #[serde(default)]
+    pub function: Option<ToolCallFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolCallFunctionDelta {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub arguments: String, // streamed as partial JSON string
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +169,15 @@ impl OpenAIClient {
                                         let delta = ch.delta.content;
                                         if !delta.is_empty() {
                                             out.push(Ok(delta));
+                                        }
+                                        if !ch.delta.tool_calls.is_empty() {
+                                            if let Ok(marker) =
+                                                serde_json::to_string(&ch.delta.tool_calls)
+                                            {
+                                                out.push(Ok(format!(
+                                                    "__TOOL_CALLS_DELTA__:{marker}"
+                                                )));
+                                            }
                                         }
                                     }
                                 }
