@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use std::time::Duration;
+use tracing::{debug, info};
 
 use crate::llm::client::{ChatMessage, OpenAIClient};
 
@@ -53,27 +54,67 @@ impl OpenAIClient {
             format!("Bearer {}", self.api_key).parse().unwrap(),
         );
 
-        // Log payload with API key redacted
         if let Ok(payload) = serde_json::to_string(&req) {
             debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions payload (stream)");
         }
 
-        let resp = self
-            .inner
-            .post(url)
-            .headers(headers)
-            .json(&req)
-            .send()
-            .await
-            .context("send chat request (stream)")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("chat error: {} - {}", status, text);
-        }
+        // Only retry establishing the stream, not mid-stream reads
+        let mut attempt = 1usize;
+        let max_attempts = self.llm_cfg.max_retries.saturating_add(1);
+        let resp = loop {
+            let fut = self
+                .inner
+                .post(url.clone())
+                .headers(headers.clone())
+                .json(&req)
+                .send();
+            let timeout = Duration::from_millis(self.llm_cfg.request_timeout_ms);
+            match tokio::time::timeout(timeout, fut).await {
+                Err(_) => {
+                    if attempt < max_attempts {
+                        let wait = self.backoff_delay(attempt, None);
+                        info!(attempt, wait_ms=%wait.as_millis(), "retrying stream establish after timeout");
+                        tokio::time::sleep(wait).await;
+                        attempt += 1;
+                        continue;
+                    } else {
+                        anyhow::bail!("stream establish timeout");
+                    }
+                }
+                Ok(Err(e)) => {
+                    if attempt < max_attempts {
+                        let wait = self.backoff_delay(attempt, None);
+                        info!(attempt, err=%e, wait_ms=%wait.as_millis(), "retrying stream establish after error");
+                        tokio::time::sleep(wait).await;
+                        attempt += 1;
+                        continue;
+                    } else {
+                        return Err(anyhow::Error::new(e).context("send chat request (stream)"));
+                    }
+                }
+                Ok(Ok(resp)) => {
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        if attempt < max_attempts
+                            && (status.is_server_error() || status.as_u16() == 429)
+                        {
+                            let wait = self.backoff_delay(attempt, None);
+                            info!(attempt, status=%status.as_u16(), wait_ms=%wait.as_millis(), "retrying stream establish after HTTP error");
+                            tokio::time::sleep(wait).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        anyhow::bail!("chat error: {} - {}", status, text);
+                    }
+                    break resp;
+                }
+            }
+        };
 
         let stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
+        let _idle = Duration::from_millis(self.llm_cfg.read_idle_timeout_ms);
         let s = stream
             .map(move |chunk_res| match chunk_res {
                 Ok(chunk) => {
@@ -120,6 +161,10 @@ impl OpenAIClient {
                     futures::stream::iter(out)
                 }
                 Err(e) => futures::stream::iter(vec![Err(anyhow::anyhow!(e))]),
+            })
+            .map(move |item| {
+                // Implement idle timeout by wrapping each chunk with a timeout if needed in future.
+                item
             })
             .flatten();
         Ok(s)

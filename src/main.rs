@@ -89,7 +89,9 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
     let mut analyzer = Analyzer::new(&cfg.project_root)?;
 
     let client = match cfg.api_key.clone() {
-        Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
+        Some(key) => {
+            Some(OpenAIClient::new(cfg.base_url.clone(), key)?.with_llm_config(cfg.llm.clone()))
+        }
         None => None,
     };
 
