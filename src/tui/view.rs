@@ -125,7 +125,8 @@ impl TuiApp {
                     crossterm::event::Event::Key(k) => match k.code {
                         // Handle Ctrl+C before generic Char(c) to avoid being shadowed
                         crossterm::event::KeyCode::Char('c')
-                            if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            if k.modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             let now = std::time::Instant::now();
                             if let Some(prev) = last_ctrl_c_at {

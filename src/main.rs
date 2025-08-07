@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 mod llm;
 pub mod logging;
+mod session;
 mod tools;
 mod tui;
 
@@ -92,6 +93,8 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
         None => None,
     };
 
+    let mut current_session: Option<session::SessionData> = None;
+
     for line in reader {
         let line = line?;
         if line.trim().is_empty() {
@@ -100,6 +103,41 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
         if let Some(quit) = handle_command(&line) {
             if quit {
                 break;
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/session ") {
+            let store = session::SessionStore::new_default()?;
+            match rest.trim() {
+                "new" => {
+                    let s = store.create("unnamed")?;
+                    println!("created session: {}", s.meta.id);
+                    current_session = Some(s);
+                }
+                "list" => {
+                    let list = store.list()?;
+                    for m in list {
+                        println!("{}\t{}\t{}", m.id, m.created_at, m.title);
+                    }
+                }
+                other => {
+                    let mut it = other.split_whitespace();
+                    match (it.next(), it.next()) {
+                        (Some("load"), Some(id)) => {
+                            let s = store.load(id)?;
+                            println!("loaded session: {}", s.meta.id);
+                            current_session = Some(s);
+                        }
+                        (Some("delete"), Some(id)) => {
+                            store.delete(id)?;
+                            println!("deleted session: {id}");
+                            if current_session.as_ref().map(|s| s.meta.id.as_str()) == Some(id) {
+                                current_session = None;
+                            }
+                        }
+                        _ => eprintln!("usage: /session new|list|load <id>|delete <id>"),
+                    }
+                }
             }
             continue;
         }
@@ -196,6 +234,11 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
         }
 
         println!("You said: {line}");
+        if let Some(sess) = current_session.as_mut() {
+            sess.history.push(format!("user: {line}"));
+            let store = session::SessionStore::new_default()?;
+            store.save(sess)?;
+        }
     }
 
     Ok(())

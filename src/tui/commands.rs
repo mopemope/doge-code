@@ -42,7 +42,6 @@ impl CommandHandler for TuiExecutor {
         if self.ui_tx.is_none() {
             self.ui_tx = ui.sender();
         }
-        // update header by sending a no-op so draw_with_model can read model from cfg via executor? The view does not own cfg; we will embed model in header via render_plan argument handled in view.
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -101,6 +100,7 @@ impl CommandHandler for TuiExecutor {
                             let content = rest.to_string();
                             let c = c.clone();
                             let tx = self.ui_tx.clone();
+                            // Prepare a fresh line for streaming tokens only once per request
                             ui.push_log(String::new());
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
@@ -117,37 +117,47 @@ impl CommandHandler for TuiExecutor {
                                 match stream_res {
                                     Ok(mut s) => {
                                         use futures::StreamExt;
+                                        let mut had_error = false;
                                         while let Some(item) = s.next().await {
                                             if *cancel_rx.borrow() {
                                                 if let Some(tx) = tx.as_ref() {
                                                     let _ = tx.send("[Cancelled]".into());
+                                                    let _ = tx.send("::status:cancelled".into());
                                                 }
                                                 break;
                                             }
-                                            let token = match item {
-                                                Ok(t) => t,
-                                                Err(_e) => {
+                                            match item {
+                                                Ok(t) => {
                                                     if let Some(tx) = tx.as_ref() {
-                                                        let _ =
-                                                            tx.send("[Error] stream error".into());
+                                                        let _ = tx.send(format!("::append:{t}"));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    had_error = true;
+                                                    if let Some(tx) = tx.as_ref() {
+                                                        let _ = tx.send(format!(
+                                                            "[Error] stream error: {e}"
+                                                        ));
                                                         let _ = tx.send("::status:error".into());
                                                     }
-                                                    String::new()
+                                                    break;
                                                 }
-                                            };
-                                            if let Some(tx) = tx.as_ref() {
-                                                let _ = tx.send(format!("::append:{token}"));
                                             }
                                         }
                                         if let Some(tx) = tx {
-                                            let _ = tx.send("[Done]".into());
-                                            let _ = tx.send("::status:done".into());
+                                            if !*cancel_rx.borrow() {
+                                                if !had_error {
+                                                    let _ = tx.send("[Done]".into());
+                                                    let _ = tx.send("::status:done".into());
+                                                }
+                                            }
                                         }
                                     }
-                                    Err(_) => {
+                                    Err(e) => {
                                         if *cancel_rx.borrow() {
                                             if let Some(tx) = tx {
                                                 let _ = tx.send("[Cancelled]".into());
+                                                let _ = tx.send("::status:cancelled".into());
                                             }
                                             return;
                                         }
@@ -162,7 +172,7 @@ impl CommandHandler for TuiExecutor {
                                             .await;
                                         let out = match res {
                                             Ok(m) => m.content,
-                                            Err(e) => format!("LLM error: {e}"),
+                                            Err(err) => format!("LLM error: {err}"),
                                         };
                                         if let Some(tx) = tx {
                                             let _ = tx.send(out);
