@@ -146,6 +146,22 @@ pub fn default_tools_def() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: "get_symbol_info".into(),
+                description: "Query repository symbols by name substring; optionally filter by include (path contains) and kind (fn/struct/enum/trait/impl/method/assoc_fn/mod).".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "include": {"type": "string"},
+                        "kind": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
     ]
 }
 
@@ -317,6 +333,16 @@ async fn dispatch_tool_call(
                 .unwrap_or("");
             match runtime.fs.fs_write(path, content) {
                 Ok(()) => Ok(json!({"ok": true, "path": path, "bytesWritten": content.len()})),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
+        "get_symbol_info" => {
+            let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let include = args_val.get("include").and_then(|v| v.as_str());
+            let kind = args_val.get("kind").and_then(|v| v.as_str());
+            let sym = crate::tools::symbol::SymbolTools::new(&runtime.fs.root);
+            match sym.get_symbol_info(query, include, kind) {
+                Ok(items) => Ok(json!({"ok": true, "symbols": items})),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
