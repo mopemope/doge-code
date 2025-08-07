@@ -14,6 +14,7 @@ pub struct TuiExecutor {
     pub(crate) tools: FsTools,
     pub(crate) analyzer: Analyzer,
     pub(crate) client: Option<OpenAIClient>,
+    #[allow(dead_code)]
     pub(crate) history: crate::llm::ChatHistory,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
