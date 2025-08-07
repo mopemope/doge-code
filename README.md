@@ -16,6 +16,8 @@ An interactive CLI/TUI coding agent written in Rust (Edition 2024). It leverages
   - Real-time streaming output with status indicator (Idle/Streaming/Cancelled/Done/Error)
   - Esc to cancel ongoing streaming
   - Max log size with automatic truncation
+  - @-file completion for project files in the input field
+  - New: `/open <path>` launches your editor from TUI and safely returns
 
 ## Requirements
 
@@ -82,27 +84,7 @@ DOGE_LOG=debug \
 
 ## Usage
 
-### CLI mode
-
-Run with `--no-tui` to use the plain CLI:
-
-```bash
-./target/release/doge-code --no-tui
-```
-
-Type plain text lines to query the LLM. Supported commands:
-
-- `/help` – show help
-- `/clear` – clear screen
-- `/quit` or `/exit` – exit
-- `/tools` – list available tools
-- `<plain text>` – send a prompt to the LLM (prints assistant reply)
-- `/read <path> [offset limit]` – print file content (line-range optional)
-- `/write <path> <text>` – write text to a file (creates parents, guards project root)
-- `/search <regex> [include_glob]` – grep-like search with regex; optional glob filter
-- `/map` – build and print a simple repo map (Rust fns only)
-
-### TUI mode
+### TUI mode (recommended)
 
 Run without flags to launch the TUI:
 
@@ -112,31 +94,57 @@ Run without flags to launch the TUI:
 
 Key points:
 
-- Type commands into the input at the bottom (same commands as CLI)
-- `/ask <text>` streams tokens to the log area in real time
-- Status is shown in the header (e.g., `doge-code — [Streaming]`)
-- Press `Esc` to cancel an ongoing `/ask` (mapped to `/cancel`)
-- Type `/quit` to exit TUI
+- Type plain prompts (no leading slash) to talk to the LLM.
+- Commands (recognized in TUI):
+  - `/help` – list commands
+  - `/map` – show a simple repo map (Rust fns only)
+  - `/tools` – list available tools
+  - `/clear` – clear the log area
+  - `/open <path>` – open a file in your editor (see below)
+  - `/retry` – resend your previous non-command input to the LLM
+  - `/cancel` – cancel an ongoing LLM streaming
+  - `/quit` – exit TUI
+- Status is shown in the header (Idle/Streaming/Cancelled/Done/Error)
+- Press `Esc` (or `Ctrl+C` once) to cancel streaming. Double `Ctrl+C` within 3s to exit.
+- Input history is persisted under `~/.config/doge-code/...` (XDG paths respected).
 
-Status and system messages:
+@-file completion:
 
-- `[Done]` – response finished
-- `[Cancelled]` – request was cancelled
-- `[Error] stream error` – a streaming error occurred
+- Type `@` to trigger file completion based on the current project root.
+- Navigate the popup with Up/Down; Enter to insert the selected path into input.
+- Recent selections are prioritized.
 
-Separators:
+New: `/open <path>` (TUI only)
 
-- When you hit Enter with `/ask ...`, a timestamped separator like
-  `[12:34:56] --------------------------------`
-  is inserted to visually delineate sessions.
+- Launches your editor and temporarily suspends the TUI screen; upon editor exit, TUI is restored.
+- Editor selection order: `$EDITOR` → `$VISUAL` → `vi`.
+- Path resolution:
+  - Relative paths are resolved against the configured `project_root`.
+  - Absolute paths are allowed.
+  - If the path does not exist, an error is shown in the log.
+- Recommended workflow: type `/open @src/tui/view.rs` and use `@` completion to pick files.
+
+### CLI mode
+
+Run with `--no-tui` to use the plain CLI:
+
+```bash
+./target/release/doge-code --no-tui
+```
+
+Supported commands mirror TUI for file tools and map building. Note: `/open` is implemented in TUI; CLI behavior may differ or be unavailable depending on your version.
+
+- `/help`, `/clear`, `/quit` or `/exit`, `/tools`
+- `/read <path> [offset limit]`, `/write <path> <text>`, `/search <regex> [include_glob]`
+- `/map`
+- Plain text lines are sent to the LLM and the assistant reply is printed.
 
 ### Safety notes for Tools
 
-- All file operations are restricted to the current project root directory
-- Absolute paths are rejected; binary writes are not allowed
-- Search skips common binary file types; use a glob include to narrow scope
+- All file operations are restricted to the current project root directory.
+- Search skips common binary/big files; use a glob include to narrow scope.
 
-#### Tools module layout (after refactor)
+#### Tools module layout
 
 The filesystem tools are split per operation for maintainability:
 
@@ -151,18 +159,17 @@ Public API remains the same via `pub use` in `tools::mod`.
 ## Developer Notes
 
 - Edition: Rust 2024
-- Concurrency: tokio, `reqwest` for HTTP, SSE-like parsing for streaming tokens
-- Parsing: `tree-sitter` + `tree-sitter-rust` for repo map (Rust functions)
-- Logging: `tracing` to `./debug.log` (set `DOGE_LOG`) – currently the program writes a single log file per run
+- Concurrency: tokio, `reqwest` for HTTP, streaming token handling
+- Parsing: `tree-sitter` + `tree-sitter-rust` for repo map (currently Rust functions)
+- Logging: `tracing` to `./debug.log` (set `DOGE_LOG`)
 - Tests: `cargo test`
 
 ## Roadmap
 
 - Map: extract structs/enums/traits/impl methods; add filters
-- Config file (e.g., `doge.toml`) for model, base-url, temperature, max log lines
 - Richer tool use via LLM (structured function calling)
-- Multi-request handling with IDs and targeted cancel (`/cancel <id>`)
-- Theming and color toggle
+- Theming, color toggle, and configurable max-log lines
+- Session management enhancements (TUI) and better persistence UX
 
 ## License
 
