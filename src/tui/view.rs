@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::state::{Status, build_render_plan};
@@ -440,6 +441,10 @@ impl TuiApp {
                 }
             }
         }
+
+        // Position terminal cursor at visual end of input line using unicode width
+        let col = UnicodeWidthStr::width(plan.input_line.as_str()) as u16;
+        queue!(stdout, cursor::MoveTo(col, input_row), cursor::Show)?;
 
         stdout.flush()?;
         Ok(())
