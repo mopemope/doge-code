@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::LlmConfig;
 use crate::llm::LlmErrorKind;
@@ -116,6 +116,7 @@ impl OpenAIClient {
 
             match resp_res {
                 Err(e) => {
+                    error!(attempt, err=%e, "llm chat_once send error");
                     last_err = Some(anyhow::Error::new(e).context("send chat request"));
                 }
                 Ok(resp) => {
@@ -127,6 +128,7 @@ impl OpenAIClient {
                             .and_then(|h| h.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
                         let text = resp.text().await.unwrap_or_default();
+                        error!(attempt, status=%status.as_u16(), body=%text, "llm chat_once non-success status");
                         let e = anyhow::anyhow!("chat error: {} - {}", status, text);
                         let kind = crate::llm::classify_error(Some(status), &e);
                         if self.should_retry(kind.clone()) && attempt < max_attempts {
@@ -152,6 +154,7 @@ impl OpenAIClient {
                         }
                         Err(e) => {
                             let kind = LlmErrorKind::Deserialize;
+                            error!(attempt, err=%e, "llm chat_once deserialize error");
                             if self.should_retry(kind.clone()) && attempt < max_attempts {
                                 let wait = self.backoff_delay(attempt, None);
                                 warn!(attempt, kind=?kind, "retrying after deserialize error");
