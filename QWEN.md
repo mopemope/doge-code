@@ -217,6 +217,13 @@ When tasked with unit test additions or modifications, strictly follow these ste
 - /help ヘルプを表示します。
 - /map repomapの内容をわかりやすく表示します。
 - /tools builtin tools、使用できるtoolを表示します。
+- /open この後にファイル名の補完が表示され、入力されたファイルパスのファイルを環境変数: EDITORで指定したプログラムで開きます。
+
+### コンテキストへのファイルの追加
+
+@ から始めた場合、プロジェクト内のファイル名を補完します。
+補完で入力したファイルパスのファイルが存在する場合は、LLMへ送信するメッセージにそのファイル名とそのファイルの内容を送信します。
+
 
 ### セッション管理機能
 
