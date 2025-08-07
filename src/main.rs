@@ -251,7 +251,7 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
 
         // Treat non-command line as a prompt to LLM via tool-use agent loop
         if let Some(ref client) = client {
-            use crate::llm::{ChatMessage, run_agent_loop};
+            use crate::llm::{ChatMessage, run_agent_loop, run_agent_streaming_once};
             let fs = FsTools::new(&cfg.project_root);
             let mut msgs = Vec::new();
             if let Ok(sys) = std::fs::read_to_string("resources/system_prompt.md") {
@@ -264,7 +264,21 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
                 role: "user".into(),
                 content: line.clone(),
             });
-            match run_agent_loop(client, &cfg.model, &fs, msgs).await {
+            let final_msg = if cfg.enable_stream_tools {
+                match run_agent_streaming_once(client, &cfg.model, &fs, msgs).await {
+                    Ok((messages_after, maybe_final)) => {
+                        if let Some(m) = maybe_final {
+                            Ok(m)
+                        } else {
+                            run_agent_loop(client, &cfg.model, &fs, messages_after).await
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                run_agent_loop(client, &cfg.model, &fs, msgs).await
+            };
+            match final_msg {
                 Ok(msg) => println!("{}", msg.content),
                 Err(e) => eprintln!("LLM error: {e}"),
             }

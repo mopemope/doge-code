@@ -216,6 +216,78 @@ pub async fn chat_tools_once(
     Ok(msg)
 }
 
+pub async fn run_agent_streaming_once(
+    client: &OpenAIClient,
+    model: &str,
+    fs: &FsTools,
+    mut messages: Vec<ChatMessage>,
+) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
+    use crate::llm::stream_tools::{ToolDeltaBuffer, execute_tool_call};
+    use futures::StreamExt;
+
+    // Start stream
+    let mut stream = client.chat_stream(model, messages.clone()).await?;
+    let runtime = ToolRuntime::default_with(fs);
+    let mut buf = ToolDeltaBuffer::new();
+    let mut acc_text = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let delta = chunk?;
+        if delta.is_empty() {
+            break;
+        }
+        if let Some(rest) = delta.strip_prefix("__TOOL_CALLS_DELTA__:") {
+            // Parse synthetic tool_calls marker and feed into buffer.
+            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest)
+            {
+                for d in deltas {
+                    let idx = d.index.unwrap_or(0);
+                    let (name_delta, args_delta) = if let Some(f) = d.function {
+                        (Some(f.name), Some(f.arguments))
+                    } else {
+                        (None, None)
+                    };
+                    buf.push_delta(idx, name_delta.as_deref(), args_delta.as_deref(), None);
+                    // Try finalize and execute immediately when JSON becomes valid
+                    if buf.finalize_sync_call(idx).is_ok() {
+                        let exec = execute_tool_call(&runtime, idx, &buf).await;
+                        if let Ok(val) = exec {
+                            messages.push(ChatMessage {
+                                role: "tool".into(),
+                                content: serde_json::to_string(&val)
+                                    .unwrap_or_else(|_| "{\"ok\":false}".to_string()),
+                            });
+                            // One tool exec per streaming round (minimal policy)
+                            return Ok((messages, None));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Accumulate plain text
+            acc_text.push_str(&delta);
+        }
+    }
+
+    // If we have accumulated content and no tool call executed, return it as assistant message
+    if !acc_text.is_empty() {
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: acc_text.clone(),
+        });
+        return Ok((
+            messages,
+            Some(ChoiceMessage {
+                role: "assistant".into(),
+                content: acc_text,
+            }),
+        ));
+    }
+
+    // No text; in future we will detect and execute tool_calls via ToolDeltaBuffer.
+    Ok((messages, None))
+}
+
 pub async fn run_agent_loop(
     client: &OpenAIClient,
     model: &str,
@@ -274,7 +346,7 @@ pub async fn run_agent_loop(
     }
 }
 
-async fn dispatch_tool_call(
+pub async fn dispatch_tool_call(
     runtime: &ToolRuntime<'_>,
     call: ToolCall,
 ) -> Result<serde_json::Value> {
