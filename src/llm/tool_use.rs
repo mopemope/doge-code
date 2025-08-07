@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, error, warn};
 
 use crate::llm::client::{ChatMessage, ChoiceMessage, OpenAIClient};
 use crate::tools::FsTools;
@@ -161,7 +161,7 @@ pub async fn chat_tools_once(
         messages,
         temperature: None,
         tools: Some(tools.to_vec()),
-        tool_choice: Some(json!({"type":"auto"})),
+        tool_choice: None,
     };
 
     let mut headers = HeaderMap::new();
@@ -185,6 +185,7 @@ pub async fn chat_tools_once(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
     let body: ChatResponseWithTools = resp.json().await?;
@@ -208,6 +209,7 @@ pub async fn run_agent_loop(
     loop {
         iters += 1;
         if iters > runtime.max_iters {
+            warn!(iters, "max tool iterations reached");
             return Err(anyhow!("max tool iterations reached"));
         }
         let msg = tokio::time::timeout(
@@ -215,11 +217,13 @@ pub async fn run_agent_loop(
             chat_tools_once(client, model, messages.clone(), &runtime.tools),
         )
         .await
-        .map_err(|_| anyhow!("chat tools request timed out"))??;
+        .map_err(|_| {
+            error!("llm chat_tools_once timed out");
+            anyhow!("chat tools request timed out")
+        })??;
 
         // If assistant returned final content without tool calls, we are done.
         if !msg.tool_calls.is_empty() {
-            // Execute tool calls serially; append tool results to messages, then continue.
             messages.push(ChatMessage {
                 role: "assistant".into(),
                 content: msg.content.clone().unwrap_or_else(|| "".to_string()),
@@ -228,7 +232,10 @@ pub async fn run_agent_loop(
                 let res =
                     tokio::time::timeout(runtime.tool_timeout, dispatch_tool_call(&runtime, tc))
                         .await
-                        .map_err(|_| anyhow!("tool execution timed out"))??;
+                        .map_err(|_| {
+                            error!("tool execution timed out");
+                            anyhow!("tool execution timed out")
+                        })??;
                 // tool message to feed back
                 messages.push(ChatMessage {
                     role: "tool".into(),
