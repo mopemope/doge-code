@@ -177,6 +177,7 @@ When tasked with unit test additions or modifications, strictly follow these ste
 
 ### 2. 高パフォーマンス (Performance-First)
 
+- tokioを使用した高速な非同期処理を実現
 - 処理の最適化とキャッシュ機構により応答時間を最小化
 - 不要なUI演出を排除
 - ファイルI/OやLLMリクエストの最適化
@@ -205,9 +206,9 @@ When tasked with unit test additions or modifications, strictly follow these ste
 
 ## 主な使用方法
 
-### 指示の方法
+### 会話、指示の方法
 
-指示はTUIから入力します。
+会話、指示はTUIから入力します。
 指示の他に `/` から始まるコマンドをサポートします。
 主なコマンドは以下です。
 
@@ -216,6 +217,15 @@ When tasked with unit test additions or modifications, strictly follow these ste
 - /help ヘルプを表示します。
 - /map repomapの内容をわかりやすく表示します。
 - /tools builtin tools、使用できるtoolを表示します。
+
+### セッション管理機能
+
+一連の会話はセッションという単位としてまとめます。
+セッション管理機能は以下のことを行います。
+
+- 対話履歴の永続化
+- セッションの作成・読み込み・削除
+- セッションメタデータ管理
 
 ### Tools
 
@@ -261,6 +271,13 @@ resources以下にtree-sitterで使用する各言語のscmがあります。
 これをrust-embed crateを使用してバイナリに埋め込みます。
 解析結果はsqliteで永続化します。
 
+#### エラー定義
+
+エラーを共通的な処理で処理できるように以下のようにします。
+
+- アプリケーション全体で使用するエラー型
+- thiserrorを使用したカスタムエラー
+
 ### データ処理
 
 - **シリアライゼーション**: serde, serde_json
@@ -287,17 +304,23 @@ resources以下にtree-sitterで使用する各言語のscmがあります。
 ### コーディング規約
 
 - Rust Edition 2024を使用
+- サブモジュールではmod.rsを使用しない（Rust Edition 2018以降対応の書き方にする)
 - `rustfmt`でコードフォーマット
 - `clippy`でリント
-- ファイルサイズは500行以内に制限
+- ファイルサイズは500行以内に制限。大きくなる場合にはサブモジュール化する
 
 ## デバッグ
 
 アプリケーションのログは "./debug.log" に出力されます。
+デバッグを容易にするため、実装時にはなるべくデバッグログを追加します。
 エラーの調査の際にはこのファイルを読んで、原因を特定するヒントにして下さい。
 
 ## OpenAI API 仕様
 
+このコーディングエージェントが提供するシステムプロンプトはresources/system_prompt.mdに記載します。
+これをrust-embed crateを使用してバイナリに埋め込み使用します。
 OpenAI APIはchat.completions APIをstreamで使用します。
+提供しているtoolingを使用できるようにします。
+
 
 *このドキュメントは開発進捗に応じて随時更新されます。*
