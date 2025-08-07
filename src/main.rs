@@ -68,12 +68,12 @@ async fn main() -> Result<()> {
 async fn run_tui(cfg: AppConfig) -> Result<()> {
     let exec = TuiExecutor::new(cfg.clone())?;
     let mut app = TuiApp::new(
-        "doge-code - /help, Esc or /quit to exit",
+        "🦮 doge-code - /help, Esc or /quit to exit",
         Some(cfg.model.clone()),
     )
     .with_handler(Box::new(exec));
     app.push_log("Welcome to doge-code TUI");
-    app.push_log("Type plain prompts (no leading slash) or commands like /read, /search, /map");
+    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
     Ok(())
 }
