@@ -9,10 +9,10 @@ mod tests {
         let logs = vec!["aaa".to_string(), "bbbbbbbbbbbb".to_string(), "c".to_string()];
         let input = "hello world";
         let plan = build_render_plan(title, crate::tui::state::Status::Idle, &logs, input, 10, 8, None);
-        assert_eq!(plan.header_lines[0], "\rTITLE12345\n");
-        assert_eq!(plan.header_lines[1], "\r----------\n");
-        assert_eq!(plan.log_lines, vec!["\raaa\n", "\rbbbbbbbbbb\n", "\rc\n"]);
-        assert_eq!(plan.input_line, "\r> hello wo");
+        assert_eq!(plan.header_lines[0], "TITLE12345");
+        assert_eq!(plan.header_lines[1], "----------");
+        assert_eq!(plan.log_lines, vec!["aaa", "bbbbbbbbbb", "c"]);
+        assert_eq!(plan.input_line, "> hello wo");
     }
 
     #[test]
@@ -22,11 +22,10 @@ mod tests {
         let input = "漢字かなABC";
         let plan = build_render_plan(title, crate::tui::state::Status::Idle, &logs, input, 10, 6, None);
         for line in plan.header_lines.iter().chain(plan.log_lines.iter()) {
-            let s = line.trim(); // remove CR/LF
+            let s = line.as_str();
             assert!(UnicodeWidthStr::width(s) <= 10, "line too wide: {}", s);
         }
-        let input_s = plan.input_line.trim_start_matches('\r');
-        assert!(UnicodeWidthStr::width(input_s) <= 10);
+        assert!(UnicodeWidthStr::width(plan.input_line.as_str()) <= 10);
     }
 
     #[test]
@@ -36,11 +35,10 @@ mod tests {
         let input = "y";
         let plan = build_render_plan(title, crate::tui::state::Status::Idle, &logs, input, 1, 3, None);
         for line in plan.header_lines.iter().chain(plan.log_lines.iter()) {
-            let s = line.trim();
+            let s = line.as_str();
             assert!(UnicodeWidthStr::width(s) <= 1);
         }
-        let input_s = plan.input_line.trim_start_matches('\r');
-        assert!(UnicodeWidthStr::width(input_s) <= 1);
+        assert!(UnicodeWidthStr::width(plan.input_line.as_str()) <= 1);
     }
 
     #[test]

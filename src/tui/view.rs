@@ -74,9 +74,9 @@ impl TuiApp {
 
     fn event_loop(&mut self) -> Result<()> {
         let mut last_ctrl_c_at: Option<std::time::Instant> = None;
+        let mut dirty = true; // initial full render
         loop {
-            // We cannot downcast trait object safely here; show no model hint in view and instead inject a header line from executor.
-            let _model_hint: Option<&str> = None;
+            // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {
                 let mut drained = Vec::new();
                 while let Ok(msg) = rx.try_recv() {
@@ -86,25 +86,29 @@ impl TuiApp {
                     match msg.as_str() {
                         "::status:done" => {
                             self.status = Status::Done;
-                            // Safety net: ensure any pending model hint is cleared.
                             if self.model_hint_pending {
                                 Self::purge_model_hint(&mut self.log);
                                 self.model_hint_pending = false;
                             }
+                            dirty = true;
                         }
                         "::status:cancelled" => {
                             self.status = Status::Cancelled;
+                            dirty = true;
                         }
                         "::status:streaming" => {
                             self.status = Status::Streaming;
+                            dirty = true;
                         }
                         "::status:error" => {
                             self.status = Status::Error;
+                            dirty = true;
                         }
                         _ if msg.starts_with("::model:hint:") => {
                             let payload = &msg["::model:hint:".len()..];
                             self.push_log(payload.to_string());
                             self.model_hint_pending = true;
+                            dirty = true;
                         }
                         _ if msg.starts_with("::append:") => {
                             if self.model_hint_pending {
@@ -113,20 +117,21 @@ impl TuiApp {
                             }
                             let payload = &msg["::append:".len()..];
                             self.append_stream_token(payload);
+                            dirty = true;
                         }
-                        _ => self.push_log(msg),
+                        _ => {
+                            self.push_log(msg);
+                            dirty = true;
+                        }
                     }
                 }
             }
-            let model_hint = self.model.as_deref();
-            self.draw_with_model(model_hint)?;
+
             if crossterm::event::poll(std::time::Duration::from_millis(50))? {
                 match crossterm::event::read()? {
                     crossterm::event::Event::Key(k) => match k.code {
-                        // Handle Ctrl+C before generic Char(c) to avoid being shadowed
                         crossterm::event::KeyCode::Char('c')
-                            if k.modifiers
-                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             let now = std::time::Instant::now();
                             if let Some(prev) = last_ctrl_c_at {
@@ -137,9 +142,11 @@ impl TuiApp {
                             last_ctrl_c_at = Some(now);
                             self.dispatch("/cancel");
                             self.push_log("[Press Ctrl+C again within 3s to exit]");
+                            dirty = true;
                         }
                         crossterm::event::KeyCode::Esc => {
                             self.dispatch("/cancel");
+                            dirty = true;
                         }
                         crossterm::event::KeyCode::Enter => {
                             let line = std::mem::take(&mut self.input);
@@ -147,18 +154,29 @@ impl TuiApp {
                                 return Ok(());
                             }
                             self.dispatch(&line);
+                            dirty = true;
                         }
                         crossterm::event::KeyCode::Backspace => {
                             self.input.pop();
+                            dirty = true;
                         }
                         crossterm::event::KeyCode::Char(c) => {
                             self.input.push(c);
+                            dirty = true;
                         }
                         _ => {}
                     },
-                    crossterm::event::Event::Resize(_, _) => {}
+                    crossterm::event::Event::Resize(_, _) => {
+                        dirty = true;
+                    }
                     _ => {}
                 }
+            }
+
+            if dirty {
+                let model_hint = self.model.as_deref();
+                self.draw_with_model(model_hint)?;
+                dirty = false;
             }
         }
     }
@@ -200,26 +218,28 @@ impl TuiApp {
             h,
             model,
         );
-        queue!(
-            stdout,
-            terminal::Clear(ClearType::All),
-            cursor::MoveTo(0, 0)
-        )?;
+
+        // Draw header (2 lines)
+        queue!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::CurrentLine))?;
         if let Some(first) = plan.header_lines.first() {
             queue!(stdout, SetForegroundColor(Color::Cyan))?;
             write!(stdout, "{first}")?;
             queue!(stdout, ResetColor)?;
         }
+        queue!(stdout, cursor::MoveTo(0, 1), terminal::Clear(ClearType::CurrentLine))?;
         if let Some(second) = plan.header_lines.get(1) {
             queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
             write!(stdout, "{second}")?;
             queue!(stdout, ResetColor)?;
         }
-        for line in plan.header_lines.iter().skip(2) {
-            write!(stdout, "{line}")?;
-        }
-        for line in &plan.log_lines {
-            let cmp = line.trim_start_matches('\r').trim_end_matches('\n');
+
+        // Draw log area starting at row 2 up to h-2
+        let start_row = 2u16;
+        let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
+        for (i, line) in plan.log_lines.iter().take(max_rows as usize).enumerate() {
+            let row = start_row + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+            let cmp = line.as_str();
             if cmp.starts_with("> ") {
                 queue!(stdout, SetForegroundColor(Color::Blue))?;
                 write!(stdout, "{line}")?;
@@ -243,12 +263,17 @@ impl TuiApp {
                 write!(stdout, "{line}")?;
             }
         }
-        queue!(
-            stdout,
-            cursor::MoveTo(0, h.saturating_sub(1)),
-            terminal::Clear(ClearType::CurrentLine)
-        )?;
+        // Clear any remaining rows in the log area if current content is shorter
+        let used_rows = plan.log_lines.len() as u16;
+        for row in start_row + used_rows..start_row + max_rows {
+            queue!(stdout, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+        }
+
+        // Draw input line at bottom
+        let input_row = h.saturating_sub(1);
+        queue!(stdout, cursor::MoveTo(0, input_row), terminal::Clear(ClearType::CurrentLine))?;
         write!(stdout, "{}", plan.input_line)?;
+
         stdout.flush()?;
         Ok(())
     }

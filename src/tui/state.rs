@@ -91,7 +91,8 @@ pub fn build_render_plan(
     };
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
-    let header_lines = vec![format!("\r{}\n", title_trim), format!("\r{}\n", sep)];
+    // Header lines are plain text without embedded CR/LF; positioning is handled by the view layer.
+    let header_lines = vec![title_trim, sep];
 
     // Build wrapped physical lines from logs (from end to start to keep last rows)
     let max_log_rows = h.saturating_sub(3) as usize;
@@ -100,7 +101,7 @@ pub fn build_render_plan(
         let line = line.trim_end_matches('\n');
         let parts = wrap_display(line, w_usize);
         for p in parts.into_iter().rev() {
-            phys_rev.push(format!("\r{}\n", p));
+            phys_rev.push(p);
             if phys_rev.len() >= max_log_rows {
                 break;
             }
@@ -119,7 +120,7 @@ pub fn build_render_plan(
         format!("> {input}")
     };
     let input_trim = truncate_display(&input_prompt, w_usize);
-    let input_line = format!("\r{input_trim}");
+    let input_line = input_trim;
 
     RenderPlan {
         header_lines,
