@@ -27,6 +27,7 @@ pub struct TuiApp {
 impl TuiApp {
     pub fn new(title: impl Into<String>, model: Option<String>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (input_history, history_index) = load_input_history();
         Self {
             title: title.into(),
             input: String::new(),
@@ -37,8 +38,8 @@ impl TuiApp {
             max_log_lines: 500,
             status: Status::Idle,
             model,
-            input_history: Vec::new(),
-            history_index: 0,
+            input_history,
+            history_index,
             draft: String::new(),
         }
     }
@@ -77,6 +78,10 @@ impl TuiApp {
     }
 
     fn event_loop(&mut self) -> Result<()> {
+        // Sync history index to end if out of range (e.g., after loading)
+        if self.history_index > self.input_history.len() {
+            self.history_index = self.input_history.len();
+        }
         let mut last_ctrl_c_at: Option<std::time::Instant> = None;
         let mut dirty = true; // initial full render
         loop {
@@ -148,6 +153,7 @@ impl TuiApp {
                                     != Some(line.as_str())
                                 {
                                     self.input_history.push(line.clone());
+                                    save_input_history(&self.input_history);
                                 }
                                 self.history_index = self.input_history.len();
                                 self.draft.clear();
@@ -328,3 +334,36 @@ impl TuiApp {
 }
 
 impl TuiApp {}
+
+fn history_store_path() -> std::path::PathBuf {
+    // Reuse session store base dir but keep a flat file for input history
+    let base = crate::session::SessionStore::new_default()
+        .map(|s| s.root)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./.doge/sessions"));
+    std::fs::create_dir_all(&base).ok();
+    base.join("input_history.json")
+}
+
+fn load_input_history() -> (Vec<String>, usize) {
+    let path = history_store_path();
+    let s = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
+    let mut v: Vec<String> = serde_json::from_str(&s).unwrap_or_default();
+    // cap size
+    if v.len() > 1000 {
+        let start = v.len() - 1000;
+        v = v[start..].to_vec();
+    }
+    let idx = v.len();
+    (v, idx)
+}
+
+fn save_input_history(hist: &Vec<String>) {
+    let path = history_store_path();
+    // keep last 1000 entries
+    let slice: Vec<&String> = hist.iter().rev().take(1000).collect();
+    let out: Vec<String> = slice.into_iter().rev().cloned().collect();
+    let _ = std::fs::write(
+        path,
+        serde_json::to_string_pretty(&out).unwrap_or("[]".into()),
+    );
+}
