@@ -223,9 +223,15 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
         if line.trim() == "/map" {
             match analyzer.build() {
                 Ok(map) => {
-                    println!("RepoMap (Rust functions): {} symbols", map.symbols.len());
+                    println!("RepoMap: {} symbols", map.symbols.len());
                     for s in map.symbols.iter().take(50) {
-                        println!("fn {}  @{}:{}", s.name, s.file.display(), s.line);
+                        println!(
+                            "{} {}  @{}:{}",
+                            s.kind.as_str(),
+                            s.name,
+                            s.file.display(),
+                            s.start_line
+                        );
                     }
                 }
                 Err(e) => eprintln!("map error: {e}"),

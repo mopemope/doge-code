@@ -71,12 +71,15 @@ impl CommandHandler for TuiExecutor {
             }
             "/map" => match self.analyzer.build() {
                 Ok(map) => {
-                    ui.push_log(format!(
-                        "RepoMap (Rust functions): {} symbols",
-                        map.symbols.len()
-                    ));
+                    ui.push_log(format!("RepoMap: {} symbols", map.symbols.len()));
                     for s in map.symbols.iter().take(50) {
-                        ui.push_log(format!("fn {}  @{}:{}", s.name, s.file.display(), s.line));
+                        ui.push_log(format!(
+                            "{} {}  @{}:{}",
+                            s.kind.as_str(),
+                            s.name,
+                            s.file.display(),
+                            s.start_line
+                        ));
                     }
                 }
                 Err(e) => ui.push_log(format!("map error: {e}")),
