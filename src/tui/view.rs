@@ -175,8 +175,16 @@ impl TuiApp {
 
     #[allow(dead_code)]
     pub fn append_stream_token(&mut self, s: &str) {
+        // Normalize incoming token: split by '\n' and append as multiple logical lines if needed.
+        let parts: Vec<&str> = s.split('\n').collect();
+        if parts.is_empty() {
+            return;
+        }
         if let Some(last) = self.log.last_mut() {
-            last.push_str(s);
+            last.push_str(parts[0]);
+        }
+        for seg in parts.iter().skip(1) {
+            self.log.push((*seg).to_string());
         }
     }
 
@@ -211,22 +219,23 @@ impl TuiApp {
             write!(stdout, "{line}")?;
         }
         for line in &plan.log_lines {
-            if line.starts_with("\r> ") {
+            let cmp = line.trim_start_matches('\r').trim_end_matches('\n');
+            if cmp.starts_with("> ") {
                 queue!(stdout, SetForegroundColor(Color::Blue))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
-            } else if line.contains("[Done]") || line.contains("[done]") {
+            } else if cmp.contains("[Done]") || cmp.contains("[done]") {
                 queue!(stdout, SetForegroundColor(Color::Green))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
-            } else if line.contains("[Cancelled]")
-                || line.contains("[cancelled]")
-                || line.contains("[canceled]")
+            } else if cmp.contains("[Cancelled]")
+                || cmp.contains("[cancelled]")
+                || cmp.contains("[canceled]")
             {
                 queue!(stdout, SetForegroundColor(Color::Red))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
-            } else if line.starts_with("\r[") {
+            } else if cmp.starts_with('[') {
                 queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
