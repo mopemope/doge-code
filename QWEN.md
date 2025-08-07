@@ -213,7 +213,7 @@ When tasked with unit test additions or modifications, strictly follow these ste
 主なコマンドは以下です。
 
 - /quit エージェントを終了します。
-- /clear 会話履歴を全てクリアします。
+- /clear 起動時からの会話履歴を全てクリアします。
 - /help ヘルプを表示します。
 - /map repomapの内容をわかりやすく表示します。
 - /tools builtin tools、使用できるtoolを表示します。
@@ -270,6 +270,10 @@ https://platform.openai.com/docs/api-reference/chat/create
 resources以下にtree-sitterで使用する各言語のscmがあります。
 これをrust-embed crateを使用してバイナリに埋め込みます。
 解析結果はsqliteで永続化します。
+
+このエージェント起動時に配下のファイルを走査し、repomapを作成します。
+repomapの結果はtool:get_symbol_infoで使用します。
+tool:get_symbol_infoではLLMからの検索クエリに対しrepomapからシンボルの情報、関数のコードなどを返します。
 
 #### エラー定義
 
