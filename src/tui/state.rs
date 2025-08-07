@@ -37,6 +37,32 @@ pub fn truncate_display(s: &str, max: usize) -> String {
     out
 }
 
+// Soft-wrap a single logical line into multiple physical lines within max width, preserving Unicode display width.
+pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
+    if max == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let ch_w = ch.width().unwrap_or(0);
+        if ch_w == 0 {
+            cur.push(ch);
+            continue;
+        }
+        if width + ch_w > max {
+            lines.push(cur);
+            cur = String::new();
+            width = 0;
+        }
+        cur.push(ch);
+        width += ch_w;
+    }
+    lines.push(cur);
+    lines
+}
+
 pub fn build_render_plan(
     title: &str,
     status: Status,
@@ -67,13 +93,25 @@ pub fn build_render_plan(
     let sep = "-".repeat(w_usize);
     let header_lines = vec![format!("\r{}\n", title_trim), format!("\r{}\n", sep)];
 
+    // Build wrapped physical lines from logs (from end to start to keep last rows)
     let max_log_rows = h.saturating_sub(3) as usize;
-    let start = log.len().saturating_sub(max_log_rows);
-    let mut log_lines = Vec::new();
-    for line in &log[start..] {
+    let mut phys_rev: Vec<String> = Vec::new();
+    for line in log.iter().rev() {
         let line = line.trim_end_matches('\n');
-        log_lines.push(format!("\r{}\n", truncate_display(line, w_usize)));
+        let parts = wrap_display(line, w_usize);
+        for p in parts.into_iter().rev() {
+            phys_rev.push(format!("\r{}\n", p));
+            if phys_rev.len() >= max_log_rows {
+                break;
+            }
+        }
+        if phys_rev.len() >= max_log_rows {
+            break;
+        }
     }
+    phys_rev.reverse();
+
+    let log_lines = phys_rev;
 
     let input_prompt = if input.is_empty() {
         "> ".to_string()

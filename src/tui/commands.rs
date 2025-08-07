@@ -94,7 +94,7 @@ impl CommandHandler for TuiExecutor {
                             let rt = tokio::runtime::Handle::current();
                             let model = self.cfg.model.clone();
                             if let Some(tx) = &self.ui_tx {
-                                let _ = tx.send(format!("::model:hint:\r[model: {model}]"));
+                                let _ = tx.send(format!("::model:hint:[model: {model}]"));
                                 let _ = tx.send(String::new());
                             }
                             let content = rest.to_string();
