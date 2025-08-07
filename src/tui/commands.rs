@@ -16,6 +16,7 @@ pub struct TuiExecutor {
     pub(crate) client: Option<OpenAIClient>,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
+    pub(crate) last_user_prompt: Option<String>,
 }
 
 impl TuiExecutor {
@@ -33,6 +34,7 @@ impl TuiExecutor {
             client,
             ui_tx: None,
             cancel_tx: None,
+            last_user_prompt: None,
         })
     }
 }
@@ -48,7 +50,7 @@ impl CommandHandler for TuiExecutor {
         }
         match line {
             "/help" => {
-                ui.push_log("/help, /map, /tools, /clear, /quit");
+                ui.push_log("/help, /map, /tools, /clear, /quit, /retry");
                 ui.push_log("/read <path> [offset limit]");
                 ui.push_log("/write <path> <text>");
                 ui.push_log("/search <regex> [include_glob]");
@@ -60,13 +62,26 @@ impl CommandHandler for TuiExecutor {
             "/cancel" => {
                 if let Some(tx) = &self.cancel_tx {
                     let _ = tx.send(true);
-                    ui.push_log("[Cancelled]");
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx.send("::status:cancelled".into());
                     }
+                    ui.push_log("[Cancelled]");
                     self.cancel_tx = None;
                 } else {
                     ui.push_log("[no running task]");
+                }
+            }
+            "/retry" => {
+                if self.cancel_tx.is_some() {
+                    ui.push_log("[busy] streaming in progress; use /cancel first");
+                    return;
+                }
+                match self.last_user_prompt.clone() {
+                    Some(prompt) => {
+                        // Re-dispatch as if user typed it
+                        self.handle(&prompt, ui);
+                    }
+                    None => ui.push_log("[no previous prompt]"),
                 }
             }
             "/map" => match self.analyzer.build() {
@@ -87,6 +102,7 @@ impl CommandHandler for TuiExecutor {
             _ => {
                 if !line.starts_with('/') {
                     let rest = line;
+                    self.last_user_prompt = Some(rest.to_string());
                     ui.push_log(format!("> {rest}"));
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx.send("::status:streaming".into());
@@ -119,8 +135,8 @@ impl CommandHandler for TuiExecutor {
                                         while let Some(item) = s.next().await {
                                             if *cancel_rx.borrow() {
                                                 if let Some(tx) = tx.as_ref() {
-                                                    let _ = tx.send("[Cancelled]".into());
                                                     let _ = tx.send("::status:cancelled".into());
+                                                    let _ = tx.send("[Cancelled]".into());
                                                 }
                                                 break;
                                             }
@@ -133,9 +149,9 @@ impl CommandHandler for TuiExecutor {
                                                 Err(_e) => {
                                                     had_error = true;
                                                     if let Some(tx) = tx.as_ref() {
+                                                        let _ = tx.send("::status:error".into());
                                                         let _ =
                                                             tx.send("[Error] stream error".into());
-                                                        let _ = tx.send("::status:error".into());
                                                     }
                                                     break;
                                                 }
@@ -147,11 +163,11 @@ impl CommandHandler for TuiExecutor {
                                             }
                                         }
                                     }
-                                    Err(e) => {
+                                    Err(_e) => {
                                         if *cancel_rx.borrow() {
                                             if let Some(tx) = tx {
-                                                let _ = tx.send("[Cancelled]".into());
                                                 let _ = tx.send("::status:cancelled".into());
+                                                let _ = tx.send("[Cancelled]".into());
                                             }
                                             return;
                                         }
