@@ -140,7 +140,6 @@ impl CommandHandler for TuiExecutor {
                                         }
                                         if let Some(tx) = tx {
                                             if !*cancel_rx.borrow() && !had_error {
-                                                let _ = tx.send("[Done]".into());
                                                 let _ = tx.send("::status:done".into());
                                             }
                                         }
@@ -168,7 +167,6 @@ impl CommandHandler for TuiExecutor {
                                         };
                                         if let Some(tx) = tx {
                                             let _ = tx.send(out);
-                                            let _ = tx.send("[Done]".into());
                                             let _ = tx.send("::status:done".into());
                                         }
                                     }

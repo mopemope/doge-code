@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     cursor, execute, queue,
-    style::{Color, ResetColor, SetForegroundColor},
+    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
@@ -240,10 +240,6 @@ impl TuiApp {
                 queue!(stdout, SetForegroundColor(Color::Blue))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
-            } else if cmp.contains("[Done]") || cmp.contains("[done]") {
-                queue!(stdout, SetForegroundColor(Color::Green))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
             } else if cmp.contains("[Cancelled]")
                 || cmp.contains("[cancelled]")
                 || cmp.contains("[canceled]")
@@ -256,7 +252,11 @@ impl TuiApp {
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             } else {
+                // LLM response lines: darker grey/black background with white foreground for contrast
+                queue!(stdout, SetBackgroundColor(Color::Black))?;
+                queue!(stdout, SetForegroundColor(Color::White))?;
                 write!(stdout, "{line}")?;
+                queue!(stdout, ResetColor)?;
             }
         }
         // Clear any remaining rows in the log area if current content is shorter
