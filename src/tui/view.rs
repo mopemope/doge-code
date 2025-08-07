@@ -131,7 +131,8 @@ impl TuiApp {
                 match crossterm::event::read()? {
                     crossterm::event::Event::Key(k) => match k.code {
                         crossterm::event::KeyCode::Char('c')
-                            if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            if k.modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             let now = std::time::Instant::now();
                             if let Some(prev) = last_ctrl_c_at {
@@ -220,13 +221,21 @@ impl TuiApp {
         );
 
         // Draw header (2 lines)
-        queue!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::CurrentLine))?;
+        queue!(
+            stdout,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(ClearType::CurrentLine)
+        )?;
         if let Some(first) = plan.header_lines.first() {
             queue!(stdout, SetForegroundColor(Color::Cyan))?;
             write!(stdout, "{first}")?;
             queue!(stdout, ResetColor)?;
         }
-        queue!(stdout, cursor::MoveTo(0, 1), terminal::Clear(ClearType::CurrentLine))?;
+        queue!(
+            stdout,
+            cursor::MoveTo(0, 1),
+            terminal::Clear(ClearType::CurrentLine)
+        )?;
         if let Some(second) = plan.header_lines.get(1) {
             queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
             write!(stdout, "{second}")?;
@@ -238,7 +247,11 @@ impl TuiApp {
         let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
         for (i, line) in plan.log_lines.iter().take(max_rows as usize).enumerate() {
             let row = start_row + i as u16;
-            queue!(stdout, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+            queue!(
+                stdout,
+                cursor::MoveTo(0, row),
+                terminal::Clear(ClearType::CurrentLine)
+            )?;
             let cmp = line.as_str();
             if cmp.starts_with("> ") {
                 queue!(stdout, SetForegroundColor(Color::Blue))?;
@@ -266,12 +279,20 @@ impl TuiApp {
         // Clear any remaining rows in the log area if current content is shorter
         let used_rows = plan.log_lines.len() as u16;
         for row in start_row + used_rows..start_row + max_rows {
-            queue!(stdout, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+            queue!(
+                stdout,
+                cursor::MoveTo(0, row),
+                terminal::Clear(ClearType::CurrentLine)
+            )?;
         }
 
         // Draw input line at bottom
         let input_row = h.saturating_sub(1);
-        queue!(stdout, cursor::MoveTo(0, input_row), terminal::Clear(ClearType::CurrentLine))?;
+        queue!(
+            stdout,
+            cursor::MoveTo(0, input_row),
+            terminal::Clear(ClearType::CurrentLine)
+        )?;
         write!(stdout, "{}", plan.input_line)?;
 
         stdout.flush()?;
