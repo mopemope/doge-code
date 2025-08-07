@@ -17,7 +17,7 @@ use tracing::info;
 use crate::analysis::Analyzer;
 use crate::cli::handle_command;
 use crate::config::AppConfig;
-use crate::llm::{ChatMessage, OpenAIClient};
+use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
 use crate::tui::{TuiApp, TuiExecutor};
 
@@ -73,7 +73,7 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
     )
     .with_handler(Box::new(exec));
     app.push_log("Welcome to doge-code TUI");
-    app.push_log("Type commands like /ask, /read, /search, /map");
+    app.push_log("Type plain prompts (no leading slash) or commands like /read, /search, /map");
     app.run()?;
     Ok(())
 }
@@ -143,26 +143,7 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix("/ask ") {
-            if let Some(ref client) = client {
-                let reply = client
-                    .chat_once(
-                        &cfg.model,
-                        vec![ChatMessage {
-                            role: "user".into(),
-                            content: rest.to_string(),
-                        }],
-                    )
-                    .await;
-                match reply {
-                    Ok(msg) => println!("{}", msg.content),
-                    Err(e) => eprintln!("LLM error: {e}"),
-                }
-            } else {
-                eprintln!("OPENAI_API_KEY not set; cannot call LLM.");
-            }
-            continue;
-        }
+
         if let Some(rest) = line.strip_prefix("/read ") {
             let mut parts = rest.split_whitespace();
             let path = match parts.next() {
@@ -241,7 +222,28 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
             continue;
         }
 
-        println!("You said: {line}");
+        // Treat non-command line as a prompt to LLM via tool-use agent loop
+        if let Some(ref client) = client {
+            use crate::llm::{ChatMessage, run_agent_loop};
+            let fs = FsTools::new(&cfg.project_root);
+            let mut msgs = Vec::new();
+            if let Ok(sys) = std::fs::read_to_string("resources/system_prompt.md") {
+                msgs.push(ChatMessage {
+                    role: "system".into(),
+                    content: sys,
+                });
+            }
+            msgs.push(ChatMessage {
+                role: "user".into(),
+                content: line.clone(),
+            });
+            match run_agent_loop(client, &cfg.model, &fs, msgs).await {
+                Ok(msg) => println!("{}", msg.content),
+                Err(e) => eprintln!("LLM error: {e}"),
+            }
+        } else {
+            println!("You said: {line}");
+        }
         if let Some(sess) = current_session.as_mut() {
             sess.history.push(format!("user: {line}"));
             let store = session::SessionStore::new_default()?;

@@ -1,11 +1,13 @@
 mod client;
 mod history;
 mod stream;
+pub mod tool_use;
 
 use reqwest::StatusCode;
 
 pub use client::*;
 pub use history::*;
+pub use tool_use::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmErrorKind {
