@@ -6,7 +6,7 @@ An interactive CLI/TUI coding agent written in Rust (Edition 2024). It leverages
 
 - CLI and TUI modes
 - OpenAI-compatible Chat Completions API
-  - Single-shot (`/ask`) and streaming output
+  - Streaming output (TUI) and tool-use agent loop
   - Basic error handling and cancelation
 - Safe filesystem tools confined to the project root
   - `/read`, `/write`, `/search` with path normalization and binary file guards
@@ -15,7 +15,6 @@ An interactive CLI/TUI coding agent written in Rust (Edition 2024). It leverages
 - TUI UX
   - Real-time streaming output with status indicator (Idle/Streaming/Cancelled/Done/Error)
   - Esc to cancel ongoing streaming
-  - Timestamped separators per `/ask`
   - Max log size with automatic truncation
 
 ## Requirements
@@ -91,13 +90,13 @@ Run with `--no-tui` to use the plain CLI:
 ./target/release/doge-code --no-tui
 ```
 
-Supported commands:
+Type plain text lines to query the LLM. Supported commands:
 
 - `/help` – show help
 - `/clear` – clear screen
 - `/quit` or `/exit` – exit
 - `/tools` – list available tools
-- `/ask <text>` – send a single prompt to the LLM (prints assistant reply)
+- `<plain text>` – send a prompt to the LLM (prints assistant reply)
 - `/read <path> [offset limit]` – print file content (line-range optional)
 - `/write <path> <text>` – write text to a file (creates parents, guards project root)
 - `/search <regex> [include_glob]` – grep-like search with regex; optional glob filter

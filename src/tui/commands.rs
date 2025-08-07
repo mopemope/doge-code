@@ -111,9 +111,6 @@ impl CommandHandler for TuiExecutor {
                     let rest = line;
                     self.last_user_prompt = Some(rest.to_string());
                     ui.push_log(format!("> {rest}"));
-                    if let Some(tx) = &self.ui_tx {
-                        let _ = tx.send("::status:streaming".into());
-                    }
                     match self.client.as_ref() {
                         Some(c) => {
                             let rt = tokio::runtime::Handle::current();
@@ -121,80 +118,43 @@ impl CommandHandler for TuiExecutor {
                             let content = rest.to_string();
                             let c = c.clone();
                             let tx = self.ui_tx.clone();
-                            // Prepare a fresh line for streaming tokens only once per request
+                            // Prepare a fresh line for the final output
                             ui.push_log(String::new());
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
-                            // Clone pieces needed in async task
-                            let mut hist = self.history.clone();
-                            hist.append_user(content.clone());
-                            let hist_for_result = hist.clone();
+                            // Build initial messages with optional system prompt + user
+                            let mut msgs = Vec::new();
+                            if let Ok(sys) = std::fs::read_to_string("resources/system_prompt.md") {
+                                msgs.push(crate::llm::ChatMessage {
+                                    role: "system".into(),
+                                    content: sys,
+                                });
+                            }
+                            msgs.push(crate::llm::ChatMessage {
+                                role: "user".into(),
+                                content: content.clone(),
+                            });
+                            let fs = self.tools.clone();
                             rt.spawn(async move {
-                                let stream_res = c.chat_stream(&model, hist.build_messages()).await;
-                                match stream_res {
-                                    Ok(mut s) => {
-                                        use futures::StreamExt;
-                                        let mut had_error = false;
-                                        let mut full = String::new();
-                                        while let Some(item) = s.next().await {
-                                            if *cancel_rx.borrow() {
-                                                if let Some(tx) = tx.as_ref() {
-                                                    let _ = tx.send("::status:cancelled".into());
-                                                    let _ = tx.send("[Cancelled]".into());
-                                                }
-                                                break;
-                                            }
-                                            match item {
-                                                Ok(t) => {
-                                                    full.push_str(&t);
-                                                    if let Some(tx) = tx.as_ref() {
-                                                        let _ = tx.send(format!("::append:{t}"));
-                                                    }
-                                                }
-                                                Err(_e) => {
-                                                    had_error = true;
-                                                    if let Some(tx) = tx.as_ref() {
-                                                        let _ = tx.send("::status:error".into());
-                                                        let _ =
-                                                            tx.send("[Error] stream error".into());
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if let Some(tx) = tx {
-                                            if !*cancel_rx.borrow() && !had_error {
-                                                let _ = tx.send("::status:done".into());
-                                            }
-                                        }
-                                        // Append assistant message to history after stream completes
-                                        let mut hist = hist_for_result;
-                                        if !full.is_empty() {
-                                            hist.append_assistant(full);
-                                        }
+                                if *cancel_rx.borrow() {
+                                    if let Some(tx) = tx {
+                                        let _ = tx.send("::status:cancelled".into());
+                                        let _ = tx.send("[Cancelled]".into());
                                     }
-                                    Err(_e) => {
-                                        if *cancel_rx.borrow() {
-                                            if let Some(tx) = tx {
-                                                let _ = tx.send("::status:cancelled".into());
-                                                let _ = tx.send("[Cancelled]".into());
-                                            }
-                                            return;
-                                        }
-                                        // Fallback to non-streaming
-                                        let res = c.chat_once(&model, hist.build_messages()).await;
-                                        let out = match res {
-                                            Ok(m) => m.content,
-                                            Err(err) => format!("LLM error: {err}"),
-                                        };
+                                    return;
+                                }
+                                let res = crate::llm::run_agent_loop(&c, &model, &fs, msgs).await;
+                                match res {
+                                    Ok(msg) => {
                                         if let Some(tx) = tx {
-                                            let _ = tx.send(out.clone());
+                                            let _ = tx.send(msg.content);
                                             let _ = tx.send("::status:done".into());
                                         }
-                                        // Append assistant message to history after non-streaming completes
-                                        let mut hist = hist_for_result;
-                                        if !out.is_empty() && !out.starts_with("LLM error:") {
-                                            hist.append_assistant(out);
+                                    }
+                                    Err(e) => {
+                                        if let Some(tx) = tx {
+                                            let _ = tx.send(format!("LLM error: {e}"));
+                                            let _ = tx.send("::status:error".into());
                                         }
                                     }
                                 }
