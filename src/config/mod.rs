@@ -11,6 +11,32 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     pub log_level: String,
     pub project_root: PathBuf,
+    pub llm: LlmConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmConfig {
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub read_idle_timeout_ms: u64,
+    pub max_retries: usize,
+    pub retry_base_ms: u64,
+    pub retry_jitter_ms: u64,
+    pub respect_retry_after: bool,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: 5_000,
+            request_timeout_ms: 60_000,
+            read_idle_timeout_ms: 20_000,
+            max_retries: 3,
+            retry_base_ms: 300,
+            retry_jitter_ms: 200,
+            respect_retry_after: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -20,6 +46,18 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     pub log_level: Option<String>,
     pub project_root: Option<std::path::PathBuf>,
+    pub llm: Option<PartialLlmConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PartialLlmConfig {
+    pub connect_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<u64>,
+    pub read_idle_timeout_ms: Option<u64>,
+    pub max_retries: Option<usize>,
+    pub retry_base_ms: Option<u64>,
+    pub retry_jitter_ms: Option<u64>,
+    pub respect_retry_after: Option<bool>,
 }
 
 impl AppConfig {
@@ -55,6 +93,30 @@ impl AppConfig {
             cli.log_level
         };
         let project_root = file_cfg.project_root.unwrap_or(project_root);
+
+        let llm_defaults = LlmConfig::default();
+        let llm = if let Some(p) = file_cfg.llm {
+            LlmConfig {
+                connect_timeout_ms: p
+                    .connect_timeout_ms
+                    .unwrap_or(llm_defaults.connect_timeout_ms),
+                request_timeout_ms: p
+                    .request_timeout_ms
+                    .unwrap_or(llm_defaults.request_timeout_ms),
+                read_idle_timeout_ms: p
+                    .read_idle_timeout_ms
+                    .unwrap_or(llm_defaults.read_idle_timeout_ms),
+                max_retries: p.max_retries.unwrap_or(llm_defaults.max_retries),
+                retry_base_ms: p.retry_base_ms.unwrap_or(llm_defaults.retry_base_ms),
+                retry_jitter_ms: p.retry_jitter_ms.unwrap_or(llm_defaults.retry_jitter_ms),
+                respect_retry_after: p
+                    .respect_retry_after
+                    .unwrap_or(llm_defaults.respect_retry_after),
+            }
+        } else {
+            llm_defaults
+        };
+
         Ok(Self {
             no_tui: cli.no_tui,
             base_url,
@@ -62,6 +124,7 @@ impl AppConfig {
             api_key,
             log_level,
             project_root,
+            llm,
         })
     }
 }
