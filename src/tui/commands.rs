@@ -1,5 +1,5 @@
 use crate::analysis::Analyzer;
-use crate::llm::{ChatMessage, OpenAIClient};
+use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
 use crate::tui::view::TuiApp;
 use anyhow::Result;
@@ -14,6 +14,7 @@ pub struct TuiExecutor {
     pub(crate) tools: FsTools,
     pub(crate) analyzer: Analyzer,
     pub(crate) client: Option<OpenAIClient>,
+    pub(crate) history: crate::llm::ChatHistory,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
     pub(crate) last_user_prompt: Option<String>,
@@ -27,11 +28,17 @@ impl TuiExecutor {
             Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
             None => None,
         };
+        // Load system prompt
+        let sys_prompt = std::fs::read_to_string("resources/system_prompt.md").ok();
+        let mut history = crate::llm::ChatHistory::new(12_000, sys_prompt);
+        history.append_system_once();
+
         Ok(Self {
             cfg,
             tools,
             analyzer,
             client,
+            history,
             ui_tx: None,
             cancel_tx: None,
             last_user_prompt: None,
@@ -118,20 +125,17 @@ impl CommandHandler for TuiExecutor {
                             ui.push_log(String::new());
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
+                            // Clone pieces needed in async task
+                            let mut hist = self.history.clone();
+                            hist.append_user(content.clone());
+                            let hist_for_result = hist.clone();
                             rt.spawn(async move {
-                                let stream_res = c
-                                    .chat_stream(
-                                        &model,
-                                        vec![ChatMessage {
-                                            role: "user".into(),
-                                            content: content.clone(),
-                                        }],
-                                    )
-                                    .await;
+                                let stream_res = c.chat_stream(&model, hist.build_messages()).await;
                                 match stream_res {
                                     Ok(mut s) => {
                                         use futures::StreamExt;
                                         let mut had_error = false;
+                                        let mut full = String::new();
                                         while let Some(item) = s.next().await {
                                             if *cancel_rx.borrow() {
                                                 if let Some(tx) = tx.as_ref() {
@@ -142,6 +146,7 @@ impl CommandHandler for TuiExecutor {
                                             }
                                             match item {
                                                 Ok(t) => {
+                                                    full.push_str(&t);
                                                     if let Some(tx) = tx.as_ref() {
                                                         let _ = tx.send(format!("::append:{t}"));
                                                     }
@@ -162,6 +167,11 @@ impl CommandHandler for TuiExecutor {
                                                 let _ = tx.send("::status:done".into());
                                             }
                                         }
+                                        // Append assistant message to history after stream completes
+                                        let mut hist = hist_for_result;
+                                        if !full.is_empty() {
+                                            hist.append_assistant(full);
+                                        }
                                     }
                                     Err(_e) => {
                                         if *cancel_rx.borrow() {
@@ -171,22 +181,20 @@ impl CommandHandler for TuiExecutor {
                                             }
                                             return;
                                         }
-                                        let res = c
-                                            .chat_once(
-                                                &model,
-                                                vec![ChatMessage {
-                                                    role: "user".into(),
-                                                    content,
-                                                }],
-                                            )
-                                            .await;
+                                        // Fallback to non-streaming
+                                        let res = c.chat_once(&model, hist.build_messages()).await;
                                         let out = match res {
                                             Ok(m) => m.content,
                                             Err(err) => format!("LLM error: {err}"),
                                         };
                                         if let Some(tx) = tx {
-                                            let _ = tx.send(out);
+                                            let _ = tx.send(out.clone());
                                             let _ = tx.send("::status:done".into());
+                                        }
+                                        // Append assistant message to history after non-streaming completes
+                                        let mut hist = hist_for_result;
+                                        if !out.is_empty() && !out.starts_with("LLM error:") {
+                                            hist.append_assistant(out);
                                         }
                                     }
                                 }
