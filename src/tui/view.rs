@@ -18,6 +18,10 @@ pub struct TuiApp {
     pub max_log_lines: usize,
     pub status: Status,
     pub model: Option<String>,
+    // input history and navigation index; index==history.len() means current (editing) buffer
+    pub input_history: Vec<String>,
+    pub history_index: usize,
+    pub draft: String,
 }
 
 impl TuiApp {
@@ -33,6 +37,9 @@ impl TuiApp {
             max_log_lines: 500,
             status: Status::Idle,
             model,
+            input_history: Vec::new(),
+            history_index: 0,
+            draft: String::new(),
         }
     }
 
@@ -135,6 +142,16 @@ impl TuiApp {
                         }
                         crossterm::event::KeyCode::Enter => {
                             let line = std::mem::take(&mut self.input);
+                            // record history if non-empty and not duplicate of last
+                            if !line.trim().is_empty() {
+                                if self.input_history.last().map(|s| s.as_str())
+                                    != Some(line.as_str())
+                                {
+                                    self.input_history.push(line.clone());
+                                }
+                                self.history_index = self.input_history.len();
+                                self.draft.clear();
+                            }
                             if line.trim() == "/quit" {
                                 return Ok(());
                             }
@@ -143,10 +160,37 @@ impl TuiApp {
                         }
                         crossterm::event::KeyCode::Backspace => {
                             self.input.pop();
+                            if self.history_index == self.input_history.len() {
+                                self.draft = self.input.clone();
+                            }
                             dirty = true;
+                        }
+                        crossterm::event::KeyCode::Up => {
+                            if self.history_index > 0 {
+                                if self.history_index == self.input_history.len() {
+                                    self.draft = self.input.clone();
+                                }
+                                self.history_index -= 1;
+                                self.input = self.input_history[self.history_index].clone();
+                                dirty = true;
+                            }
+                        }
+                        crossterm::event::KeyCode::Down => {
+                            if self.history_index < self.input_history.len() {
+                                self.history_index += 1;
+                                if self.history_index == self.input_history.len() {
+                                    self.input = self.draft.clone();
+                                } else {
+                                    self.input = self.input_history[self.history_index].clone();
+                                }
+                                dirty = true;
+                            }
                         }
                         crossterm::event::KeyCode::Char(c) => {
                             self.input.push(c);
+                            if self.history_index == self.input_history.len() {
+                                self.draft = self.input.clone();
+                            }
                             dirty = true;
                         }
                         _ => {}
