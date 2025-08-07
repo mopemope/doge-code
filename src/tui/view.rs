@@ -18,8 +18,6 @@ pub struct TuiApp {
     pub max_log_lines: usize,
     pub status: Status,
     pub model: Option<String>,
-    // When true, the last inserted model hint line should be removed on first stream token.
-    model_hint_pending: bool,
 }
 
 impl TuiApp {
@@ -35,7 +33,6 @@ impl TuiApp {
             max_log_lines: 500,
             status: Status::Idle,
             model,
-            model_hint_pending: false,
         }
     }
 
@@ -86,10 +83,6 @@ impl TuiApp {
                     match msg.as_str() {
                         "::status:done" => {
                             self.status = Status::Done;
-                            if self.model_hint_pending {
-                                Self::purge_model_hint(&mut self.log);
-                                self.model_hint_pending = false;
-                            }
                             dirty = true;
                         }
                         "::status:cancelled" => {
@@ -104,17 +97,8 @@ impl TuiApp {
                             self.status = Status::Error;
                             dirty = true;
                         }
-                        _ if msg.starts_with("::model:hint:") => {
-                            let payload = &msg["::model:hint:".len()..];
-                            self.push_log(payload.to_string());
-                            self.model_hint_pending = true;
-                            dirty = true;
-                        }
+
                         _ if msg.starts_with("::append:") => {
-                            if self.model_hint_pending {
-                                Self::purge_model_hint(&mut self.log);
-                                self.model_hint_pending = false;
-                            }
                             let payload = &msg["::append:".len()..];
                             self.append_stream_token(payload);
                             dirty = true;
@@ -175,8 +159,7 @@ impl TuiApp {
             }
 
             if dirty {
-                let model_hint = self.model.as_deref();
-                self.draw_with_model(model_hint)?;
+                self.draw_with_model(self.model.as_deref())?;
                 dirty = false;
             }
         }
@@ -300,27 +283,4 @@ impl TuiApp {
     }
 }
 
-impl TuiApp {
-    // Remove a transient model hint from the end of the log if present.
-    fn purge_model_hint(log: &mut Vec<String>) {
-        let mut removed = false;
-        for _ in 0..2 {
-            if let Some(last) = log.last() {
-                if last.starts_with("\r[model:") || last.trim().is_empty() {
-                    if last.trim().is_empty() {
-                        log.pop();
-                        continue;
-                    }
-                    log.pop();
-                    removed = true;
-                    break;
-                } else {
-                    break;
-                }
-            }
-        }
-        if removed && !log.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
-            log.push(String::new());
-        }
-    }
-}
+impl TuiApp {}

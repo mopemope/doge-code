@@ -48,7 +48,6 @@ impl CommandHandler for TuiExecutor {
         }
         match line {
             "/help" => {
-                ui.push_log(format!("[model: {}]", self.cfg.model));
                 ui.push_log("/help, /map, /tools, /clear, /quit");
                 ui.push_log("/read <path> [offset limit]");
                 ui.push_log("/write <path> <text>");
@@ -93,10 +92,6 @@ impl CommandHandler for TuiExecutor {
                         Some(c) => {
                             let rt = tokio::runtime::Handle::current();
                             let model = self.cfg.model.clone();
-                            if let Some(tx) = &self.ui_tx {
-                                let _ = tx.send(format!("::model:hint:[model: {model}]"));
-                                let _ = tx.send(String::new());
-                            }
                             let content = rest.to_string();
                             let c = c.clone();
                             let tx = self.ui_tx.clone();
@@ -132,12 +127,11 @@ impl CommandHandler for TuiExecutor {
                                                         let _ = tx.send(format!("::append:{t}"));
                                                     }
                                                 }
-                                                Err(e) => {
+                                                Err(_e) => {
                                                     had_error = true;
                                                     if let Some(tx) = tx.as_ref() {
-                                                        let _ = tx.send(format!(
-                                                            "[Error] stream error: {e}"
-                                                        ));
+                                                        let _ =
+                                                            tx.send("[Error] stream error".into());
                                                         let _ = tx.send("::status:error".into());
                                                     }
                                                     break;
@@ -145,11 +139,10 @@ impl CommandHandler for TuiExecutor {
                                             }
                                         }
                                         if let Some(tx) = tx {
-                                            if !*cancel_rx.borrow()
-                                                && !had_error {
-                                                    let _ = tx.send("[Done]".into());
-                                                    let _ = tx.send("::status:done".into());
-                                                }
+                                            if !*cancel_rx.borrow() && !had_error {
+                                                let _ = tx.send("[Done]".into());
+                                                let _ = tx.send("::status:done".into());
+                                            }
                                         }
                                     }
                                     Err(e) => {
