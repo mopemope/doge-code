@@ -203,6 +203,33 @@ async fn run_cli_loop(cfg: AppConfig) -> Result<()> {
             }
             continue;
         }
+        if let Some(rest) = line.strip_prefix("/open ") {
+            let path = rest.trim();
+            if path.is_empty() {
+                eprintln!("usage: /open <path>");
+                continue;
+            }
+            let p = std::path::Path::new(path);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cfg.project_root.join(p)
+            };
+            if !abs.exists() {
+                eprintln!("not found: {}", abs.display());
+                continue;
+            }
+            let editor = std::env::var("EDITOR")
+                .ok()
+                .or_else(|| std::env::var("VISUAL").ok())
+                .unwrap_or_else(|| "vi".to_string());
+            match std::process::Command::new(&editor).arg(&abs).status() {
+                Ok(s) if s.success() => println!("opened: {}", abs.display()),
+                Ok(s) => eprintln!("editor exited with status {s}"),
+                Err(e) => eprintln!("failed to launch editor: {e}"),
+            }
+            continue;
+        }
         if line.trim() == "/map" {
             match analyzer.build() {
                 Ok(map) => {

@@ -58,7 +58,7 @@ impl CommandHandler for TuiExecutor {
         }
         match line {
             "/help" => {
-                ui.push_log("/help, /map, /tools, /clear, /quit, /retry");
+                ui.push_log("/help, /map, /tools, /clear, /open <path>, /quit, /retry");
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write"),
             "/clear" => {
@@ -105,6 +105,47 @@ impl CommandHandler for TuiExecutor {
                 Err(e) => ui.push_log(format!("map error: {e}")),
             },
             _ => {
+                if let Some(rest) = line.strip_prefix("/open ") {
+                    let path_arg = rest.trim();
+                    if path_arg.is_empty() {
+                        ui.push_log("usage: /open <path>");
+                        return;
+                    }
+                    // Resolve to absolute path; allow project-internal paths and absolute paths
+                    let p = std::path::Path::new(path_arg);
+                    let abs = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        self.cfg.project_root.join(p)
+                    };
+                    if !abs.exists() {
+                        ui.push_log(format!("not found: {}", abs.display()));
+                        return;
+                    }
+                    // Leave TUI alt screen temporarily while spawning editor in blocking mode
+                    use crossterm::{cursor, execute, terminal};
+                    let mut stdout = std::io::stdout();
+                    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+                    let _ = terminal::disable_raw_mode();
+
+                    // Choose editor from $EDITOR, then $VISUAL, else fallback list
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .or_else(|| std::env::var("VISUAL").ok())
+                        .unwrap_or_else(|| "vi".to_string());
+                    let status = std::process::Command::new(&editor).arg(&abs).status();
+
+                    // Re-enter TUI
+                    let _ = terminal::enable_raw_mode();
+                    let _ = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide);
+
+                    match status {
+                        Ok(s) if s.success() => ui.push_log(format!("opened: {}", abs.display())),
+                        Ok(s) => ui.push_log(format!("editor exited with status {s}")),
+                        Err(e) => ui.push_log(format!("failed to launch editor: {e}")),
+                    }
+                    return;
+                }
                 if !line.starts_with('/') {
                     let rest = line;
                     self.last_user_prompt = Some(rest.to_string());
