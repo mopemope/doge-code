@@ -255,23 +255,21 @@ impl TuiApp {
                     }
                     crossterm::event::Event::Key(k) => match k.code {
                         crossterm::event::KeyCode::Tab => {
-                            if self.compl.visible
-                                && !self.compl.items.is_empty() {
-                                    self.compl.selected =
-                                        (self.compl.selected + 1) % self.compl.items.len();
-                                    dirty = true;
-                                }
+                            if self.compl.visible && !self.compl.items.is_empty() {
+                                self.compl.selected =
+                                    (self.compl.selected + 1) % self.compl.items.len();
+                                dirty = true;
+                            }
                         }
                         crossterm::event::KeyCode::BackTab => {
-                            if self.compl.visible
-                                && !self.compl.items.is_empty() {
-                                    if self.compl.selected == 0 {
-                                        self.compl.selected = self.compl.items.len() - 1;
-                                    } else {
-                                        self.compl.selected -= 1;
-                                    }
-                                    dirty = true;
+                            if self.compl.visible && !self.compl.items.is_empty() {
+                                if self.compl.selected == 0 {
+                                    self.compl.selected = self.compl.items.len() - 1;
+                                } else {
+                                    self.compl.selected -= 1;
                                 }
+                                dirty = true;
+                            }
                         }
                         crossterm::event::KeyCode::Enter => {
                             if self.compl.visible {
