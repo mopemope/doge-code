@@ -7,6 +7,8 @@ use tracing::{debug, error, warn};
 use crate::llm::client::{ChatMessage, ChoiceMessage, OpenAIClient};
 use crate::tools::FsTools;
 
+const MAX_ITERS: usize = 128;
+
 // Minimal structures to support tool-calling style chats (non-streaming).
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,9 +91,9 @@ impl<'a> ToolRuntime<'a> {
         Self {
             tools: default_tools_def(),
             fs,
-            max_iters: 4,
-            request_timeout: Duration::from_secs(60),
-            tool_timeout: Duration::from_secs(10),
+            max_iters: MAX_ITERS,
+            request_timeout: Duration::from_secs(60 * 5),
+            tool_timeout: Duration::from_secs(10 * 60),
         }
     }
 }
