@@ -254,39 +254,6 @@ impl TuiApp {
                     crossterm::event::Event::Resize(_, _) => {
                         dirty = true;
                     }
-                    crossterm::event::Event::Key(k) => match k.code {
-                        crossterm::event::KeyCode::Tab => {
-                            if self.compl.visible && !self.compl.items.is_empty() {
-                                self.compl.selected =
-                                    (self.compl.selected + 1) % self.compl.items.len();
-                                dirty = true;
-                            }
-                        }
-                        crossterm::event::KeyCode::BackTab => {
-                            if self.compl.visible && !self.compl.items.is_empty() {
-                                if self.compl.selected == 0 {
-                                    self.compl.selected = self.compl.items.len() - 1;
-                                } else {
-                                    self.compl.selected -= 1;
-                                }
-                                dirty = true;
-                            }
-                        }
-                        crossterm::event::KeyCode::Enter => {
-                            if self.compl.visible {
-                                self.apply_completion();
-                                dirty = true;
-                                continue;
-                            }
-                        }
-                        crossterm::event::KeyCode::Esc => {
-                            if self.compl.visible {
-                                self.compl.reset();
-                                dirty = true;
-                            }
-                        }
-                        _ => {}
-                    },
                     _ => {}
                 }
             }
@@ -556,7 +523,7 @@ fn load_input_history() -> (Vec<String>, usize) {
     (v, idx)
 }
 
-fn save_input_history(hist: &Vec<String>) {
+fn save_input_history(hist: &[String]) {
     let path = history_store_path();
     // keep last 1000 entries
     let slice: Vec<&String> = hist.iter().rev().take(1000).collect();

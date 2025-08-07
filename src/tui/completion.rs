@@ -9,6 +9,7 @@ pub struct FileEntry {
     pub base: String,
     pub dir: String,
     pub ext: Option<String>,
+    #[allow(dead_code)]
     pub size: u64,
     pub mtime: Option<DateTime<Utc>>,
 }

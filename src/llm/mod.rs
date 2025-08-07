@@ -20,6 +20,7 @@ pub enum LlmErrorKind {
     Unknown,
 }
 
+#[allow(dead_code)]
 pub fn classify_error(status: Option<StatusCode>, err: &anyhow::Error) -> LlmErrorKind {
     if let Some(st) = status {
         if st == StatusCode::TOO_MANY_REQUESTS {

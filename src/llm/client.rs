@@ -82,6 +82,7 @@ impl OpenAIClient {
         format!("{base}/v1/chat/completions")
     }
 
+    #[allow(dead_code)]
     pub async fn chat_once(
         &self,
         model: &str,
@@ -183,6 +184,7 @@ impl OpenAIClient {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown error")))
     }
 
+    #[allow(dead_code)]
     fn should_retry(&self, kind: LlmErrorKind) -> bool {
         // borrow kind to avoid move
         matches!(
