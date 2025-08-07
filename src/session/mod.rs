@@ -18,7 +18,7 @@ pub struct SessionData {
 }
 
 pub struct SessionStore {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
 }
 
 impl SessionStore {
