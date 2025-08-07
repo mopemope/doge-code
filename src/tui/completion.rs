@@ -1,0 +1,219 @@
+use chrono::{DateTime, Utc};
+use globwalk::GlobWalkerBuilder;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub rel: String,
+    pub base: String,
+    pub dir: String,
+    pub ext: Option<String>,
+    pub size: u64,
+    pub mtime: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RecentLRU {
+    cap: usize,
+    items: Vec<String>,
+}
+
+impl RecentLRU {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            items: Vec::new(),
+        }
+    }
+    pub fn touch(&mut self, rel: &str) {
+        if let Some(i) = self.items.iter().position(|s| s == rel) {
+            self.items.remove(i);
+        }
+        self.items.insert(0, rel.to_string());
+        if self.items.len() > self.cap {
+            self.items.pop();
+        }
+    }
+    pub fn rank(&self, rel: &str) -> Option<usize> {
+        self.items.iter().position(|s| s == rel)
+    }
+}
+
+#[derive(Clone)]
+pub struct AtFileIndex {
+    root: PathBuf,
+    pub entries: Arc<RwLock<Vec<FileEntry>>>,
+    pub recent: Arc<RwLock<RecentLRU>>,
+}
+
+impl AtFileIndex {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            entries: Arc::new(RwLock::new(Vec::new())),
+            recent: Arc::new(RwLock::new(RecentLRU::new(256))),
+        }
+    }
+
+    pub fn scan(&self) {
+        let root = self.root.clone();
+        let mut v = Vec::new();
+        let walker = GlobWalkerBuilder::from_patterns(&root, &["**/*"]) // respect .gitignore by default via globwalk
+            .follow_links(false)
+            .case_insensitive(true)
+            .max_depth(64)
+            .build();
+        if let Ok(walker) = walker {
+            for e in walker.filter_map(Result::ok) {
+                let p = e.path();
+                if p.is_dir() {
+                    continue;
+                }
+                if should_skip(p) {
+                    continue;
+                }
+                if let Ok(relp) = p.strip_prefix(&root) {
+                    let rel = relp.to_string_lossy().replace('\\', "/");
+                    let base = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let dir = rel
+                        .rsplit_once('/')
+                        .map(|(d, _)| d.to_string())
+                        .unwrap_or_else(|| "".into());
+                    let ext = p.extension().map(|s| s.to_string_lossy().to_string());
+                    let (size, mtime) = file_meta(p);
+                    v.push(FileEntry {
+                        rel,
+                        base,
+                        dir,
+                        ext,
+                        size,
+                        mtime,
+                    });
+                }
+            }
+        }
+        v.sort_by(|a, b| a.rel.cmp(&b.rel));
+        if let Ok(mut guard) = self.entries.write() {
+            *guard = v;
+        }
+    }
+
+    pub fn complete(&self, query: &str) -> Vec<FileEntry> {
+        let q = query.trim_start_matches('@');
+        let (dir_pref, pat) = match q.rsplit_once('/') {
+            Some((d, b)) => (Some(d.to_string()), b.to_string()),
+            None => (None, q.to_string()),
+        };
+        let entries = self
+            .entries
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let recent = self.recent.read().ok();
+        let mut scored: Vec<(i32, i32, i32, i64, usize)> = Vec::new();
+        for (idx, e) in entries.iter().enumerate() {
+            if let Some(dp) = &dir_pref {
+                if !e.dir.starts_with(dp) {
+                    continue;
+                }
+            }
+            let (tier, score) = match_tier(&e.base, &pat);
+            if tier == 3 && pat.is_empty() {
+                continue;
+            }
+            if tier == i32::MAX {
+                continue;
+            }
+            let rec_rank = recent
+                .as_ref()
+                .and_then(|r| r.rank(&e.rel))
+                .map(|x| x as i32)
+                .unwrap_or(9999);
+            let mtime_key = e.mtime.map(|t| t.timestamp()).unwrap_or(0);
+            // store index to pick entry later
+            scored.push((tier, -score, rec_rank, -mtime_key, idx));
+        }
+        scored.sort();
+        scored
+            .into_iter()
+            .filter_map(|t| entries.get(t.4).cloned())
+            .take(20)
+            .collect()
+    }
+}
+
+fn should_skip(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/.git/")
+        || s.starts_with(".git/")
+        || s.contains("/target/")
+        || s.contains("/node_modules/")
+}
+
+fn file_meta(p: &Path) -> (u64, Option<DateTime<Utc>>) {
+    let md = std::fs::metadata(p).ok();
+    let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mtime = md
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| DateTime::<Utc>::from(t).into());
+    (size, mtime)
+}
+
+fn match_tier(base: &str, pat: &str) -> (i32, i32) {
+    if pat.is_empty() {
+        return (1, 0);
+    }
+    let bl = base.to_ascii_lowercase();
+    let pl = pat.to_ascii_lowercase();
+    if bl.starts_with(&pl) {
+        return (0, pl.len() as i32);
+    }
+    if bl.contains(&pl) {
+        return (1, pl.len() as i32);
+    }
+    let f = fuzzy_score(&bl, &pl);
+    if f > 0 { (2, f) } else { (i32::MAX, 0) }
+}
+
+fn fuzzy_score(text: &str, pat: &str) -> i32 {
+    let mut ti = 0usize;
+    let mut score = 0i32;
+    let tb = text.as_bytes();
+    let pb = pat.as_bytes();
+    for &pc in pb {
+        while ti < tb.len() && tb[ti] != pc {
+            ti += 1;
+            score -= 1;
+        }
+        if ti == tb.len() {
+            return 0;
+        }
+        score += 5;
+        ti += 1;
+    }
+    score
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CompletionState {
+    pub visible: bool,
+    pub query: String,
+    pub items: Vec<FileEntry>,
+    pub selected: usize,
+    // suppress reopening completion once right after it was closed/applied
+    pub suppress_once: bool,
+}
+
+impl CompletionState {
+    pub fn reset(&mut self) {
+        self.visible = false;
+        self.query.clear();
+        self.items.clear();
+        self.selected = 0;
+    }
+}
