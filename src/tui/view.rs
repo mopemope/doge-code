@@ -6,6 +6,7 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
+use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::state::{Status, build_render_plan};
 
 pub struct TuiApp {
@@ -22,13 +23,19 @@ pub struct TuiApp {
     pub input_history: Vec<String>,
     pub history_index: usize,
     pub draft: String,
+    // completion
+    pub at_index: AtFileIndex,
+    pub compl: CompletionState,
 }
 
 impl TuiApp {
     pub fn new(title: impl Into<String>, model: Option<String>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
-        Self {
+        let at_index = AtFileIndex::new(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        );
+        let app = Self {
             title: title.into(),
             input: String::new(),
             log: Vec::new(),
@@ -41,7 +48,12 @@ impl TuiApp {
             input_history,
             history_index,
             draft: String::new(),
-        }
+            at_index,
+            compl: Default::default(),
+        };
+        // initial scan (blocking once at startup)
+        app.at_index.scan();
+        app
     }
 
     pub fn with_handler(mut self, h: Box<dyn crate::tui::commands::CommandHandler + Send>) -> Self {
@@ -146,6 +158,11 @@ impl TuiApp {
                             dirty = true;
                         }
                         crossterm::event::KeyCode::Enter => {
+                            if self.compl.visible {
+                                self.apply_completion();
+                                dirty = true;
+                                continue;
+                            }
                             let line = std::mem::take(&mut self.input);
                             // record history if non-empty and not duplicate of last
                             if !line.trim().is_empty() {
@@ -169,10 +186,17 @@ impl TuiApp {
                             if self.history_index == self.input_history.len() {
                                 self.draft = self.input.clone();
                             }
+                            self.update_completion();
                             dirty = true;
                         }
                         crossterm::event::KeyCode::Up => {
-                            if self.history_index > 0 {
+                            if self.compl.visible {
+                                if !self.compl.items.is_empty() {
+                                    self.compl.selected =
+                                        (self.compl.selected + 1) % self.compl.items.len();
+                                    dirty = true;
+                                }
+                            } else if self.history_index > 0 {
                                 if self.history_index == self.input_history.len() {
                                     self.draft = self.input.clone();
                                 }
@@ -182,7 +206,16 @@ impl TuiApp {
                             }
                         }
                         crossterm::event::KeyCode::Down => {
-                            if self.history_index < self.input_history.len() {
+                            if self.compl.visible {
+                                if !self.compl.items.is_empty() {
+                                    if self.compl.selected == 0 {
+                                        self.compl.selected = self.compl.items.len() - 1;
+                                    } else {
+                                        self.compl.selected -= 1;
+                                    }
+                                    dirty = true;
+                                }
+                            } else if self.history_index < self.input_history.len() {
                                 self.history_index += 1;
                                 if self.history_index == self.input_history.len() {
                                     self.input = self.draft.clone();
@@ -193,10 +226,26 @@ impl TuiApp {
                             }
                         }
                         crossterm::event::KeyCode::Char(c) => {
+                            // If completion popup is visible and space is pressed, close the popup and suppress reopening once.
+                            if c == ' ' && self.compl.visible {
+                                self.compl.reset();
+                                self.compl.suppress_once = true;
+                                self.input.push(c);
+                                if self.history_index == self.input_history.len() {
+                                    self.draft = self.input.clone();
+                                }
+                                dirty = true;
+                                continue;
+                            }
                             self.input.push(c);
+                            // If user typed a new '@', enable completion again regardless of previous suppression.
+                            if c == '@' {
+                                self.compl.suppress_once = false;
+                            }
                             if self.history_index == self.input_history.len() {
                                 self.draft = self.input.clone();
                             }
+                            self.update_completion();
                             dirty = true;
                         }
                         _ => {}
@@ -204,6 +253,41 @@ impl TuiApp {
                     crossterm::event::Event::Resize(_, _) => {
                         dirty = true;
                     }
+                    crossterm::event::Event::Key(k) => match k.code {
+                        crossterm::event::KeyCode::Tab => {
+                            if self.compl.visible
+                                && !self.compl.items.is_empty() {
+                                    self.compl.selected =
+                                        (self.compl.selected + 1) % self.compl.items.len();
+                                    dirty = true;
+                                }
+                        }
+                        crossterm::event::KeyCode::BackTab => {
+                            if self.compl.visible
+                                && !self.compl.items.is_empty() {
+                                    if self.compl.selected == 0 {
+                                        self.compl.selected = self.compl.items.len() - 1;
+                                    } else {
+                                        self.compl.selected -= 1;
+                                    }
+                                    dirty = true;
+                                }
+                        }
+                        crossterm::event::KeyCode::Enter => {
+                            if self.compl.visible {
+                                self.apply_completion();
+                                dirty = true;
+                                continue;
+                            }
+                        }
+                        crossterm::event::KeyCode::Esc => {
+                            if self.compl.visible {
+                                self.compl.reset();
+                                dirty = true;
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -328,12 +412,124 @@ impl TuiApp {
         )?;
         write!(stdout, "{}", plan.input_line)?;
 
+        // draw completion popup above input if visible
+        if self.compl.visible && !self.compl.items.is_empty() {
+            let popup_h = std::cmp::min(self.compl.items.len(), 10) as u16;
+            for i in 0..popup_h as usize {
+                let row = input_row.saturating_sub(1 + i as u16);
+                let item = &self.compl.items[i];
+                let mark = if i == self.compl.selected { ">" } else { " " };
+                let line = format!(
+                    "{mark} {}  [{}]",
+                    item.rel,
+                    item.ext.clone().unwrap_or_default()
+                );
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, row),
+                    terminal::Clear(ClearType::CurrentLine)
+                )?;
+                if i == self.compl.selected {
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(Color::DarkGrey),
+                        SetForegroundColor(Color::White)
+                    )?;
+                }
+                write!(stdout, "{line}")?;
+                if i == self.compl.selected {
+                    queue!(stdout, ResetColor)?;
+                }
+            }
+        }
+
         stdout.flush()?;
         Ok(())
     }
 }
 
-impl TuiApp {}
+impl TuiApp {
+    fn current_at_token(&self) -> Option<String> {
+        // capture last segment starting with '@' up to whitespace or end
+        let s = self.input.as_str();
+        let mut start = None;
+        for (i, ch) in s.char_indices() {
+            if ch == '@' {
+                start = Some(i);
+            }
+            if ch.is_whitespace() {
+                if let Some(st) = start {
+                    if i > st {
+                        return Some(s[st..i].to_string());
+                    } else {
+                        start = None;
+                    }
+                }
+            }
+        }
+        start.map(|st| s[st..].to_string())
+    }
+    fn update_completion(&mut self) {
+        // If we just applied/closed completion, suppress reopening once.
+        if self.compl.suppress_once {
+            self.compl.suppress_once = false;
+            self.compl.visible = false;
+            return;
+        }
+        // Only trigger completion when the character immediately before the cursor is '@'.
+        let s = self.input.as_str();
+        let mut rev = s.chars().rev();
+        let prev = rev.next();
+        let prev2 = rev.next();
+        let prev_char_is_at = prev == Some('@');
+        if !prev_char_is_at {
+            self.compl.reset();
+            return;
+        }
+        // If this '@' starts a new token (at BOL or preceded by whitespace), start from full set by forcing query="@".
+        if prev2.is_none() || prev2.map(|c| c.is_whitespace()).unwrap_or(false) {
+            let tok = "@".to_string();
+            self.compl.visible = true;
+            self.compl.query = tok.clone();
+            self.compl.items = self.at_index.complete(&tok);
+            self.compl.selected = 0;
+            return;
+        }
+        // Otherwise, build from current token content after '@'.
+        if let Some(tok) = self.current_at_token() {
+            if tok.starts_with('@') {
+                self.compl.visible = true;
+                self.compl.query = tok.clone();
+                self.compl.items = self.at_index.complete(&tok);
+                self.compl.selected = 0;
+                return;
+            }
+        }
+        self.compl.reset();
+    }
+    fn apply_completion(&mut self) {
+        if !self.compl.visible {
+            return;
+        }
+        if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
+            // replace current token in input with @rel
+            if let Some(tok) = self.current_at_token() {
+                if let Some(pos) = self.input.rfind(&tok) {
+                    let mut ins = format!("@{}", item.rel);
+                    if ins.contains(' ') {
+                        ins = format!("@'{}'", item.rel);
+                    }
+                    self.input.replace_range(pos..pos + tok.len(), &ins);
+                }
+            }
+            if let Ok(mut r) = self.at_index.recent.write() {
+                r.touch(&item.rel);
+            }
+        }
+        self.compl.reset();
+        self.compl.suppress_once = true;
+    }
+}
 
 fn history_store_path() -> std::path::PathBuf {
     // Reuse session store base dir but keep a flat file for input history
