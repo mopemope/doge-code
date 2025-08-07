@@ -70,7 +70,7 @@ pub fn build_render_plan(
     input: &str,
     w: u16,
     h: u16,
-    _model: Option<&str>,
+    model: Option<&str>,
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -83,7 +83,8 @@ pub fn build_render_plan(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
-    let title_full = format!("{title} — [{status_str}]  {cwd}");
+    let model_suffix = model.map(|m| format!(" — model:{m}")).unwrap_or_default();
+    let title_full = format!("{title}{model_suffix} — [{status_str}]  {cwd}");
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
     // Header lines are plain text without embedded CR/LF; positioning is handled by the view layer.
