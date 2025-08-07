@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 pub fn print_help() {
     println!(
-        "/help  Show help\n/map   Show repo map (Rust fn only)\n/tools Show tools (fs_search, fs_read, fs_write)\n/clear Clear screen\n/quit  Quit\n/ask <text>  Send a single prompt to the LLM\n/read <path> [offset limit]\n/write <path> <text>\n/search <regex> [include_glob]"
+        "/help  Show help\n/map   Show repo map (Rust fn only)\n/tools Show tools (fs_search, fs_read, fs_write)\n/session new|list|load <id>|delete <id>\n/clear Clear screen\n/quit  Quit\n/ask <text>  Send a single prompt to the LLM\n/read <path> [offset limit]\n/write <path> <text>\n/search <regex> [include_glob]"
     );
 }
 
