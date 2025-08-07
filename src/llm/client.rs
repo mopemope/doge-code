@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -81,6 +82,11 @@ impl OpenAIClient {
             AUTHORIZATION,
             format!("Bearer {}", self.api_key).parse().unwrap(),
         );
+
+        // Log payload with API key redacted
+        if let Ok(payload) = serde_json::to_string(&req) {
+            debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions payload");
+        }
 
         let resp = self
             .inner
