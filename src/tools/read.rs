@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use std::{fs, io::Read};
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 
 pub fn fs_read(
-    root: &PathBuf,
+    root: &Path,
     rel: &str,
     offset: Option<usize>,
     limit: Option<usize>,

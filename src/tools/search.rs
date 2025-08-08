@@ -1,49 +1,70 @@
 use anyhow::{Context, Result};
-use regex::Regex;
-use std::path::PathBuf;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+enum RipgrepMessageType {
+    Begin,
+    End,
+    Match,
+    Context,
+}
+
+#[derive(Deserialize, Debug)]
+struct RipgrepJson {
+    r#type: RipgrepMessageType,
+    data: RipgrepData,
+}
+
+#[derive(Deserialize, Debug)]
+struct RipgrepData {
+    path: Option<RipgrepText>,
+    lines: Option<RipgrepText>,
+    line_number: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RipgrepText {
+    text: String,
+}
 
 pub fn fs_search(
-    root: &PathBuf,
+    root: &Path,
     search_pattern: &str,
     file_glob: Option<&str>,
 ) -> Result<Vec<(PathBuf, usize, String)>> {
-    let re = Regex::new(search_pattern).context("invalid regex")?;
+    let mut cmd = Command::new("rg");
+    cmd.current_dir(root)
+        .arg("--json")
+        .arg("-n")
+        .arg("-e")
+        .arg(search_pattern);
+
+    if let Some(glob) = file_glob {
+        cmd.arg("-g").arg(glob);
+    }
+
+    let output = cmd.output().context("failed to execute ripgrep")?;
+    let stdout = String::from_utf8(output.stdout).context("ripgrep output is not utf-8")?;
+
     let mut results = Vec::new();
-    let walker = globwalk::GlobWalkerBuilder::from_patterns(root, &[file_glob.unwrap_or("**/*")])
-        .follow_links(false)
-        .case_insensitive(true)
-        .build()
-        .context("build glob walker")?;
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let p = entry.path().to_path_buf();
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        if re.is_match(p.to_str().unwrap_or_default()) {
-            results.push((p.clone(), 0, p.display().to_string()));
-            continue;
-        }
-        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-            let bin_exts = [
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "zip", "gz", "tar", "xz", "zst",
-            ];
-            if bin_exts.contains(&ext) {
-                continue;
-            }
-        }
-        let content = match std::fs::read_to_string(&p) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        for (i, line) in content.lines().enumerate() {
-            if re.is_match(line) {
-                results.push((p.clone(), i + 1, line.to_string()));
+    for line in stdout.lines() {
+        if let Ok(json) = serde_json::from_str::<RipgrepJson>(line) {
+            if let RipgrepMessageType::Match = json.r#type {
+                if let (Some(path_text), Some(lines_text), Some(line_number)) =
+                    (json.data.path, json.data.lines, json.data.line_number)
+                {
+                    results.push((
+                        PathBuf::from(path_text.text),
+                        line_number,
+                        lines_text.text.trim().to_string(),
+                    ));
+                }
             }
         }
     }
+
     Ok(results)
 }

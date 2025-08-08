@@ -1,28 +1,22 @@
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
-pub fn fs_write(root: &PathBuf, rel: &str, content: &str) -> Result<()> {
+pub fn fs_write(root: &Path, rel: &str, content: &str) -> Result<()> {
+    if content.as_bytes().contains(&0) {
+        bail!("binary content is not allowed");
+    }
     let p = std::path::Path::new(rel);
     if p.is_absolute() {
         bail!("absolute paths are not allowed");
     }
     let path = root.join(p);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    if content.as_bytes().contains(&0) {
-        bail!("binary content not allowed");
-    }
-    let root_canon = root.canonicalize().context("canonicalize root")?;
-    let canon_parent = path
-        .parent()
-        .unwrap_or(Path::new("."))
+    let canon = path
         .canonicalize()
-        .context("canonicalize parent")?;
-    if !canon_parent.starts_with(&root_canon) {
+        .with_context(|| format!("canonicalize {rel}"))?;
+    let root_canon = root.canonicalize().context("canonicalize root")?;
+    if !canon.starts_with(&root_canon) {
         bail!("path escapes project root");
     }
-    fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    fs::write(&canon, content).with_context(|| format!("write {}", canon.display()))
 }
