@@ -5,7 +5,6 @@ use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub no_tui: bool,
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
@@ -120,7 +119,6 @@ impl AppConfig {
         };
 
         Ok(Self {
-            no_tui: cli.no_tui,
             base_url,
             model,
             api_key,

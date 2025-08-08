@@ -1,10 +1,10 @@
 # doge-code
 
-An interactive CLI/TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to read, search, and edit code, and provides a fast, minimal TUI with streaming output and basic repository analysis.
+An interactive TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to read, search, and edit code, and provides a fast, minimal TUI with streaming output and basic repository analysis.
 
 ## Features
 
-- CLI and TUI modes
+- TUI mode
 - OpenAI-compatible Chat Completions API
   - Streaming output (TUI) and tool-use agent loop
   - Basic error handling and cancelation
@@ -84,8 +84,6 @@ DOGE_LOG=debug \
 
 ## Usage
 
-### TUI mode (recommended)
-
 Run without flags to launch the TUI:
 
 ```bash
@@ -123,21 +121,6 @@ New: `/open <path>` (TUI only)
   - Absolute paths are allowed.
   - If the path does not exist, an error is shown in the log.
 - Recommended workflow: type `/open @src/tui/view.rs` and use `@` completion to pick files.
-
-### CLI mode
-
-Run with `--no-tui` to use the plain CLI:
-
-```bash
-./target/release/doge-code --no-tui
-```
-
-Supported commands mirror TUI for file tools and map building. Note: `/open` is implemented in TUI; CLI behavior may differ or be unavailable depending on your version.
-
-- `/help`, `/clear`, `/quit` or `/exit`, `/tools`
-- `/read <path> [offset limit]`, `/write <path> <text>`, `/search <regex> [include_glob]`
-- `/map`
-- Plain text lines are sent to the LLM and the assistant reply is printed.
 
 ### Safety notes for Tools
 

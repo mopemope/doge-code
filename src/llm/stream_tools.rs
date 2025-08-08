@@ -62,10 +62,6 @@ impl ToolDeltaBuffer {
         }
     }
 
-    pub fn get(&self, index: usize) -> Option<&ReconstructedToolCall> {
-        self.calls.get(index)
-    }
-
     // Attempt to parse the arguments JSON for a given index, returning a structured SyncToolCall
     pub fn finalize_sync_call(&self, index: usize) -> Result<SyncToolCall> {
         let rc = self
