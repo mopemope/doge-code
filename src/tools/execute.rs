@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use tokio::process::Command;
 use std::path::PathBuf;
+use tokio::process::Command;
 
 pub async fn execute_bash(root: &PathBuf, command: &str) -> Result<String> {
     let output = Command::new("bash")

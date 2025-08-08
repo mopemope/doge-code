@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
-use std::{fs, path::Path};
 use std::path::PathBuf;
+use std::{fs, path::Path};
 
 pub fn fs_write(root: &PathBuf, rel: &str, content: &str) -> Result<()> {
     let p = std::path::Path::new(rel);

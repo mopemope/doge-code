@@ -9,12 +9,11 @@ pub fn fs_search(
 ) -> Result<Vec<(PathBuf, usize, String)>> {
     let re = Regex::new(pattern).context("invalid regex")?;
     let mut results = Vec::new();
-    let walker =
-        globwalk::GlobWalkerBuilder::from_patterns(root, &[include.unwrap_or("**/*")])
-            .follow_links(false)
-            .case_insensitive(true)
-            .build()
-            .context("build glob walker")?;
+    let walker = globwalk::GlobWalkerBuilder::from_patterns(root, &[include.unwrap_or("**/*")])
+        .follow_links(false)
+        .case_insensitive(true)
+        .build()
+        .context("build glob walker")?;
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
@@ -30,8 +29,7 @@ pub fn fs_search(
         }
         if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
             let bin_exts = [
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "zip", "gz", "tar", "xz",
-                "zst",
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "zip", "gz", "tar", "xz", "zst",
             ];
             if bin_exts.contains(&ext) {
                 continue;

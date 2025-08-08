@@ -91,7 +91,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_list".into(),
-                description: "List files and directories in a given path, with optional depth and pattern filtering.".into(),
+                description: "Lists files and directories within a specified path. Can limit the depth of recursion and filter results by a glob pattern. Useful for exploring project structure or finding specific files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -107,7 +107,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_read".into(),
-                description: "Read a text file inside the project root. Optionally specify offset and limit (lines).".into(),
+                description: "Reads the content of a text file from the project root. Can specify a starting line offset and a maximum number of lines to read. Useful for inspecting file contents or reading specific sections of large files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -123,7 +123,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_search".into(),
-                description: "Search files using a regex pattern. Optionally limit by an include glob.".into(),
+                description: "Searches for a regular expression pattern within the content of files in the project root. Can filter files by a glob pattern (e.g., '*.rs', 'src/**/*.js'). Returns matching lines along with their file paths and line numbers. Useful for finding code snippets, variable usages, or specific text across multiple files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -138,7 +138,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_write".into(),
-                description: "Write text to a file inside the project root. Creates parent directories if needed.".into(),
+                description: "Writes or overwrites text content to a specified file within the project root. Automatically creates parent directories if they don't exist. Useful for creating new files or modifying existing ones.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -153,7 +153,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "get_symbol_info".into(),
-                description: "Query repository symbols by name substring; optionally filter by include (path contains) and kind (fn/struct/enum/trait/impl/method/assoc_fn/mod).".into(),
+                description: "Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. Can optionally filter by file path (include) and symbol kind (e.g., 'fn', 'struct'). Useful for understanding the codebase structure, locating definitions, or getting context about specific code elements.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -169,7 +169,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "execute_bash".into(),
-                description: "Execute a bash command within the project root. Captures stdout and stderr.".into(),
+                description: "Executes an arbitrary bash command within the project root directory. Captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands, tests, or external utilities.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -407,7 +407,10 @@ pub async fn dispatch_tool_call(
     let result = match name {
         "fs_list" => {
             let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let max_depth = args_val.get("max_depth").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let max_depth = args_val
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let pattern = args_val.get("pattern").and_then(|v| v.as_str());
             match runtime.fs.fs_list(path, max_depth, pattern) {
                 Ok(files) => Ok(json!({"ok": true, "files": files})),

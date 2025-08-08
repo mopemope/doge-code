@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
-use std::{fs, io::Read};
 use std::path::PathBuf;
+use std::{fs, io::Read};
 
 pub fn fs_read(
     root: &PathBuf,
@@ -33,4 +33,3 @@ pub fn fs_read(
         _ => Ok(s),
     }
 }
-
