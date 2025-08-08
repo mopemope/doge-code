@@ -186,7 +186,9 @@ impl CommandHandler for TuiExecutor {
                                     }
                                     return;
                                 }
-                                let res = crate::llm::run_agent_loop(&c, &model, &fs, msgs).await;
+                                let res =
+                                    crate::llm::run_agent_loop(&c, &model, &fs, msgs, tx.clone())
+                                        .await;
                                 match res {
                                     Ok(msg) => {
                                         if let Some(tx) = tx {

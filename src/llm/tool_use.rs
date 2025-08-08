@@ -207,7 +207,9 @@ pub async fn chat_tools_once(
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
-    let body: ChatResponseWithTools = resp.json().await?;
+    let response_text = resp.text().await?;
+    debug!(target: "llm", response_body=%response_text, "llm chat_tools_once response");
+    let body: ChatResponseWithTools = serde_json::from_str(&response_text)?;
     let msg = body
         .choices
         .into_iter()
@@ -300,6 +302,7 @@ pub async fn run_agent_loop(
     model: &str,
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
+    ui_tx: Option<std::sync::mpsc::Sender<String>>,
 ) -> Result<ChoiceMessage> {
     let runtime = ToolRuntime::default_with(fs);
     let mut iters = 0usize;
@@ -322,6 +325,14 @@ pub async fn run_agent_loop(
 
         // If assistant returned final content without tool calls, we are done.
         if !msg.tool_calls.is_empty() {
+            if let Some(content) = &msg.content {
+                if !content.is_empty() {
+                    if let Some(tx) = &ui_tx {
+                        let _ = tx.send(content.clone());
+                    }
+                }
+            }
+
             messages.push(ChatMessage {
                 role: "assistant".into(),
                 content: msg.content.clone(),
@@ -329,6 +340,12 @@ pub async fn run_agent_loop(
                 tool_call_id: None,
             });
             for tc in msg.tool_calls {
+                if let Some(tx) = &ui_tx {
+                    let _ = tx.send(format!(
+                        "[tool] {}({})",
+                        tc.function.name, tc.function.arguments
+                    ));
+                }
                 let res = tokio::time::timeout(runtime.tool_timeout, async {
                     dispatch_tool_call(&runtime, tc.clone()).await
                 })
