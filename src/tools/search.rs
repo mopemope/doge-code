@@ -27,6 +27,10 @@ impl FsTools {
             if entry.file_type().is_dir() {
                 continue;
             }
+            if re.is_match(p.to_str().unwrap_or_default()) {
+                results.push((p.clone(), 0, p.display().to_string()));
+                continue;
+            }
             if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                 let bin_exts = [
                     "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "zip", "gz", "tar", "xz",

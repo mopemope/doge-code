@@ -166,12 +166,16 @@ impl CommandHandler for TuiExecutor {
                             if let Ok(sys) = std::fs::read_to_string("resources/system_prompt.md") {
                                 msgs.push(crate::llm::ChatMessage {
                                     role: "system".into(),
-                                    content: sys,
+                                    content: Some(sys),
+                                    tool_calls: vec![],
+                                    tool_call_id: None,
                                 });
                             }
                             msgs.push(crate::llm::ChatMessage {
                                 role: "user".into(),
-                                content: content.clone(),
+                                content: Some(content.clone()),
+                                tool_calls: vec![],
+                                tool_call_id: None,
                             });
                             let fs = self.tools.clone();
                             rt.spawn(async move {

@@ -27,7 +27,9 @@ impl ChatHistory {
                 0,
                 ChatMessage {
                     role: "system".into(),
-                    content: sys,
+                    content: Some(sys),
+                    tool_calls: vec![],
+                    tool_call_id: None,
                 },
             );
             self.system_added = true;
@@ -38,7 +40,9 @@ impl ChatHistory {
     pub fn append_user(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage {
             role: "user".into(),
-            content: content.into(),
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
         });
         self.trim_to_max();
     }
@@ -47,7 +51,9 @@ impl ChatHistory {
     pub fn append_assistant(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage {
             role: "assistant".into(),
-            content: content.into(),
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
         });
         self.trim_to_max();
     }
@@ -59,11 +65,15 @@ impl ChatHistory {
 
     fn trim_to_max(&mut self) {
         // Keep total character count under max_chars, preserving system message at index 0 if present.
-        let mut total: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let mut total: usize = self
+            .messages
+            .iter()
+            .map(|m| m.content.as_deref().unwrap_or("").len())
+            .sum();
         while total > self.max_chars && self.messages.len() > 1 {
             // remove the oldest non-system (index 1)
             let removed = self.messages.remove(1);
-            total -= removed.content.len();
+            total -= removed.content.as_deref().unwrap_or("").len();
         }
     }
 }
@@ -79,7 +89,11 @@ mod tests {
         h.append_assistant("67890");
         h.append_user("abcde");
         assert!(h.build_messages().len() <= 3);
-        let sum: usize = h.build_messages().iter().map(|m| m.content.len()).sum();
+        let sum: usize = h
+            .build_messages()
+            .iter()
+            .map(|m| m.content.as_deref().unwrap_or("").len())
+            .sum();
         assert!(sum <= 10);
     }
 

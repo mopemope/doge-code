@@ -3,9 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::llm::tool_use::{
-    ToolCall as SyncToolCall, ToolRuntime, dispatch_tool_call as dispatch_sync_tool_call,
-};
+use crate::llm::client::{ToolCall as SyncToolCall, ToolCallFunction};
+use crate::llm::tool_use::{ToolRuntime, dispatch_tool_call as dispatch_sync_tool_call};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReconstructedToolCall {
@@ -79,7 +78,7 @@ impl ToolDeltaBuffer {
         Ok(SyncToolCall {
             id: rc.id.clone(),
             r#type: "function".to_string(),
-            function: crate::llm::tool_use::ToolCallFunction {
+            function: ToolCallFunction {
                 name: rc.name.clone(),
                 arguments: rc.arguments.clone(),
             },
