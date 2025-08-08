@@ -27,3 +27,49 @@ pub fn fs_list(
 
     Ok(files)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_fs_list_simple() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("a")).unwrap();
+        fs::write(root.join("a/b.txt"), "").unwrap();
+        fs::write(root.join("c.txt"), "").unwrap();
+
+        let result = fs_list(root, ".", None, None).unwrap();
+        let mut expected = vec!["a".to_string(), "a/b.txt".to_string(), "c.txt".to_string()];
+        expected.sort();
+        let mut sorted_result = result;
+        sorted_result.sort();
+
+        assert_eq!(sorted_result, expected);
+    }
+
+    #[test]
+    fn test_fs_list_with_depth() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/b/c.txt"), "").unwrap();
+
+        let result = fs_list(root, "a", Some(1), None).unwrap();
+        assert_eq!(result, vec!["a/b".to_string()]);
+    }
+
+    #[test]
+    fn test_fs_list_with_pattern() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "").unwrap();
+        fs::write(root.join("b.log"), "").unwrap();
+
+        let result = fs_list(root, ".", None, Some("*.txt")).unwrap();
+        assert_eq!(result, vec!["a.txt".to_string()]);
+    }
+}

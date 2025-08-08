@@ -36,18 +36,28 @@ impl SymbolTools {
         Self { root: root.into() }
     }
 
+    // This function is hard to test directly without a complex setup.
+    // We will test the filtering logic in a separate, testable function.
     pub fn get_symbol_info(
         &self,
         query: &str,
         include: Option<&str>,
         kind: Option<&str>,
     ) -> Result<Vec<SymbolQueryResult>> {
-        // Build a fresh map for now (later: cache)
         let mut analyzer = Analyzer::new(&self.root)?;
         let map: RepoMap = analyzer.build()?;
+        let results = Self::filter_symbols(map.symbols, query, include, kind);
+        Ok(results)
+    }
+
+    fn filter_symbols(
+        symbols: Vec<SymbolInfo>,
+        query: &str,
+        include: Option<&str>,
+        kind: Option<&str>,
+    ) -> Vec<SymbolQueryResult> {
         let mut out = Vec::new();
-        for s in map.symbols.into_iter() {
-            // include glob is applied at analysis time today; to keep simple, filter by file path contains
+        for s in symbols {
             if let Some(glob_like) = include {
                 if !s.file.to_string_lossy().contains(glob_like) {
                     continue;
@@ -63,6 +73,57 @@ impl SymbolTools {
             }
             out.push(SymbolQueryResult::from(s));
         }
-        Ok(out)
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::SymbolKind;
+    use std::path::PathBuf;
+
+    fn create_dummy_symbol(name: &str, kind: SymbolKind, file: &str) -> SymbolInfo {
+        SymbolInfo {
+            name: name.to_string(),
+            kind,
+            file: PathBuf::from(file),
+            start_line: 1,
+            end_line: 10,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn test_filter_symbols_by_name() {
+        let symbols = vec![
+            create_dummy_symbol("my_function", SymbolKind::Function, "src/main.rs"),
+            create_dummy_symbol("another_function", SymbolKind::Function, "src/lib.rs"),
+        ];
+        let results = SymbolTools::filter_symbols(symbols, "my_function", None, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "my_function");
+    }
+
+    #[test]
+    fn test_filter_symbols_by_kind() {
+        let symbols = vec![
+            create_dummy_symbol("my_function", SymbolKind::Function, "src/main.rs"),
+            create_dummy_symbol("my_struct", SymbolKind::Struct, "src/main.rs"),
+        ];
+        let results = SymbolTools::filter_symbols(symbols, "my", None, Some("fn"));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].kind, "fn");
+    }
+
+    #[test]
+    fn test_filter_symbols_by_include() {
+        let symbols = vec![
+            create_dummy_symbol("main_func", SymbolKind::Function, "src/main.rs"),
+            create_dummy_symbol("lib_func", SymbolKind::Function, "src/lib.rs"),
+        ];
+        let results = SymbolTools::filter_symbols(symbols, "func", Some("lib.rs"), None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "lib_func");
     }
 }

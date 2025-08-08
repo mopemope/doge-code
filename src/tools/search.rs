@@ -68,3 +68,46 @@ pub fn fs_search(
 
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_fs_search_simple() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("test.txt"), "hello world\nsecond line").unwrap();
+
+        let results = fs_search(root, "hello", None).unwrap();
+        assert_eq!(results.len(), 1);
+        let (path, line, content) = &results[0];
+        assert_eq!(path.to_str().unwrap(), "test.txt");
+        assert_eq!(*line, 1);
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_fs_search_with_glob() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "find me").unwrap();
+        fs::write(root.join("b.log"), "find me").unwrap();
+
+        let results = fs_search(root, "find me", Some("*.txt")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.to_str().unwrap(), "a.txt");
+    }
+
+    #[test]
+    fn test_fs_search_no_match() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("test.txt"), "some content").unwrap();
+
+        let results = fs_search(root, "nonexistent", None).unwrap();
+        assert!(results.is_empty());
+    }
+}

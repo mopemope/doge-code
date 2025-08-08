@@ -88,3 +88,82 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
         diff: Some(diff_text),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn calculate_sha256(content: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[tokio::test]
+    async fn test_replace_text_block_success() {
+        let original_content = "Hello, world!\nThis is a test.";
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{original_content}").unwrap();
+        let file_path = file.path().to_str().unwrap().to_string();
+
+        let params = ReplaceTextBlockParams {
+            file_path: file_path.clone(),
+            target_block: "world".to_string(),
+            new_block: "Rust".to_string(),
+            file_hash_sha256: calculate_sha256(original_content),
+            dry_run: Some(false),
+        };
+
+        let result = replace_text_block(params).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.message, "File updated successfully.");
+
+        let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(new_content, "Hello, Rust!\nThis is a test.");
+    }
+
+    #[tokio::test]
+    async fn test_replace_text_block_dry_run() {
+        let original_content = "Dry run test.";
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{original_content}").unwrap();
+        let file_path = file.path().to_str().unwrap().to_string();
+
+        let params = ReplaceTextBlockParams {
+            file_path: file_path.clone(),
+            target_block: "run".to_string(),
+            new_block: "RUN".to_string(),
+            file_hash_sha256: calculate_sha256(original_content),
+            dry_run: Some(true),
+        };
+
+        let result = replace_text_block(params).await.unwrap();
+        assert!(result.success);
+        assert!(result.diff.is_some());
+
+        let content_after = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(content_after, original_content);
+    }
+
+    #[tokio::test]
+    async fn test_replace_text_block_hash_mismatch() {
+        let original_content = "Hash mismatch test.";
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{original_content}").unwrap();
+        let file_path = file.path().to_str().unwrap().to_string();
+
+        let params = ReplaceTextBlockParams {
+            file_path: file_path.clone(),
+            target_block: "mismatch".to_string(),
+            new_block: "MISMATCH".to_string(),
+            file_hash_sha256: "invalid_hash".to_string(),
+            dry_run: Some(false),
+        };
+
+        let result = replace_text_block(params).await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("File hash mismatch"));
+    }
+}
