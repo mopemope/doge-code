@@ -312,6 +312,7 @@ pub async fn run_agent_loop(
     let mut iters = 0usize;
     loop {
         iters += 1;
+        debug!(target: "llm", iteration = iters, messages = ?messages, "agent loop iteration");
         if iters > runtime.max_iters {
             warn!(iters, "max tool iterations reached");
             return Err(anyhow!("max tool iterations reached"));
@@ -365,6 +366,7 @@ pub async fn dispatch_tool_call(
     runtime: &ToolRuntime<'_>,
     call: ToolCall,
 ) -> Result<serde_json::Value> {
+    debug!(target: "llm", tool_call = ?call, "dispatching tool call");
     if call.r#type != "function" {
         return Ok(json!({"error": format!("unsupported tool type: {}", call.r#type)}));
     }
@@ -373,7 +375,7 @@ pub async fn dispatch_tool_call(
         Ok(v) => v,
         Err(e) => return Ok(json!({"error": format!("invalid tool args: {e}")})),
     };
-    match name {
+    let result = match name {
         "fs_read" => {
             let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let offset = args_val
@@ -444,5 +446,7 @@ pub async fn dispatch_tool_call(
             }
         }
         other => Ok(json!({"error": format!("unknown tool: {other}")})),
-    }
+    };
+    debug!(target: "llm", tool_result = ?result, "tool call result");
+    result
 }
