@@ -20,3 +20,53 @@ pub fn fs_write(root: &Path, rel: &str, content: &str) -> Result<()> {
     }
     fs::write(&canon, content).with_context(|| format!("write {}", canon.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs as std_fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_fs_write_success() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let file_path = "test_file.txt";
+        let content = "Hello, Rust!";
+
+        std_fs::write(root.join(file_path), "").unwrap(); // Create the file first
+        fs_write(root, file_path, content).unwrap();
+
+        let read_content = std_fs::read_to_string(root.join(file_path)).unwrap();
+        assert_eq!(read_content, content);
+    }
+
+    #[test]
+    fn test_fs_write_absolute_path_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let absolute_path = "/tmp/abs_path.txt";
+
+        let result = fs_write(root, absolute_path, "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fs_write_path_escape_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let result = fs_write(root, "../escaping.txt", "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fs_write_binary_content_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let content_with_null = "hello\0world";
+
+        let result = fs_write(root, "binary.txt", content_with_null);
+        assert!(result.is_err());
+    }
+}
