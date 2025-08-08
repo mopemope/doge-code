@@ -1,4 +1,5 @@
 mod common;
+mod execute;
 mod read;
 mod search;
 pub mod symbol;

@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream", "gzip", "brotli", "zstd", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "process"] }
 dotenvy = "0.15"
 regex = "1"
 globwalk = "0.9"
