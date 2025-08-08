@@ -37,10 +37,10 @@ impl FsTools {
 
     pub fn fs_search(
         &self,
-        pattern: &str,
-        include: Option<&str>,
+        search_pattern: &str,
+        file_glob: Option<&str>,
     ) -> Result<Vec<(PathBuf, usize, String)>> {
-        search::fs_search(&self.root, pattern, include)
+        search::fs_search(&self.root, search_pattern, file_glob)
     }
 
     pub fn fs_write(&self, path: &str, content: &str) -> Result<()> {
