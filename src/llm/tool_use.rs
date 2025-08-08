@@ -91,7 +91,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_list".into(),
-                description: "Lists files and directories within a specified path. Can limit the depth of recursion and filter results by a glob pattern. Useful for exploring project structure or finding specific files.".into(),
+                description: "Lists files and directories within a specified path. You can limit the depth of recursion and filter results by a glob pattern. This tool is useful for exploring the project structure, finding specific files, or getting an overview of the codebase before starting a task. For example, use it to see what files are in a directory or to find all `.rs` files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -107,7 +107,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_read".into(),
-                description: "Reads the content of a text file from the project root. Can specify a starting line offset and a maximum number of lines to read. Useful for inspecting file contents or reading specific sections of large files.".into(),
+                description: "Reads the content of a text file from the project root. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -123,7 +123,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_search".into(),
-                description: "Searches for a regular expression `search_pattern` within files matching the `file_glob` pattern. Returns matching lines with file paths and line numbers. Useful for finding code, configuration, or specific text across multiple files.".into(),
+                description: "Searches for a regular expression `search_pattern` within files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This is useful for finding code, configuration, or specific text across multiple files. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -144,7 +144,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_write".into(),
-                description: "Writes or overwrites text content to a specified file within the project root. Automatically creates parent directories if they don't exist. Useful for creating new files or modifying existing ones.".into(),
+                description: "Writes or overwrites text content to a specified file within the project root. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `replace_text_block` or `apply_patch` are generally safer and recommended.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -159,7 +159,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "get_symbol_info".into(),
-                description: "Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. Can optionally filter by file path (include) and symbol kind (e.g., 'fn', 'struct'). Useful for understanding the codebase structure, locating definitions, or getting context about specific code elements.".into(),
+                description: "Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. You can optionally filter by file path (`include`) and symbol kind (e.g., 'fn', 'struct'). This is useful for understanding the codebase structure, locating definitions, or getting context about specific code elements. For example, use it to find where a specific function is defined, or to see all methods of a particular struct. The returned information includes the symbol's kind, name, file path, line number, and a relevant code snippet.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -175,7 +175,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "execute_bash".into(),
-                description: "Executes an arbitrary bash command within the project root directory. Captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands, tests, or external utilities.".into(),
+                description: "Executes an arbitrary bash command within the project root directory. It captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system (e.g., `rm`, `mv`) and consider their impact beforehand. Interactive commands are not supported.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -189,7 +189,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "replace_text_block".into(),
-                description: "Replaces a single, unique block of text within a file, ensuring file integrity via hashing. Use this for simple, targeted replacements.".into(),
+                description: "Replaces a single, unique block of text within a file with a new block of text. It ensures file integrity by verifying the SHA256 hash of the file content, preventing accidental overwrites if the file has changed since it was last read. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -207,7 +207,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "create_patch".into(),
-                description: "Generates a patch in the unified diff format from the original and modified content of a file. Use this to prepare for complex, multi-location changes.".into(),
+                description: "Generates a patch in the unified diff format by comparing the `original_content` of a file with its `modified_content`. This tool is crucial for preparing complex, multi-location changes that will be applied using `apply_patch`. First, use `fs_read` to get the `original_content` and its hash. Then, generate the `modified_content` (the entire desired file content after changes) in your mind or through internal reasoning. Finally, call this tool with both contents to obtain the `patch_content` string, which can then be passed to `apply_patch`.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -222,7 +222,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "apply_patch".into(),
-                description: "Applies a patch to a file using the unified diff format. This is powerful for applying complex changes generated by `create_patch`.".into(),
+                description: "Applies a patch (in unified diff format) to a file. This is a powerful tool for applying complex changes that affect multiple locations within a file, typically generated by `create_patch`. It verifies the file's SHA256 hash against the `file_hash_sha256` to ensure the file has not been modified externally, providing a safe application. If the patch cannot be applied cleanly (e.g., due to conflicts), it will return an error. You can use `dry_run: true` to check if the patch can be applied and to preview the resulting file content without making actual changes.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
