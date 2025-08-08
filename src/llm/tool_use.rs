@@ -162,6 +162,20 @@ pub fn default_tools_def() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: "execute_bash".into(),
+                description: "Execute a bash command within the project root. Captures stdout and stderr.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"}
+                    },
+                    "required": ["command"]
+                }),
+            },
+        },
     ]
 }
 
@@ -319,13 +333,14 @@ pub async fn run_agent_loop(
                 content: msg.content.clone().unwrap_or_else(|| "".to_string()),
             });
             for tc in msg.tool_calls {
-                let res =
-                    tokio::time::timeout(runtime.tool_timeout, dispatch_tool_call(&runtime, tc))
-                        .await
-                        .map_err(|_| {
-                            error!("tool execution timed out");
-                            anyhow!("tool execution timed out")
-                        })??;
+                let res = tokio::time::timeout(runtime.tool_timeout, async {
+                    dispatch_tool_call(&runtime, tc).await
+                })
+                .await
+                .map_err(|_| {
+                    error!("tool execution timed out");
+                    anyhow!("tool execution timed out")
+                })??;
                 // tool message to feed back
                 messages.push(ChatMessage {
                     role: "tool".into(),
@@ -415,6 +430,16 @@ pub async fn dispatch_tool_call(
             let sym = crate::tools::symbol::SymbolTools::new(&runtime.fs.root);
             match sym.get_symbol_info(query, include, kind) {
                 Ok(items) => Ok(json!({"ok": true, "symbols": items})),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
+        "execute_bash" => {
+            let command = args_val
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match runtime.fs.execute_bash(command).await {
+                Ok(output) => Ok(json!({"ok": true, "stdout": output})),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
