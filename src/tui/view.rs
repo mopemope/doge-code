@@ -67,7 +67,9 @@ impl TuiApp {
     }
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
-        self.log.push(s.into());
+        for line in s.into().split('\n') {
+            self.log.push(line.to_string());
+        }
         if self.log.len() > self.max_log_lines {
             let overflow = self.log.len() - self.max_log_lines;
             self.log.drain(0..overflow);
