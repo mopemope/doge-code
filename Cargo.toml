@@ -30,6 +30,8 @@ tree-sitter-python = "0.23"
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fastrand = "2"
+diffy = "0.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 httptest = "0.16"
