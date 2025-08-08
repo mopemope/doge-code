@@ -439,12 +439,12 @@ pub async fn dispatch_tool_call(
             }
         }
         "fs_search" => {
-            let pattern = args_val
+            let search_pattern = args_val
                 .get("search_pattern")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let include = args_val.get("file_glob").and_then(|v| v.as_str());
-            match runtime.fs.fs_search(pattern, include) {
+            let file_glob = args_val.get("file_glob").and_then(|v| v.as_str());
+            match runtime.fs.fs_search(search_pattern, file_glob) {
                 Ok(rows) => {
                     let items: Vec<_> = rows
                         .into_iter()
