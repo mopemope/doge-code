@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-use crate::llm::client::{ChatMessage, ChoiceMessage, OpenAIClient};
+use crate::llm::client::{ChatMessage, ChoiceMessage, OpenAIClient, ToolCall};
 use crate::tools::FsTools;
 
 const MAX_ITERS: usize = 128;
@@ -35,19 +35,6 @@ pub struct ChatRequestWithTools {
     pub tools: Option<Vec<ToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>, // {"type":"auto"}
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallFunction {
-    pub name: String,
-    pub arguments: String, // JSON string per OpenAI spec
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: Option<String>,
-    pub r#type: String, // "function"
-    pub function: ToolCallFunction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,8 +255,12 @@ pub async fn run_agent_streaming_once(
                         if let Ok(val) = exec {
                             messages.push(ChatMessage {
                                 role: "tool".into(),
-                                content: serde_json::to_string(&val)
-                                    .unwrap_or_else(|_| "{\"ok\":false}".to_string()),
+                                content: Some(
+                                    serde_json::to_string(&val)
+                                        .unwrap_or_else(|_| "{\"ok\":false}".to_string()),
+                                ),
+                                tool_calls: vec![],
+                                tool_call_id: None,
                             });
                             // One tool exec per streaming round (minimal policy)
                             return Ok((messages, None));
@@ -287,7 +278,9 @@ pub async fn run_agent_streaming_once(
     if !acc_text.is_empty() {
         messages.push(ChatMessage {
             role: "assistant".into(),
-            content: acc_text.clone(),
+            content: Some(acc_text.clone()),
+            tool_calls: vec![],
+            tool_call_id: None,
         });
         return Ok((
             messages,
@@ -331,11 +324,13 @@ pub async fn run_agent_loop(
         if !msg.tool_calls.is_empty() {
             messages.push(ChatMessage {
                 role: "assistant".into(),
-                content: msg.content.clone().unwrap_or_else(|| "".to_string()),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: None,
             });
             for tc in msg.tool_calls {
                 let res = tokio::time::timeout(runtime.tool_timeout, async {
-                    dispatch_tool_call(&runtime, tc).await
+                    dispatch_tool_call(&runtime, tc.clone()).await
                 })
                 .await
                 .map_err(|_| {
@@ -345,18 +340,19 @@ pub async fn run_agent_loop(
                 // tool message to feed back
                 messages.push(ChatMessage {
                     role: "tool".into(),
-                    content: serde_json::to_string(&res).unwrap_or_else(|e| {
+                    content: Some(serde_json::to_string(&res).unwrap_or_else(|e| {
                         format!("{{\"error\":\"failed to serialize tool result: {e}\"}}")
-                    }),
+                    })),
+                    tool_calls: vec![],
+                    tool_call_id: tc.id,
                 });
             }
             continue;
         } else {
             // Final assistant message
-            let content = msg.content.unwrap_or_default();
             return Ok(ChoiceMessage {
                 role: "assistant".into(),
-                content,
+                content: msg.content.unwrap_or_default(),
             });
         }
     }
