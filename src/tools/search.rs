@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 pub fn fs_search(
     root: &PathBuf,
-    pattern: &str,
-    include: Option<&str>,
+    search_pattern: &str,
+    file_glob: Option<&str>,
 ) -> Result<Vec<(PathBuf, usize, String)>> {
-    let re = Regex::new(pattern).context("invalid regex")?;
+    let re = Regex::new(search_pattern).context("invalid regex")?;
     let mut results = Vec::new();
-    let walker = globwalk::GlobWalkerBuilder::from_patterns(root, &[include.unwrap_or("**/*")])
+    let walker = globwalk::GlobWalkerBuilder::from_patterns(root, &[file_glob.unwrap_or("**/*")])
         .follow_links(false)
         .case_insensitive(true)
         .build()

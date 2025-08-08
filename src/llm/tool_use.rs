@@ -123,14 +123,20 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_search".into(),
-                description: "Searches for a regular expression pattern within the content of files in the project root. Can filter files by a glob pattern (e.g., '*.rs', 'src/**/*.js'). Returns matching lines along with their file paths and line numbers. Useful for finding code snippets, variable usages, or specific text across multiple files.".into(),
+                description: "Searches for a regular expression `search_pattern` within files matching the `file_glob` pattern. Returns matching lines with file paths and line numbers. Useful for finding code, configuration, or specific text across multiple files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string"},
-                        "include": {"type": "string"}
+                        "search_pattern": {
+                            "type": "string",
+                            "description": "The regular expression to search for within file contents."
+                        },
+                        "file_glob": {
+                            "type": "string",
+                            "description": "A glob pattern to filter which files are searched (e.g., 'src/**/*.rs', '*.toml'). Defaults to all files if not provided."
+                        }
                     },
-                    "required": ["pattern"]
+                    "required": ["search_pattern"]
                 }),
             },
         },
@@ -434,10 +440,10 @@ pub async fn dispatch_tool_call(
         }
         "fs_search" => {
             let pattern = args_val
-                .get("pattern")
+                .get("search_pattern")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let include = args_val.get("include").and_then(|v| v.as_str());
+            let include = args_val.get("file_glob").and_then(|v| v.as_str());
             match runtime.fs.fs_search(pattern, include) {
                 Ok(rows) => {
                     let items: Vec<_> = rows
