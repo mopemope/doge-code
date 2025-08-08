@@ -7,7 +7,7 @@ use tokio::fs;
 pub struct ApplyPatchParams {
     pub file_path: String,
     pub patch_content: String,
-    pub file_hash_sha256: String,
+    pub file_hash_sha256: Option<String>,
     pub dry_run: Option<bool>,
 }
 
@@ -22,7 +22,6 @@ pub struct ApplyPatchResult {
 pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
     let file_path = &params.file_path;
     let patch_content = &params.patch_content;
-    let expected_hash = &params.file_hash_sha256;
     let dry_run = params.dry_run.unwrap_or(false);
 
     // 1. Read file content
@@ -30,19 +29,21 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
         .await
         .with_context(|| format!("Failed to read file: {file_path}"))?;
 
-    // 2. Verify file hash
-    let mut hasher = Sha256::new();
-    hasher.update(original_content.as_bytes());
-    let actual_hash = format!("{:x}", hasher.finalize());
+    // 2. Verify file hash (if provided)
+    if let Some(expected_hash) = params.file_hash_sha256 {
+        let mut hasher = Sha256::new();
+        hasher.update(original_content.as_bytes());
+        let actual_hash = format!("{:x}", hasher.finalize());
 
-    if &actual_hash != expected_hash {
-        return Ok(ApplyPatchResult {
-            success: false,
-            message: "File hash mismatch. The file content has changed since it was last read."
-                .to_string(),
-            original_content: Some(original_content),
-            modified_content: None,
-        });
+        if actual_hash != expected_hash {
+            return Ok(ApplyPatchResult {
+                success: false,
+                message: "File hash mismatch. The file content has changed since it was last read."
+                    .to_string(),
+                original_content: Some(original_content),
+                modified_content: None,
+            });
+        }
     }
 
     // 3. Apply the patch
