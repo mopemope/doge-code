@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use tracing::debug;
 
 use crate::llm::tool_use::{
     ToolCall as SyncToolCall, ToolRuntime, dispatch_tool_call as dispatch_sync_tool_call,
@@ -93,6 +94,7 @@ pub async fn execute_tool_call(
     buf: &ToolDeltaBuffer,
 ) -> Result<serde_json::Value> {
     let sc = buf.finalize_sync_call(index)?;
+    debug!(target: "llm", tool_call = ?sc, "executing reconstructed tool call");
     let res = dispatch_sync_tool_call(runtime, sc).await?;
     Ok(res)
 }

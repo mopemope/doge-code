@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -142,8 +142,27 @@ impl OpenAIClient {
                         }
                     }
 
-                    let body: Result<ChatResponse> =
-                        resp.json().await.context("parse chat response");
+                    let response_text = match resp.text().await {
+                        Ok(text) => text,
+                        Err(e) => {
+                            error!(attempt, err=%e, "llm chat_once read body error");
+                            last_err =
+                                Some(anyhow::Error::new(e).context("read chat response body"));
+                            let kind = crate::llm::classify_error(None, last_err.as_ref().unwrap());
+                            if self.should_retry(kind.clone()) && attempt < max_attempts {
+                                let wait = self.backoff_delay(attempt, None);
+                                warn!(attempt, kind=?kind, "retrying after body read error");
+                                tokio::time::sleep(wait).await;
+                                continue;
+                            } else {
+                                return Err(last_err.unwrap());
+                            }
+                        }
+                    };
+
+                    debug!(target: "llm", response_body=%response_text, "llm chat_once response");
+
+                    let body: Result<ChatResponse, _> = serde_json::from_str(&response_text);
                     match body {
                         Ok(body) => {
                             if let Some(msg) = body.choices.into_iter().next().map(|c| c.message) {
@@ -160,10 +179,11 @@ impl OpenAIClient {
                                 let wait = self.backoff_delay(attempt, None);
                                 warn!(attempt, kind=?kind, "retrying after deserialize error");
                                 tokio::time::sleep(wait).await;
-                                last_err = Some(e);
+                                last_err =
+                                    Some(anyhow::Error::new(e).context("parse chat response"));
                                 continue;
                             } else {
-                                return Err(e);
+                                return Err(anyhow::Error::new(e).context("parse chat response"));
                             }
                         }
                     }

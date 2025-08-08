@@ -159,6 +159,9 @@ impl OpenAIClient {
                                     out.push(Ok(String::new()));
                                     continue;
                                 }
+
+                                debug!(target: "llm", response_chunk=%payload, "llm chat_stream response");
+
                                 if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
                                     for ch in json.choices {
                                         if let Some(reason) = ch.finish_reason {
