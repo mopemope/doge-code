@@ -90,6 +90,22 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         ToolDef {
             kind: "function".into(),
             function: ToolFunctionDef {
+                name: "fs_list".into(),
+                description: "List files and directories in a given path, with optional depth and pattern filtering.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "max_depth": {"type": "integer"},
+                        "pattern": {"type": "string"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+        },
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
                 name: "fs_read".into(),
                 description: "Read a text file inside the project root. Optionally specify offset and limit (lines).".into(),
                 parameters: json!({
@@ -389,6 +405,15 @@ pub async fn dispatch_tool_call(
         Err(e) => return Ok(json!({"error": format!("invalid tool args: {e}")})),
     };
     let result = match name {
+        "fs_list" => {
+            let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let max_depth = args_val.get("max_depth").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let pattern = args_val.get("pattern").and_then(|v| v.as_str());
+            match runtime.fs.fs_list(path, max_depth, pattern) {
+                Ok(files) => Ok(json!({"ok": true, "files": files})),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
         "fs_read" => {
             let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let offset = args_val
