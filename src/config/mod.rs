@@ -79,14 +79,10 @@ impl AppConfig {
             cli.base_url
         };
         let model = if cli.model.is_empty() {
-            std::env::var("DOGE_OPENAI_MODEL")
+            std::env::var("OPENAI_MODEL")
                 .ok()
                 .or(file_cfg.model)
                 .unwrap_or_else(|| "gpt-4o-mini".to_string())
-            // std::env::var("OPENAI_MODEL")
-            //     .ok()
-            //     .or(file_cfg.model)
-            //     .unwrap_or_else(|| "gpt-4o-mini".to_string())
         } else {
             cli.model
         };
