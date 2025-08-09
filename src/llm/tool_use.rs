@@ -427,10 +427,29 @@ pub async fn run_agent_loop(
             });
             for tc in msg.tool_calls {
                 if let Some(tx) = &ui_tx {
-                    let _ = tx.send(format!(
-                        "[tool] {}({})",
-                        tc.function.name, tc.function.arguments
-                    ));
+                    // fs_write の場合、contentを除外して表示
+                    let log_message = if tc.function.name == "fs_write" {
+                        let args_str = tc.function.arguments.clone();
+                        // JSONをパースしてcontentを除外
+                        if let Ok(mut args_val) =
+                            serde_json::from_str::<serde_json::Value>(&args_str)
+                        {
+                            // contentフィールドを削除
+                            args_val.as_object_mut().map(|obj| obj.remove("content"));
+                            if let Ok(filtered_args_str) = serde_json::to_string(&args_val) {
+                                format!("[tool] {}({})", tc.function.name, filtered_args_str)
+                            } else {
+                                // パースに失敗した場合は、元の引数をそのまま表示 (念のため)
+                                format!("[tool] {}({})", tc.function.name, args_str)
+                            }
+                        } else {
+                            // パースに失敗した場合は、元の引数をそのまま表示 (念のため)
+                            format!("[tool] {}({})", tc.function.name, args_str)
+                        }
+                    } else {
+                        format!("[tool] {}({})", tc.function.name, tc.function.arguments)
+                    };
+                    let _ = tx.send(log_message);
                 }
                 let res = tokio::time::timeout(runtime.tool_timeout, async {
                     dispatch_tool_call(&runtime, tc.clone()).await
