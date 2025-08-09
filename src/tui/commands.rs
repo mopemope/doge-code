@@ -1,6 +1,7 @@
 use crate::analysis::Analyzer;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
+use crate::tui::Theme; // 新規追加
 use crate::tui::view::TuiApp;
 use anyhow::Result;
 use tokio::sync::watch;
@@ -58,7 +59,9 @@ impl CommandHandler for TuiExecutor {
         }
         match line {
             "/help" => {
-                ui.push_log("/help, /map, /tools, /clear, /open <path>, /quit, /retry");
+                ui.push_log(
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>",
+                );
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write"),
             "/clear" => {
@@ -104,6 +107,29 @@ impl CommandHandler for TuiExecutor {
                 }
                 Err(e) => ui.push_log(format!("map error: {e}")),
             },
+            // /theme コマンドの処理を追加
+            line if line.starts_with("/theme ") => {
+                let theme_name = line[7..].trim(); // "/theme " の後の文字列を取得
+                match theme_name.to_lowercase().as_str() {
+                    "dark" => {
+                        ui.theme = Theme::dark();
+                        ui.push_log("[Theme switched to dark]");
+                    }
+                    "light" => {
+                        ui.theme = Theme::light();
+                        ui.push_log("[Theme switched to light]");
+                    }
+                    _ => {
+                        ui.push_log(format!(
+                            "[Unknown theme: {theme_name}. Available themes: dark, light]"
+                        ));
+                    }
+                }
+                // テーマ変更後に再描画
+                if let Err(e) = ui.draw_with_model(Some(&self.cfg.model)) {
+                    ui.push_log(format!("Failed to redraw after theme change: {e}"));
+                }
+            }
             _ => {
                 if let Some(rest) = line.strip_prefix("/open ") {
                     let path_arg = rest.trim();
