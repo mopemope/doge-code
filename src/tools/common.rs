@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::tools::execute;
 use crate::tools::list;
 use crate::tools::read;
-use crate::tools::search;
+use crate::tools::search_text;
 use crate::tools::write;
 
 #[derive(Debug, Clone)]
@@ -35,12 +35,12 @@ impl FsTools {
         read::fs_read(&self.root, path, offset, limit)
     }
 
-    pub fn fs_search(
+    pub fn search_text(
         &self,
         search_pattern: &str,
         file_glob: Option<&str>,
     ) -> Result<Vec<(PathBuf, usize, String)>> {
-        search::fs_search(&self.root, search_pattern, file_glob)
+        search_text::search_text(&self.root, search_pattern, file_glob)
     }
 
     pub fn fs_write(&self, path: &str, content: &str) -> Result<()> {
