@@ -1,14 +1,15 @@
 use anyhow::Result;
 use crossterm::{
     cursor, execute, queue,
-    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::{ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
+use crate::tui::Theme;
 use crate::tui::completion::{AtFileIndex, CompletionState};
-use crate::tui::state::{Status, build_render_plan};
+use crate::tui::state::{Status, build_render_plan}; // 新規追加
 
 pub struct TuiApp {
     pub title: String,
@@ -27,15 +28,23 @@ pub struct TuiApp {
     // completion
     pub at_index: AtFileIndex,
     pub compl: CompletionState,
+    // theme
+    pub theme: Theme, // 新規追加
 }
 
 impl TuiApp {
-    pub fn new(title: impl Into<String>, model: Option<String>) -> Self {
+    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Self {
+        // 引数を追加
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
         let at_index = AtFileIndex::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         );
+        // テーマの選択ロジックを追加
+        let theme = match theme_name.to_lowercase().as_str() {
+            "light" => Theme::light(),
+            _ => Theme::dark(), // デフォルトはdark
+        };
         let app = Self {
             title: title.into(),
             input: String::new(),
@@ -51,6 +60,7 @@ impl TuiApp {
             draft: String::new(),
             at_index,
             compl: Default::default(),
+            theme, // 新規追加
         };
         // initial scan (blocking once at startup)
         app.at_index.scan();
@@ -292,7 +302,7 @@ impl TuiApp {
         }
     }
 
-    fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
+    pub fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
         let mut stdout = io::stdout();
         let (w, h) = terminal::size()?;
         let plan = build_render_plan(
@@ -312,7 +322,7 @@ impl TuiApp {
             terminal::Clear(ClearType::CurrentLine)
         )?;
         if let Some(first) = plan.header_lines.first() {
-            queue!(stdout, SetForegroundColor(Color::Cyan))?;
+            queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
             write!(stdout, "{first}")?;
             queue!(stdout, ResetColor)?;
         }
@@ -322,7 +332,7 @@ impl TuiApp {
             terminal::Clear(ClearType::CurrentLine)
         )?;
         if let Some(second) = plan.header_lines.get(1) {
-            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            queue!(stdout, SetForegroundColor(self.theme.header_separator))?;
             write!(stdout, "{second}")?;
             queue!(stdout, ResetColor)?;
         }
@@ -339,24 +349,35 @@ impl TuiApp {
             )?;
             let cmp = line.as_str();
             if cmp.starts_with("> ") {
-                queue!(stdout, SetForegroundColor(Color::Blue))?;
+                queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             } else if cmp.contains("[Cancelled]")
                 || cmp.contains("[cancelled]")
                 || cmp.contains("[canceled]")
             {
-                queue!(stdout, SetForegroundColor(Color::Red))?;
+                queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             } else if cmp.starts_with('[') {
-                queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
+                write!(stdout, "{line}")?;
+                queue!(stdout, ResetColor)?;
+            } else if cmp.starts_with("LLM error:")
+                || cmp.contains("error")
+                || cmp.contains("Error")
+            {
+                queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
+                write!(stdout, "{line}")?;
+                queue!(stdout, ResetColor)?;
+            } else if cmp.contains("warning") || cmp.contains("Warning") {
+                queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             } else {
                 // LLM response lines: darker grey/black background with white foreground for contrast
-                queue!(stdout, SetBackgroundColor(Color::Black))?;
-                queue!(stdout, SetForegroundColor(Color::White))?;
+                queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
+                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             }
@@ -400,9 +421,11 @@ impl TuiApp {
                 if i == self.compl.selected {
                     queue!(
                         stdout,
-                        SetBackgroundColor(Color::DarkGrey),
-                        SetForegroundColor(Color::White)
+                        SetBackgroundColor(self.theme.completion_selected_bg),
+                        SetForegroundColor(self.theme.completion_selected_fg)
                     )?;
+                } else {
+                    queue!(stdout, SetForegroundColor(self.theme.completion_item_fg))?;
                 }
                 write!(stdout, "{line}")?;
                 if i == self.compl.selected {
