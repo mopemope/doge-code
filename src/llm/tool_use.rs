@@ -91,7 +91,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_list".into(),
-                description: "Lists files and directories within a specified path. You can limit the depth of recursion and filter results by a glob pattern. This tool is useful for exploring the project structure, finding specific files, or getting an overview of the codebase before starting a task. For example, use it to see what files are in a directory or to find all `.rs` files.".into(),
+                description: "Lists files and directories within a specified path. You can limit the depth of recursion and filter results by a glob pattern. The default maximum depth is 1. This tool is useful for exploring the project structure, finding specific files, or getting an overview of the codebase before starting a task. For example, use it to see what files are in a directory or to find all `.rs` files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

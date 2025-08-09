@@ -2,6 +2,18 @@ use anyhow::Result;
 use globwalk::GlobWalkerBuilder;
 use std::path::Path;
 
+/// Lists files and directories within a specified path.
+///
+/// # Arguments
+///
+/// * `root` - The root directory path.
+/// * `path` - The path to list files and directories.
+/// * `max_depth` - The maximum depth to traverse. Defaults to 1.
+/// * `pattern` - An optional glob pattern to filter files.
+///
+/// # Returns
+///
+/// A vector of strings representing the file and directory paths.
 pub fn fs_list(
     root: &Path,
     path: &str,
@@ -10,7 +22,7 @@ pub fn fs_list(
 ) -> Result<Vec<String>> {
     let full_path = root.join(path);
     let walker = GlobWalkerBuilder::new(full_path, pattern.unwrap_or("**/*"))
-        .max_depth(max_depth.unwrap_or(usize::MAX))
+        .max_depth(max_depth.unwrap_or(1))
         .build()?;
 
     let files = walker
