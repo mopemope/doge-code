@@ -1,15 +1,25 @@
 use anyhow::Result;
 use crossterm::{
-    cursor, execute, queue,
-    style::{ResetColor, SetBackgroundColor, SetForegroundColor},
+    cursor,
+    execute,
+    queue,
+    style::{ResetColor, SetBackgroundColor, SetForegroundColor}, // Colorを削除
     terminal::{self, ClearType},
 };
+use regex::Regex;
 use std::io::{self, Write};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr; // 新規: regexクレートを使用
 
 use crate::tui::Theme;
 use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::state::{Status, build_render_plan}; // 新規追加
+
+// 新規: LLMレスポンスの構造化セグメント定義
+#[derive(Debug, Clone)]
+enum LlmResponseSegment {
+    Text { content: String },
+    CodeBlock { language: String, content: String },
+}
 
 pub struct TuiApp {
     pub title: String,
@@ -30,6 +40,10 @@ pub struct TuiApp {
     pub compl: CompletionState,
     // theme
     pub theme: Theme, // 新規追加
+    // 新規: 現在進行中のLLMレスポンスの構造化されたセグメント
+    current_llm_response: Option<Vec<LlmResponseSegment>>,
+    // 新規: LLMレスポンス解析用バッファ
+    llm_parsing_buffer: String,
 }
 
 impl TuiApp {
@@ -60,7 +74,9 @@ impl TuiApp {
             draft: String::new(),
             at_index,
             compl: Default::default(),
-            theme, // 新規追加
+            theme,                             // 新規追加
+            current_llm_response: None,        // 新規: 初期化
+            llm_parsing_buffer: String::new(), // 新規: 初期化
         };
         // initial scan (blocking once at startup)
         app.at_index.scan();
@@ -109,6 +125,7 @@ impl TuiApp {
         }
         let mut last_ctrl_c_at: Option<std::time::Instant> = None;
         let mut dirty = true; // initial full render
+        let mut is_streaming = false; // 新規: ストリーミング状態を追跡
         loop {
             // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {
@@ -119,25 +136,55 @@ impl TuiApp {
                 for msg in drained {
                     match msg.as_str() {
                         "::status:done" => {
+                            if is_streaming {
+                                // 変更: マーカーにスペースを追加
+                                self.push_log(" --- LLM Response End --- ".to_string());
+                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
+                                self.finalize_and_append_llm_response();
+                                is_streaming = false;
+                            }
                             self.status = Status::Done;
                             dirty = true;
                         }
                         "::status:cancelled" => {
+                            if is_streaming {
+                                // 変更: マーカーにスペースを追加
+                                self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
+                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
+                                self.finalize_and_append_llm_response();
+                                is_streaming = false;
+                            }
                             self.status = Status::Cancelled;
                             dirty = true;
                         }
                         "::status:streaming" => {
+                            if !is_streaming {
+                                // 変更: マーカーにスペースを追加
+                                self.push_log(" --- LLM Response Start --- ".to_string());
+                                // 新規: ストリーミング開始時に current_llm_response と解析バッファを初期化
+                                self.current_llm_response = Some(Vec::new());
+                                self.llm_parsing_buffer.clear();
+                                is_streaming = true;
+                            }
                             self.status = Status::Streaming;
                             dirty = true;
                         }
                         "::status:error" => {
+                            if is_streaming {
+                                // 変更: マーカーにスペースを追加
+                                self.push_log(" --- LLM Response End (Error) --- ".to_string());
+                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
+                                self.finalize_and_append_llm_response();
+                                is_streaming = false;
+                            }
                             self.status = Status::Error;
                             dirty = true;
                         }
 
                         _ if msg.starts_with("::append:") => {
                             let payload = &msg["::append:".len()..];
-                            self.append_stream_token(payload);
+                            // 変更: LLM応答内容を構造化して蓄積
+                            self.append_stream_token_structured(payload);
                             dirty = true;
                         }
                         _ => {
@@ -287,19 +334,131 @@ impl TuiApp {
         self.push_log(format!("> {line}"));
     }
 
+    // 新規: LLMストリーミングトークンを構造化して処理するメソッド (簡易版)
+    // トークンはバッファに蓄積され、ストリーム完了時に一括解析される。
+    #[allow(dead_code)]
+    pub fn append_stream_token_structured(&mut self, s: &str) {
+        // 受信したトークンを解析バッファに追加
+        self.llm_parsing_buffer.push_str(s);
+    }
+
+    // 既存のメソッド（左マージン付き）は一時的に残すが、新しい実装で置き換える
     #[allow(dead_code)]
     pub fn append_stream_token(&mut self, s: &str) {
+        // 左マージン付きでストリーミングトークンを追加
+        self.append_stream_token_with_margin(s, 2); // 2文字分のマージン
+    }
+
+    // 新規: 左マージン付きでストリーミングトークンを追加する内部メソッド
+    fn append_stream_token_with_margin(&mut self, s: &str, margin: usize) {
+        let margin_str = " ".repeat(margin); // マージン用のスペース文字列を作成
+
         // Normalize incoming token: split by '\n' and append as multiple logical lines if needed.
         let parts: Vec<&str> = s.split('\n').collect();
         if parts.is_empty() {
             return;
         }
+
+        // 最初のパートは、既存の最後の行に追加
         if let Some(last) = self.log.last_mut() {
             last.push_str(parts[0]);
         }
+
+        // 2番目以降のパートは新しい行として追加（マージン付き）
         for seg in parts.iter().skip(1) {
-            self.log.push((*seg).to_string());
+            // 空行でない場合、または空行でもマージンを適用したい場合はこの条件を調整
+            // ここでは空行もマージン付きで追加する
+            let line_with_margin = format!("{margin_str}{seg}");
+            self.log.push(line_with_margin);
         }
+    }
+
+    // 新規: llm_parsing_buffer をパースして構造化セグメントを作成し、self.log に追加する
+    // 新規: llm_parsing_buffer をパースして構造化セグメントを作成し、self.log に追加する
+    fn finalize_and_append_llm_response(&mut self) {
+        // 解析バッファを消費
+        let buffer = std::mem::take(&mut self.llm_parsing_buffer);
+        if buffer.is_empty() {
+            // バッファが空なら、current_llm_response もクリアして終了
+            self.current_llm_response = None;
+            return;
+        }
+
+        // current_llm_response を take() で所有権ごと取得し、後で処理するセグメントリストを構築
+        // これにより、self.current_llm_response への借用をすぐに解除できる
+        let mut response_segments = match self.current_llm_response.take() {
+            Some(segments) => segments,
+            None => {
+                // 万が一初期化されていなければ、空のリストで開始
+                Vec::new()
+            }
+        };
+
+        // 正規表現でコードブロックを抽出
+        // (?s) フラグは、`.` が改行にもマッチするようにする（複数行マッチ）
+        // `?` により非貪欲マッチ（最初に見つかった ``` で終了）
+        let re = Regex::new(r"(?s)```(\w*)\n(.*?)```").unwrap();
+        let mut last_end = 0;
+
+        for cap in re.captures_iter(&buffer) {
+            let whole_match = cap.get(0).unwrap();
+            let lang = cap.get(1).map_or("", |m| m.as_str());
+            let code_content = cap.get(2).map_or("", |m| m.as_str());
+
+            // コードブロックより前のテキスト（Textセグメント）を追加
+            if whole_match.start() > last_end {
+                let text_content = &buffer[last_end..whole_match.start()];
+                if !text_content.is_empty() {
+                    response_segments.push(LlmResponseSegment::Text {
+                        content: text_content.to_string(),
+                    });
+                }
+            }
+
+            // コードブロック（CodeBlockセグメント）を追加
+            response_segments.push(LlmResponseSegment::CodeBlock {
+                language: lang.to_string(),
+                content: code_content.to_string(),
+            });
+
+            last_end = whole_match.end();
+        }
+
+        // 最後のコードブロックより後のテキスト（Textセグメント）を追加
+        if last_end < buffer.len() {
+            let text_content = &buffer[last_end..];
+            if !text_content.is_empty() {
+                response_segments.push(LlmResponseSegment::Text {
+                    content: text_content.to_string(),
+                });
+            }
+        }
+
+        // この時点で、response_segments にはすべての構造化されたセグメントが含まれている
+        // self.current_llm_response は None になっている（take() したため）
+        // したがって、これ以降の self の他の部分（例: self.log）への可変借用は安全に行える
+
+        // response_segments (Vec<LlmResponseSegment>) をフラットな String Vec に変換して self.log に追加
+        for segment in response_segments {
+            match segment {
+                LlmResponseSegment::Text { content } => {
+                    // テキストコンテンツを、改行で分割してログに追加
+                    // 既存の append_stream_token_with_margin のロジックを再利用
+                    self.append_stream_token_with_margin(&content, 2); // テキストにもマージンを適用
+                }
+                LlmResponseSegment::CodeBlock { language, content } => {
+                    // コードブロックの開始を示す識別子行を追加
+                    self.log.push(format!(" [CodeBlockStart({language})]"));
+                    // コードコンテンツを、改行で分割してログに追加（マージン付き）
+                    self.append_stream_token_with_margin(&content, 4); // コードブロックにはより広いマージン
+                    // コードブロックの終了を示す識別子行を追加
+                    self.log.push(" [CodeBlockEnd]".to_string());
+                }
+            }
+        }
+
+        // current_llm_response は処理後 None に設定されている（take() したため）
+        // 特に再設定の必要なし
     }
 
     pub fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
@@ -340,6 +499,7 @@ impl TuiApp {
         // Draw log area starting at row 2 up to h-2
         let start_row = 2u16;
         let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
+        let mut in_code_block = false; // 新規: コードブロック内かどうかのフラグ
         for (i, line) in plan.log_lines.iter().take(max_rows as usize).enumerate() {
             let row = start_row + i as u16;
             queue!(
@@ -348,7 +508,31 @@ impl TuiApp {
                 terminal::Clear(ClearType::CurrentLine)
             )?;
             let cmp = line.as_str();
-            if cmp.starts_with("> ") {
+
+            // 新規: コードブロック識別子のチェック
+            if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
+                // コードブロック開始識別子: 特別な描画はしないが、フラグを立てる
+                in_code_block = true;
+                // この行自体は描画しないか、非常に薄い色で描画するなどして非表示に近づける
+                // ここでは描画をスキップする
+                continue;
+            } else if cmp == " [CodeBlockEnd]" {
+                // コードブロック終了識別子: フラグを下ろす
+                in_code_block = false;
+                // この行自体は描画しない
+                continue;
+            }
+
+            // 新規: コードブロック内の行に異なるスタイルを適用
+            if in_code_block {
+                // コードブロック行: テーマで定義された背景色を使用
+                queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
+                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?; // 文字色は維持
+                write!(stdout, "{line}")?;
+                queue!(stdout, ResetColor)?;
+            }
+            // 既存の描画ロジック: 順番を変更して、コードブロック判定を最優先に
+            else if cmp.starts_with("> ") {
                 queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;

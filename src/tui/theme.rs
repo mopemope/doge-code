@@ -10,6 +10,7 @@ pub struct Theme {
     pub user_input_fg: Color,
     pub llm_response_bg: Color,
     pub llm_response_fg: Color,
+    pub llm_code_block_bg: Color, // 新規: コードブロック用背景色
     pub info_fg: Color,
     pub warning_fg: Color,
     pub error_fg: Color,
@@ -32,6 +33,7 @@ impl Theme {
             user_input_fg: Color::Blue,
             llm_response_bg: Color::Black,
             llm_response_fg: Color::White,
+            llm_code_block_bg: Color::DarkGrey, // 新規: Darkテーマ用コードブロック背景色
             info_fg: Color::DarkGrey,
             warning_fg: Color::Yellow,
             error_fg: Color::Red,
@@ -54,6 +56,7 @@ impl Theme {
             user_input_fg: Color::DarkBlue,
             llm_response_bg: Color::White,
             llm_response_fg: Color::Black,
+            llm_code_block_bg: Color::Grey, // 新規: Lightテーマ用コードブロック背景色
             info_fg: Color::Grey,
             warning_fg: Color::DarkYellow,
             error_fg: Color::DarkRed,
