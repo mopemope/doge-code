@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::tools::execute;
+use crate::tools::find_file;
 use crate::tools::list;
 use crate::tools::read;
 use crate::tools::search_text;
@@ -49,5 +50,47 @@ impl FsTools {
 
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
         execute::execute_bash(&self.root, command).await
+    }
+
+    /// Finds files in the project based on a filename or pattern.
+    ///
+    /// This method allows the LLM agent to search for files within the project
+    /// directory. It supports searching by full filename, partial name, or glob
+    /// patterns.
+    ///
+    /// # Arguments
+    ///
+    /// * `filename` - The filename or pattern to search for.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing:
+    /// - `Ok(find_file::FindFileResult)`: A struct with a list of matching file paths.
+    /// - `Err(anyhow::Error)`: An error if the search could not be completed.
+    ///
+    /// # Examples
+    ///
+    /// To find a file by its exact name:
+    /// ```ignore
+    /// let result = fs_tools.find_file("main.rs").await?;
+    /// ```
+    ///
+    /// To find files matching a glob pattern:
+    /// ```ignore
+    /// let result = fs_tools.find_file("*.rs").await?;
+    /// ```
+    ///
+    /// To find files with a partial name match:
+    /// ```ignore
+    /// let result = fs_tools.find_file("main").await?;
+    /// ```
+    pub async fn find_file(&self, filename: &str) -> Result<find_file::FindFileResult> {
+        find_file::find_file(
+            find_file::FindFileArgs {
+                filename: filename.to_string(),
+            },
+            &self.root,
+        )
+        .await
     }
 }
