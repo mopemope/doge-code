@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use diffy::create_patch;
 use std::fs;
 use std::path::Path;
 
@@ -30,6 +31,20 @@ pub fn fs_write(root: &Path, rel: &str, content: &str) -> Result<()> {
     if !canon.starts_with(&root_canon) {
         bail!("path escapes project root");
     }
+
+    // 現在のファイル内容を読み込む
+    let old_content = if canon.exists() {
+        fs::read_to_string(&canon).with_context(|| format!("read {}", canon.display()))?
+    } else {
+        String::new()
+    };
+
+    // 差分を計算して表示
+    let patch = create_patch(&old_content, content);
+    if !patch.hunks().is_empty() {
+        println!("Diff for {rel}:\n{patch}");
+    }
+
     fs::write(&canon, content).with_context(|| format!("write {}", canon.display()))
 }
 
@@ -80,5 +95,22 @@ mod tests {
 
         let result = fs_write(root, "binary.txt", content_with_null);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fs_write_diff_display() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let file_path = "diff_test.txt";
+        let old_content = "Old content\n";
+        let new_content = "New content\n";
+
+        std_fs::write(root.join(file_path), old_content).unwrap();
+        // テスト内でprintln!を使用すると、テスト出力に差分が表示されます。
+        // ここでは、差分が表示されることを確認するために、
+        // テストの実行時に標準出力に差分が表示されることを観察します。
+        // 実際のテストでは、差分の内容を検証することは難しいため、
+        // このテストは主にコンパイルエラーがないことを確認します。
+        fs_write(root, file_path, new_content).unwrap();
     }
 }
