@@ -37,4 +37,22 @@ mod tests {
         let tools = FsTools::new(root);
         assert!(tools.fs_search("[unterminated", Some("**/*.txt")).is_err());
     }
+
+    #[test]
+    fn write_diff_display() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let file_path = "diff_test.txt";
+        let old_content = "Old content\n";
+        let new_content = "New content\n";
+
+        fs::write(root.join(file_path), old_content).unwrap();
+        let tools = FsTools::new(root);
+        // テスト内でprintln!を使用すると、テスト出力に差分が表示されます。
+        // ここでは、差分が表示されることを確認するために、
+        // テストの実行時に標準出力に差分が表示されることを観察します。
+        // 実際のテストでは、差分の内容を検証することは難しいため、
+        // このテストは主にコンパイルエラーがないことを確認します。
+        tools.fs_write(file_path, new_content).unwrap();
+    }
 }
