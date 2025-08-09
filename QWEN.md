@@ -240,7 +240,7 @@ LLMのFunction Callingなどで使用するToolを提供します。
 提供する基本的なtoolは以下です。
 
 - fs_list: 指定されたパスのファイル一覧を返す（深さ指定可能）
-- fs_search: ファイルを検索する（ripgrepを使用可能）
+- search_text: テキストを検索する（ripgrepを使用可能）
 - fs_read: ファイルを読む（範囲指定も可能）
 - fs_write: ファイルを書く
 - get_symbol_info: 問い合わせに対し、repomapで解析した結果（ファイル名、行数、コードなど）を返す
