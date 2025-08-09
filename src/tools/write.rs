@@ -11,9 +11,21 @@ pub fn fs_write(root: &Path, rel: &str, content: &str) -> Result<()> {
         bail!("absolute paths are not allowed");
     }
     let path = root.join(p);
-    let canon = path
+
+    // 親ディレクトリが存在することを確認し、存在しなければ作成する
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create parent directories for {}", path.display()))?;
+    }
+
+    // 修正箇所: 親ディレクトリを正規化し、それにファイル名を結合
+    let parent = path.parent().unwrap_or(&path); // 親がない場合は自身を親とする（ルートファイルの場合）
+    let file_name = path.file_name().context("path has no file name")?;
+    let canon_parent = parent
         .canonicalize()
-        .with_context(|| format!("canonicalize {rel}"))?;
+        .with_context(|| format!("canonicalize parent directory of {rel}"))?;
+    let canon = canon_parent.join(file_name);
+
     let root_canon = root.canonicalize().context("canonicalize root")?;
     if !canon.starts_with(&root_canon) {
         bail!("path escapes project root");
