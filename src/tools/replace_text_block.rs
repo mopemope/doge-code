@@ -8,7 +8,7 @@ pub struct ReplaceTextBlockParams {
     pub file_path: String,
     pub target_block: String,
     pub new_block: String,
-    pub file_hash_sha256: String,
+    pub file_hash_sha256: Option<String>,
     pub dry_run: Option<bool>,
 }
 
@@ -23,7 +23,7 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
     let file_path = &params.file_path;
     let target_block = &params.target_block;
     let new_block = &params.new_block;
-    let expected_hash = &params.file_hash_sha256;
+    let expected_hash = params.file_hash_sha256.as_deref();
     let dry_run = params.dry_run.unwrap_or(false);
 
     // 1. Read file content
@@ -31,18 +31,20 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
         .await
         .with_context(|| format!("Failed to read file: {file_path}"))?;
 
-    // 2. Verify file hash
-    let mut hasher = Sha256::new();
-    hasher.update(original_content.as_bytes());
-    let actual_hash = format!("{:x}", hasher.finalize());
+    // 2. Verify file hash if provided
+    if let Some(expected) = expected_hash {
+        let mut hasher = Sha256::new();
+        hasher.update(original_content.as_bytes());
+        let actual_hash = format!("{:x}", hasher.finalize());
 
-    if &actual_hash != expected_hash {
-        return Ok(ReplaceTextBlockResult {
-            success: false,
-            message: "File hash mismatch. The file content has changed since it was last read."
-                .to_string(),
-            diff: None,
-        });
+        if actual_hash != expected {
+            return Ok(ReplaceTextBlockResult {
+                success: false,
+                message: "File hash mismatch. The file content has changed since it was last read."
+                    .to_string(),
+                diff: None,
+            });
+        }
     }
 
     // 3. Find the target block
@@ -112,7 +114,7 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "world".to_string(),
             new_block: "Rust".to_string(),
-            file_hash_sha256: calculate_sha256(original_content),
+            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(false),
         };
 
@@ -135,7 +137,7 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "run".to_string(),
             new_block: "RUN".to_string(),
-            file_hash_sha256: calculate_sha256(original_content),
+            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(true),
         };
 
@@ -158,12 +160,34 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "mismatch".to_string(),
             new_block: "MISMATCH".to_string(),
-            file_hash_sha256: "invalid_hash".to_string(),
+            file_hash_sha256: Some("invalid_hash".to_string()),
             dry_run: Some(false),
         };
 
         let result = replace_text_block(params).await.unwrap();
         assert!(!result.success);
         assert!(result.message.contains("File hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_text_block_no_hash_provided() {
+        let original_content = "No hash provided test.";
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{original_content}").unwrap();
+        let file_path = file.path().to_str().unwrap().to_string();
+
+        let params = ReplaceTextBlockParams {
+            file_path: file_path.clone(),
+            target_block: "provided".to_string(),
+            new_block: "PROVIDED".to_string(),
+            file_hash_sha256: None,
+            dry_run: Some(false),
+        };
+
+        let result = replace_text_block(params).await.unwrap();
+        assert!(result.success);
+
+        let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(new_content, "No hash PROVIDED test.");
     }
 }
