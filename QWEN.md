@@ -289,28 +289,103 @@ tool:get_symbol_infoではLLMからの検索クエリに対しrepomapからシ�
 - アプリケーション全体で使用するエラー型
 - thiserrorを使用したカスタムエラー
 
-### データ処理
+# Project Structure Overview: doge-code
 
-- **シリアライゼーション**: serde, serde_json
-- **キャッシュ**: bincode
-- **UUID**: uuid
+This document provides a high-level overview of the `doge-code` project structure based on its files and directories.
 
-## データフロー例：コード修正
+## Root Directory
 
-1. **[User → TUI]** ユーザーがTUIに入力: `「hoge.rsのcalculate関数にドキュメントコメントを追加して」`
-2. **[TUI → Core]** `UserInput`イベントが`core`に送信
-3. **[Core → RepoMap]** `core`は`repomap`に問い合わせ、`hoge.rs`の`calculate`関数の`SymbolInfo`を取得
-4. **[Core → Agent]** プロンプトを構築し、`agent`に渡す
-   - System Prompt: 「あなたは有能なRustプログラマーです...」
-   - Context: `repomap`から取得した関数情報
-   - User Prompt: ユーザーの指示
-5. **[Agent → LLM]** `agent`がLLM APIにリクエスト送信
-6. **[LLM → Agent]** LLMが`write_file`ツールを呼び出すレスポンスを返す
-7. **[Agent → Core]** `agent`はレスポンスをパースし、`ToolCall`イベントを`core`に渡す
-8. **[Core]** `core`は受け取ったツール呼び出しを実行し、ファイルを更新
-9. **[Core → Agent → LLM]** 実行結果をLLMにフィードバック
-10. **[LLM → Agent → Core]** LLMが最終応答を生成
-11. **[Core → TUI]** 最終応答を`tui`に渡し、画面更新
+- **`.env`, `.envrc`**: Environment variable configuration files, likely for `dotenv` and `direnv`.
+- **`.gitignore`**: Specifies intentionally untracked files to ignore by Git.
+- **`Cargo.lock`, `Cargo.toml`**: Rust project configuration and dependency lock files.
+- **`debug.log`**: Application log file.
+- **`GEMINI.md`, `QWEN.md`**: Documentation files, likely for LLM guidelines/context.
+- **`README.md`**: Main project documentation, including features, installation, and usage.
+- **`.amazonq/`**: Directory for Amazon Q configuration/rules.
+- **`.git/`**: Git version control directory.
+- **`.plan/`**: Directory for development plans and documentation.
+- **`resources/`**: Directory for static resources like system prompts (tree-sitter queries).
+- **`src/`**: Main source code directory.
+- **`target/`**: Rust build output directory.
+
+## Source Code (`src/`)
+
+The project is a Rust application structured as a Cargo workspace with multiple modules.
+
+### Main Entry Point (`src/main.rs`)
+
+- Initializes the application using `clap` for CLI argument parsing.
+- Sets up logging.
+- Loads configuration from CLI, environment variables, or a config file.
+- Launches the TUI application (`TuiApp`) with a `TuiExecutor`.
+
+### Core Modules
+
+1.  **`analysis/`**
+    - **`analysis.rs`**: Contains logic for static code analysis using `tree-sitter`.
+        - Defines `SymbolKind` (Function, Struct, Enum, etc.), `SymbolInfo`, and `RepoMap`.
+        - The `Analyzer` struct handles parsing files (`.rs`, `.ts`, `.js`, `.py`) and building a `RepoMap` of symbols.
+        - Includes specific logic for extracting symbols from Rust, TypeScript/JavaScript, and Python.
+
+2.  **`config/`**
+    - **`config/mod.rs`**: Handles application configuration.
+        - Defines `AppConfig` struct.
+        - Loads configuration from CLI arguments, environment variables (`dotenv`), or a TOML config file, respecting a priority order.
+
+3.  **`llm/`**
+    - **`llm/` directory**: Manages interactions with the LLM.
+        - **`client.rs`**: LLM API client (OpenAI-compatible).
+        - **`history.rs`**: Manages conversation history.
+        - **`mod.rs`**: Module wiring.
+        - **`stream_tools.rs`**: Handles streaming responses and tool parsing.
+        - **`stream.rs`**: Core logic for streaming tokens from the LLM.
+        - **`tool_use.rs`**: Logic for LLM tool calling (Function Calling).
+
+4.  **`logging/`**
+    - **`logging.rs`**: Configures and initializes the `tracing` logging framework.
+
+5.  **`session/`**
+    - **`session/mod.rs`**: Manages user sessions, including saving and loading conversation history and metadata.
+
+6.  **`tools/`**
+    - **`tools/` directory**: Implements the tools available for the LLM to use.
+        - **`apply_patch.rs`**, **`create_patch.rs`**, **`replace_text_block.rs`**: Utilities for modifying file content.
+        - **`common.rs`**: Common utilities for tools, like path normalization and project root checks.
+        - **`execute.rs`**: Executes bash commands.
+        - **`get_file_sha256.rs`**: Calculates SHA256 hash of a file.
+        - **`list.rs`**: Lists files in a directory (`fs_list`).
+        - **`mod.rs`**: Module wiring and re-exports for tools.
+        - **`read.rs`**: Reads file contents (`fs_read`).
+        - **`search.rs`**: Searches for text within files (`fs_search`).
+        - **`symbol.rs`**: Retrieves symbol information from the `RepoMap` (`get_symbol_info`).
+        - **`write.rs`**: Writes content to a file (`fs_write`).
+
+7.  **`tui/`**
+    - **`tui/` directory**: Implements the Terminal User Interface.
+        - **`commands.rs`**: Handles TUI-specific commands like `/open`, `/map`, `/tools`.
+        - **`completion.rs`**: Provides file path completion for the input field.
+        - **`mod.rs`**: Module wiring.
+        - **`state.rs`**: Manages the TUI application state.
+        - **`theme.rs`**: Manages UI themes.
+        - **`view.rs`**: Handles the rendering and drawing of the TUI elements.
+
+### Test Files
+
+- **`tools_tests.rs`**: Integration or unit tests for the tools module.
+- **`tui_tests.rs`**: Tests for the TUI components.
+
+## Summary
+
+The `doge-code` project is a Rust-based TUI application that acts as an AI coding agent. Its core functionalities are:
+
+1.  **TUI**: Provides an interactive terminal interface for user input and displaying LLM responses. (`src/tui/`)
+2.  **LLM Interaction**: Communicates with OpenAI-compatible APIs, handles streaming, and manages conversation history. (`src/llm/`)
+3.  **Static Analysis**: Analyzes project code using `tree-sitter` to build a map of symbols (functions, structs, etc.) for context. (`src/analysis/`)
+4.  **Tools**: Offers a set of file system and execution tools that the LLM can invoke to interact with the project. (`src/tools/`)
+5.  **Configuration & Session**: Manages application settings and persists user sessions. (`src/config/`, `src/session/`)
+6.  **Safety**: Ensures file operations are confined to the project root. (`src/tools/common.rs`)
+
+The architecture is modular, separating concerns into distinct modules for UI, LLM interaction, analysis, tools, and configuration.
 
 ### コーディング規約
 
