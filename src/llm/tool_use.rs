@@ -122,8 +122,8 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         ToolDef {
             kind: "function".into(),
             function: ToolFunctionDef {
-                name: "fs_search".into(),
-                description: "Searches for a regular expression `search_pattern` within files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This is useful for finding code, configuration, or specific text across multiple files. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.".into(),
+                name: "search_text".into(),
+                description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -521,13 +521,13 @@ pub async fn dispatch_tool_call(
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
-        "fs_search" => {
+        "search_text" => {
             let search_pattern = args_val
                 .get("search_pattern")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let file_glob = args_val.get("file_glob").and_then(|v| v.as_str());
-            match runtime.fs.fs_search(search_pattern, file_glob) {
+            match runtime.fs.search_text(search_pattern, file_glob) {
                 Ok(rows) => {
                     let items: Vec<_> = rows
                         .into_iter()

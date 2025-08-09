@@ -30,7 +30,7 @@ struct RipgrepText {
     text: String,
 }
 
-pub fn fs_search(
+pub fn search_text(
     root: &Path,
     search_pattern: &str,
     file_glob: Option<&str>,
@@ -71,17 +71,17 @@ pub fn fs_search(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::tools::search_text::search_text;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_fs_search_simple() {
+    fn test_search_text_simple() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("test.txt"), "hello world\nsecond line").unwrap();
 
-        let results = fs_search(root, "hello", None).unwrap();
+        let results = search_text(root, "hello", None).unwrap();
         assert_eq!(results.len(), 1);
         let (path, line, content) = &results[0];
         assert_eq!(path.to_str().unwrap(), "test.txt");
@@ -96,7 +96,7 @@ mod tests {
         fs::write(root.join("a.txt"), "find me").unwrap();
         fs::write(root.join("b.log"), "find me").unwrap();
 
-        let results = fs_search(root, "find me", Some("*.txt")).unwrap();
+        let results = search_text(root, "find me", Some("*.txt")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.to_str().unwrap(), "a.txt");
     }
@@ -107,7 +107,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("test.txt"), "some content").unwrap();
 
-        let results = fs_search(root, "nonexistent", None).unwrap();
+        let results = search_text(root, "nonexistent", None).unwrap();
         assert!(results.is_empty());
     }
 }

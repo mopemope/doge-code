@@ -6,7 +6,7 @@ pub mod get_file_sha256;
 pub mod list;
 mod read;
 pub mod replace_text_block;
-mod search;
+mod search_text;
 pub mod symbol;
 pub mod write;
 
