@@ -249,6 +249,20 @@ pub fn default_tools_def() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: "find_file".into(),
+                description: "Finds files in the project based on a filename or pattern. It allows searching for files by name or using glob patterns. The tool is designed to be used by the LLM agent to efficiently locate files without needing to know the exact path. It supports various search criteria to provide flexibility in finding the desired files.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string", "description": "The filename or pattern to search for. This can be a full filename (e.g., `main.rs`), a partial name (e.g., `main`), or a glob pattern (e.g., `*.rs`, `src/**/*.rs`). The search is performed recursively from the project root."}
+                    },
+                    "required": ["filename"]
+                }),
+            },
+        },
     ]
 }
 
@@ -599,6 +613,13 @@ pub async fn dispatch_tool_call(
         "apply_patch" => {
             let params = serde_json::from_value(args_val)?;
             match crate::tools::apply_patch::apply_patch(params).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
+        "find_file" => {
+            let args = serde_json::from_value::<crate::tools::find_file::FindFileArgs>(args_val)?;
+            match runtime.fs.find_file(&args.filename).await {
                 Ok(res) => Ok(serde_json::to_value(res)?),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
