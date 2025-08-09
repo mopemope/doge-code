@@ -54,8 +54,9 @@ mod tests {
         fs::write(root.join("a/b.txt"), "").unwrap();
         fs::write(root.join("c.txt"), "").unwrap();
 
-        let result = fs_list(root, ".", None, None).unwrap();
-        let mut expected = vec!["a".to_string(), "a/b.txt".to_string(), "c.txt".to_string()];
+        // With max_depth=1, we should only see direct children of the root.
+        let result = fs_list(root, ".", Some(1), None).unwrap();
+        let mut expected = vec!["a".to_string(), "c.txt".to_string()];
         expected.sort();
         let mut sorted_result = result;
         sorted_result.sort();
