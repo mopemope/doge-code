@@ -193,5 +193,23 @@ pub fn default_tools_def() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: "fs_read_many_files".into(),
+                description: "Reads the content of multiple files at once. You can specify a list of file paths or glob patterns. This is useful for getting a comprehensive overview of multiple files, such as all source files in a directory or a set of related configuration files.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "A list of absolute file paths or glob patterns."
+                        },
+                    },
+                    "required": ["paths"]
+                }),
+            },
+        },
     ]
 }
