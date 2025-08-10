@@ -12,7 +12,8 @@ pub struct AppConfig {
     pub project_root: PathBuf,
     pub llm: LlmConfig,
     pub enable_stream_tools: bool,
-    pub theme: String, // 新規追加
+    pub theme: String,                     // 新規追加
+    pub project_instructions_file: String, // 新規追加
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,7 +50,8 @@ pub struct FileConfig {
     pub project_root: Option<std::path::PathBuf>,
     pub llm: Option<PartialLlmConfig>,
     pub enable_stream_tools: Option<bool>,
-    pub theme: Option<String>, // 新規追加
+    pub theme: Option<String>,                     // 新規追加
+    pub project_instructions_file: Option<String>, // 新規追加
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +124,10 @@ impl AppConfig {
 
         // themeの設定を追加
         let theme = file_cfg.theme.unwrap_or_else(|| "dark".to_string());
+        // project_instructions_fileの設定を追加
+        let project_instructions_file = file_cfg
+            .project_instructions_file
+            .unwrap_or_else(|| "PROJECT.md".to_string());
 
         Ok(Self {
             base_url,
@@ -135,7 +141,8 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .or(file_cfg.enable_stream_tools)
                 .unwrap_or(false),
-            theme, // 新規追加
+            theme,                     // 新規追加
+            project_instructions_file, // 新規追加
         })
     }
 }

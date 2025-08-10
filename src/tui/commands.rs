@@ -6,6 +6,41 @@ use crate::tui::view::TuiApp;
 use anyhow::Result;
 use tokio::sync::watch;
 
+/// Load project-specific instructions from a file.
+fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
+    let project_instructions_path = cfg.project_root.join(&cfg.project_instructions_file);
+    if project_instructions_path.exists() {
+        match std::fs::read_to_string(&project_instructions_path) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                eprintln!(
+                    "Failed to read {}: {}",
+                    project_instructions_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Combine the base system prompt with project-specific instructions.
+fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
+    let base_sys_prompt = std::fs::read_to_string("resources/system_prompt.md")
+        .ok()
+        .unwrap_or_default();
+    let project_instructions = load_project_instructions(cfg);
+    if let Some(instructions) = project_instructions {
+        format!(
+            "{base_sys_prompt}\n\n# Project-Specific Instructions\n{instructions}"
+        )
+    } else {
+        base_sys_prompt
+    }
+}
+
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
 }
@@ -31,8 +66,8 @@ impl TuiExecutor {
             None => None,
         };
         // Load system prompt
-        let sys_prompt = std::fs::read_to_string("resources/system_prompt.md").ok();
-        let mut history = crate::llm::ChatHistory::new(12_000, sys_prompt);
+        let sys_prompt = build_system_prompt(&cfg);
+        let mut history = crate::llm::ChatHistory::new(12_000, Some(sys_prompt));
         history.append_system_once();
 
         Ok(Self {
@@ -189,14 +224,14 @@ impl CommandHandler for TuiExecutor {
                             self.cancel_tx = Some(cancel_tx);
                             // Build initial messages with optional system prompt + user
                             let mut msgs = Vec::new();
-                            if let Ok(sys) = std::fs::read_to_string("resources/system_prompt.md") {
-                                msgs.push(crate::llm::ChatMessage {
-                                    role: "system".into(),
-                                    content: Some(sys),
-                                    tool_calls: vec![],
-                                    tool_call_id: None,
-                                });
-                            }
+                            // Load system prompt
+                            let sys_prompt = build_system_prompt(&self.cfg);
+                            msgs.push(crate::llm::ChatMessage {
+                                role: "system".into(),
+                                content: Some(sys_prompt),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            });
                             msgs.push(crate::llm::ChatMessage {
                                 role: "user".into(),
                                 content: Some(content.clone()),
