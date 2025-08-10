@@ -107,7 +107,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_read".into(),
-                description: "Reads the content of a text file from the project root. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".into(),
+                description: "Reads the content of a text file from the absolute path. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -144,7 +144,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
             kind: "function".into(),
             function: ToolFunctionDef {
                 name: "fs_write".into(),
-                description: "Writes or overwrites text content to a specified file within the project root. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `replace_text_block` or `apply_patch` are generally safer and recommended.".into(),
+                description: "Writes or overwrites text content to a specified file from the absolute path. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `replace_text_block` or `apply_patch` are generally safer and recommended.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
