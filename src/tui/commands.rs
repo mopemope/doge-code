@@ -4,20 +4,30 @@ use crate::tools::FsTools;
 use crate::tui::Theme; // 新規追加
 use crate::tui::view::TuiApp;
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 
+/// Finds the project instructions file based on a priority list.
+/// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
+fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
+    let priority_files = ["AGENTS.md", "QWEN.md", "GEMINI.md"];
+    for file_name in &priority_files {
+        let path = project_root.join(file_name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Load project-specific instructions from a file.
+/// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
 fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
-    let project_instructions_path = cfg.project_root.join(&cfg.project_instructions_file);
-    if project_instructions_path.exists() {
-        match std::fs::read_to_string(&project_instructions_path) {
+    if let Some(path) = find_project_instructions_file(&cfg.project_root) {
+        match std::fs::read_to_string(&path) {
             Ok(content) => Some(content),
             Err(e) => {
-                eprintln!(
-                    "Failed to read {}: {}",
-                    project_instructions_path.display(),
-                    e
-                );
+                eprintln!("Failed to read {}: {}", path.display(), e);
                 None
             }
         }
@@ -33,9 +43,7 @@ fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
         .unwrap_or_default();
     let project_instructions = load_project_instructions(cfg);
     if let Some(instructions) = project_instructions {
-        format!(
-            "{base_sys_prompt}\n\n# Project-Specific Instructions\n{instructions}"
-        )
+        format!("{base_sys_prompt}\n\n# Project-Specific Instructions\n{instructions}")
     } else {
         base_sys_prompt
     }
@@ -273,5 +281,78 @@ impl CommandHandler for TuiExecutor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // use std::io; // 削除
+    // use std::path::PathBuf; // 削除
+
+    #[test]
+    fn test_find_project_instructions_file_found_agents_md() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path();
+        let agents_md_path = project_root.join("AGENTS.md");
+        let qwen_md_path = project_root.join("QWEN.md");
+        let gemini_md_path = project_root.join("GEMINI.md");
+
+        // Create AGENTS.md
+        std::fs::write(&agents_md_path, "Agents instructions content").unwrap();
+        // Also create QWEN.md and GEMINI.md to show AGENTS.md has priority
+        std::fs::write(&qwen_md_path, "Qwen instructions content").unwrap();
+        std::fs::write(&gemini_md_path, "Gemini instructions content").unwrap();
+
+        let found_path = find_project_instructions_file(project_root);
+        assert_eq!(found_path, Some(agents_md_path));
+    }
+
+    #[test]
+    fn test_find_project_instructions_file_found_qwen_md() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path();
+        let agents_md_path = project_root.join("AGENTS.md"); // 追加: AGENTS.mdが存在しないことを明示
+        let qwen_md_path = project_root.join("QWEN.md");
+        let gemini_md_path = project_root.join("GEMINI.md");
+
+        // AGENTS.md should not exist for this test to be valid
+        assert!(!agents_md_path.exists());
+
+        // Create QWEN.md (AGENTS.md does not exist)
+        std::fs::write(&qwen_md_path, "Qwen instructions content").unwrap();
+        // Also create GEMINI.md to show QWEN.md has priority
+        std::fs::write(&gemini_md_path, "Gemini instructions content").unwrap();
+
+        let found_path = find_project_instructions_file(project_root);
+        assert_eq!(found_path, Some(qwen_md_path));
+    }
+
+    #[test]
+    fn test_find_project_instructions_file_found_gemini_md() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path();
+        let agents_md_path = project_root.join("AGENTS.md"); // 追加: AGENTS.mdが存在しないことを明示
+        let qwen_md_path = project_root.join("QWEN.md"); // 追加: QWEN.mdが存在しないことを明示
+        let gemini_md_path = project_root.join("GEMINI.md");
+
+        // AGENTS.md and QWEN.md should not exist for this test to be valid
+        assert!(!agents_md_path.exists());
+        assert!(!qwen_md_path.exists());
+
+        // Create GEMINI.md (AGENTS.md and QWEN.md do not exist)
+        std::fs::write(&gemini_md_path, "Gemini instructions content").unwrap();
+
+        let found_path = find_project_instructions_file(project_root);
+        assert_eq!(found_path, Some(gemini_md_path));
+    }
+
+    #[test]
+    fn test_find_project_instructions_file_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path();
+
+        let found_path = find_project_instructions_file(project_root);
+        assert_eq!(found_path, None);
     }
 }
