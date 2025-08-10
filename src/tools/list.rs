@@ -15,6 +15,12 @@ use std::path::Path;
 /// A vector of strings representing the file and directory paths.
 pub fn fs_list(path: &str, max_depth: Option<usize>, pattern: Option<&str>) -> Result<Vec<String>> {
     let full_path = Path::new(path);
+
+    // Ensure the path is absolute
+    if !full_path.is_absolute() {
+        anyhow::bail!("Path must be absolute: {}", path);
+    }
+
     let walker = GlobWalkerBuilder::new(full_path, pattern.unwrap_or("**/*"))
         .max_depth(max_depth.unwrap_or(1))
         .build()?;

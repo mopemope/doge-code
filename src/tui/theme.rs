@@ -70,9 +70,4 @@ impl Theme {
             completion_item_fg: Color::DarkGrey,
         }
     }
-
-    // デフォルトテーマをdarkに設定
-    pub fn default() -> Self {
-        Self::dark()
-    }
 }

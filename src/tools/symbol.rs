@@ -29,8 +29,14 @@ impl From<SymbolInfo> for SymbolQueryResult {
 
 pub struct SymbolTools;
 
+impl Default for SymbolTools {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SymbolTools {
-    pub fn new(_root: impl Into<PathBuf>) -> Self {
+    pub fn new() -> Self {
         Self
     }
 

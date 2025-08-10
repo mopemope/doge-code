@@ -5,17 +5,20 @@ use std::path::Path;
 
 pub fn fs_read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     let p = Path::new(path);
-    let canon = p
-        .canonicalize()
-        .with_context(|| format!("canonicalize {path}"))?;
-    let meta = fs::metadata(&canon).with_context(|| format!("metadata {}", canon.display()))?;
+
+    // Ensure the path is absolute
+    if !p.is_absolute() {
+        anyhow::bail!("Path must be absolute: {}", path);
+    }
+
+    let meta = fs::metadata(p).with_context(|| format!("metadata {}", p.display()))?;
     if !meta.is_file() {
         anyhow::bail!("not a file");
     }
-    let mut f = fs::File::open(&canon).with_context(|| format!("open {}", canon.display()))?;
+    let mut f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
     let mut s = String::new();
     f.read_to_string(&mut s)
-        .with_context(|| format!("read {}", canon.display()))?;
+        .with_context(|| format!("read {}", p.display()))?;
     match (offset, limit) {
         (Some(o), Some(l)) => Ok(s.lines().skip(o).take(l).collect::<Vec<_>>().join("\n")),
         _ => Ok(s),

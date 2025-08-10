@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use tokio::fs;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,10 +27,16 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
     let expected_hash = params.file_hash_sha256.as_deref();
     let dry_run = params.dry_run.unwrap_or(false);
 
+    // Ensure the path is absolute
+    let path = Path::new(file_path);
+    if !path.is_absolute() {
+        anyhow::bail!("File path must be absolute: {}", file_path);
+    }
+
     // 1. Read file content
-    let original_content = fs::read_to_string(file_path)
+    let original_content = fs::read_to_string(path)
         .await
-        .with_context(|| format!("Failed to read file: {file_path}"))?;
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
     // 2. Verify file hash if provided
     if let Some(expected) = expected_hash {
@@ -80,9 +87,9 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
     }
 
     // 6. Write the modified content back to the file
-    fs::write(file_path, modified_content)
+    fs::write(path, modified_content)
         .await
-        .with_context(|| format!("Failed to write to file: {file_path}"))?;
+        .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
     Ok(ReplaceTextBlockResult {
         success: true,

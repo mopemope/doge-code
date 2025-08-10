@@ -43,8 +43,10 @@ pub fn search_text(
         for entry in glob(glob_pattern).context("Failed to read glob pattern")? {
             match entry {
                 Ok(path) => {
+                    // Ensure the path is absolute
+                    let absolute_path = path.canonicalize().unwrap_or(path);
                     // Add each file path as an argument to ripgrep
-                    cmd.arg(path);
+                    cmd.arg(absolute_path);
                 }
                 Err(e) => println!("Error reading glob entry: {e}"),
             }

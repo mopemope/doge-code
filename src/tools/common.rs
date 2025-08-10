@@ -9,13 +9,17 @@ use crate::tools::search_text;
 use crate::tools::write;
 
 #[derive(Debug, Clone)]
-pub struct FsTools {
-    pub root: PathBuf,
+pub struct FsTools;
+
+impl Default for FsTools {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FsTools {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn fs_list(

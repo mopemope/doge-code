@@ -573,7 +573,7 @@ pub async fn dispatch_tool_call(
             let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let include = args_val.get("include").and_then(|v| v.as_str());
             let kind = args_val.get("kind").and_then(|v| v.as_str());
-            let sym = crate::tools::symbol::SymbolTools::new(&runtime.fs.root);
+            let sym = crate::tools::symbol::SymbolTools::new();
             match sym.get_symbol_info(query, include, kind) {
                 Ok(items) => Ok(json!({"ok": true, "symbols": items})),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
