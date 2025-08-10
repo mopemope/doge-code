@@ -110,9 +110,8 @@ mod tests {
         // Create the file so it's found, but simulate a read error
         std::fs::write(&project_md_path, "dummy").unwrap();
 
-        let mock_reader = |_path: &Path| -> io::Result<String> {
-            Err(io::Error::other("Simulated read error"))
-        };
+        let mock_reader =
+            |_path: &Path| -> io::Result<String> { Err(io::Error::other("Simulated read error")) };
         let result = load_project_instructions_inner(project_root, mock_reader);
 
         // It should return None on read error and print an error message (we won't test the print)
