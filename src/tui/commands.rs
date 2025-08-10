@@ -5,7 +5,10 @@ use crate::tools::FsTools;
 use crate::tui::theme::Theme; // 新規追加
 use crate::tui::view::TuiApp;
 use anyhow::Result;
+use chrono::Local;
+use std::env;
 use std::path::{Path, PathBuf};
+use tera::{Context, Tera};
 use tokio::sync::watch;
 
 /// Finds the project instructions file based on a priority list.
@@ -50,8 +53,27 @@ fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
 
 /// Combine the base system prompt with project-specific instructions.
 fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
-    let base_sys_prompt = String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
-        .unwrap_or_default();
+    let mut tera = Tera::default();
+    let mut context = Context::new();
+
+    let sys_prompt_template =
+        String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
+            .unwrap_or_default();
+
+    context.insert("date", &Local::now().format("%Y年%m月%d日 %A").to_string());
+    context.insert("os", &std::env::consts::OS);
+    context.insert("project_dir", &cfg.project_root.to_string_lossy());
+    context.insert(
+        "shell",
+        &env::var("SHELL").unwrap_or_else(|_| "unknown".to_string()),
+    );
+
+    let base_sys_prompt = tera
+        .render_str(&sys_prompt_template, &context)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to render system prompt: {e}");
+            sys_prompt_template // fallback to the original template
+        });
 
     let project_instructions = load_project_instructions(cfg);
     if let Some(instructions) = project_instructions {
