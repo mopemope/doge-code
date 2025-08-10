@@ -1,4 +1,5 @@
 use crate::analysis::Analyzer;
+use crate::assets::Assets;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
 use crate::tui::theme::Theme; // 新規追加
@@ -49,9 +50,9 @@ fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
 
 /// Combine the base system prompt with project-specific instructions.
 fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
-    let base_sys_prompt = std::fs::read_to_string("resources/system_prompt.md")
-        .ok()
+    let base_sys_prompt = String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
         .unwrap_or_default();
+
     let project_instructions = load_project_instructions(cfg);
     if let Some(instructions) = project_instructions {
         format!("{base_sys_prompt}\n\n# Project-Specific Instructions\n{instructions}")
