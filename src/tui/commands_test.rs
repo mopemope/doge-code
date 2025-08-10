@@ -1,11 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::tui::commands::{find_project_instructions_file, load_project_instructions_inner};
     use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     // Helper function to create a mock reader that returns a specific content for a given path
-    fn create_mock_reader(expected_path: PathBuf, content: String) -> impl Fn(&Path) -> io::Result<String> {
+    fn create_mock_reader(
+        expected_path: PathBuf,
+        content: String,
+    ) -> impl Fn(&Path) -> io::Result<String> {
         move |path: &Path| {
             if path == expected_path {
                 Ok(content.clone())
@@ -19,18 +22,18 @@ mod tests {
     fn test_find_project_instructions_file_found_project_md() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_root = temp_dir.path();
-        let project_md_path = project_root.join("PROJECT.md");
+        let agents_md_path = project_root.join("AGENTS.md");
         let qwen_md_path = project_root.join("QWEN.md");
         let gemini_md_path = project_root.join("GEMINI.md");
 
-        // Create PROJECT.md
-        std::fs::write(&project_md_path, "Project instructions content").unwrap();
-        // Also create QWEN.md and GEMINI.md to show PROJECT.md has priority
+        // Create AGENTS.md (has the highest priority)
+        std::fs::write(&agents_md_path, "Agents instructions content").unwrap();
+        // Also create QWEN.md and GEMINI.md to show AGENTS.md has priority
         std::fs::write(&qwen_md_path, "Qwen instructions content").unwrap();
         std::fs::write(&gemini_md_path, "Gemini instructions content").unwrap();
 
         let found_path = find_project_instructions_file(project_root);
-        assert_eq!(found_path, Some(project_md_path));
+        assert_eq!(found_path, Some(agents_md_path));
     }
 
     #[test]
@@ -75,14 +78,14 @@ mod tests {
     fn test_load_project_instructions_inner_success() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_root = temp_dir.path();
-        let project_md_path = project_root.join("PROJECT.md");
-        let content = "Project instructions content".to_string();
+        let agents_md_path = project_root.join("AGENTS.md");
+        let content = "Agents instructions content".to_string();
 
-        std::fs::write(&project_md_path, &content).unwrap();
+        std::fs::write(&agents_md_path, &content).unwrap();
 
-        let mock_reader = create_mock_reader(project_md_path.clone(), content.clone());
+        let mock_reader = create_mock_reader(agents_md_path.clone(), content.clone());
         let result = load_project_instructions_inner(project_root, mock_reader);
-        
+
         assert_eq!(result, Some(content));
     }
 
@@ -91,12 +94,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_root = temp_dir.path();
 
-        let mock_reader = create_mock_reader(
-            project_root.join("PROJECT.md"),
-            "content".to_string()
-        );
+        let mock_reader =
+            create_mock_reader(project_root.join("PROJECT.md"), "content".to_string());
         let result = load_project_instructions_inner(project_root, mock_reader);
-        
+
         assert_eq!(result, None);
     }
 
@@ -110,10 +111,10 @@ mod tests {
         std::fs::write(&project_md_path, "dummy").unwrap();
 
         let mock_reader = |_path: &Path| -> io::Result<String> {
-            Err(io::Error::new(io::ErrorKind::Other, "Simulated read error"))
+            Err(io::Error::other("Simulated read error"))
         };
         let result = load_project_instructions_inner(project_root, mock_reader);
-        
+
         // It should return None on read error and print an error message (we won't test the print)
         assert_eq!(result, None);
     }

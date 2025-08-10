@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::llm::client::{ToolCall as SyncToolCall, ToolCallFunction};
-use crate::llm::tool_use::{ToolRuntime, dispatch_tool_call as dispatch_sync_tool_call};
+use crate::llm::tool_execution::{ToolRuntime, dispatch_tool_call as dispatch_sync_tool_call};
+use crate::llm::types::{ToolCall as SyncToolCall, ToolCallFunction};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReconstructedToolCall {

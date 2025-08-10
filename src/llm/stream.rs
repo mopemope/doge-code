@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::llm::client::{ChatMessage, OpenAIClient};
+use crate::llm::client_core::OpenAIClient;
+use crate::llm::types::ChatMessage;
 
 // Stream types
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -56,7 +57,7 @@ impl OpenAIClient {
         model: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<impl futures::Stream<Item = Result<String>> + '_> {
-        use crate::llm::client::ChatRequest;
+        use crate::llm::types::ChatRequest;
         use futures::StreamExt;
 
         let url = self.endpoint();

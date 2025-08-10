@@ -1,9 +1,16 @@
-mod commands;
-mod completion;
-mod state;
-mod theme;
-mod view;
+// Copyright (c) 2024 モペモペ
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
-pub use commands::*;
-pub use theme::*;
-pub use view::*;
+// pub mod app;
+pub mod commands;
+pub mod commands_test;
+pub mod completion;
+pub mod event_loop;
+pub mod llm_response_handler;
+pub mod rendering;
+pub mod state;
+pub mod theme;
+pub mod view;
+
+// pub use app::TuiApp;
+// pub use view::TuiView; // TuiViewは削除

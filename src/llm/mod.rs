@@ -1,14 +1,21 @@
-mod client;
+mod chat_with_tools;
+mod client_core;
 mod history;
 mod stream;
 mod stream_tools;
-pub mod tool_use;
+mod tool_def;
+mod tool_execution;
+mod tool_runtime;
+mod types;
 
 use reqwest::StatusCode;
 
-pub use client::*;
+pub use chat_with_tools::*;
+pub use client_core::*;
 pub use history::*;
-pub use tool_use::*;
+pub use tool_def::*;
+pub use tool_execution::*;
+pub use types::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmErrorKind {

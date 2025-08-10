@@ -1,4 +1,4 @@
-use crate::llm::client::ChatMessage;
+use crate::llm::types::ChatMessage;
 
 #[derive(Debug, Clone)]
 pub struct ChatHistory {
