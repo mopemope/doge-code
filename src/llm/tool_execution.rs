@@ -370,6 +370,30 @@ pub async fn dispatch_tool_call(
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
+        "fs_read_many_files" => {
+            let paths = args_val
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let exclude = args_val
+                .get("exclude")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                });
+            let recursive = args_val.get("recursive").and_then(|v| v.as_bool());
+            match runtime.fs.fs_read_many_files(paths, exclude, recursive) {
+                Ok(content) => Ok(json!({"ok": true, "content": content})),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
         other => Ok(json!({"error": format!("unknown tool: {other}")})),
     };
     debug!(target: "llm", tool_result = ?result, "tool call result");

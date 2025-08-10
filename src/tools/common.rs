@@ -5,6 +5,7 @@ use crate::tools::execute;
 use crate::tools::find_file;
 use crate::tools::list;
 use crate::tools::read;
+use crate::tools::read_many;
 use crate::tools::search_text;
 use crate::tools::write;
 
@@ -38,6 +39,15 @@ impl FsTools {
         limit: Option<usize>,
     ) -> Result<String> {
         read::fs_read(path, offset, limit)
+    }
+
+    pub fn fs_read_many_files(
+        &self,
+        paths: Vec<String>,
+        exclude: Option<Vec<String>>,
+        recursive: Option<bool>,
+    ) -> Result<String> {
+        read_many::fs_read_many_files(paths, exclude, recursive)
     }
 
     pub fn search_text(
