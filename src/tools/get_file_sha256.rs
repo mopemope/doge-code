@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use tokio::fs;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -17,9 +18,15 @@ pub struct GetFileSha256Result {
 pub async fn get_file_sha256(params: GetFileSha256Params) -> Result<GetFileSha256Result> {
     let file_path = &params.file_path;
 
-    let content = fs::read(file_path)
+    // Ensure the path is absolute
+    let path = Path::new(file_path);
+    if !path.is_absolute() {
+        anyhow::bail!("File path must be absolute: {}", file_path);
+    }
+
+    let content = fs::read(path)
         .await
-        .with_context(|| format!("Failed to read file: {file_path}"))?;
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
     let mut hasher = Sha256::new();
     hasher.update(&content);

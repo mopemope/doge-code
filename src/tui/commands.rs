@@ -24,7 +24,7 @@ pub struct TuiExecutor {
 
 impl TuiExecutor {
     pub fn new(cfg: crate::config::AppConfig) -> Result<Self> {
-        let tools = FsTools::new(&cfg.project_root);
+        let tools = FsTools::new();
         let analyzer = Analyzer::new(&cfg.project_root)?;
         let client = match cfg.api_key.clone() {
             Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),

@@ -9,18 +9,20 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
     }
     let p = Path::new(path);
 
-    // 正規化されたパスを取得
-    let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    // Ensure the path is absolute
+    if !p.is_absolute() {
+        anyhow::bail!("Path must be absolute: {}", path);
+    }
 
     // 親ディレクトリが存在することを確認し、存在しなければ作成する
-    if let Some(parent) = canon.parent() {
+    if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)
-            .with_context(|| format!("create parent directories for {}", canon.display()))?;
+            .with_context(|| format!("create parent directories for {}", p.display()))?;
     }
 
     // 現在のファイル内容を読み込む
-    let old_content = if canon.exists() {
-        fs::read_to_string(&canon).with_context(|| format!("read {}", canon.display()))?
+    let old_content = if p.exists() {
+        fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?
     } else {
         String::new()
     };
@@ -31,7 +33,7 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
         println!("Diff for {path}:\n{patch}");
     }
 
-    fs::write(&canon, content).with_context(|| format!("write {}", canon.display()))
+    fs::write(p, content).with_context(|| format!("write {}", p.display()))
 }
 
 #[cfg(test)]
