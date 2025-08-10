@@ -55,13 +55,7 @@ impl TuiApp {
 
         // current_llm_response を take() で所有権ごと取得し、後で処理するセグメントリストを構築
         // これにより、self.current_llm_response への借用をすぐに解除できる
-        let mut response_segments = match self.current_llm_response.take() {
-            Some(segments) => segments,
-            None => {
-                // 万が一初期化されていなければ、空のリストで開始
-                Vec::new()
-            }
-        };
+        let mut response_segments = self.current_llm_response.take().unwrap_or_default();
 
         // 正規表現でコードブロックを抽出
         // (?s) フラグは、`.` が改行にもマッチするようにする（複数行マッチ）

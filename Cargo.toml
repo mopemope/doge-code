@@ -33,6 +33,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fastrand = "2"
 diffy = "0.3"
 sha2 = "0.10"
+rust-embed = "8"
 
 [dev-dependencies]
 httptest = "0.16"
