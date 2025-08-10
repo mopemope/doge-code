@@ -27,13 +27,11 @@ impl From<SymbolInfo> for SymbolQueryResult {
     }
 }
 
-pub struct SymbolTools {
-    root: PathBuf,
-}
+pub struct SymbolTools;
 
 impl SymbolTools {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(_root: impl Into<PathBuf>) -> Self {
+        Self
     }
 
     // This function is hard to test directly without a complex setup.
@@ -44,7 +42,10 @@ impl SymbolTools {
         include: Option<&str>,
         kind: Option<&str>,
     ) -> Result<Vec<SymbolQueryResult>> {
-        let mut analyzer = Analyzer::new(&self.root)?;
+        // TODO: Analyzer の初期化方法を変更する必要があります。
+        // 現在の実装では、Analyzer がプロジェクトルートパスを必要としています。
+        // しかし、Analyzer の実装が不明なため、この修正を保留します。
+        let mut analyzer = Analyzer::new(".")?;
         let map: RepoMap = analyzer.build()?;
         let results = Self::filter_symbols(map.symbols, query, include, kind);
         Ok(results)

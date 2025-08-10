@@ -10,22 +10,23 @@
 //! To find a file by its exact name:
 //! ```ignore
 //! let args = FindFileArgs { filename: "main.rs".to_string() };
-//! let result = find_file(args, project_root).await?;
+//! let result = find_file(args).await?;
 //! ```
 //!
 //! To find files matching a glob pattern:
 //! ```ignore
 //! let args = FindFileArgs { filename: "*.rs".to_string() };
-//! let result = find_file(args, project_root).await?;
+//! let result = find_file(args).await?;
 //! ```
 //!
 //! To find files with a partial name match:
 //! ```ignore
 //! let args = FindFileArgs { filename: "main".to_string() };
-//! let result = find_file(args, project_root).await?;
+//! let result = find_file(args).await?;
 //! ```
 
 use anyhow::Result;
+use glob::glob;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -64,7 +65,6 @@ pub struct FindFileResult {
 /// # Arguments
 ///
 /// * `args` - The arguments for the search, including the filename or pattern.
-/// * `project_root` - The root directory of the project to search within.
 ///
 /// # Returns
 ///
@@ -76,12 +76,22 @@ pub struct FindFileResult {
 ///
 /// ```ignore
 /// let args = FindFileArgs { filename: "lib.rs".to_string() };
-/// let result = find_file(args, "/path/to/project").await?;
+/// let result = find_file(args).await?;
 /// assert_eq!(result.files, vec!["/path/to/project/src/lib.rs"]);
 /// ```
-pub async fn find_file(args: FindFileArgs, project_root: &Path) -> Result<FindFileResult> {
-    let pattern = format!("{}/**/{}", project_root.display(), args.filename);
-    let paths = glob::glob(&pattern)?
+pub async fn find_file(args: FindFileArgs) -> Result<FindFileResult> {
+    // If the filename is an absolute path and it's a file, return it directly.
+    let path = Path::new(&args.filename);
+    if path.is_absolute() && path.is_file() {
+        return Ok(FindFileResult {
+            files: vec![args.filename],
+        });
+    }
+
+    // Otherwise, treat the filename as a glob pattern and search for matching files.
+    // If it's not a glob pattern, this will still work for exact filename matches.
+    let pattern = &args.filename;
+    let paths = glob(pattern)?
         .filter_map(Result::ok)
         .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().to_string())
