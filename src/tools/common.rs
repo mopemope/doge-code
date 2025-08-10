@@ -10,7 +10,7 @@ use crate::tools::write;
 
 #[derive(Debug, Clone)]
 pub struct FsTools {
-    pub(crate) root: PathBuf,
+    pub root: PathBuf,
 }
 
 impl FsTools {
@@ -24,7 +24,7 @@ impl FsTools {
         max_depth: Option<usize>,
         pattern: Option<&str>,
     ) -> Result<Vec<String>> {
-        list::fs_list(&self.root, path, max_depth, pattern)
+        list::fs_list(path, max_depth, pattern)
     }
 
     pub fn fs_read(
@@ -33,7 +33,7 @@ impl FsTools {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String> {
-        read::fs_read(&self.root, path, offset, limit)
+        read::fs_read(path, offset, limit)
     }
 
     pub fn search_text(
@@ -41,15 +41,15 @@ impl FsTools {
         search_pattern: &str,
         file_glob: Option<&str>,
     ) -> Result<Vec<(PathBuf, usize, String)>> {
-        search_text::search_text(&self.root, search_pattern, file_glob)
+        search_text::search_text(search_pattern, file_glob)
     }
 
     pub fn fs_write(&self, path: &str, content: &str) -> Result<()> {
-        write::fs_write(&self.root, path, content)
+        write::fs_write(path, content)
     }
 
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
-        execute::execute_bash(&self.root, command).await
+        execute::execute_bash(command).await
     }
 
     /// Finds files in the project based on a filename or pattern.
@@ -85,12 +85,9 @@ impl FsTools {
     /// let result = fs_tools.find_file("main").await?;
     /// ```
     pub async fn find_file(&self, filename: &str) -> Result<find_file::FindFileResult> {
-        find_file::find_file(
-            find_file::FindFileArgs {
-                filename: filename.to_string(),
-            },
-            &self.root,
-        )
+        find_file::find_file(find_file::FindFileArgs {
+            filename: filename.to_string(),
+        })
         .await
     }
 }

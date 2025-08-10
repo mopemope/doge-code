@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use glob::glob;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Deserialize, Debug)]
@@ -31,19 +32,26 @@ struct RipgrepText {
 }
 
 pub fn search_text(
-    root: &Path,
     search_pattern: &str,
     file_glob: Option<&str>,
 ) -> Result<Vec<(PathBuf, usize, String)>> {
     let mut cmd = Command::new("rg");
-    cmd.current_dir(root)
-        .arg("--json")
-        .arg("-n")
-        .arg("-e")
-        .arg(search_pattern);
+    cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
 
-    if let Some(glob) = file_glob {
-        cmd.arg("-g").arg(glob);
+    if let Some(glob_pattern) = file_glob {
+        // Expand the glob pattern to get a list of files
+        for entry in glob(glob_pattern).context("Failed to read glob pattern")? {
+            match entry {
+                Ok(path) => {
+                    // Add each file path as an argument to ripgrep
+                    cmd.arg(path);
+                }
+                Err(e) => println!("Error reading glob entry: {e}"),
+            }
+        }
+    } else {
+        // If no glob pattern is provided, search in the current directory
+        cmd.arg(".");
     }
 
     let output = cmd.output().context("failed to execute ripgrep")?;
@@ -81,10 +89,12 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("test.txt"), "hello world\nsecond line").unwrap();
 
-        let results = search_text(root, "hello", None).unwrap();
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let results = search_text("hello", Some(&file_glob)).unwrap();
         assert_eq!(results.len(), 1);
         let (path, line, content) = &results[0];
-        assert_eq!(path.to_str().unwrap(), "test.txt");
+        assert_eq!(path, &root.join("test.txt"));
         assert_eq!(*line, 1);
         assert_eq!(content, "hello world");
     }
@@ -96,9 +106,11 @@ mod tests {
         fs::write(root.join("a.txt"), "find me").unwrap();
         fs::write(root.join("b.log"), "find me").unwrap();
 
-        let results = search_text(root, "find me", Some("*.txt")).unwrap();
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let results = search_text("find me", Some(&file_glob)).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.to_str().unwrap(), "a.txt");
+        assert_eq!(results[0].0, root.join("a.txt"));
     }
 
     #[test]
@@ -107,7 +119,9 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("test.txt"), "some content").unwrap();
 
-        let results = search_text(root, "nonexistent", None).unwrap();
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let results = search_text("nonexistent", Some(&file_glob)).unwrap();
         assert!(results.is_empty());
     }
 }
