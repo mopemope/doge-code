@@ -12,7 +12,8 @@ use dotenvy::dotenv;
 use tracing::info;
 
 use crate::config::AppConfig;
-use crate::tui::{TuiApp, TuiExecutor};
+use crate::tui::commands::TuiExecutor;
+use crate::tui::state::TuiApp;
 
 #[derive(Parser, Debug, Clone)]
 #[command(

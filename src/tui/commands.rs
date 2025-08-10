@@ -1,7 +1,7 @@
 use crate::analysis::Analyzer;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
-use crate::tui::Theme; // 新規追加
+use crate::tui::theme::Theme; // 新規追加
 use crate::tui::view::TuiApp;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 /// Finds the project instructions file based on a priority list.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
-fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
+pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
     let priority_files = ["AGENTS.md", "QWEN.md", "GEMINI.md"];
     for file_name in &priority_files {
         let path = project_root.join(file_name);
@@ -20,11 +20,16 @@ fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Load project-specific instructions from a file.
-/// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
-fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
-    if let Some(path) = find_project_instructions_file(&cfg.project_root) {
-        match std::fs::read_to_string(&path) {
+/// Inner function for loading project instructions, allowing for mocking the file reader.
+pub(crate) fn load_project_instructions_inner<F>(
+    project_root: &Path,
+    read_file: F,
+) -> Option<String>
+where
+    F: Fn(&Path) -> std::io::Result<String>,
+{
+    if let Some(path) = find_project_instructions_file(project_root) {
+        match read_file(&path) {
             Ok(content) => Some(content),
             Err(e) => {
                 eprintln!("Failed to read {}: {}", path.display(), e);
@@ -34,6 +39,12 @@ fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Load project-specific instructions from a file.
+/// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
+fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
+    load_project_instructions_inner(&cfg.project_root, |p: &Path| std::fs::read_to_string(p))
 }
 
 /// Combine the base system prompt with project-specific instructions.
