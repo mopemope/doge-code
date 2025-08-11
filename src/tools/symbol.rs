@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::path::PathBuf;
 
-use crate::analysis::{Analyzer, RepoMap, SymbolInfo};
+use crate::analysis::{RepoMap, SymbolInfo};
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -48,6 +48,7 @@ impl From<SymbolInfo> for SymbolQueryResult {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SymbolTools;
 
 impl Default for SymbolTools {
@@ -65,16 +66,12 @@ impl SymbolTools {
     // We will test the filtering logic in a separate, testable function.
     pub fn get_symbol_info(
         &self,
+        map: &RepoMap,
         query: &str,
         include: Option<&str>,
         kind: Option<&str>,
     ) -> Result<Vec<SymbolQueryResult>> {
-        // TODO: Analyzer の初期化方法を変更する必要があります。
-        // 現在の実装では、Analyzer がプロジェクトルートパスを必要としています。
-        // しかし、Analyzer の実装が不明なため、この修正を保留します。
-        let mut analyzer = Analyzer::new(".")?;
-        let map: RepoMap = analyzer.build()?;
-        let results = Self::filter_symbols(map.symbols, query, include, kind);
+        let results = Self::filter_symbols(map.symbols.clone(), query, include, kind);
         Ok(results)
     }
 

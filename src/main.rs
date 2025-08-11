@@ -53,14 +53,26 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(cfg: AppConfig) -> Result<()> {
-    let exec = TuiExecutor::new(cfg.clone())?;
     let mut app = TuiApp::new(
         "🦮 doge-code - /help, Esc or /quit to exit",
         Some(cfg.model.clone()),
         &cfg.theme, // テーマ名を渡す
-    )
-    .with_handler(Box::new(exec));
+    );
     app.push_log("Welcome to doge-code TUI");
+    app.push_log("Initializing repomap...");
+
+    let exec = match TuiExecutor::new(cfg.clone()) {
+        Ok(exec) => {
+            app.push_log("Repomap initialization completed.");
+            exec
+        }
+        Err(e) => {
+            app.push_log(format!("Failed to initialize repomap: {:?}", e));
+            return Err(e);
+        }
+    };
+
+    let mut app = app.with_handler(Box::new(exec));
     app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
     Ok(())

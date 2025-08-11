@@ -1,4 +1,4 @@
-use crate::analysis::Analyzer;
+use crate::analysis::{Analyzer, RepoMap};
 use crate::assets::Assets;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
@@ -8,8 +8,10 @@ use anyhow::Result;
 use chrono::Local;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tera::{Context, Tera};
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
+use tracing::{error, info};
 
 /// Finds the project instructions file based on a priority list.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
@@ -36,7 +38,7 @@ where
         match read_file(&path) {
             Ok(content) => Some(content),
             Err(e) => {
-                eprintln!("Failed to read {}: {}", path.display(), e);
+                error!("Failed to read {}: {}", path.display(), e);
                 None
             }
         }
@@ -71,7 +73,7 @@ fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
     let base_sys_prompt = tera
         .render_str(&sys_prompt_template, &context)
         .unwrap_or_else(|e| {
-            eprintln!("Failed to render system prompt: {e}");
+            error!("Failed to render system prompt: {e}");
             sys_prompt_template // fallback to the original template
         });
 
@@ -90,7 +92,7 @@ pub trait CommandHandler {
 pub struct TuiExecutor {
     pub(crate) cfg: crate::config::AppConfig,
     pub(crate) tools: FsTools,
-    pub(crate) analyzer: Analyzer,
+    pub(crate) repomap: Arc<RwLock<Option<RepoMap>>>,
     pub(crate) client: Option<OpenAIClient>,
     #[allow(dead_code)]
     pub(crate) history: crate::llm::ChatHistory,
@@ -101,8 +103,41 @@ pub struct TuiExecutor {
 
 impl TuiExecutor {
     pub fn new(cfg: crate::config::AppConfig) -> Result<Self> {
-        let tools = FsTools::new();
-        let analyzer = Analyzer::new(&cfg.project_root)?;
+        info!("Initializing TuiExecutor");
+        let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
+        let tools = FsTools::new(repomap.clone());
+        let repomap_clone = repomap.clone();
+        let project_root = cfg.project_root.clone();
+
+        // 非同期タスクを生成
+        tokio::spawn(async move {
+            info!(
+                "Starting background repomap generation for project at {:?}",
+                project_root
+            );
+            let mut analyzer = match Analyzer::new(&project_root) {
+                Ok(analyzer) => analyzer,
+                Err(e) => {
+                    error!("Failed to create Analyzer: {:?}", e);
+                    return;
+                }
+            };
+
+            match analyzer.build() {
+                Ok(map) => {
+                    let symbol_count = map.symbols.len();
+                    *repomap_clone.write().await = Some(map);
+                    info!(
+                        "Background repomap generation completed with {} symbols",
+                        symbol_count
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to build RepoMap: {:?}", e);
+                }
+            }
+        });
+
         let client = match cfg.api_key.clone() {
             Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
             None => None,
@@ -115,7 +150,7 @@ impl TuiExecutor {
         Ok(Self {
             cfg,
             tools,
-            analyzer,
+            repomap,
             client,
             history,
             ui_tx: None,
@@ -169,21 +204,28 @@ impl CommandHandler for TuiExecutor {
                     None => ui.push_log("[no previous prompt]"),
                 }
             }
-            "/map" => match self.analyzer.build() {
-                Ok(map) => {
-                    ui.push_log(format!("RepoMap: {} symbols", map.symbols.len()));
-                    for s in map.symbols.iter().take(50) {
-                        ui.push_log(format!(
-                            "{} {}  @{}:{}",
-                            s.kind.as_str(),
-                            s.name,
-                            s.file.display(),
-                            s.start_line
-                        ));
+            "/map" => {
+                // repomap が生成済みかチェック
+                let repomap = self.repomap.clone();
+                let ui_tx = self.ui_tx.clone().unwrap();
+                tokio::spawn(async move {
+                    let repomap_guard = repomap.read().await;
+                    if let Some(map) = &*repomap_guard {
+                        let _ = ui_tx.send(format!("RepoMap: {} symbols", map.symbols.len()));
+                        for s in map.symbols.iter().take(50) {
+                            let _ = ui_tx.send(format!(
+                                "{} {}  @{}:{}",
+                                s.kind.as_str(),
+                                s.name,
+                                s.file.display(),
+                                s.start_line
+                            ));
+                        }
+                    } else {
+                        let _ = ui_tx.send("[repomap] Still generating...".to_string());
                     }
-                }
-                Err(e) => ui.push_log(format!("map error: {e}")),
-            },
+                });
+            }
             // /theme コマンドの処理を追加
             line if line.starts_with("/theme ") => {
                 let theme_name = line[7..].trim(); // "/theme " の後の文字列を取得
