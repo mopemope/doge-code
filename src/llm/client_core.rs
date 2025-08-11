@@ -183,10 +183,10 @@ impl OpenAIClient {
     }
 
     pub(crate) fn backoff_delay(&self, attempt: usize, retry_after_secs: Option<u64>) -> Duration {
-        if self.llm_cfg.respect_retry_after {
-            if let Some(secs) = retry_after_secs {
-                return Duration::from_secs(secs);
-            }
+        if self.llm_cfg.respect_retry_after
+            && let Some(secs) = retry_after_secs
+        {
+            return Duration::from_secs(secs);
         }
         let base = self.llm_cfg.retry_base_ms;
         let exp = base.saturating_mul(1u64 << (attempt as u32 - 1));

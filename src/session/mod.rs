@@ -50,10 +50,10 @@ impl SessionStore {
                 continue;
             }
             let meta_p = p.join("meta.json");
-            if let Ok(s) = fs::read_to_string(&meta_p) {
-                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&s) {
-                    out.push(meta);
-                }
+            if let Ok(s) = fs::read_to_string(&meta_p)
+                && let Ok(meta) = serde_json::from_str::<SessionMeta>(&s)
+            {
+                out.push(meta);
             }
         }
         out.sort_by_key(|m| m.created_at);

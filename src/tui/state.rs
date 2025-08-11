@@ -221,13 +221,13 @@ impl TuiApp {
             if ch == '@' {
                 start = Some(i);
             }
-            if ch.is_whitespace() {
-                if let Some(st) = start {
-                    if i > st {
-                        return Some(s[st..i].to_string());
-                    } else {
-                        start = None;
-                    }
+            if ch.is_whitespace()
+                && let Some(st) = start
+            {
+                if i > st {
+                    return Some(s[st..i].to_string());
+                } else {
+                    start = None;
                 }
             }
         }
@@ -261,14 +261,14 @@ impl TuiApp {
             return;
         }
         // Otherwise, build from current token content after '@'.
-        if let Some(tok) = self.current_at_token() {
-            if tok.starts_with('@') {
-                self.compl.visible = true;
-                self.compl.query = tok.clone();
-                self.compl.items = self.at_index.complete(&tok);
-                self.compl.selected = 0;
-                return;
-            }
+        if let Some(tok) = self.current_at_token()
+            && tok.starts_with('@')
+        {
+            self.compl.visible = true;
+            self.compl.query = tok.clone();
+            self.compl.items = self.at_index.complete(&tok);
+            self.compl.selected = 0;
+            return;
         }
         self.compl.reset();
     }
@@ -299,14 +299,14 @@ impl TuiApp {
         }
         if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
             // replace current token in input with @rel
-            if let Some(tok) = self.current_at_token() {
-                if let Some(pos) = self.input.rfind(&tok) {
-                    let mut ins = format!("@{}", item.rel);
-                    if ins.contains(' ') {
-                        ins = format!("@\"{}\"", item.rel);
-                    }
-                    self.input.replace_range(pos..pos + tok.len(), &ins);
+            if let Some(tok) = self.current_at_token()
+                && let Some(pos) = self.input.rfind(&tok)
+            {
+                let mut ins = format!("@{}", item.rel);
+                if ins.contains(' ') {
+                    ins = format!("@\"{}\"", item.rel);
                 }
+                self.input.replace_range(pos..pos + tok.len(), &ins);
             }
             if let Ok(mut r) = self.at_index.recent.write() {
                 r.touch(&item.rel);

@@ -1,12 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::json;
 
 use tracing::{debug, error, warn};
 
 use crate::llm::chat_with_tools::{
-    ChatRequestWithTools,
-    ChatResponseWithTools,
-    ChoiceMessageWithTools,
+    ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
 };
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::tool_runtime::ToolRuntime;
@@ -71,7 +69,7 @@ pub async fn run_agent_streaming_once(
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
-    use crate::llm::stream_tools::{execute_tool_call, ToolDeltaBuffer};
+    use crate::llm::stream_tools::{ToolDeltaBuffer, execute_tool_call};
     use futures::StreamExt;
 
     // Start stream
@@ -87,7 +85,8 @@ pub async fn run_agent_streaming_once(
         }
         if let Some(rest) = delta.strip_prefix("__TOOL_CALLS_DELTA__:") {
             // Parse synthetic tool_calls marker and feed into buffer.
-            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest) {
+            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest)
+            {
                 for d in deltas {
                     let idx = d.index.unwrap_or(0);
                     let (name_delta, args_delta) = if let Some(f) = d.function {
@@ -170,12 +169,11 @@ pub async fn run_agent_loop(
 
         // If assistant returned final content without tool calls, we are done.
         if !msg.tool_calls.is_empty() {
-            if let Some(content) = &msg.content {
-                if !content.is_empty() {
-                    if let Some(tx) = &ui_tx {
-                        let _ = tx.send(content.clone());
-                    }
-                }
+            if let Some(content) = &msg.content
+                && !content.is_empty()
+                && let Some(tx) = &ui_tx
+            {
+                let _ = tx.send(content.clone());
             }
 
             messages.push(ChatMessage {

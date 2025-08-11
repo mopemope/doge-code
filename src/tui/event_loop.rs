@@ -88,10 +88,10 @@ impl TuiApp {
                     Event::Key(k) => match k.code {
                         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                             let now = std::time::Instant::now();
-                            if let Some(prev) = last_ctrl_c_at {
-                                if now.duration_since(prev) <= std::time::Duration::from_secs(3) {
-                                    return Ok(());
-                                }
+                            if let Some(prev) = last_ctrl_c_at
+                                && now.duration_since(prev) <= std::time::Duration::from_secs(3)
+                            {
+                                return Ok(());
                             }
                             last_ctrl_c_at = Some(now);
                             self.dispatch("/cancel");

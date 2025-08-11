@@ -165,24 +165,22 @@ impl OpenAIClient {
 
                                 if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
                                     for ch in json.choices {
-                                        if let Some(reason) = ch.finish_reason {
-                                            if reason == "stop" {
+                                        if let Some(reason) = ch.finish_reason
+                                            && reason == "stop" {
                                                 continue;
                                             }
-                                        }
                                         let delta = ch.delta.content;
                                         if !delta.is_empty() {
                                             out.push(Ok(delta));
                                         }
-                                        if !ch.delta.tool_calls.is_empty() {
-                                            if let Ok(marker) =
+                                        if !ch.delta.tool_calls.is_empty()
+                                            && let Ok(marker) =
                                                 serde_json::to_string(&ch.delta.tool_calls)
                                             {
                                                 out.push(Ok(format!(
                                                     "__TOOL_CALLS_DELTA__:{marker}"
                                                 )));
                                             }
-                                        }
                                     }
                                 }
                             }
