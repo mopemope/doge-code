@@ -45,61 +45,26 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
     match node.kind() {
         "function_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[analysis] fn {} @{}:{}",
-                    name,
-                    file.display(),
-                    node.start_position().row + 1
-                );
                 push_symbol(map, SymbolKind::Function, name, node, file, None);
             }
         }
         "struct_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[analysis] struct {} @{}:{}",
-                    name,
-                    file.display(),
-                    node.start_position().row + 1
-                );
                 push_symbol(map, SymbolKind::Struct, name, node, file, None);
             }
         }
         "enum_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[analysis] enum {} @{}:{}",
-                    name,
-                    file.display(),
-                    node.start_position().row + 1
-                );
                 push_symbol(map, SymbolKind::Enum, name, node, file, None);
             }
         }
         "trait_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[analysis] trait {} @{}:{}",
-                    name,
-                    file.display(),
-                    node.start_position().row + 1
-                );
                 push_symbol(map, SymbolKind::Trait, name, node, file, None);
             }
         }
         "mod_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[analysis] mod {} @{}:{}",
-                    name,
-                    file.display(),
-                    node.start_position().row + 1
-                );
                 push_symbol(map, SymbolKind::Mod, name, node, file, None);
             }
         }
@@ -109,13 +74,6 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                 // Simple case: let x = ...;
                 if pattern.kind() == "identifier" {
                     let name = node_text(pattern, src).to_string();
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "[analysis] var {} @{}:{}",
-                        name,
-                        file.display(),
-                        pattern.start_position().row + 1
-                    );
                     push_symbol(map, SymbolKind::Variable, name, pattern, file, None);
                 } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
                     // Complex patterns like let (a, b) = ...; or let Point { x, y } = ...;
@@ -129,13 +87,6 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                     ) {
                         if pattern_node.kind() == "identifier" {
                             let name = node_text(pattern_node, src).to_string();
-                            #[cfg(debug_assertions)]
-                            eprintln!(
-                                "[analysis] var {} @{}:{}",
-                                name,
-                                file.display(),
-                                pattern_node.start_position().row + 1
-                            );
                             push_symbol(map, SymbolKind::Variable, name, pattern_node, file, None);
                         } else {
                             let mut c = pattern_node.walk();
@@ -158,13 +109,6 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                 parent_name = Some(node_text(tr, src).to_string());
             }
             let impl_name = parent_name.clone().unwrap_or_else(|| "impl".to_string());
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[analysis] impl {} @{}:{}",
-                impl_name,
-                file.display(),
-                node.start_position().row + 1
-            );
             // Record the impl itself
             push_symbol(map, SymbolKind::Impl, impl_name.clone(), node, file, None);
             // Walk items inside impl (deep scan to catch declaration_list/function_item)
@@ -178,12 +122,6 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
             ) {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "[analysis] impl-desc child kind={} @line {}",
-                        child.kind(),
-                        child.start_position().row + 1
-                    );
                     if child.kind() == "function_item" {
                         // Distinguish method vs associated function by presence of receiver
                         let mut has_receiver = false;
@@ -201,10 +139,6 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                             }
                         }
                         if let Some(name) = name_from(child, "name", src) {
-                            #[cfg(debug_assertions)]
-                            eprintln!(
-                                "[analysis] impl fn {name} (method={has_receiver}) parent={impl_name}"
-                            );
                             if has_receiver {
                                 push_symbol(
                                     map,
@@ -304,17 +238,11 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
             let mut c = node.walk();
             for child in node.children(&mut c) {
                 if child.kind() == "variable_declarator"
-                    && let Some(id_node) = child.child_by_field_name("name") {
-                        let name = node_text(id_node, src).to_string();
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "[analysis] var {} @{}:{}",
-                            name,
-                            file.display(),
-                            id_node.start_position().row + 1
-                        );
-                        push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
-                    }
+                    && let Some(id_node) = child.child_by_field_name("name")
+                {
+                    let name = node_text(id_node, src).to_string();
+                    push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
+                }
             }
         }
         _ => {}
@@ -363,13 +291,6 @@ fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Op
                 // Simple case: identifier = ...
                 if lhs.kind() == "identifier" {
                     let name = node_text(lhs, src).to_string();
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "[analysis] var {} @{}:{}",
-                        name,
-                        file.display(),
-                        lhs.start_position().row + 1
-                    );
                     push_symbol(map, SymbolKind::Variable, name, lhs, file, None);
                 } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
                     // Multiple assignments like a, b = ...
@@ -382,13 +303,6 @@ fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Op
                     ) {
                         if lhs_node.kind() == "identifier" {
                             let name = node_text(lhs_node, src).to_string();
-                            #[cfg(debug_assertions)]
-                            eprintln!(
-                                "[analysis] var {} @{}:{}",
-                                name,
-                                file.display(),
-                                lhs_node.start_position().row + 1
-                            );
                             push_symbol(map, SymbolKind::Variable, name, lhs_node, file, None);
                         } else {
                             let mut c = lhs_node.walk();

@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+use tracing::{debug, error, info, warn};
 use tree_sitter::{Language, Parser, Tree};
 
 type CollectorFn = fn(&mut RepoMap, &Tree, &str, &Path);
@@ -108,6 +109,9 @@ impl Analyzer {
     }
 
     pub fn build(&mut self) -> Result<RepoMap> {
+        info!("Starting to build RepoMap for project at {:?}", self.root);
+        let start_time = std::time::Instant::now();
+
         let mut map = RepoMap::default();
         let patterns: Vec<_> = language_configs()
             .iter()
@@ -120,19 +124,45 @@ impl Analyzer {
             .build()
             .context("build glob walker")?;
 
+        let mut file_count = 0;
+        let mut parsed_file_count = 0;
         for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!("Failed to walk entry: {:?}", e);
+                    continue;
+                }
             };
             if entry.file_type().is_dir() {
                 continue;
             }
+            file_count += 1;
             let p = entry.path().to_path_buf();
-            if let Some((tree, src, config)) = self.parse_file(&p)? {
-                (config.collector)(&mut map, &tree, &src, &p);
+            match self.parse_file(&p) {
+                Ok(Some((tree, src, config))) => {
+                    (config.collector)(&mut map, &tree, &src, &p);
+                    parsed_file_count += 1;
+                }
+                Ok(None) => {
+                    // ファイルが対応していない拡張子の場合など
+                    debug!("Skipped file (no parser): {}", p.display());
+                }
+                Err(e) => {
+                    error!("Failed to parse file {}: {:?}", p.display(), e);
+                }
             }
         }
+
+        let duration = start_time.elapsed();
+        info!(
+            "Finished building RepoMap. Parsed {}/{} files in {:?}. Found {} symbols.",
+            parsed_file_count,
+            file_count,
+            duration,
+            map.symbols.len()
+        );
+
         Ok(map)
     }
 }

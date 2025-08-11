@@ -52,7 +52,7 @@ pub async fn chat_tools_once(
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
-    let response_text = resp.text().await?;
+    let response_text: String = resp.text().await?;
     debug!(target: "llm", response_body=%response_text, "llm chat_tools_once response");
     let body: ChatResponseWithTools = serde_json::from_str(&response_text)?;
     let msg = body
@@ -74,7 +74,7 @@ pub async fn run_agent_streaming_once(
 
     // Start stream
     let mut stream = client.chat_stream(model, messages.clone()).await?;
-    let runtime = ToolRuntime::default_with(fs);
+    let runtime = ToolRuntime::new(fs);
     let mut buf = ToolDeltaBuffer::new();
     let mut acc_text = String::new();
 
@@ -148,7 +148,7 @@ pub async fn run_agent_loop(
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
 ) -> Result<ChoiceMessage> {
-    let runtime = ToolRuntime::default_with(fs);
+    let runtime = ToolRuntime::new(fs);
     let mut iters = 0usize;
     loop {
         iters += 1;
@@ -316,8 +316,8 @@ pub async fn dispatch_tool_call(
             let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let include = args_val.get("include").and_then(|v| v.as_str());
             let kind = args_val.get("kind").and_then(|v| v.as_str());
-            let sym = crate::tools::symbol::SymbolTools::new();
-            match sym.get_symbol_info(query, include, kind) {
+
+            match runtime.fs.get_symbol_info(query, include, kind).await {
                 Ok(items) => Ok(json!({"ok": true, "symbols": items})),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }

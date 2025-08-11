@@ -1,26 +1,37 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
+use crate::analysis::RepoMap;
 use crate::tools::execute;
 use crate::tools::find_file;
 use crate::tools::list;
 use crate::tools::read;
 use crate::tools::read_many;
 use crate::tools::search_text;
+use crate::tools::symbol;
+use crate::tools::symbol::SymbolTools;
 use crate::tools::write;
 
 #[derive(Debug, Clone)]
-pub struct FsTools;
+pub struct FsTools {
+    symbol_tools: SymbolTools,
+    repomap: Arc<RwLock<Option<RepoMap>>>,
+}
 
 impl Default for FsTools {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(RwLock::new(None)))
     }
 }
 
 impl FsTools {
-    pub fn new() -> Self {
-        Self
+    pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
+        Self {
+            symbol_tools: SymbolTools::new(),
+            repomap,
+        }
     }
 
     pub fn fs_list(
@@ -103,5 +114,19 @@ impl FsTools {
             filename: filename.to_string(),
         })
         .await
+    }
+
+    pub async fn get_symbol_info(
+        &self,
+        query: &str,
+        include: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Vec<symbol::SymbolQueryResult>> {
+        let repomap_guard = self.repomap.read().await;
+        if let Some(map) = &*repomap_guard {
+            self.symbol_tools.get_symbol_info(map, query, include, kind)
+        } else {
+            Err(anyhow::anyhow!("repomap is still generating"))
+        }
     }
 }
