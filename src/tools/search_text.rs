@@ -87,18 +87,16 @@ pub fn search_text(
 
     let mut results = Vec::new();
     for line in stdout.lines() {
-        if let Ok(json) = serde_json::from_str::<RipgrepJson>(line) {
-            if let RipgrepMessageType::Match = json.r#type {
-                if let (Some(path_text), Some(lines_text), Some(line_number)) =
-                    (json.data.path, json.data.lines, json.data.line_number)
-                {
-                    results.push((
-                        PathBuf::from(path_text.text),
-                        line_number,
-                        lines_text.text.trim().to_string(),
-                    ));
-                }
-            }
+        if let Ok(json) = serde_json::from_str::<RipgrepJson>(line)
+            && let RipgrepMessageType::Match = json.r#type
+            && let (Some(path_text), Some(lines_text), Some(line_number)) =
+                (json.data.path, json.data.lines, json.data.line_number)
+        {
+            results.push((
+                PathBuf::from(path_text.text),
+                line_number,
+                lines_text.text.trim().to_string(),
+            ));
         }
     }
 

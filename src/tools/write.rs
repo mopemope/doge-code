@@ -1,5 +1,5 @@
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use diffy::create_patch;
 use serde_json::json;
 use std::fs;
@@ -42,7 +42,7 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
 
     // 現在のファイル内容を読み込む
     let old_content = if p.exists() {
-        fs::read_to_string(p).with_context(|| format!("read {}", p.display()))? 
+        fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?
     } else {
         String::new()
     };

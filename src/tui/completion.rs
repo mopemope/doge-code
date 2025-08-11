@@ -118,10 +118,10 @@ impl AtFileIndex {
         let recent = self.recent.read().ok();
         let mut scored: Vec<(i32, i32, i32, i64, usize)> = Vec::new();
         for (idx, e) in entries.iter().enumerate() {
-            if let Some(dp) = &dir_pref {
-                if !e.dir.starts_with(dp) {
-                    continue;
-                }
+            if let Some(dp) = &dir_pref
+                && !e.dir.starts_with(dp)
+            {
+                continue;
             }
             let (tier, score) = match_tier(&e.base, &pat);
             if tier == 3 && pat.is_empty() {

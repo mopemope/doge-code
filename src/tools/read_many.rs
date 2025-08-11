@@ -65,10 +65,7 @@ pub fn fs_read_many_files(
             let mut s = String::new();
             f.read_to_string(&mut s)
                 .with_context(|| format!("read {}", p.display()))?;
-            content.push_str(&format!(
-                "--- {}---\n",
-                p.display()
-            ));
+            content.push_str(&format!("--- {}---\n", p.display()));
             content.push_str(&s);
             content.push('\n');
         }
@@ -96,7 +93,7 @@ mod tests {
         write!(file2, "content2").unwrap();
         let file2_path = file2.path().to_str().unwrap().to_string();
 
-        let content = 
+        let content =
             fs_read_many_files(vec![file1_path.clone(), file2_path.clone()], None, None).unwrap();
 
         assert!(content.contains(&format!("--- {file1_path}---")));

@@ -86,18 +86,18 @@ impl SymbolTools {
     ) -> Vec<SymbolQueryResult> {
         let mut out = Vec::new();
         for s in symbols {
-            if let Some(glob_like) = include {
-                if !s.file.to_string_lossy().contains(glob_like) {
-                    continue;
-                }
+            if let Some(glob_like) = include
+                && !s.file.to_string_lossy().contains(glob_like)
+            {
+                continue;
             }
             if !s.name.contains(query) {
                 continue;
             }
-            if let Some(k) = kind {
-                if s.kind.as_str() != k {
-                    continue;
-                }
+            if let Some(k) = kind
+                && s.kind.as_str() != k
+            {
+                continue;
             }
             out.push(SymbolQueryResult::from(s));
         }

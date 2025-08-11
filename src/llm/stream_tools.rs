@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::llm::tool_execution::{dispatch_tool_call as dispatch_sync_tool_call};
+use crate::llm::tool_execution::dispatch_tool_call as dispatch_sync_tool_call;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ToolCall as SyncToolCall, ToolCallFunction};
 
@@ -38,27 +38,27 @@ impl ToolDeltaBuffer {
             self.calls.resize_with(index + 1, Default::default);
         }
         let slot = &mut self.calls[index];
-        if let Some(idv) = id {
-            if slot.id.is_none() {
-                slot.id = Some(idv.to_string());
+        if let Some(idv) = id
+            && slot.id.is_none()
+        {
+            slot.id = Some(idv.to_string());
+        }
+        if let Some(n) = name_delta
+            && !n.is_empty()
+        {
+            if slot.name.is_empty() {
+                slot.name = n.to_string();
+            } else {
+                slot.name.push_str(n);
             }
         }
-        if let Some(n) = name_delta {
-            if !n.is_empty() {
-                if slot.name.is_empty() {
-                    slot.name = n.to_string();
-                } else {
-                    slot.name.push_str(n);
-                }
-            }
-        }
-        if let Some(a) = args_delta {
-            if !a.is_empty() {
-                if slot.arguments.is_empty() {
-                    slot.arguments = a.to_string();
-                } else {
-                    slot.arguments.push_str(a);
-                }
+        if let Some(a) = args_delta
+            && !a.is_empty()
+        {
+            if slot.arguments.is_empty() {
+                slot.arguments = a.to_string();
+            } else {
+                slot.arguments.push_str(a);
             }
         }
     }
