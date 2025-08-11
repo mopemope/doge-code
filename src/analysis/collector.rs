@@ -26,13 +26,17 @@ fn push_symbol(
     parent: Option<String>,
 ) {
     let start_line = node.start_position().row + 1;
+    let start_col = node.start_position().column + 1;
     let end_line = node.end_position().row + 1;
+    let end_col = node.end_position().column + 1;
     map.symbols.push(SymbolInfo {
         name,
         kind,
         file: file.to_path_buf(),
         start_line,
+        start_col,
         end_line,
+        end_col,
         parent,
     });
 }
@@ -97,6 +101,52 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                     node.start_position().row + 1
                 );
                 push_symbol(map, SymbolKind::Mod, name, node, file, None);
+            }
+        }
+        "let_declaration" => {
+            // Extract variable name from pattern
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                // Simple case: let x = ...;
+                if pattern.kind() == "identifier" {
+                    let name = node_text(pattern, src).to_string();
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "[analysis] var {} @{}:{}",
+                        name,
+                        file.display(),
+                        pattern.start_position().row + 1
+                    );
+                    push_symbol(map, SymbolKind::Variable, name, pattern, file, None);
+                } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
+                    // Complex patterns like let (a, b) = ...; or let Point { x, y } = ...;
+                    // For simplicity, we can try to extract identifiers from these patterns
+                    // This is a basic implementation, can be expanded for more complex cases
+                    fn extract_identifiers_from_pattern(
+                        map: &mut RepoMap,
+                        pattern_node: Node,
+                        src: &str,
+                        file: &Path,
+                    ) {
+                        if pattern_node.kind() == "identifier" {
+                            let name = node_text(pattern_node, src).to_string();
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "[analysis] var {} @{}:{}",
+                                name,
+                                file.display(),
+                                pattern_node.start_position().row + 1
+                            );
+                            push_symbol(map, SymbolKind::Variable, name, pattern_node, file, None);
+                        } else {
+                            let mut c = pattern_node.walk();
+                            for child in pattern_node.children(&mut c) {
+                                extract_identifiers_from_pattern(map, child, src, file);
+                            }
+                        }
+                    }
+                    extract_identifiers_from_pattern(map, pattern, src, file);
+                }
+                // Other patterns like array_pattern etc. can be added similarly if needed
             }
         }
         "impl_item" => {
@@ -248,6 +298,25 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
                 push_symbol(map, SymbolKind::Trait, name, node, file, None);
             }
         }
+        // Handle variable declarations (var, let, const)
+        "lexical_declaration" | "variable_declaration" => {
+            // These nodes contain a list of variable declarators
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                if child.kind() == "variable_declarator"
+                    && let Some(id_node) = child.child_by_field_name("name") {
+                        let name = node_text(id_node, src).to_string();
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "[analysis] var {} @{}:{}",
+                            name,
+                            file.display(),
+                            id_node.start_position().row + 1
+                        );
+                        push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
+                    }
+            }
+        }
         _ => {}
     }
     let mut c = node.walk();
@@ -285,6 +354,52 @@ fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Op
                     visit_py(map, child, src, file, Some(name.clone()));
                 }
                 return;
+            }
+        }
+        // Handle simple assignments (var = value)
+        "assignment" => {
+            // Left hand side is the target, right hand side is the value
+            if let Some(lhs) = node.child_by_field_name("left") {
+                // Simple case: identifier = ...
+                if lhs.kind() == "identifier" {
+                    let name = node_text(lhs, src).to_string();
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "[analysis] var {} @{}:{}",
+                        name,
+                        file.display(),
+                        lhs.start_position().row + 1
+                    );
+                    push_symbol(map, SymbolKind::Variable, name, lhs, file, None);
+                } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
+                    // Multiple assignments like a, b = ...
+                    // Extract identifiers from the left-hand side pattern
+                    fn extract_identifiers_from_py_lhs(
+                        map: &mut RepoMap,
+                        lhs_node: Node,
+                        src: &str,
+                        file: &Path,
+                    ) {
+                        if lhs_node.kind() == "identifier" {
+                            let name = node_text(lhs_node, src).to_string();
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "[analysis] var {} @{}:{}",
+                                name,
+                                file.display(),
+                                lhs_node.start_position().row + 1
+                            );
+                            push_symbol(map, SymbolKind::Variable, name, lhs_node, file, None);
+                        } else {
+                            let mut c = lhs_node.walk();
+                            for child in lhs_node.children(&mut c) {
+                                extract_identifiers_from_py_lhs(map, child, src, file);
+                            }
+                        }
+                    }
+                    extract_identifiers_from_py_lhs(map, lhs, src, file);
+                }
+                // Other patterns like list/dict unpacking can be handled if needed
             }
         }
         _ => {}

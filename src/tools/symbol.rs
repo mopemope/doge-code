@@ -117,7 +117,9 @@ mod tests {
             kind,
             file: PathBuf::from(file),
             start_line: 1,
+            start_col: 1,
             end_line: 10,
+            end_col: 10,
             parent: None,
         }
     }
