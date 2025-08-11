@@ -11,6 +11,7 @@ pub enum SymbolKind {
     Method,
     AssocFn,
     Mod,
+    Variable,
 }
 
 impl SymbolKind {
@@ -24,6 +25,7 @@ impl SymbolKind {
             SymbolKind::Method => "method",
             SymbolKind::AssocFn => "assoc_fn",
             SymbolKind::Mod => "mod",
+            SymbolKind::Variable => "var",
         }
     }
 }
@@ -34,7 +36,9 @@ pub struct SymbolInfo {
     pub kind: SymbolKind,
     pub file: PathBuf,
     pub start_line: usize,
+    pub start_col: usize,
     pub end_line: usize,
+    pub end_col: usize,
     pub parent: Option<String>,
 }
 
