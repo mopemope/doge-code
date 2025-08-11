@@ -1,5 +1,25 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "create_patch".to_string(),
+            description: "Generates a patch in the unified diff format by comparing the `original_content` of a file with its `modified_content`. This tool is crucial for preparing complex, multi-location changes that will be applied using `apply_patch`. First, use `fs_read` to get the `original_content` and its hash. Then, generate the `modified_content` (the entire desired file content after changes) in your mind or through internal reasoning. Finally, call this tool with both contents to obtain the `patch_content` string, which can then be passed to `apply_patch`.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "original_content": {"type": "string", "description": "The original content of the file."},
+                    "modified_content": {"type": "string", "description": "The full desired content of the file after modification."}
+                },
+                "required": ["original_content", "modified_content"]
+            }),
+        },
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePatchParams {

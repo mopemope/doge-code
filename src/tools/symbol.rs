@@ -1,8 +1,29 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use serde::Serialize;
+use serde_json::json;
 use std::path::PathBuf;
 
 use crate::analysis::{Analyzer, RepoMap, SymbolInfo};
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "get_symbol_info".to_string(),
+            description: "Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. You can optionally filter by file path (`include`) and symbol kind (e.g., 'fn', 'struct'). This is useful for understanding the codebase structure, locating definitions, or getting context about specific code elements. For example, use it to find where a specific function is defined, or to see all methods of a particular struct. The returned information includes the symbol's kind, name, file path, line number, and a relevant code snippet.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "include": {"type": "string"},
+                    "kind": {"type": "string"}
+                },
+                "required": ["query"]
+            }),
+        },
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolQueryResult {

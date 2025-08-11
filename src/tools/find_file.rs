@@ -25,10 +25,29 @@
 //! let result = find_file(args).await?;
 //! ```
 
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use glob::glob;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::Path;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "find_file".to_string(),
+            description: "Finds files in the project based on a filename or pattern. It allows searching for files by name or using glob patterns. The tool is designed to be used by the LLM agent to efficiently locate files without needing to know the exact path. It supports various search criteria to provide flexibility in finding the desired files.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "The filename or pattern to search for. This can be a full filename (e.g., `main.rs`), a partial name (e.g., `main`), or a glob pattern (e.g., `*.rs`, `src/**/*.rs`). The search is performed recursively from the project root."}
+                },
+                "required": ["filename"]
+            }),
+        },
+    }
+}
 
 /// Arguments for the `find_file` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]

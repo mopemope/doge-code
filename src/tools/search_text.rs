@@ -1,8 +1,34 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use glob::glob;
 use serde::Deserialize;
+use serde_json::json;
 use std::path::PathBuf;
 use std::process::Command;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "search_text".to_string(),
+            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "search_pattern": {
+                        "type": "string",
+                        "description": "The regular expression to search for within file contents."
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": "A glob pattern to filter which files are searched (e.g., 'src/**/*.rs', '*.toml'). Defaults to all files if not provided."
+                    }
+                },
+                "required": ["search_pattern"]
+            }),
+        },
+    }
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]

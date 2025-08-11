@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::llm::tool_def::ToolDef;
-use crate::llm::types::{ChatMessage, ToolCall};
+use crate::llm::types::{ChatMessage, ToolCall, ToolDef};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequestWithTools {

@@ -1,15 +1,16 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use tracing::{debug, error, warn};
 
 use crate::llm::chat_with_tools::{
-    ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
+    ChatRequestWithTools,
+    ChatResponseWithTools,
+    ChoiceMessageWithTools,
 };
 use crate::llm::client_core::OpenAIClient;
-use crate::llm::tool_def::ToolDef;
-pub use crate::llm::tool_runtime::ToolRuntime;
-use crate::llm::types::{ChatMessage, ChoiceMessage, ToolCall};
+use crate::llm::tool_runtime::ToolRuntime;
+use crate::llm::types::{ChatMessage, ChoiceMessage, ToolCall, ToolDef};
 use crate::tools::FsTools;
 
 pub async fn chat_tools_once(
@@ -60,9 +61,8 @@ pub async fn chat_tools_once(
         .choices
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow!("no choices"))?
-        .message;
-    Ok(msg)
+        .ok_or_else(|| anyhow!("no choices"))?;
+    Ok(msg.message)
 }
 
 pub async fn run_agent_streaming_once(
@@ -71,7 +71,7 @@ pub async fn run_agent_streaming_once(
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
-    use crate::llm::stream_tools::{ToolDeltaBuffer, execute_tool_call};
+    use crate::llm::stream_tools::{execute_tool_call, ToolDeltaBuffer};
     use futures::StreamExt;
 
     // Start stream
@@ -87,8 +87,7 @@ pub async fn run_agent_streaming_once(
         }
         if let Some(rest) = delta.strip_prefix("__TOOL_CALLS_DELTA__:") {
             // Parse synthetic tool_calls marker and feed into buffer.
-            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest)
-            {
+            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest) {
                 for d in deltas {
                     let idx = d.index.unwrap_or(0);
                     let (name_delta, args_delta) = if let Some(f) = d.function {

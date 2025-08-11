@@ -1,7 +1,27 @@
-use anyhow::{Context, Result, bail};
+use crate::llm::types::{ToolDef, ToolFunctionDef};
+use anyhow::{bail, Context, Result};
 use diffy::create_patch;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "fs_write".to_string(),
+            description: "Writes or overwrites text content to a specified file from the absolute path. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `replace_text_block` or `apply_patch` are generally safer and recommended.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }),
+        },
+    }
+}
 
 pub fn fs_write(path: &str, content: &str) -> Result<()> {
     if content.as_bytes().contains(&0) {
@@ -22,7 +42,7 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
 
     // 現在のファイル内容を読み込む
     let old_content = if p.exists() {
-        fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?
+        fs::read_to_string(p).with_context(|| format!("read {}", p.display()))? 
     } else {
         String::new()
     };

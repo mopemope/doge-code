@@ -6,7 +6,7 @@ mod stream_tools;
 mod tool_def;
 mod tool_execution;
 mod tool_runtime;
-mod types;
+pub mod types;
 
 use reqwest::StatusCode;
 
