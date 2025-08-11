@@ -1,6 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFunctionDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value, // JSON Schema object
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    #[serde(rename = "type")]
+    pub kind: String, // "function"
+    pub function: ToolFunctionDef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallFunction {
     pub name: String,
     pub arguments: String, // JSON string per OpenAI spec

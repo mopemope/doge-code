@@ -1,8 +1,31 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use glob::glob;
+use serde_json::json;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "fs_read_many_files".to_string(),
+            description: "Reads the content of multiple files at once. You can specify a list of file paths or glob patterns. This is useful for getting a comprehensive overview of multiple files, such as all source files in a directory or a set of related configuration files.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "A list of absolute file paths or glob patterns."
+                    },
+                },
+                "required": ["paths"]
+            }),
+        },
+    }
+}
 
 #[allow(unused_variables)]
 pub fn fs_read_many_files(
@@ -43,8 +66,7 @@ pub fn fs_read_many_files(
             f.read_to_string(&mut s)
                 .with_context(|| format!("read {}", p.display()))?;
             content.push_str(&format!(
-                "--- {}---
-",
+                "--- {}---\n",
                 p.display()
             ));
             content.push_str(&s);
@@ -74,7 +96,7 @@ mod tests {
         write!(file2, "content2").unwrap();
         let file2_path = file2.path().to_str().unwrap().to_string();
 
-        let content =
+        let content = 
             fs_read_many_files(vec![file1_path.clone(), file2_path.clone()], None, None).unwrap();
 
         assert!(content.contains(&format!("--- {file1_path}---")));

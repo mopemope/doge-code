@@ -1,6 +1,27 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use globwalk::GlobWalkerBuilder;
+use serde_json::json;
 use std::path::Path;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "fs_list".to_string(),
+            description: "Lists files and directories within a specified path. You can limit the depth of recursion and filter results by a glob pattern. The default maximum depth is 1. This tool is useful for exploring the project structure, finding specific files, or getting an overview of the codebase before starting a task. For example, use it to see what files are in a directory or to find all `.rs` files.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "max_depth": {"type": "integer"},
+                    "pattern": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+        },
+    }
+}
 
 /// Lists files and directories within a specified path.
 ///

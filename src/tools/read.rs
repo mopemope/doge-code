@@ -1,7 +1,28 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
+use serde_json::json;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "fs_read".to_string(),
+            description: "Reads the content of a text file from the absolute path. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["path"]
+            }),
+        },
+    }
+}
 
 pub fn fs_read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     let p = Path::new(path);

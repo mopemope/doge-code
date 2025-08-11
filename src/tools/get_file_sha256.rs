@@ -1,8 +1,27 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "get_file_sha256".to_string(),
+            description: "Calculates the SHA256 hash of a file. This is useful for verifying file integrity or for providing the `file_hash_sha256` parameter to other tools like `apply_patch` or `replace_text_block` for safe file modifications.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "The absolute path to the file."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetFileSha256Params {

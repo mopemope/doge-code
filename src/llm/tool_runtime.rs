@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::llm::tool_def::ToolDef;
+use crate::llm::types::ToolDef;
 use crate::tools::FsTools;
 
 const MAX_ITERS: usize = 128;

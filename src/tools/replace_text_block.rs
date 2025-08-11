@@ -1,8 +1,31 @@
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs;
+
+pub fn tool_def() -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: ToolFunctionDef {
+            name: "replace_text_block".to_string(),
+            description: "Replaces a single, unique block of text within a file with a new block of text. It ensures file integrity by verifying the SHA256 hash of the file content, preventing accidental overwrites if the file has changed since it was last read. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Absolute path to the file."},
+                    "target_block": {"type": "string", "description": "The exact, unique text block to be replaced."},
+                    "new_block": {"type": "string", "description": "The new text block to replace the target."},
+                    "file_hash_sha256": {"type": "string", "description": "The SHA256 hash of the original file content to prevent race conditions."},
+                    "dry_run": {"type": "boolean", "description": "If true, returns the diff of the proposed change without modifying the file."}
+                },
+                "required": ["file_path", "target_block", "new_block", "file_hash_sha256"]
+            }),
+        },
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReplaceTextBlockParams {
