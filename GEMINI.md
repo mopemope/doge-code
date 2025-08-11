@@ -271,6 +271,11 @@ https://platform.openai.com/docs/api-reference/chat/create
 
 ### 静的解析（repomap）
 
+**責務**: tree-sitterを利用したソースコード静的解析
+- ソースコードの再帰的スキャン
+- ASTからのシンボル抽出
+- 解析結果のキャッシュ管理
+
 - **パーサー**: tree-sitter
 - **言語サポート**: Rust, TypeScript, Python, JavaScript等
 
