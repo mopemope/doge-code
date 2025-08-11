@@ -37,6 +37,7 @@ diffy = "0.3"
 sha2 = "0.10"
 rust-embed = "8"
 tera = "1.20.0"
+num_cpus = "1.0"
 
 [dev-dependencies]
 httptest = "0.16"

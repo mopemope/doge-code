@@ -123,7 +123,7 @@ impl TuiExecutor {
                 }
             };
 
-            match analyzer.build() {
+            match analyzer.build().await {
                 Ok(map) => {
                     let symbol_count = map.symbols.len();
                     *repomap_clone.write().await = Some(map);

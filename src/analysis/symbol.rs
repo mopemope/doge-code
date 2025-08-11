@@ -46,3 +46,18 @@ pub struct SymbolInfo {
 pub struct RepoMap {
     pub symbols: Vec<SymbolInfo>,
 }
+
+impl RepoMap {
+    // 複数の RepoMap を1つにまとめる
+    pub fn merge(mut self, other: RepoMap) -> Self {
+        self.symbols.extend(other.symbols);
+        self
+    }
+
+    // Vec<RepoMap> をまとめる関数
+    pub fn merge_many(maps: Vec<RepoMap>) -> Self {
+        maps.into_iter()
+            .reduce(|acc, map| acc.merge(map))
+            .unwrap_or_default()
+    }
+}
