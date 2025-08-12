@@ -309,6 +309,10 @@ impl CommandHandler for TuiExecutor {
                             ui.push_log(String::new());
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
+                            // LLMリクエスト開始を通知
+                            if let Some(tx) = &self.ui_tx {
+                                let _ = tx.send("::status:streaming".into());
+                            }
                             // Build initial messages with optional system prompt + user
                             let mut msgs = Vec::new();
                             // Load system prompt

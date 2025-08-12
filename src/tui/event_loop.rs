@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::time::{Duration, Instant};
+use tracing::debug; // tracingをインポート
 
 use crate::tui::state::{Status, TuiApp, save_input_history}; // import TuiApp and save_input_history
 
@@ -19,6 +20,7 @@ impl TuiApp {
                 && last_spinner_update.elapsed() >= Duration::from_millis(200)
             {
                 self.spinner_state = self.spinner_state.wrapping_add(1);
+                debug!(spinner_state = self.spinner_state, "Spinner state updated"); // デバッグログ追加
                 dirty = true;
                 last_spinner_update = Instant::now();
             }
@@ -33,7 +35,7 @@ impl TuiApp {
                     match msg.as_str() {
                         "::status:done" => {
                             if is_streaming {
-                                self.push_log(" --- LLM Response End --- ".to_string());
+                                // Removed: self.push_log(" --- LLM Response End --- ".to_string());
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
@@ -42,7 +44,7 @@ impl TuiApp {
                         }
                         "::status:cancelled" => {
                             if is_streaming {
-                                self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
+                                // Removed: self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
@@ -51,7 +53,7 @@ impl TuiApp {
                         }
                         "::status:streaming" => {
                             if !is_streaming {
-                                self.push_log(" --- LLM Response Start --- ".to_string());
+                                // Removed: self.push_log(" --- LLM Response Start --- ".to_string());
                                 self.current_llm_response = Some(Vec::new());
                                 self.llm_parsing_buffer.clear();
                                 is_streaming = true;
@@ -63,7 +65,7 @@ impl TuiApp {
                         }
                         "::status:error" => {
                             if is_streaming {
-                                self.push_log(" --- LLM Response End (Error) --- ".to_string());
+                                // Removed: self.push_log(" --- LLM Response End (Error) --- ".to_string());
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
