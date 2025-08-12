@@ -1,13 +1,9 @@
 use crate::analysis::{RepoMap, SymbolInfo, SymbolKind};
+use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-// ---------------- Rust -----------------
-pub fn collect_symbols_rust(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
-    let root = tree.root_node();
-    visit_node(map, root, src, file, None);
-}
-
+// Helper functions (kept generic)
 fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
     node.utf8_text(src.as_bytes()).unwrap_or("")
 }
@@ -41,7 +37,41 @@ fn push_symbol(
     });
 }
 
-fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: Option<String>) {
+// Trait for language-specific symbol extraction
+pub trait LanguageSpecificExtractor: Send + Sync {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()>;
+}
+
+// ---------------- Rust Extractor -----------------
+pub struct RustExtractor;
+
+impl LanguageSpecificExtractor for RustExtractor {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()> {
+        let root = tree.root_node();
+        visit_rust_node(map, root, src, file, None);
+        Ok(())
+    }
+}
+
+fn visit_rust_node(
+    map: &mut RepoMap,
+    node: Node,
+    src: &str,
+    file: &Path,
+    ctx_impl: Option<String>,
+) {
     match node.kind() {
         "function_item" => {
             if let Some(name) = name_from(node, "name", src) {
@@ -69,16 +99,11 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
             }
         }
         "let_declaration" => {
-            // Extract variable name from pattern
             if let Some(pattern) = node.child_by_field_name("pattern") {
-                // Simple case: let x = ...;
                 if pattern.kind() == "identifier" {
                     let name = node_text(pattern, src).to_string();
                     push_symbol(map, SymbolKind::Variable, name, pattern, file, None);
                 } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
-                    // Complex patterns like let (a, b) = ...; or let Point { x, y } = ...;
-                    // For simplicity, we can try to extract identifiers from these patterns
-                    // This is a basic implementation, can be expanded for more complex cases
                     fn extract_identifiers_from_pattern(
                         map: &mut RepoMap,
                         pattern_node: Node,
@@ -90,14 +115,19 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                             push_symbol(map, SymbolKind::Variable, name, pattern_node, file, None);
                         } else {
                             let mut c = pattern_node.walk();
-                            for child in pattern_node.children(&mut c) {
-                                extract_identifiers_from_pattern(map, child, src, file);
+                            if c.goto_first_child() {
+                                loop {
+                                    extract_identifiers_from_pattern(map, c.node(), src, file);
+                                    if !c.goto_next_sibling() {
+                                        break;
+                                    }
+                                }
+                                c.goto_parent();
                             }
                         }
                     }
                     extract_identifiers_from_pattern(map, pattern, src, file);
                 }
-                // Other patterns like array_pattern etc. can be added similarly if needed
             }
         }
         "impl_item" => {
@@ -109,9 +139,7 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                 parent_name = Some(node_text(tr, src).to_string());
             }
             let impl_name = parent_name.clone().unwrap_or_else(|| "impl".to_string());
-            // Record the impl itself
             push_symbol(map, SymbolKind::Impl, impl_name.clone(), node, file, None);
-            // Walk items inside impl (deep scan to catch declaration_list/function_item)
             fn walk_impl_items(
                 map: &mut RepoMap,
                 parent_name: &Option<String>,
@@ -121,48 +149,60 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                 file: &Path,
             ) {
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "function_item" {
-                        // Distinguish method vs associated function by presence of receiver
-                        let mut has_receiver = false;
-                        if let Some(params) = child
-                            .child_by_field_name("parameters")
-                            .or_else(|| child.child_by_field_name("parameter_list"))
-                        {
-                            let mut pc = params.walk();
-                            for pchild in params.children(&mut pc) {
-                                let k = pchild.kind();
-                                if k == "self_parameter" || k == "self" {
-                                    has_receiver = true;
-                                    break;
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        if child.kind() == "function_item" {
+                            let mut has_receiver = false;
+                            if let Some(params) = child
+                                .child_by_field_name("parameters")
+                                .or_else(|| child.child_by_field_name("parameter_list"))
+                            {
+                                let mut pc = params.walk();
+                                if pc.goto_first_child() {
+                                    loop {
+                                        let pchild = pc.node();
+                                        let k = pchild.kind();
+                                        if k == "self_parameter" || k == "self" {
+                                            has_receiver = true;
+                                            break;
+                                        }
+                                        if !pc.goto_next_sibling() {
+                                            break;
+                                        }
+                                    }
+                                    pc.goto_parent();
                                 }
                             }
-                        }
-                        if let Some(name) = name_from(child, "name", src) {
-                            if has_receiver {
-                                push_symbol(
-                                    map,
-                                    SymbolKind::Method,
-                                    name,
-                                    child,
-                                    file,
-                                    parent_name.clone(),
-                                );
-                            } else {
-                                push_symbol(
-                                    map,
-                                    SymbolKind::AssocFn,
-                                    name,
-                                    child,
-                                    file,
-                                    parent_name.clone(),
-                                );
+                            if let Some(name) = name_from(child, "name", src) {
+                                if has_receiver {
+                                    push_symbol(
+                                        map,
+                                        SymbolKind::Method,
+                                        name,
+                                        child,
+                                        file,
+                                        parent_name.clone(),
+                                    );
+                                } else {
+                                    push_symbol(
+                                        map,
+                                        SymbolKind::AssocFn,
+                                        name,
+                                        child,
+                                        file,
+                                        parent_name.clone(),
+                                    );
+                                }
                             }
+                        } else {
+                            walk_impl_items(map, parent_name, _impl_name, child, src, file);
                         }
-                    } else {
-                        // Recurse deeper (e.g., declaration_list)
-                        walk_impl_items(map, parent_name, _impl_name, child, src, file);
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
                     }
+                    cursor.goto_parent();
                 }
             }
             walk_impl_items(&mut *map, &parent_name, &impl_name, node, src, file);
@@ -171,18 +211,45 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
     }
 
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        visit_node(map, child, src, file, ctx_impl.clone());
+    if cursor.goto_first_child() {
+        loop {
+            visit_rust_node(map, cursor.node(), src, file, ctx_impl.clone());
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
     }
 }
 
-// ---------------- TypeScript/JavaScript -----------------
-pub fn collect_symbols_ts(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
-    collect_ts_js(map, tree, src, file, true);
+// ---------------- TypeScript/JavaScript Extractor -----------------
+pub struct TypeScriptExtractor;
+pub struct JavaScriptExtractor;
+
+impl LanguageSpecificExtractor for TypeScriptExtractor {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()> {
+        collect_ts_js(map, tree, src, file, true);
+        Ok(())
+    }
 }
 
-pub fn collect_symbols_js(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
-    collect_ts_js(map, tree, src, file, false);
+impl LanguageSpecificExtractor for JavaScriptExtractor {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()> {
+        collect_ts_js(map, tree, src, file, false);
+        Ok(())
+    }
 }
 
 fn collect_ts_js(
@@ -194,8 +261,14 @@ fn collect_ts_js(
 ) {
     let root = tree.root_node();
     let mut cursor = root.walk();
-    for node in root.children(&mut cursor) {
-        visit_ts_js(map, node, src, file, None);
+    if cursor.goto_first_child() {
+        loop {
+            visit_ts_js(map, cursor.node(), src, file, None);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
     }
 }
 
@@ -210,8 +283,14 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
             if let Some(name) = name_from(node, "name", src) {
                 push_symbol(map, SymbolKind::Struct, name.clone(), node, file, None);
                 let mut c = node.walk();
-                for child in node.children(&mut c) {
-                    visit_ts_js(map, child, src, file, Some(name.clone()));
+                if c.goto_first_child() {
+                    loop {
+                        visit_ts_js(map, c.node(), src, file, Some(name.clone()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                    c.goto_parent();
                 }
                 return;
             }
@@ -232,34 +311,56 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
                 push_symbol(map, SymbolKind::Trait, name, node, file, None);
             }
         }
-        // Handle variable declarations (var, let, const)
         "lexical_declaration" | "variable_declaration" => {
-            // These nodes contain a list of variable declarators
             let mut c = node.walk();
-            for child in node.children(&mut c) {
-                if child.kind() == "variable_declarator"
-                    && let Some(id_node) = child.child_by_field_name("name")
-                {
-                    let name = node_text(id_node, src).to_string();
-                    push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
+            if c.goto_first_child() {
+                loop {
+                    let child = c.node();
+                    if child.kind() == "variable_declarator"
+                        && let Some(id_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(id_node, src).to_string();
+                        push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
+                    }
+                    if !c.goto_next_sibling() {
+                        break;
+                    }
                 }
+                c.goto_parent();
             }
         }
         _ => {}
     }
     let mut c = node.walk();
-    for child in node.children(&mut c) {
-        visit_ts_js(map, child, src, file, class_ctx.clone());
+    if c.goto_first_child() {
+        loop {
+            visit_ts_js(map, c.node(), src, file, class_ctx.clone());
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+        c.goto_parent();
     }
 }
 
-// ---------------- Python -----------------
-pub fn collect_symbols_py(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
-    let root = tree.root_node();
-    visit_py(map, root, src, file, None);
+// ---------------- Python Extractor -----------------
+pub struct PythonExtractor;
+
+impl LanguageSpecificExtractor for PythonExtractor {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()> {
+        let root = tree.root_node();
+        visit_py_node(map, root, src, file, None);
+        Ok(())
+    }
 }
 
-fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Option<String>) {
+fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Option<String>) {
     match node.kind() {
         "function_definition" => {
             if let Some(name) = name_from(node, "name", src) {
@@ -278,23 +379,24 @@ fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Op
             if let Some(name) = name_from(node, "name", src) {
                 push_symbol(map, SymbolKind::Struct, name.clone(), node, file, None);
                 let mut c = node.walk();
-                for child in node.children(&mut c) {
-                    visit_py(map, child, src, file, Some(name.clone()));
+                if c.goto_first_child() {
+                    loop {
+                        visit_py_node(map, c.node(), src, file, Some(name.clone()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                    c.goto_parent();
                 }
                 return;
             }
         }
-        // Handle simple assignments (var = value)
         "assignment" => {
-            // Left hand side is the target, right hand side is the value
             if let Some(lhs) = node.child_by_field_name("left") {
-                // Simple case: identifier = ...
                 if lhs.kind() == "identifier" {
                     let name = node_text(lhs, src).to_string();
                     push_symbol(map, SymbolKind::Variable, name, lhs, file, None);
                 } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
-                    // Multiple assignments like a, b = ...
-                    // Extract identifiers from the left-hand side pattern
                     fn extract_identifiers_from_py_lhs(
                         map: &mut RepoMap,
                         lhs_node: Node,
@@ -306,44 +408,73 @@ fn visit_py(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Op
                             push_symbol(map, SymbolKind::Variable, name, lhs_node, file, None);
                         } else {
                             let mut c = lhs_node.walk();
-                            for child in lhs_node.children(&mut c) {
-                                extract_identifiers_from_py_lhs(map, child, src, file);
+                            if c.goto_first_child() {
+                                loop {
+                                    extract_identifiers_from_py_lhs(map, c.node(), src, file);
+                                    if !c.goto_next_sibling() {
+                                        break;
+                                    }
+                                }
+                                c.goto_parent();
                             }
                         }
                     }
                     extract_identifiers_from_py_lhs(map, lhs, src, file);
                 }
-                // Other patterns like list/dict unpacking can be handled if needed
             }
         }
         _ => {}
     }
     let mut c = node.walk();
-    for child in node.children(&mut c) {
-        visit_py(map, child, src, file, class_ctx.clone());
+    if c.goto_first_child() {
+        loop {
+            visit_py_node(map, c.node(), src, file, class_ctx.clone());
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+        c.goto_parent();
     }
 }
 
 fn first_param_is_self_or_cls(fn_node: Node, src: &str) -> bool {
     if let Some(params) = fn_node.child_by_field_name("parameters") {
         let mut c = params.walk();
-        for child in params.children(&mut c) {
-            if child.kind() == "identifier" {
-                let name = node_text(child, src);
-                return name == "self" || name == "cls";
+        if c.goto_first_child() {
+            loop {
+                let child = c.node();
+                if child.kind() == "identifier" {
+                    let name = node_text(child, src);
+                    return name == "self" || name == "cls";
+                }
+                if !c.goto_next_sibling() {
+                    break;
+                }
             }
+            c.goto_parent();
         }
     }
     false
 }
 
-// ---------------- Go -----------------
-pub fn collect_symbols_go(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
-    let root = tree.root_node();
-    visit_go(map, root, src, file, None);
+// ---------------- Go Extractor -----------------
+pub struct GoExtractor;
+
+impl LanguageSpecificExtractor for GoExtractor {
+    fn extract_symbols(
+        &self,
+        map: &mut RepoMap,
+        tree: &tree_sitter::Tree,
+        src: &str,
+        file: &Path,
+    ) -> Result<()> {
+        let root = tree.root_node();
+        visit_go_node(map, root, src, file, None);
+        Ok(())
+    }
 }
 
-fn visit_go(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Option<String>) {
+fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Option<String>) {
     match node.kind() {
         "function_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
@@ -351,21 +482,23 @@ fn visit_go(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Opt
             }
         }
         "method_declaration" => {
-            // In Go, method declarations have a receiver, which links them to a type.
-            // The receiver acts as a context, similar to a class in other languages.
             let mut receiver_type = None;
             if let Some(receiver_node) = node.child_by_field_name("receiver") {
-                // The receiver node might contain a parameter list with a type.
-                // e.g., `(p *MyType)`
-                // We need to find the type identifier.
                 let mut cursor = receiver_node.walk();
-                for child in receiver_node.children(&mut cursor) {
-                    if child.kind() == "parameter_declaration"
-                        && let Some(type_node) = child.child_by_field_name("type")
-                    {
-                        receiver_type = Some(node_text(type_node, src).to_string());
-                        break;
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        if child.kind() == "parameter_declaration"
+                            && let Some(type_node) = child.child_by_field_name("type")
+                        {
+                            receiver_type = Some(node_text(type_node, src).to_string());
+                            break;
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
                     }
+                    cursor.goto_parent();
                 }
             }
 
@@ -374,47 +507,61 @@ fn visit_go(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Opt
             }
         }
         "type_declaration" => {
-            // This can declare multiple types. e.g., `type ( ... )`
             let mut c = node.walk();
-            for child in node.children(&mut c) {
-                if child.kind() == "type_spec"
-                    && let Some(name) = name_from(child, "name", src)
-                {
-                    // Check what kind of type it is (struct, interface, etc.)
-                    let type_node = child.child_by_field_name("type");
-                    let kind = if let Some(tn) = type_node {
-                        match tn.kind() {
-                            "struct_type" => SymbolKind::Struct,
-                            "interface_type" => SymbolKind::Trait, // Using Trait for interface
-                            _ => SymbolKind::Struct, // Default to Struct for other types
-                        }
-                    } else {
-                        SymbolKind::Struct // Default to Struct for other types
-                    };
-                    push_symbol(map, kind, name.clone(), child, file, None);
-
-                    // If it's a struct, we can look for methods defined on it,
-                    // but the method declarations are separate in Go.
-                    // The link is established via the receiver.
+            if c.goto_first_child() {
+                loop {
+                    let child = c.node();
+                    if child.kind() == "type_spec"
+                        && let Some(name) = name_from(child, "name", src)
+                    {
+                        let type_node = child.child_by_field_name("type");
+                        let kind = if let Some(tn) = type_node {
+                            match tn.kind() {
+                                "struct_type" => SymbolKind::Struct,
+                                "interface_type" => SymbolKind::Trait,
+                                _ => SymbolKind::Struct,
+                            }
+                        } else {
+                            SymbolKind::Struct
+                        };
+                        push_symbol(map, kind, name.clone(), child, file, None);
+                    }
+                    if !c.goto_next_sibling() {
+                        break;
+                    }
                 }
+                c.goto_parent();
             }
         }
         "const_declaration" | "var_declaration" => {
             let mut c = node.walk();
-            for child in node.children(&mut c) {
-                if (child.kind() == "const_spec" || child.kind() == "var_spec")
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
-                    let name = node_text(name_node, src).to_string();
-                    push_symbol(map, SymbolKind::Variable, name, name_node, file, None);
+            if c.goto_first_child() {
+                loop {
+                    let child = c.node();
+                    if (child.kind() == "const_spec" || child.kind() == "var_spec")
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(name_node, src).to_string();
+                        push_symbol(map, SymbolKind::Variable, name, name_node, file, None);
+                    }
+                    if !c.goto_next_sibling() {
+                        break;
+                    }
                 }
+                c.goto_parent();
             }
         }
         _ => {}
     }
 
     let mut c = node.walk();
-    for child in node.children(&mut c) {
-        visit_go(map, child, src, file, recv_ctx.clone());
+    if c.goto_first_child() {
+        loop {
+            visit_go_node(map, c.node(), src, file, recv_ctx.clone());
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+        c.goto_parent();
     }
 }
