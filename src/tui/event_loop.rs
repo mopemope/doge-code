@@ -4,16 +4,14 @@ use std::time::Duration;
 
 use crate::tui::state::{Status, TuiApp, save_input_history}; // TuiAppとsave_input_historyをインポート
 
-// TuiAppにイベントループのロジックを実装
 impl TuiApp {
     pub fn event_loop(&mut self) -> Result<()> {
-        // Sync history index to end if out of range (e.g., after loading)
         if self.history_index > self.input_history.len() {
             self.history_index = self.input_history.len();
         }
         let mut last_ctrl_c_at: Option<std::time::Instant> = None;
         let mut dirty = true; // initial full render
-        let mut is_streaming = false; // 新規: ストリーミング状態を追跡
+        let mut is_streaming = false; // ストリーミング状態を追跡
         loop {
             // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {
@@ -25,9 +23,7 @@ impl TuiApp {
                     match msg.as_str() {
                         "::status:done" => {
                             if is_streaming {
-                                // 変更: マーカーにスペースを追加
                                 self.push_log(" --- LLM Response End --- ".to_string());
-                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
@@ -36,9 +32,7 @@ impl TuiApp {
                         }
                         "::status:cancelled" => {
                             if is_streaming {
-                                // 変更: マーカーにスペースを追加
                                 self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
-                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
@@ -47,9 +41,7 @@ impl TuiApp {
                         }
                         "::status:streaming" => {
                             if !is_streaming {
-                                // 変更: マーカーにスペースを追加
                                 self.push_log(" --- LLM Response Start --- ".to_string());
-                                // 新規: ストリーミング開始時に current_llm_response と解析バッファを初期化
                                 self.current_llm_response = Some(Vec::new());
                                 self.llm_parsing_buffer.clear();
                                 is_streaming = true;
@@ -59,9 +51,7 @@ impl TuiApp {
                         }
                         "::status:error" => {
                             if is_streaming {
-                                // 変更: マーカーにスペースを追加
                                 self.push_log(" --- LLM Response End (Error) --- ".to_string());
-                                // 新規: ストリーム完了時に構造化レスポンスをログに追加
                                 self.finalize_and_append_llm_response();
                                 is_streaming = false;
                             }
@@ -71,7 +61,6 @@ impl TuiApp {
 
                         _ if msg.starts_with("::append:") => {
                             let payload = &msg["::append:".len()..];
-                            // 変更: LLM応答内容を構造化して蓄積
                             self.append_stream_token_structured(payload);
                             dirty = true;
                         }
@@ -109,7 +98,6 @@ impl TuiApp {
                                 continue;
                             }
                             let line = std::mem::take(&mut self.input);
-                            // record history if non-empty and not duplicate of last
                             if !line.trim().is_empty() {
                                 if self.input_history.last().map(|s| s.as_str())
                                     != Some(line.as_str())
@@ -125,13 +113,52 @@ impl TuiApp {
                             }
                             self.dispatch(&line);
                             dirty = true;
+                            // reset cursor to start of new empty input
+                            self.cursor = 0;
                         }
                         KeyCode::Backspace => {
-                            self.input.pop();
-                            if self.history_index == self.input_history.len() {
+                            if self.compl.visible {
+                                // if completion visible, backspace should close it and also backspace input
+                                let changed = self.backspace_at_cursor();
+                                self.compl.reset();
+                                if changed && self.history_index == self.input_history.len() {
+                                    self.draft = self.input.clone();
+                                }
+                            } else {
+                                let changed = self.backspace_at_cursor();
+                                if changed && self.history_index == self.input_history.len() {
+                                    self.draft = self.input.clone();
+                                }
+                                self.update_completion();
+                            }
+                            dirty = true;
+                        }
+                        KeyCode::Delete => {
+                            let changed = self.delete_at_cursor();
+                            if changed && self.history_index == self.input_history.len() {
                                 self.draft = self.input.clone();
                             }
                             self.update_completion();
+                            dirty = true;
+                        }
+                        KeyCode::Left => {
+                            if self.cursor > 0 {
+                                self.cursor -= 1;
+                                dirty = true;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if self.cursor < self.input.chars().count() {
+                                self.cursor += 1;
+                                dirty = true;
+                            }
+                        }
+                        KeyCode::Home => {
+                            self.cursor = 0;
+                            dirty = true;
+                        }
+                        KeyCode::End => {
+                            self.cursor = self.input.chars().count();
                             dirty = true;
                         }
                         KeyCode::Up => {
@@ -147,6 +174,8 @@ impl TuiApp {
                                 }
                                 self.history_index -= 1;
                                 self.input = self.input_history[self.history_index].clone();
+                                // reset cursor to end of loaded history line
+                                self.cursor = self.input.chars().count();
                                 dirty = true;
                             }
                         }
@@ -167,23 +196,22 @@ impl TuiApp {
                                 } else {
                                     self.input = self.input_history[self.history_index].clone();
                                 }
+                                self.cursor = self.input.chars().count();
                                 dirty = true;
                             }
                         }
                         KeyCode::Char(c) => {
-                            // If completion popup is visible and space is pressed, close the popup and suppress reopening once.
                             if c == ' ' && self.compl.visible {
                                 self.compl.reset();
                                 self.compl.suppress_once = true;
-                                self.input.push(c);
+                                self.insert_at_cursor(&c.to_string());
                                 if self.history_index == self.input_history.len() {
                                     self.draft = self.input.clone();
                                 }
                                 dirty = true;
                                 continue;
                             }
-                            self.input.push(c);
-                            // If user typed a new '@', enable completion again regardless of previous suppression.
+                            self.insert_at_cursor(&c.to_string());
                             if c == '@' {
                                 self.compl.suppress_once = false;
                             }
