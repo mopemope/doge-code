@@ -10,7 +10,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "fs_write".to_string(),
-            description: "Writes or overwrites text content to a specified file from the absolute path. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `replace_text_block` or `apply_patch` are generally safer and recommended.".to_string(),
+            description: "Writes or overwrites text content to a specified file from the absolute path. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file (e.g., resetting a config file to its default state, updating a generated code file). For partial modifications to existing files, `edit` or `apply_patch` are generally safer and recommended.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

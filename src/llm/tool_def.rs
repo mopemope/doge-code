@@ -10,7 +10,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::symbol::tool_def(),
         tools::execute::tool_def(),
         tools::get_file_sha256::tool_def(),
-        tools::replace_text_block::tool_def(),
+        tools::edit::tool_def(),
         tools::create_patch::tool_def(),
         tools::apply_patch::tool_def(),
         tools::find_file::tool_def(),

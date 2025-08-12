@@ -354,7 +354,7 @@ The project is a Rust application structured as a Cargo workspace with multiple 
 
 6.  **`tools/`**
     - **`tools/` directory**: Implements the tools available for the LLM to use.
-        - **`apply_patch.rs`**, **`create_patch.rs`**, **`replace_text_block.rs`**: Utilities for modifying file content.
+        - **`apply_patch.rs`**, **`create_patch.rs`**, **`edit.rs`**: Utilities for modifying file content.
         - **`common.rs`**: Common utilities for tools, like path normalization and project root checks.
         - **`execute.rs`**: Executes bash commands.
         - **`get_file_sha256.rs`**: Calculates SHA256 hash of a file.
