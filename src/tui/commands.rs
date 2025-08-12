@@ -115,6 +115,7 @@ impl TuiExecutor {
                 "Starting background repomap generation for project at {:?}",
                 project_root
             );
+            let start_time = std::time::Instant::now();
             let mut analyzer = match Analyzer::new(&project_root) {
                 Ok(analyzer) => analyzer,
                 Err(e) => {
@@ -125,10 +126,12 @@ impl TuiExecutor {
 
             match analyzer.build().await {
                 Ok(map) => {
+                    let duration = start_time.elapsed();
                     let symbol_count = map.symbols.len();
                     *repomap_clone.write().await = Some(map);
-                    info!(
-                        "Background repomap generation completed with {} symbols",
+                    tracing::debug!(
+                        "Background repomap generation completed in {:?} with {} symbols",
+                        duration,
                         symbol_count
                     );
                 }
