@@ -90,20 +90,27 @@ pub fn build_render_plan(
     w: u16,
     h: u16,
     model: Option<&str>,
+    spinner_state: usize, // Add spinner_state parameter
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
-        Status::Idle => "Idle",
-        Status::Streaming => "Streaming",
-        Status::Cancelled => "Cancelled",
-        Status::Done => "Done",
-        Status::Error => "Error",
+        Status::Idle => {
+            // Define spinner characters
+            let spinner_chars = ['/', '-', '\\', '|'];
+            // Get the current spinner character based on spinner_state
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!("Thinking... {}", spinner_char)
+        }
+        Status::Streaming => "Streaming".to_string(),
+        Status::Cancelled => "Cancelled".to_string(),
+        Status::Done => "Done".to_string(),
+        Status::Error => "Error".to_string(),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
-    let model_suffix = model.map(|m| format!(" — model:{m}")).unwrap_or_default();
-    let title_full = format!("{title}{model_suffix} — [{status_str}]  {cwd}");
+    let model_suffix = model.map(|m| format!(" - model:{m}")).unwrap_or_default();
+    let title_full = format!("{title}{model_suffix} - [{status_str}]  {cwd}");
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
     let header_lines = vec![title_trim, sep];
@@ -217,6 +224,8 @@ pub struct TuiApp {
     pub(crate) llm_parsing_buffer: String,
     // cursor position within input in number of chars (not bytes)
     pub cursor: usize,
+    // spinner state for "Thinking..." display
+    pub spinner_state: usize,
 }
 
 impl TuiApp {
@@ -249,6 +258,7 @@ impl TuiApp {
             current_llm_response: None,
             llm_parsing_buffer: String::new(),
             cursor: 0,
+            spinner_state: 0, // Initialize spinner state
         };
         app.at_index.scan();
         app
@@ -435,9 +445,9 @@ impl TuiApp {
 fn history_store_path() -> std::path::PathBuf {
     let base = crate::session::SessionStore::new_default()
         .map(|s| s.root)
-        .unwrap_or_else(|_| std::path::PathBuf::from(r"./.doge/sessions"));
+        .unwrap_or_else(|_| std::path::PathBuf::from("./.doge/sessions"));
     std::fs::create_dir_all(&base).ok();
-    base.join(r"input_history.json")
+    base.join("input_history.json")
 }
 
 fn load_input_history() -> (Vec<String>, usize) {

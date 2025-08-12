@@ -22,6 +22,7 @@ pub struct Theme {
     pub completion_selected_bg: Color,
     pub completion_selected_fg: Color,
     pub completion_item_fg: Color,
+    pub spinner_fg: Color, // new: color for the spinner
 }
 
 impl Theme {
@@ -45,6 +46,7 @@ impl Theme {
             completion_selected_bg: Color::DarkGrey,
             completion_selected_fg: Color::White,
             completion_item_fg: Color::Grey,
+            spinner_fg: Color::Cyan, // new: spinner color for dark theme
         }
     }
 
@@ -68,6 +70,7 @@ impl Theme {
             completion_selected_bg: Color::Grey,
             completion_selected_fg: Color::Black,
             completion_item_fg: Color::DarkGrey,
+            spinner_fg: Color::DarkBlue, // new: spinner color for light theme
         }
     }
 }
