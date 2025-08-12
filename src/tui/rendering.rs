@@ -5,20 +5,21 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
-use unicode_width::UnicodeWidthStr;
 
 use crate::tui::state::{TuiApp, build_render_plan}; // TuiAppをインポート
 
-// TuiAppに描画のロジックを実装
 impl TuiApp {
     pub fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
         let mut stdout = io::stdout();
         let (w, h) = terminal::size()?;
+        // compute cursor char index for build_render_plan
+        let cursor_idx = self.cursor;
         let plan = build_render_plan(
             &self.title,
             self.status,
             &self.log,
             &self.input,
+            cursor_idx,
             w,
             h,
             model,
@@ -59,30 +60,20 @@ impl TuiApp {
             )?;
             let cmp = line.as_str();
 
-            // 新規: コードブロック識別子のチェック
             if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
-                // コードブロック開始識別子: 特別な描画はしないが、フラグを立てる
                 in_code_block = true;
-                // この行自体は描画しないか、非常に薄い色で描画するなどして非表示に近づける
-                // ここでは描画をスキップする
                 continue;
             } else if cmp == " [CodeBlockEnd]" {
-                // コードブロック終了識別子: フラグを下ろす
                 in_code_block = false;
-                // この行自体は描画しない
                 continue;
             }
 
-            // 新規: コードブロック内の行に異なるスタイルを適用
             if in_code_block {
-                // コードブロック行: テーマで定義された背景色を使用
                 queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
-                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?; // 文字色は維持
+                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
-            }
-            // 既存の描画ロジック: 順番を変更して、コードブロック判定を最優先に
-            else if cmp.starts_with("> ") {
+            } else if cmp.starts_with("> ") {
                 queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
@@ -109,7 +100,6 @@ impl TuiApp {
                 write!(stdout, "{line}")?;
                 queue!(stdout, ResetColor)?;
             } else {
-                // LLM response lines: darker grey/black background with white foreground for contrast
                 queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
                 queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
                 write!(stdout, "{line}")?;
@@ -168,8 +158,8 @@ impl TuiApp {
             }
         }
 
-        // Position terminal cursor at visual end of input line using unicode width
-        let col = UnicodeWidthStr::width(plan.input_line.as_str()) as u16;
+        // Position terminal cursor at visual column provided by plan
+        let col = plan.input_cursor_col;
         queue!(stdout, cursor::MoveTo(col, input_row), cursor::Show)?;
 
         stdout.flush()?;

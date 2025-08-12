@@ -10,7 +10,6 @@ use unicode_width::UnicodeWidthChar;
 use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::theme::Theme;
 
-// 新規: LLMレスポンスの構造化セグメント定義 (後で別ファイルに移動する予定)
 #[derive(Debug, Clone)]
 pub enum LlmResponseSegment {
     Text { content: String },
@@ -31,6 +30,8 @@ pub struct RenderPlan {
     pub header_lines: Vec<String>,
     pub log_lines: Vec<String>,
     pub input_line: String,
+    // visual column within input_line where terminal cursor should be placed
+    pub input_cursor_col: u16,
 }
 
 pub fn truncate_display(s: &str, max: usize) -> String {
@@ -54,7 +55,6 @@ pub fn truncate_display(s: &str, max: usize) -> String {
     out
 }
 
-// Soft-wrap a single logical line into multiple physical lines within max width, preserving Unicode display width.
 pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
     if max == 0 {
         return vec![String::new()];
@@ -80,11 +80,13 @@ pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
     lines
 }
 
+// Build a render plan. cursor_char_idx is the character index within `input` (not counting the "> " prompt)
 pub fn build_render_plan(
     title: &str,
     status: Status,
     log: &[String],
     input: &str,
+    cursor_char_idx: usize,
     w: u16,
     h: u16,
     model: Option<&str>,
@@ -104,7 +106,6 @@ pub fn build_render_plan(
     let title_full = format!("{title}{model_suffix} — [{status_str}]  {cwd}");
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
-    // Header lines are plain text without embedded CR/LF; positioning is handled by the view layer.
     let header_lines = vec![title_trim, sep];
 
     // Build wrapped physical lines from logs (from end to start to keep last rows)
@@ -124,21 +125,71 @@ pub fn build_render_plan(
         }
     }
     phys_rev.reverse();
-
     let log_lines = phys_rev;
 
-    let input_prompt = if input.is_empty() {
-        "> ".to_string()
-    } else {
-        format!("> {input}")
+    // Prepare prompt+input as a sequence of chars with widths
+    let prompt = {
+        let mut s = String::from("> ");
+        s.push_str(input);
+        s
     };
-    let input_trim = truncate_display(&input_prompt, w_usize);
-    let input_line = input_trim;
+    let chars: Vec<char> = prompt.chars().collect();
+    let widths: Vec<usize> = chars.iter().map(|ch| ch.width().unwrap_or(0)).collect();
+    // Ensure cursor position refers into prompt (offset by 2 for "> ")
+    let mut cursor_in_prompt = 2usize.saturating_add(cursor_char_idx);
+    if cursor_in_prompt > chars.len() {
+        cursor_in_prompt = chars.len();
+    }
+
+    // If total width fits, show whole prompt
+    let total_width: usize = widths.iter().sum();
+    if total_width <= w_usize {
+        // entire prompt visible
+        let input_line = prompt.clone();
+        // cursor col is width of chars[0..cursor_in_prompt]
+        let col = widths[..cursor_in_prompt].iter().sum::<usize>() as u16;
+        return RenderPlan {
+            header_lines,
+            log_lines,
+            input_line,
+            input_cursor_col: col,
+        };
+    }
+
+    // Otherwise, build a window around the cursor: expand leftwards then rightwards greedily
+    // Start from cursor (or last char if cursor at end)
+    if cursor_in_prompt >= chars.len() && !chars.is_empty() {
+        cursor_in_prompt = chars.len().saturating_sub(1);
+    }
+    // Start window at cursor
+    let mut start = cursor_in_prompt;
+    let mut sum = widths.get(cursor_in_prompt).cloned().unwrap_or(0);
+    // expand left while possible
+    while start > 0 && sum + widths[start - 1] <= w_usize {
+        start -= 1;
+        sum += widths[start];
+    }
+    // expand right while possible
+    let mut end = start + 1;
+    while end < chars.len() && sum + widths[end] <= w_usize {
+        sum += widths[end];
+        end += 1;
+    }
+
+    // Build visible string
+    let input_line: String = chars[start..end].iter().collect();
+    // compute cursor col as width of chars[start..cursor_in_prompt]
+    let col = if cursor_in_prompt >= start {
+        widths[start..cursor_in_prompt].iter().sum::<usize>() as u16
+    } else {
+        0u16
+    };
 
     RenderPlan {
         header_lines,
         log_lines,
         input_line,
+        input_cursor_col: col,
     }
 }
 
@@ -160,25 +211,24 @@ pub struct TuiApp {
     pub at_index: AtFileIndex,
     pub compl: CompletionState,
     // theme
-    pub theme: Theme, // 新規追加
-    // 新規: 現在進行中のLLMレスポンスの構造化されたセグメント
+    pub theme: Theme,
+    // llm response
     pub(crate) current_llm_response: Option<Vec<LlmResponseSegment>>,
-    // 新規: LLMレスポンス解析用バッファ
     pub(crate) llm_parsing_buffer: String,
+    // cursor position within input in number of chars (not bytes)
+    pub cursor: usize,
 }
 
 impl TuiApp {
     pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Self {
-        // 引数を追加
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
         let at_index = AtFileIndex::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         );
-        // テーマの選択ロジックを追加
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
-            _ => Theme::dark(), // デフォルトはdark
+            _ => Theme::dark(),
         };
         let app = Self {
             title: title.into(),
@@ -195,11 +245,11 @@ impl TuiApp {
             draft: String::new(),
             at_index,
             compl: Default::default(),
-            theme,                             // 新規追加
-            current_llm_response: None,        // 新規: 初期化
-            llm_parsing_buffer: String::new(), // 新規: 初期化
+            theme,
+            current_llm_response: None,
+            llm_parsing_buffer: String::new(),
+            cursor: 0,
         };
-        // initial scan (blocking once at startup)
         app.at_index.scan();
         app
     }
@@ -214,7 +264,6 @@ impl TuiApp {
     }
 
     pub fn current_at_token(&self) -> Option<String> {
-        // capture last segment starting with '@' up to whitespace or end
         let s = self.input.as_str();
         let mut start = None;
         for (i, ch) in s.char_indices() {
@@ -235,24 +284,30 @@ impl TuiApp {
     }
 
     pub fn update_completion(&mut self) {
-        // If we just applied/closed completion, suppress reopening once.
         if self.compl.suppress_once {
             self.compl.suppress_once = false;
             self.compl.visible = false;
             return;
         }
         // Only trigger completion when the character immediately before the cursor is '@'.
-        let s = self.input.as_str();
-        let mut rev = s.chars().rev();
-        let prev = rev.next();
-        let prev2 = rev.next();
-        let prev_char_is_at = prev == Some('@');
+        let prev_char_is_at = match self.cursor {
+            0 => false,
+            _ => self.input.chars().nth(self.cursor - 1) == Some('@'),
+        };
         if !prev_char_is_at {
             self.compl.reset();
             return;
         }
-        // If this '@' starts a new token (at BOL or preceded by whitespace), start from full set by forcing query="@".
-        if prev2.is_none() || prev2.map(|c| c.is_whitespace()).unwrap_or(false) {
+        // If this '@' starts a new token (BOL or preceded by whitespace)
+        let prev2_is_space = if self.cursor < 2 {
+            true
+        } else {
+            match self.input.chars().nth(self.cursor.saturating_sub(2)) {
+                Some(c) => c.is_whitespace(),
+                None => true,
+            }
+        };
+        if prev2_is_space {
             let tok = "@".to_string();
             self.compl.visible = true;
             self.compl.query = tok.clone();
@@ -260,7 +315,6 @@ impl TuiApp {
             self.compl.selected = 0;
             return;
         }
-        // Otherwise, build from current token content after '@'.
         if let Some(tok) = self.current_at_token()
             && tok.starts_with('@')
         {
@@ -298,15 +352,19 @@ impl TuiApp {
             return;
         }
         if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
-            // replace current token in input with @rel
             if let Some(tok) = self.current_at_token()
                 && let Some(pos) = self.input.rfind(&tok)
             {
+                // compute char index of pos
+                let prefix = &self.input[..pos];
+                let start_char_idx = prefix.chars().count();
                 let mut ins = format!("@{}", item.rel);
                 if ins.contains(' ') {
                     ins = format!("@\"{}\"", item.rel);
                 }
                 self.input.replace_range(pos..pos + tok.len(), &ins);
+                // update cursor to after inserted text
+                self.cursor = start_char_idx + ins.chars().count();
             }
             if let Ok(mut r) = self.at_index.recent.write() {
                 r.touch(&item.rel);
@@ -314,6 +372,47 @@ impl TuiApp {
         }
         self.compl.reset();
         self.compl.suppress_once = true;
+    }
+
+    // Insert a string at current cursor position
+    pub(crate) fn insert_at_cursor(&mut self, s: &str) {
+        let byte_pos = self.char_to_byte_idx(self.cursor);
+        self.input.insert_str(byte_pos, s);
+        self.cursor += s.chars().count();
+    }
+
+    // Remove the character before the cursor (backspace). Returns whether anything changed.
+    pub(crate) fn backspace_at_cursor(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let end = self.char_to_byte_idx(self.cursor);
+        let start = self.char_to_byte_idx(self.cursor - 1);
+        self.input.replace_range(start..end, "");
+        self.cursor -= 1;
+        true
+    }
+
+    // Delete the character at the cursor (like Delete key). Returns whether anything changed.
+    pub(crate) fn delete_at_cursor(&mut self) -> bool {
+        let char_count = self.input.chars().count();
+        if self.cursor >= char_count {
+            return false;
+        }
+        let start = self.char_to_byte_idx(self.cursor);
+        let end = self.char_to_byte_idx(self.cursor + 1);
+        self.input.replace_range(start..end, "");
+        true
+    }
+
+    pub(crate) fn char_to_byte_idx(&self, char_idx: usize) -> usize {
+        if char_idx == 0 {
+            return 0;
+        }
+        match self.input.char_indices().nth(char_idx) {
+            Some((byte_idx, _)) => byte_idx,
+            None => self.input.len(),
+        }
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -334,7 +433,6 @@ impl TuiApp {
 }
 
 fn history_store_path() -> std::path::PathBuf {
-    // Reuse session store base dir but keep a flat file for input history
     let base = crate::session::SessionStore::new_default()
         .map(|s| s.root)
         .unwrap_or_else(|_| std::path::PathBuf::from(r"./.doge/sessions"));
@@ -346,7 +444,6 @@ fn load_input_history() -> (Vec<String>, usize) {
     let path = history_store_path();
     let s = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
     let mut v: Vec<String> = serde_json::from_str(&s).unwrap_or_default();
-    // cap size
     if v.len() > 1000 {
         let start = v.len() - 1000;
         v = v[start..].to_vec();
@@ -357,7 +454,6 @@ fn load_input_history() -> (Vec<String>, usize) {
 
 pub(crate) fn save_input_history(hist: &[String]) {
     let path = history_store_path();
-    // keep last 1000 entries
     let slice: Vec<&String> = hist.iter().rev().take(1000).collect();
     let out: Vec<String> = slice.into_iter().rev().cloned().collect();
     let _ = std::fs::write(
