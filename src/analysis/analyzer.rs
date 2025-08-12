@@ -1,6 +1,7 @@
 use crate::analysis::RepoMap;
 use crate::analysis::collector::{
-    collect_symbols_js, collect_symbols_py, collect_symbols_rust, collect_symbols_ts,
+    collect_symbols_go, collect_symbols_js, collect_symbols_py, collect_symbols_rust,
+    collect_symbols_ts,
 };
 use anyhow::{Context, Result};
 use num_cpus;
@@ -45,6 +46,11 @@ fn language_configs() -> &'static [LanguageConfig] {
                 language: tree_sitter_python::LANGUAGE.into(),
                 collector: collect_symbols_py,
                 extensions: &["py"],
+            },
+            LanguageConfig {
+                language: tree_sitter_go::LANGUAGE.into(),
+                collector: collect_symbols_go,
+                extensions: &["go"],
             },
         ]
     })

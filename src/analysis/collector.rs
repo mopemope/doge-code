@@ -336,3 +336,85 @@ fn first_param_is_self_or_cls(fn_node: Node, src: &str) -> bool {
     }
     false
 }
+
+// ---------------- Go -----------------
+pub fn collect_symbols_go(map: &mut RepoMap, tree: &tree_sitter::Tree, src: &str, file: &Path) {
+    let root = tree.root_node();
+    visit_go(map, root, src, file, None);
+}
+
+fn visit_go(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Option<String>) {
+    match node.kind() {
+        "function_declaration" => {
+            if let Some(name) = name_from(node, "name", src) {
+                push_symbol(map, SymbolKind::Function, name, node, file, None);
+            }
+        }
+        "method_declaration" => {
+            // In Go, method declarations have a receiver, which links them to a type.
+            // The receiver acts as a context, similar to a class in other languages.
+            let mut receiver_type = None;
+            if let Some(receiver_node) = node.child_by_field_name("receiver") {
+                // The receiver node might contain a parameter list with a type.
+                // e.g., `(p *MyType)`
+                // We need to find the type identifier.
+                let mut cursor = receiver_node.walk();
+                for child in receiver_node.children(&mut cursor) {
+                    if child.kind() == "parameter_declaration"
+                        && let Some(type_node) = child.child_by_field_name("type")
+                    {
+                        receiver_type = Some(node_text(type_node, src).to_string());
+                        break;
+                    }
+                }
+            }
+
+            if let Some(name) = name_from(node, "name", src) {
+                push_symbol(map, SymbolKind::Method, name, node, file, receiver_type);
+            }
+        }
+        "type_declaration" => {
+            // This can declare multiple types. e.g., `type ( ... )`
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                if child.kind() == "type_spec"
+                    && let Some(name) = name_from(child, "name", src)
+                {
+                    // Check what kind of type it is (struct, interface, etc.)
+                    let type_node = child.child_by_field_name("type");
+                    let kind = if let Some(tn) = type_node {
+                        match tn.kind() {
+                            "struct_type" => SymbolKind::Struct,
+                            "interface_type" => SymbolKind::Trait, // Using Trait for interface
+                            _ => SymbolKind::Struct, // Default to Struct for other types
+                        }
+                    } else {
+                        SymbolKind::Struct // Default to Struct for other types
+                    };
+                    push_symbol(map, kind, name.clone(), child, file, None);
+
+                    // If it's a struct, we can look for methods defined on it,
+                    // but the method declarations are separate in Go.
+                    // The link is established via the receiver.
+                }
+            }
+        }
+        "const_declaration" | "var_declaration" => {
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                if (child.kind() == "const_spec" || child.kind() == "var_spec")
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let name = node_text(name_node, src).to_string();
+                    push_symbol(map, SymbolKind::Variable, name, name_node, file, None);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        visit_go(map, child, src, file, recv_ctx.clone());
+    }
+}
