@@ -112,11 +112,10 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
             // Record the impl itself
             push_symbol(map, SymbolKind::Impl, impl_name.clone(), node, file, None);
             // Walk items inside impl (deep scan to catch declaration_list/function_item)
-            #[allow(clippy::only_used_in_recursion)]
             fn walk_impl_items(
                 map: &mut RepoMap,
                 parent_name: &Option<String>,
-                #[allow(clippy::only_used_in_recursion)] impl_name: &str,
+                _impl_name: &str,
                 node: Node,
                 src: &str,
                 file: &Path,
@@ -162,7 +161,7 @@ fn visit_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, ctx_impl: O
                         }
                     } else {
                         // Recurse deeper (e.g., declaration_list)
-                        walk_impl_items(map, parent_name, impl_name, child, src, file);
+                        walk_impl_items(map, parent_name, _impl_name, child, src, file);
                     }
                 }
             }

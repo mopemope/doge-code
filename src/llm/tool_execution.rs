@@ -339,9 +339,9 @@ pub async fn dispatch_tool_call(
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
-        "replace_text_block" => {
+        "edit" => {
             let params = serde_json::from_value(args_val)?;
-            match crate::tools::replace_text_block::replace_text_block(params).await {
+            match crate::tools::edit::edit(params).await {
                 Ok(res) => Ok(serde_json::to_value(res)?),
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }

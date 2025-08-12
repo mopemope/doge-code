@@ -11,7 +11,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "get_file_sha256".to_string(),
-            description: "Calculates the SHA256 hash of a file. This is useful for verifying file integrity or for providing the `file_hash_sha256` parameter to other tools like `apply_patch` or `replace_text_block` for safe file modifications.".to_string(),
+            description: "Calculates the SHA256 hash of a file. This is useful for verifying file integrity or for providing the `file_hash_sha256` parameter to other tools like `apply_patch` or `edit` for safe file modifications.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

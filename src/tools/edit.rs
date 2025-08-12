@@ -10,8 +10,8 @@ pub fn tool_def() -> ToolDef {
     ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
-            name: "replace_text_block".to_string(),
-            description: "Replaces a single, unique block of text within a file with a new block of text. It ensures file integrity by verifying the SHA256 hash of the file content, preventing accidental overwrites if the file has changed since it was last read. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
+            name: "edit".to_string(),
+            description: "Edit a single, unique block of text within a file with a new block of text. It ensures file integrity by verifying the SHA256 hash of the file content, preventing accidental overwrites if the file has changed since it was last read. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -28,7 +28,7 @@ pub fn tool_def() -> ToolDef {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ReplaceTextBlockParams {
+pub struct EditParams {
     pub file_path: String,
     pub target_block: String,
     pub new_block: String,
@@ -37,13 +37,13 @@ pub struct ReplaceTextBlockParams {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ReplaceTextBlockResult {
+pub struct EditResult {
     pub success: bool,
     pub message: String,
     pub diff: Option<String>,
 }
 
-pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<ReplaceTextBlockResult> {
+pub async fn edit(params: EditParams) -> Result<EditResult> {
     let file_path = &params.file_path;
     let target_block = &params.target_block;
     let new_block = &params.new_block;
@@ -68,7 +68,7 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
         let actual_hash = format!("{:x}", hasher.finalize());
 
         if actual_hash != expected {
-            return Ok(ReplaceTextBlockResult {
+            return Ok(EditResult {
                 success: false,
                 message: "File hash mismatch. The file content has changed since it was last read."
                     .to_string(),
@@ -80,14 +80,14 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
     // 3. Find the target block
     let occurrences = original_content.matches(target_block).count();
     if occurrences == 0 {
-        return Ok(ReplaceTextBlockResult {
+        return Ok(EditResult {
             success: false,
             message: "Target block not found in the file.".to_string(),
             diff: None,
         });
     }
     if occurrences > 1 {
-        return Ok(ReplaceTextBlockResult {
+        return Ok(EditResult {
             success: false,
             message: "Target block is not unique. Found multiple occurrences.".to_string(),
             diff: None,
@@ -102,7 +102,7 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
     let diff_text = diff.to_string();
 
     if dry_run {
-        return Ok(ReplaceTextBlockResult {
+        return Ok(EditResult {
             success: true,
             message: "Dry run successful. No changes were made.".to_string(),
             diff: Some(diff_text),
@@ -114,7 +114,7 @@ pub async fn replace_text_block(params: ReplaceTextBlockParams) -> Result<Replac
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
-    Ok(ReplaceTextBlockResult {
+    Ok(EditResult {
         success: true,
         message: "File updated successfully.".to_string(),
         diff: Some(diff_text),
@@ -134,13 +134,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_replace_text_block_success() {
+    async fn test_edit_success() {
         let original_content = "Hello, world!\nThis is a test.";
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{original_content}").unwrap();
         let file_path = file.path().to_str().unwrap().to_string();
 
-        let params = ReplaceTextBlockParams {
+        let params = EditParams {
             file_path: file_path.clone(),
             target_block: "world".to_string(),
             new_block: "Rust".to_string(),
@@ -148,7 +148,7 @@ mod tests {
             dry_run: Some(false),
         };
 
-        let result = replace_text_block(params).await.unwrap();
+        let result = edit(params).await.unwrap();
         assert!(result.success);
         assert_eq!(result.message, "File updated successfully.");
 
@@ -157,13 +157,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_replace_text_block_dry_run() {
+    async fn test_edit_dry_run() {
         let original_content = "Dry run test.";
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{original_content}").unwrap();
         let file_path = file.path().to_str().unwrap().to_string();
 
-        let params = ReplaceTextBlockParams {
+        let params = EditParams {
             file_path: file_path.clone(),
             target_block: "run".to_string(),
             new_block: "RUN".to_string(),
@@ -171,7 +171,7 @@ mod tests {
             dry_run: Some(true),
         };
 
-        let result = replace_text_block(params).await.unwrap();
+        let result = edit(params).await.unwrap();
         assert!(result.success);
         assert!(result.diff.is_some());
 
@@ -180,13 +180,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_replace_text_block_hash_mismatch() {
+    async fn test_edit_hash_mismatch() {
         let original_content = "Hash mismatch test.";
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{original_content}").unwrap();
         let file_path = file.path().to_str().unwrap().to_string();
 
-        let params = ReplaceTextBlockParams {
+        let params = EditParams {
             file_path: file_path.clone(),
             target_block: "mismatch".to_string(),
             new_block: "MISMATCH".to_string(),
@@ -194,19 +194,19 @@ mod tests {
             dry_run: Some(false),
         };
 
-        let result = replace_text_block(params).await.unwrap();
+        let result = edit(params).await.unwrap();
         assert!(!result.success);
         assert!(result.message.contains("File hash mismatch"));
     }
 
     #[tokio::test]
-    async fn test_replace_text_block_no_hash_provided() {
+    async fn test_edit_no_hash_provided() {
         let original_content = "No hash provided test.";
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{original_content}").unwrap();
         let file_path = file.path().to_str().unwrap().to_string();
 
-        let params = ReplaceTextBlockParams {
+        let params = EditParams {
             file_path: file_path.clone(),
             target_block: "provided".to_string(),
             new_block: "PROVIDED".to_string(),
@@ -214,7 +214,7 @@ mod tests {
             dry_run: Some(false),
         };
 
-        let result = replace_text_block(params).await.unwrap();
+        let result = edit(params).await.unwrap();
         assert!(result.success);
 
         let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
