@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
+use tracing::debug; // tracingをインポート
 
 use crate::tui::state::{TuiApp, build_render_plan}; // import TuiApp
 
@@ -33,8 +34,10 @@ impl TuiApp {
             terminal::Clear(ClearType::CurrentLine)
         )?;
         if let Some(first) = plan.header_lines.first() {
+            debug!(header_first_line = first, "Rendering header first line"); // デバッグログ追加
             // Check if the status is "Thinking..." and apply spinner color
-            if first.contains("Thinking...") {
+            if first.contains("Thinking") {
+                // "Thinking..." から "Thinking" に変更
                 // Find the position of "Thinking..." and the spinner character
                 if let Some(thinking_pos) = first.find("Thinking...") {
                     let before_thinking = &first[..thinking_pos];
@@ -49,7 +52,9 @@ impl TuiApp {
                     write!(stdout, "Thinking...")?;
 
                     // Write the spinner character in spinner_fg color
-                    if let Some(spinner_char) = thinking_and_spinner.chars().last() {
+                    // Get the first character after "Thinking... "
+                    let spinner_part = &thinking_and_spinner["Thinking...".len()..];
+                    if let Some(spinner_char) = spinner_part.chars().next() {
                         queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
                         write!(stdout, "{}", spinner_char)?;
                     }

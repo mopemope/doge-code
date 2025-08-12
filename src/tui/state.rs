@@ -5,6 +5,7 @@ use crossterm::{
 };
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
+use tracing::debug; // tracingをインポート
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::completion::{AtFileIndex, CompletionState};
@@ -94,14 +95,16 @@ pub fn build_render_plan(
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
-        Status::Idle => {
+        Status::Idle => "Idle".to_string(), // Status::Idle の場合は "Idle" を表示
+        Status::Streaming => {
             // Define spinner characters
             let spinner_chars = ['/', '-', '\\', '|'];
             // Get the current spinner character based on spinner_state
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Thinking... {}", spinner_char)
+            let status_str = format!("Thinking... {}", spinner_char);
+            debug!(status_str = %status_str, "Generated status string for Streaming"); // Added debug log
+            status_str
         }
-        Status::Streaming => "Streaming".to_string(),
         Status::Cancelled => "Cancelled".to_string(),
         Status::Done => "Done".to_string(),
         Status::Error => "Error".to_string(),
