@@ -1,4 +1,4 @@
-// Copyright (c) 2024 モペモペ
+// Copyright (c) 2024 Mopemope
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 // pub mod app;
@@ -13,4 +13,4 @@ pub mod theme;
 pub mod view;
 
 // pub use app::TuiApp;
-// pub use view::TuiView; // TuiViewは削除
+// pub use view::TuiView; // TuiView removed

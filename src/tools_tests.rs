@@ -48,11 +48,10 @@ mod tests {
 
         fs::write(root.join(file_path), old_content).unwrap();
         let tools = FsTools::new(root);
-        // テスト内でprintln!を使用すると、テスト出力に差分が表示されます。
-        // ここでは、差分が表示されることを確認するために、
-        // テストの実行時に標準出力に差分が表示されることを観察します。
-        // 実際のテストでは、差分の内容を検証することは難しいため、
-        // このテストは主にコンパイルエラーがないことを確認します。
+        // Using println! in tests shows the diff in test output.
+        // Here we observe that diff is printed during test execution.
+        // In real tests, verifying diff content is difficult, so this test
+        // primarily ensures there are no compilation errors.
         tools.fs_write(file_path, new_content).unwrap();
     }
 }

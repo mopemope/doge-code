@@ -1,26 +1,26 @@
-use crate::tui::state::{LlmResponseSegment, TuiApp}; // TuiAppとLlmResponseSegmentをインポート
+use crate::tui::state::{LlmResponseSegment, TuiApp}; // import TuiApp and LlmResponseSegment
 use regex::Regex;
 
-// TuiAppにLLMレスポンス処理のロジックを実装
+// Implement LLM response handling logic for TuiApp
 impl TuiApp {
-    // 新規: LLMストリーミングトークンを構造化して処理するメソッド (簡易版)
-    // トークンはバッファに蓄積され、ストリーム完了時に一括解析される。
+    // New: structured handling for LLM streaming tokens (simple version)
+    // Tokens are accumulated in a buffer and parsed in bulk when the stream completes.
     // #[allow(dead_code)]
     pub fn append_stream_token_structured(&mut self, s: &str) {
-        // 受信したトークンを解析バッファに追加
+        // Append received token to the parsing buffer
         self.llm_parsing_buffer.push_str(s);
     }
 
-    // 既存のメソッド（左マージン付き）は一時的に残すが、新しい実装で置き換える
+    // Keep existing method (with left margin) temporarily; replaced by the new implementation
     #[allow(dead_code)]
     pub fn append_stream_token(&mut self, s: &str) {
-        // 左マージン付きでストリーミングトークンを追加
-        self.append_stream_token_with_margin(s, 2); // 2文字分のマージン
+        // Append streaming token with left margin
+        self.append_stream_token_with_margin(s, 2); // 2-space margin
     }
 
-    // 新規: 左マージン付きでストリーミングトークンを追加する内部メソッド
+    // Internal helper to append tokens with a left margin
     fn append_stream_token_with_margin(&mut self, s: &str, margin: usize) {
-        let margin_str = " ".repeat(margin); // マージン用のスペース文字列を作成
+        let margin_str = " ".repeat(margin); // create a space string for margin
 
         // Normalize incoming token: split by '\n' and append as multiple logical lines if needed.
         let parts: Vec<&str> = s.split('\n').collect();
@@ -28,38 +28,36 @@ impl TuiApp {
             return;
         }
 
-        // 最初のパートは、既存の最後の行に追加
+        // The first part is appended to the existing last line
         if let Some(last) = self.log.last_mut() {
             last.push_str(parts[0]);
         }
 
-        // 2番目以降のパートは新しい行として追加（マージン付き）
+        // Parts from the second onward are added as new lines (with margin)
         for seg in parts.iter().skip(1) {
-            // 空行でない場合、または空行でもマージンを適用したい場合はこの条件を調整
-            // ここでは空行もマージン付きで追加する
+            // Adjust condition if you want to skip empty lines; here we keep margin even for empty lines
             let line_with_margin = format!("{margin_str}{seg}");
             self.log.push(line_with_margin);
         }
     }
 
-    // 新規: llm_parsing_buffer をパースして構造化セグメントを作成し、self.log に追加する
-    // 新規: llm_parsing_buffer をパースして構造化セグメントを作成し、self.log に追加する
+    // New: parse llm_parsing_buffer into structured segments and append to self.log
     pub(crate) fn finalize_and_append_llm_response(&mut self) {
-        // 解析バッファを消費
+        // Consume the parsing buffer
         let buffer = std::mem::take(&mut self.llm_parsing_buffer);
         if buffer.is_empty() {
-            // バッファが空なら、current_llm_response もクリアして終了
+            // If buffer is empty, also clear current_llm_response and exit
             self.current_llm_response = None;
             return;
         }
 
-        // current_llm_response を take() で所有権ごと取得し、後で処理するセグメントリストを構築
-        // これにより、self.current_llm_response への借用をすぐに解除できる
+        // Take ownership of current_llm_response and build a list of segments to process
+        // This releases the borrow on self.current_llm_response immediately
         let mut response_segments = self.current_llm_response.take().unwrap_or_default();
 
-        // 正規表現でコードブロックを抽出
-        // (?s) フラグは、`.` が改行にもマッチするようにする（複数行マッチ）
-        // `?` により非貪欲マッチ（最初に見つかった ``` で終了）
+        // Extract code blocks using regex
+        // (?s) makes '.' match newlines (multi-line match)
+        // non-greedy match ensures we stop at the first closing ```
         let re = Regex::new(r"(?s)```(\w*)\n(.*?)```").unwrap();
         let mut last_end = 0;
 
@@ -68,7 +66,7 @@ impl TuiApp {
             let lang = cap.get(1).map_or("", |m| m.as_str());
             let code_content = cap.get(2).map_or("", |m| m.as_str());
 
-            // コードブロックより前のテキスト（Textセグメント）を追加
+            // Add text before the code block as a Text segment
             if whole_match.start() > last_end {
                 let text_content = &buffer[last_end..whole_match.start()];
                 if !text_content.is_empty() {
@@ -78,7 +76,7 @@ impl TuiApp {
                 }
             }
 
-            // コードブロック（CodeBlockセグメント）を追加
+            // Add the code block as a CodeBlock segment
             response_segments.push(LlmResponseSegment::CodeBlock {
                 language: lang.to_string(),
                 content: code_content.to_string(),
@@ -87,7 +85,7 @@ impl TuiApp {
             last_end = whole_match.end();
         }
 
-        // 最後のコードブロックより後のテキスト（Textセグメント）を追加
+        // Add any text after the last code block as a Text segment
         if last_end < buffer.len() {
             let text_content = &buffer[last_end..];
             if !text_content.is_empty() {
@@ -97,30 +95,27 @@ impl TuiApp {
             }
         }
 
-        // この時点で、response_segments にはすべての構造化されたセグメントが含まれている
-        // self.current_llm_response は None になっている（take() したため）
-        // したがって、これ以降の self の他の部分（例: self.log）への可変借用は安全に行える
+        // At this point, response_segments contains all structured segments
+        // current_llm_response is None (taken above), so mutable borrows of other parts of self are safe
 
-        // response_segments (Vec<LlmResponseSegment>) をフラットな String Vec に変換して self.log に追加
+        // Convert response_segments (Vec<LlmResponseSegment>) into flat String lines and append to self.log
         for segment in response_segments {
             match segment {
                 LlmResponseSegment::Text { content } => {
-                    // テキストコンテンツを、改行で分割してログに追加
-                    // 既存の append_stream_token_with_margin のロジックを再利用
-                    self.append_stream_token_with_margin(&content, 2); // テキストにもマージンを適用
+                    // Split text content by newlines and append to the log using existing margin helper
+                    self.append_stream_token_with_margin(&content, 2); // apply margin to text as well
                 }
                 LlmResponseSegment::CodeBlock { language, content } => {
-                    // コードブロックの開始を示す識別子行を追加
+                    // Add a marker line for the start of the code block
                     self.log.push(format!(" [CodeBlockStart({language})]"));
-                    // コードコンテンツを、改行で分割してログに追加（マージン付き）
-                    self.append_stream_token_with_margin(&content, 4); // コードブロックにはより広いマージン
-                    // コードブロックの終了を示す識別子行を追加
+                    // Append code content split by newlines (with wider margin)
+                    self.append_stream_token_with_margin(&content, 4); // wider margin for code blocks
+                    // Add a marker line for the end of the code block
                     self.log.push(" [CodeBlockEnd]".to_string());
                 }
             }
         }
 
-        // current_llm_response は処理後 None に設定されている（take() したため）
-        // 特に再設定の必要なし
+        // current_llm_response remains None after processing (taken earlier)
     }
 }

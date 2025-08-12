@@ -6,7 +6,7 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
-use crate::tui::state::{TuiApp, build_render_plan}; // TuiAppをインポート
+use crate::tui::state::{TuiApp, build_render_plan}; // import TuiApp
 
 impl TuiApp {
     pub fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
@@ -50,7 +50,7 @@ impl TuiApp {
         // Draw log area starting at row 2 up to h-2
         let start_row = 2u16;
         let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
-        let mut in_code_block = false; // 新規: コードブロック内かどうかのフラグ
+        let mut in_code_block = false; // new: flag whether inside a code block
         for (i, line) in plan.log_lines.iter().take(max_rows as usize).enumerate() {
             let row = start_row + i as u16;
             queue!(

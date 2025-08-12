@@ -2,7 +2,7 @@ use crate::analysis::{Analyzer, RepoMap};
 use crate::assets::Assets;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
-use crate::tui::theme::Theme; // 新規追加
+use crate::tui::theme::Theme; // newly added
 use crate::tui::view::TuiApp;
 use anyhow::Result;
 use chrono::Local;
@@ -109,7 +109,7 @@ impl TuiExecutor {
         let repomap_clone = repomap.clone();
         let project_root = cfg.project_root.clone();
 
-        // 非同期タスクを生成
+        // Spawn an asynchronous task
         tokio::spawn(async move {
             info!(
                 "Starting background repomap generation for project at {:?}",
@@ -208,7 +208,7 @@ impl CommandHandler for TuiExecutor {
                 }
             }
             "/map" => {
-                // repomap が生成済みかチェック
+                // Check if repomap has been generated
                 let repomap = self.repomap.clone();
                 let ui_tx = self.ui_tx.clone().unwrap();
                 tokio::spawn(async move {
@@ -229,9 +229,9 @@ impl CommandHandler for TuiExecutor {
                     }
                 });
             }
-            // /theme コマンドの処理を追加
+            // Handle /theme command
             line if line.starts_with("/theme ") => {
-                let theme_name = line[7..].trim(); // "/theme " の後の文字列を取得
+                let theme_name = line[7..].trim(); // get the string after "/theme "
                 match theme_name.to_lowercase().as_str() {
                     "dark" => {
                         ui.theme = Theme::dark();
@@ -247,7 +247,7 @@ impl CommandHandler for TuiExecutor {
                         ));
                     }
                 }
-                // テーマ変更後に再描画
+                // Redraw after theme change
                 if let Err(e) = ui.draw_with_model(Some(&self.cfg.model)) {
                     ui.push_log(format!("Failed to redraw after theme change: {e}"));
                 }
@@ -366,8 +366,8 @@ impl CommandHandler for TuiExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use std::io; // 削除
-    // use std::path::PathBuf; // 削除
+    // use std::io; // removed
+    // use std::path::PathBuf; // removed
 
     #[test]
     fn test_find_project_instructions_file_found_agents_md() {
@@ -391,7 +391,7 @@ mod tests {
     fn test_find_project_instructions_file_found_qwen_md() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_root = temp_dir.path();
-        let agents_md_path = project_root.join("AGENTS.md"); // 追加: AGENTS.mdが存在しないことを明示
+        let agents_md_path = project_root.join("AGENTS.md"); // explicit: AGENTS.md should not exist
         let qwen_md_path = project_root.join("QWEN.md");
         let gemini_md_path = project_root.join("GEMINI.md");
 
@@ -411,8 +411,8 @@ mod tests {
     fn test_find_project_instructions_file_found_gemini_md() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_root = temp_dir.path();
-        let agents_md_path = project_root.join("AGENTS.md"); // 追加: AGENTS.mdが存在しないことを明示
-        let qwen_md_path = project_root.join("QWEN.md"); // 追加: QWEN.mdが存在しないことを明示
+        let agents_md_path = project_root.join("AGENTS.md"); // explicit: AGENTS.md should not exist
+        let qwen_md_path = project_root.join("QWEN.md"); // explicit: QWEN.md should not exist
         let gemini_md_path = project_root.join("GEMINI.md");
 
         // AGENTS.md and QWEN.md should not exist for this test to be valid

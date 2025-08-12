@@ -1,8 +1,8 @@
 use crossterm::style::Color;
-// use serde::{Deserialize, Serialize}; // 削除
+// use serde::{Deserialize, Serialize}; // removed
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // 将来的に使用するフィールドの警告を抑制
+#[allow(dead_code)] // suppress warnings for fields intended for future use
 pub struct Theme {
     pub name: String,
     pub header_fg: Color,
@@ -10,7 +10,7 @@ pub struct Theme {
     pub user_input_fg: Color,
     pub llm_response_bg: Color,
     pub llm_response_fg: Color,
-    pub llm_code_block_bg: Color, // 新規: コードブロック用背景色
+    pub llm_code_block_bg: Color, // new: background color for code blocks
     pub info_fg: Color,
     pub warning_fg: Color,
     pub error_fg: Color,
@@ -33,7 +33,7 @@ impl Theme {
             user_input_fg: Color::Blue,
             llm_response_bg: Color::Black,
             llm_response_fg: Color::White,
-            llm_code_block_bg: Color::DarkGrey, // 新規: Darkテーマ用コードブロック背景色
+            llm_code_block_bg: Color::DarkGrey, // new: code block background for dark theme
             info_fg: Color::DarkGrey,
             warning_fg: Color::Yellow,
             error_fg: Color::Red,
@@ -56,7 +56,7 @@ impl Theme {
             user_input_fg: Color::DarkBlue,
             llm_response_bg: Color::White,
             llm_response_fg: Color::Black,
-            llm_code_block_bg: Color::Grey, // 新規: Lightテーマ用コードブロック背景色
+            llm_code_block_bg: Color::Grey, // new: code block background for light theme
             info_fg: Color::Grey,
             warning_fg: Color::DarkYellow,
             error_fg: Color::DarkRed,

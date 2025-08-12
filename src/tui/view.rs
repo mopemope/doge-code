@@ -1,6 +1,6 @@
-// src/tui/view.rs は、TUIのビュー関連のロジックをまとめたファイルです。
-// 実際の実装は、event_loop.rs、rendering.rs、llm_response_handler.rs に分割されています。
-// このファイルでは、それらのモジュールを再エクスポートするだけです。
+// src/tui/view.rs collects view-related logic for the TUI.
+// The actual implementation is split across event_loop.rs, rendering.rs, and llm_response_handler.rs.
+// This file simply re-exports those modules.
 
-// TuiApp構造体とその関連アイテムも再エクスポート
+// Re-export TuiApp struct and related items
 pub use crate::tui::state::TuiApp;
