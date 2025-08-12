@@ -23,6 +23,7 @@ impl TuiApp {
             w,
             h,
             model,
+            self.spinner_state, // Pass spinner_state
         );
 
         // Draw header (2 lines)
@@ -32,9 +33,38 @@ impl TuiApp {
             terminal::Clear(ClearType::CurrentLine)
         )?;
         if let Some(first) = plan.header_lines.first() {
-            queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
-            write!(stdout, "{first}")?;
-            queue!(stdout, ResetColor)?;
+            // Check if the status is "Thinking..." and apply spinner color
+            if first.contains("Thinking...") {
+                // Find the position of "Thinking..." and the spinner character
+                if let Some(thinking_pos) = first.find("Thinking...") {
+                    let before_thinking = &first[..thinking_pos];
+                    let thinking_and_spinner = &first[thinking_pos..];
+
+                    // Write the part before "Thinking..."
+                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    write!(stdout, "{}", before_thinking)?;
+
+                    // Write "Thinking..." in status_idle_fg color
+                    queue!(stdout, SetForegroundColor(self.theme.status_idle_fg))?;
+                    write!(stdout, "Thinking...")?;
+
+                    // Write the spinner character in spinner_fg color
+                    if let Some(spinner_char) = thinking_and_spinner.chars().last() {
+                        queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
+                        write!(stdout, "{}", spinner_char)?;
+                    }
+                    queue!(stdout, ResetColor)?;
+                } else {
+                    // Fallback if "Thinking..." is not found as expected
+                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    write!(stdout, "{}", first)?;
+                    queue!(stdout, ResetColor)?;
+                }
+            } else {
+                queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                write!(stdout, "{}", first)?;
+                queue!(stdout, ResetColor)?;
+            }
         }
         queue!(
             stdout,

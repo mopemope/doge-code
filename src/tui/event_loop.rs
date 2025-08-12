@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tui::state::{Status, TuiApp, save_input_history}; // import TuiApp and save_input_history
 
@@ -9,10 +9,20 @@ impl TuiApp {
         if self.history_index > self.input_history.len() {
             self.history_index = self.input_history.len();
         }
-        let mut last_ctrl_c_at: Option<std::time::Instant> = None;
+        let mut last_ctrl_c_at: Option<Instant> = None;
         let mut dirty = true; // initial full render
         let mut is_streaming = false; // track streaming state
+        let mut last_spinner_update = Instant::now(); // Track last spinner update time
         loop {
+            // Update spinner state if status is Idle and enough time has passed
+            if self.status == Status::Idle
+                && last_spinner_update.elapsed() >= Duration::from_millis(200)
+            {
+                self.spinner_state = self.spinner_state.wrapping_add(1);
+                dirty = true;
+                last_spinner_update = Instant::now();
+            }
+
             // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {
                 let mut drained = Vec::new();
@@ -48,6 +58,8 @@ impl TuiApp {
                             }
                             self.status = Status::Streaming;
                             dirty = true;
+                            // Reset spinner state when transitioning to Streaming
+                            self.spinner_state = 0;
                         }
                         "::status:error" => {
                             if is_streaming {
@@ -76,9 +88,9 @@ impl TuiApp {
                 match event::read()? {
                     Event::Key(k) => match k.code {
                         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            let now = std::time::Instant::now();
+                            let now = Instant::now();
                             if let Some(prev) = last_ctrl_c_at
-                                && now.duration_since(prev) <= std::time::Duration::from_secs(3)
+                                && now.duration_since(prev) <= Duration::from_secs(3)
                             {
                                 return Ok(());
                             }
@@ -115,6 +127,8 @@ impl TuiApp {
                             dirty = true;
                             // reset cursor to start of new empty input
                             self.cursor = 0;
+                            // Reset spinner state when a new command is issued
+                            self.spinner_state = 0;
                         }
                         KeyCode::Backspace => {
                             if self.compl.visible {
