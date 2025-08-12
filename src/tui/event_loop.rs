@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::time::Duration;
 
-use crate::tui::state::{Status, TuiApp, save_input_history}; // TuiAppとsave_input_historyをインポート
+use crate::tui::state::{Status, TuiApp, save_input_history}; // import TuiApp and save_input_history
 
 impl TuiApp {
     pub fn event_loop(&mut self) -> Result<()> {
@@ -11,7 +11,7 @@ impl TuiApp {
         }
         let mut last_ctrl_c_at: Option<std::time::Instant> = None;
         let mut dirty = true; // initial full render
-        let mut is_streaming = false; // ストリーミング状態を追跡
+        let mut is_streaming = false; // track streaming state
         loop {
             // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {

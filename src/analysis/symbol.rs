@@ -48,13 +48,13 @@ pub struct RepoMap {
 }
 
 impl RepoMap {
-    // 複数の RepoMap を1つにまとめる
+    // Merge multiple RepoMaps into a single one
     pub fn merge(mut self, other: RepoMap) -> Self {
         self.symbols.extend(other.symbols);
         self
     }
 
-    // Vec<RepoMap> をまとめる関数
+    // Function to combine Vec<RepoMap>
     pub fn merge_many(maps: Vec<RepoMap>) -> Self {
         maps.into_iter()
             .reduce(|acc, map| acc.merge(map))

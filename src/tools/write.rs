@@ -34,20 +34,20 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
-    // 親ディレクトリが存在することを確認し、存在しなければ作成する
+    // Ensure parent directory exists; create if missing
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create parent directories for {}", p.display()))?;
     }
 
-    // 現在のファイル内容を読み込む
+    // Read current file content
     let old_content = if p.exists() {
         fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?
     } else {
         String::new()
     };
 
-    // 差分を計算して表示
+    // Compute and print diff
     let patch = create_patch(&old_content, content);
     if !patch.hunks().is_empty() {
         println!("Diff for {path}:\n{patch}");
@@ -102,10 +102,7 @@ mod tests {
         // After canonicalization, the path should be within the temp directory
         // and the write should succeed. The test expectation might need to be
         // adjusted based on the desired behavior.
-        // For now, let's check that the file is written to the correct location
-        // (i.e., the parent directory of the temp dir, if allowed, or handled appropriately).
-        // Since we're in a temp dir, and the behavior of escaping might vary,
-        // we'll check if the function returns Ok or if the file exists where we expect.
+        // For now, let's check that the function returns Ok or if the file exists where we expect.
         // This test might need further refinement based on specific security requirements.
 
         // A more robust test would be to check if the final written file is
@@ -148,11 +145,10 @@ mod tests {
         let new_content = "New content\n";
 
         fs::write(&file_path, old_content).unwrap();
-        // テスト内でprintln!を使用すると、テスト出力に差分が表示されます。
-        // ここでは、差分が表示されることを確認するために、
-        // テストの実行時に標準出力に差分が表示されることを観察します。
-        // 実際のテストでは、差分の内容を検証することは難しいため、
-        // このテストは主にコンパイルエラーがないことを確認します。
+        // Using println! in tests shows the diff in test output.
+        // Here we observe that diff is printed during test execution.
+        // In real tests, verifying diff content is difficult, so this test
+        // primarily ensures there are no compilation errors.
         fs_write(file_path_str, new_content).unwrap();
     }
 }

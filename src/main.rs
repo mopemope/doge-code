@@ -56,7 +56,7 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
     let mut app = TuiApp::new(
         "🦮 doge-code - /help, Esc or /quit to exit",
         Some(cfg.model.clone()),
-        &cfg.theme, // テーマ名を渡す
+        &cfg.theme, // pass theme name
     );
     app.push_log("Welcome to doge-code TUI");
     app.push_log("Initializing repomap...");

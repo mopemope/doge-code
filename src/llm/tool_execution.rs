@@ -184,23 +184,23 @@ pub async fn run_agent_loop(
             });
             for tc in msg.tool_calls {
                 if let Some(tx) = &ui_tx {
-                    // fs_write の場合、contentを除外して表示
+                    // For fs_write, exclude the content field when logging
                     let log_message = if tc.function.name == "fs_write" {
                         let args_str = tc.function.arguments.clone();
-                        // JSONをパースしてcontentを除外
+                        // Parse JSON and remove content field
                         if let Ok(mut args_val) =
                             serde_json::from_str::<serde_json::Value>(&args_str)
                         {
-                            // contentフィールドを削除
+                            // remove the content field
                             args_val.as_object_mut().map(|obj| obj.remove("content"));
                             if let Ok(filtered_args_str) = serde_json::to_string(&args_val) {
                                 format!("[tool] {}({})", tc.function.name, filtered_args_str)
                             } else {
-                                // パースに失敗した場合は、元の引数をそのまま表示 (念のため)
+                                // If serialization fails, fall back to original args
                                 format!("[tool] {}({})", tc.function.name, args_str)
                             }
                         } else {
-                            // パースに失敗した場合は、元の引数をそのまま表示 (念のため)
+                            // If parsing fails, fall back to original args
                             format!("[tool] {}({})", tc.function.name, args_str)
                         }
                     } else {
