@@ -1,5 +1,6 @@
 use crate::tui::state::{LlmResponseSegment, TuiApp}; // import TuiApp and LlmResponseSegment
 use regex::Regex;
+use tracing::debug; // tracingをインポート
 
 // Implement LLM response handling logic for TuiApp
 impl TuiApp {
@@ -9,6 +10,7 @@ impl TuiApp {
     pub fn append_stream_token_structured(&mut self, s: &str) {
         // Append received token to the parsing buffer
         self.llm_parsing_buffer.push_str(s);
+        debug!(appended_content = %s, "Appended token to llm_parsing_buffer");
     }
 
     // Keep existing method (with left margin) temporarily; replaced by the new implementation
@@ -28,10 +30,9 @@ impl TuiApp {
             return;
         }
 
-        // The first part is appended to the existing last line
-        if let Some(last) = self.log.last_mut() {
-            last.push_str(parts[0]);
-        }
+        // Add the first part as a new line (with margin)
+        let first_line_with_margin = format!("{margin_str}{}", parts[0]);
+        self.log.push(first_line_with_margin);
 
         // Parts from the second onward are added as new lines (with margin)
         for seg in parts.iter().skip(1) {
@@ -42,18 +43,21 @@ impl TuiApp {
     }
 
     // New: parse llm_parsing_buffer into structured segments and append to self.log
-    pub(crate) fn finalize_and_append_llm_response(&mut self) {
+    pub(crate) fn finalize_and_append_llm_response(&mut self, content: &str) {
         // Consume the parsing buffer
         let buffer = std::mem::take(&mut self.llm_parsing_buffer);
-        if buffer.is_empty() {
-            // If buffer is empty, also clear current_llm_response and exit
-            self.current_llm_response = None;
-            return;
-        }
+        debug!(buffer_content = %buffer, "Finalizing LLM response. Buffer is empty: {}", buffer.is_empty());
 
-        // Take ownership of current_llm_response and build a list of segments to process
-        // This releases the borrow on self.current_llm_response immediately
-        let mut response_segments = self.current_llm_response.take().unwrap_or_default();
+        // If buffer is empty, use the provided content
+        let buffer = if buffer.is_empty() {
+            debug!(target: "tui", provided_content = %content, "Buffer is empty, using provided content. Content is empty: {}", content.is_empty());
+            content.to_string()
+        } else {
+            buffer
+        };
+
+        // Convert buffer to response segments
+        let mut response_segments = Vec::new();
 
         // Extract code blocks using regex
         // (?s) makes '.' match newlines (multi-line match)
@@ -95,10 +99,19 @@ impl TuiApp {
             }
         }
 
-        // At this point, response_segments contains all structured segments
-        // current_llm_response is None (taken above), so mutable borrows of other parts of self are safe
+        // If there's no code block and the buffer is not empty, treat the whole buffer as text
+        if response_segments.is_empty() && !buffer.is_empty() {
+            response_segments.push(LlmResponseSegment::Text {
+                content: buffer.clone(),
+            });
+        }
+
+        // Add a marker for the start of the LLM response block
+        self.log.push(" [LlmResponseStart]".to_string());
+        debug!("Added [LlmResponseStart] marker to log");
 
         // Convert response_segments (Vec<LlmResponseSegment>) into flat String lines and append to self.log
+        // This needs to be done after adding the start marker so that the rendering logic can detect the content
         for segment in response_segments {
             match segment {
                 LlmResponseSegment::Text { content } => {
@@ -116,6 +129,8 @@ impl TuiApp {
             }
         }
 
-        // current_llm_response remains None after processing (taken earlier)
+        // Add a marker for the end of the LLM response block
+        self.log.push(" [LlmResponseEnd]".to_string());
+        debug!("Added [LlmResponseEnd] marker to log");
     }
 }

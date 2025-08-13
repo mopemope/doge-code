@@ -36,7 +36,7 @@ impl TuiApp {
                         "::status:done" => {
                             if is_streaming {
                                 // Removed: self.push_log(" --- LLM Response End --- ".to_string());
-                                self.finalize_and_append_llm_response();
+                                self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
                             self.status = Status::Done;
@@ -45,7 +45,7 @@ impl TuiApp {
                         "::status:cancelled" => {
                             if is_streaming {
                                 // Removed: self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
-                                self.finalize_and_append_llm_response();
+                                self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
                             self.status = Status::Cancelled;
@@ -66,7 +66,7 @@ impl TuiApp {
                         "::status:error" => {
                             if is_streaming {
                                 // Removed: self.push_log(" --- LLM Response End (Error) --- ".to_string());
-                                self.finalize_and_append_llm_response();
+                                self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
                             self.status = Status::Error;
@@ -76,6 +76,21 @@ impl TuiApp {
                         _ if msg.starts_with("::append:") => {
                             let payload = &msg["::append:".len()..];
                             self.append_stream_token_structured(payload);
+                            dirty = true;
+                        }
+                        _ if msg.starts_with("::status:done:") => {
+                            let content = &msg["::status:done:".len()..];
+                            debug!(target: "tui", status_done_content = %content, "Received ::status:done: message. Content is empty: {}", content.is_empty());
+                            self.finalize_and_append_llm_response(content);
+                            is_streaming = false;
+                            self.status = Status::Done;
+                            dirty = true;
+                        }
+                        _ if msg.starts_with("::status:error:") => {
+                            let content = &msg["::status:error:".len()..];
+                            self.finalize_and_append_llm_response(content);
+                            is_streaming = false;
+                            self.status = Status::Error;
                             dirty = true;
                         }
                         _ => {
