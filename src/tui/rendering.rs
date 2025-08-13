@@ -27,6 +27,13 @@ impl TuiApp {
             self.spinner_state, // Pass spinner_state
         );
 
+        debug!("Starting draw_with_model");
+        // Log plan.log_lines for debugging
+        debug!("plan.log_lines for debugging:");
+        for (i, line) in plan.log_lines.iter().enumerate() {
+            debug!("  [{}] '{}'", i, line);
+        }
+
         // Draw header (2 lines)
         queue!(
             stdout,
@@ -99,8 +106,9 @@ impl TuiApp {
 
             let cmp = plan.log_lines[i].as_str();
 
-            // Check for LLM response block start marker
-            if cmp == " [LlmResponseStart]" {
+            // Check for LLM response block start marker (trimmed for flexibility)
+            if cmp.trim() == "[LlmResponseStart]" {
+                debug!("Found [LlmResponseStart] marker at line {}, row {}", i, row);
                 info!("Detected [LlmResponseStart] marker");
                 // Draw top border
                 if i < max_rows as usize - 1 {
@@ -123,11 +131,13 @@ impl TuiApp {
                 } else {
                     break; // Not enough space for a box
                 }
+                debug!("Finished drawing top border for [LlmResponseStart]");
                 continue;
             }
 
-            // Check for LLM response block end marker
-            if cmp == " [LlmResponseEnd]" {
+            // Check for LLM response block end marker (trimmed for flexibility)
+            if cmp.trim() == "[LlmResponseEnd]" {
+                debug!("Found [LlmResponseEnd] marker at line {}, row {}", i, row);
                 info!("Detected [LlmResponseEnd] marker");
                 // Draw bottom border
                 if i < max_rows as usize {
@@ -151,12 +161,17 @@ impl TuiApp {
                         info!("Drew bottom border of LLM response box");
                     }
                 }
+                debug!("Finished drawing bottom border for [LlmResponseEnd]");
                 i += 1;
                 continue;
             }
 
             // If we are in an LLM response block, handle it
             if in_llm_response_block {
+                debug!(
+                    "Drawing line inside LLM response block at line {}, row {}: '{}'",
+                    i, row, cmp
+                );
                 info!("Drawing line inside LLM response block: {}", cmp);
                 // Check for special markers
                 if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
@@ -199,6 +214,10 @@ impl TuiApp {
                 queue!(stdout, ResetColor)?;
                 i += 1;
             } else {
+                debug!(
+                    "Drawing line outside LLM response block at line {}, row {}: '{}'",
+                    i, row, cmp
+                );
                 // Handle non-LLM response lines (user input, info, errors, etc.)
 
                 // Check for special markers

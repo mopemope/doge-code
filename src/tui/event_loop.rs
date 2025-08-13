@@ -94,7 +94,18 @@ impl TuiApp {
                             dirty = true;
                         }
                         _ => {
-                            self.push_log(msg);
+                            // Check if the message is the same as the last LLM response to avoid duplication
+                            if self
+                                .last_llm_response_content
+                                .as_ref()
+                                .is_some_and(|last_content| msg == *last_content)
+                            {
+                                debug!(target: "tui", "Skipping duplicate LLM response message: {}", msg);
+                                // Clear the stored content after matching to allow future messages
+                                self.last_llm_response_content = None;
+                            } else {
+                                self.push_log(msg);
+                            }
                             dirty = true;
                         }
                     }
