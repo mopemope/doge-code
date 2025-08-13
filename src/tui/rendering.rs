@@ -118,7 +118,6 @@ impl TuiApp {
                         terminal::Clear(ClearType::CurrentLine)
                     )?;
                     queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                    queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
                     write!(stdout, "┌")?;
                     for _ in 0..(w - 2) {
                         write!(stdout, "─")?;
@@ -150,7 +149,6 @@ impl TuiApp {
                             terminal::Clear(ClearType::CurrentLine)
                         )?;
                         queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                        queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
                         write!(stdout, "└")?;
                         for _ in 0..(w - 2) {
                             write!(stdout, "─")?;
@@ -202,7 +200,6 @@ impl TuiApp {
                 queue!(stdout, cursor::MoveTo(0, row))?;
                 queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
                 queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
                 write!(stdout, "│")?;
                 write!(
                     stdout,
