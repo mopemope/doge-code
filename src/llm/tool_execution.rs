@@ -148,6 +148,7 @@ pub async fn run_agent_loop(
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
 ) -> Result<ChoiceMessage> {
+    debug!(target: "llm", "run_agent_loop called");
     let runtime = ToolRuntime::new(fs);
     let mut iters = 0usize;
     loop {
@@ -228,10 +229,18 @@ pub async fn run_agent_loop(
             }
             continue;
         } else {
+            debug!(target: "llm", message_content = ?msg.content, "Final assistant message. Content: {:?}", msg.content.as_deref());
             // Final assistant message
+            if let Some(tx) = ui_tx {
+                debug!(target: "llm", response_content = ?msg.content, "Sending LLM response content. Content: {:?}", msg.content.as_deref());
+                let _ = tx.send(format!(
+                    "::status:done:{}",
+                    msg.content.clone().unwrap_or_default()
+                ));
+            }
             return Ok(ChoiceMessage {
                 role: "assistant".into(),
-                content: msg.content.unwrap_or_default(),
+                content: msg.content.clone().unwrap_or_default(),
             });
         }
     }

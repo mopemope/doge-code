@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
-use tracing::debug; // tracingをインポート
+use tracing::{debug, info}; // tracingをインポート
 
 use crate::tui::state::{TuiApp, build_render_plan}; // import TuiApp
 
@@ -86,60 +86,204 @@ impl TuiApp {
         let start_row = 2u16;
         let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
         let mut in_code_block = false; // new: flag whether inside a code block
-        for (i, line) in plan.log_lines.iter().take(max_rows as usize).enumerate() {
+        let mut in_llm_response_block = false; // flag to track if we are in an LLM response block
+
+        let mut i = 0;
+        while i < plan.log_lines.len() && i < max_rows as usize {
             let row = start_row + i as u16;
             queue!(
                 stdout,
                 cursor::MoveTo(0, row),
                 terminal::Clear(ClearType::CurrentLine)
             )?;
-            let cmp = line.as_str();
 
-            if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
-                in_code_block = true;
-                continue;
-            } else if cmp == " [CodeBlockEnd]" {
-                in_code_block = false;
+            let cmp = plan.log_lines[i].as_str();
+
+            // Check for LLM response block start marker
+            if cmp == " [LlmResponseStart]" {
+                info!("Detected [LlmResponseStart] marker");
+                // Draw top border
+                if i < max_rows as usize - 1 {
+                    queue!(
+                        stdout,
+                        cursor::MoveTo(0, row),
+                        terminal::Clear(ClearType::CurrentLine)
+                    )?;
+                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
+                    queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
+                    write!(stdout, "┌")?;
+                    for _ in 0..(w - 2) {
+                        write!(stdout, "─")?;
+                    }
+                    write!(stdout, "┐")?;
+                    queue!(stdout, ResetColor)?;
+                    i += 1;
+                    in_llm_response_block = true;
+                    info!("Drew top border of LLM response box");
+                } else {
+                    break; // Not enough space for a box
+                }
                 continue;
             }
 
-            if in_code_block {
-                queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
+            // Check for LLM response block end marker
+            if cmp == " [LlmResponseEnd]" {
+                info!("Detected [LlmResponseEnd] marker");
+                // Draw bottom border
+                if i < max_rows as usize {
+                    // If we are in an LLM response block, we need to draw the bottom border on the current row
+                    // and not skip to the next line
+                    if in_llm_response_block {
+                        queue!(
+                            stdout,
+                            cursor::MoveTo(0, row),
+                            terminal::Clear(ClearType::CurrentLine)
+                        )?;
+                        queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
+                        queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
+                        write!(stdout, "└")?;
+                        for _ in 0..(w - 2) {
+                            write!(stdout, "─")?;
+                        }
+                        write!(stdout, "┘")?;
+                        queue!(stdout, ResetColor)?;
+                        in_llm_response_block = false;
+                        info!("Drew bottom border of LLM response box");
+                    }
+                }
+                i += 1;
+                continue;
+            }
+
+            // If we are in an LLM response block, handle it
+            if in_llm_response_block {
+                info!("Drawing line inside LLM response block: {}", cmp);
+                // Check for special markers
+                if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
+                    in_code_block = true;
+                    // Skip drawing this line
+                    i += 1;
+                    continue;
+                } else if cmp == " [CodeBlockEnd]" {
+                    in_code_block = false;
+                    // Skip drawing this line
+                    i += 1;
+                    continue;
+                }
+
+                // If we are in a code block, draw the line with code block styling
+                if in_code_block {
+                    queue!(stdout, cursor::MoveTo(0, row))?;
+                    queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+                    queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
+                    write!(stdout, "{}", plan.log_lines[i])?;
+                    queue!(stdout, ResetColor)?;
+                    i += 1;
+                    continue;
+                }
+
+                // Draw the line inside the box
+                queue!(stdout, cursor::MoveTo(0, row))?;
+                queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
                 queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else if cmp.starts_with("> ") {
-                queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else if cmp.contains("[Cancelled]")
-                || cmp.contains("[cancelled]")
-                || cmp.contains("[canceled]")
-            {
-                queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else if cmp.starts_with('[') {
-                queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else if cmp.starts_with("LLM error:")
-                || cmp.contains("error")
-                || cmp.contains("Error")
-            {
-                queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else if cmp.contains("warning") || cmp.contains("Warning") {
-                queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
-                write!(stdout, "{line}")?;
-                queue!(stdout, ResetColor)?;
-            } else {
                 queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
-                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                write!(stdout, "{line}")?;
+                write!(stdout, "│")?;
+                write!(
+                    stdout,
+                    "{:<width$}",
+                    plan.log_lines[i],
+                    width = (w - 2) as usize
+                )?;
+                write!(stdout, "│")?;
                 queue!(stdout, ResetColor)?;
+                i += 1;
+            } else {
+                // Handle non-LLM response lines (user input, info, errors, etc.)
+
+                // Check for special markers
+                if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
+                    in_code_block = true;
+                    i += 1;
+                    continue;
+                } else if cmp == " [CodeBlockEnd]" {
+                    in_code_block = false;
+                    i += 1;
+                    continue;
+                }
+
+                // If in code block, draw with code block styling
+                if in_code_block {
+                    queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                    i += 1;
+                    continue;
+                }
+
+                // Draw other lines with their respective styles
+                if cmp.starts_with("> ") {
+                    queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                } else if cmp.contains("[Cancelled]")
+                    || cmp.contains("[cancelled]")
+                    || cmp.contains("[canceled]")
+                {
+                    queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                } else if cmp.starts_with('[') {
+                    queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                } else if cmp.starts_with("LLM error:")
+                    || cmp.contains("error")
+                    || cmp.contains("Error")
+                {
+                    queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                } else if cmp.contains("warning") || cmp.contains("Warning") {
+                    queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
+                    write!(stdout, "{cmp}")?;
+                    queue!(stdout, ResetColor)?;
+                } else {
+                    // Regular text line, draw normally
+                    write!(stdout, "{cmp}")?;
+                }
+                i += 1;
             }
+        }
+
+        // If we're still in an LLM response block at the end, close it
+        if in_llm_response_block {
+            info!("Closing LLM response block at the end");
+            let row = start_row + i as u16;
+            if i < max_rows as usize {
+                queue!(stdout, cursor::MoveTo(0, row))?;
+                queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
+                queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
+                write!(stdout, "└")?;
+                for _ in 0..(w - 2) {
+                    write!(stdout, "─")?;
+                }
+                write!(stdout, "┘")?;
+                queue!(stdout, ResetColor)?;
+                i += 1;
+            }
+        }
+
+        // Clear any remaining rows in the log area if current content is shorter
+        let used_rows = i as u16;
+        for row in start_row + used_rows..start_row + max_rows {
+            queue!(
+                stdout,
+                cursor::MoveTo(0, row),
+                terminal::Clear(ClearType::CurrentLine)
+            )?;
         }
         // Clear any remaining rows in the log area if current content is shorter
         let used_rows = plan.log_lines.len() as u16;
