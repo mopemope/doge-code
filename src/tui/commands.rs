@@ -180,7 +180,7 @@ impl CommandHandler for TuiExecutor {
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write"),
             "/clear" => {
-                ui.log.clear();
+                ui.clear_log();
             }
             "/cancel" => {
                 if let Some(tx) = &self.cancel_tx {

@@ -8,6 +8,8 @@ impl TuiApp {
     // Tokens are accumulated in a buffer and parsed in bulk when the stream completes.
     // #[allow(dead_code)]
     pub fn append_stream_token_structured(&mut self, s: &str) {
+        // Clear the last LLM response content as streaming has started/resumed
+        self.last_llm_response_content = None;
         // Append received token to the parsing buffer
         self.llm_parsing_buffer.push_str(s);
         debug!(appended_content = %s, "Appended token to llm_parsing_buffer");
@@ -16,6 +18,8 @@ impl TuiApp {
     // Keep existing method (with left margin) temporarily; replaced by the new implementation
     #[allow(dead_code)]
     pub fn append_stream_token(&mut self, s: &str) {
+        // Clear the last LLM response content as streaming has started/resumed
+        self.last_llm_response_content = None;
         // Append streaming token with left margin
         self.append_stream_token_with_margin(s, 2); // 2-space margin
     }
@@ -44,6 +48,47 @@ impl TuiApp {
 
     // New: parse llm_parsing_buffer into structured segments and append to self.log
     pub(crate) fn finalize_and_append_llm_response(&mut self, content: &str) {
+        // Log the last few lines of self.log before modification for debugging
+        debug!("self.log before finalize_and_append_llm_response:");
+        let num_lines = self.log.len();
+        let start = num_lines.saturating_sub(3);
+        for i in start..num_lines {
+            debug!("  [{}] '{}'", i, self.log[i]);
+        }
+
+        // Check if LLM response is already being displayed to prevent duplicates
+        if self.is_llm_response_active {
+            debug!(
+                "LLM response is already active, skipping duplicate finalize_and_append_llm_response call."
+            );
+            return;
+        }
+        self.is_llm_response_active = true;
+        debug!("Set is_llm_response_active to true");
+
+        // Clean up any existing incomplete LLM response block at the end of self.log
+        // to prevent duplicate content display
+        let mut start_index = None;
+        for (i, line) in self.log.iter().enumerate().rev() {
+            if line.trim() == "[LlmResponseStart]" {
+                start_index = Some(i);
+                break;
+            }
+            // If we find an end marker before a start marker, it means the block is already closed
+            if line.trim() == "[LlmResponseEnd]" {
+                break;
+            }
+        }
+
+        if let Some(start_idx) = start_index {
+            debug!(
+                "Cleaning up existing incomplete LLM response block starting at index {}",
+                start_idx
+            );
+            // Truncate the log to remove the incomplete block
+            self.log.truncate(start_idx);
+        }
+
         // Consume the parsing buffer
         let buffer = std::mem::take(&mut self.llm_parsing_buffer);
         debug!(buffer_content = %buffer, "Finalizing LLM response. Buffer is empty: {}", buffer.is_empty());
@@ -107,7 +152,7 @@ impl TuiApp {
         }
 
         // Add a marker for the start of the LLM response block
-        self.log.push(" [LlmResponseStart]".to_string());
+        self.log.push("[LlmResponseStart]".to_string());
         debug!("Added [LlmResponseStart] marker to log");
 
         // Convert response_segments (Vec<LlmResponseSegment>) into flat String lines and append to self.log
@@ -130,7 +175,22 @@ impl TuiApp {
         }
 
         // Add a marker for the end of the LLM response block
-        self.log.push(" [LlmResponseEnd]".to_string());
+        self.log.push("[LlmResponseEnd]".to_string());
         debug!("Added [LlmResponseEnd] marker to log");
+
+        // Log the last few lines of self.log after modification for debugging
+        debug!("self.log after finalize_and_append_llm_response:");
+        let num_lines = self.log.len();
+        let start = num_lines.saturating_sub(10);
+        for i in start..num_lines {
+            debug!("  [{}] '{}'", i, self.log[i]);
+        }
+
+        // Store the content to prevent duplicate printing in event_loop
+        self.last_llm_response_content = Some(content.to_string());
+
+        // Reset the flag after the response has been fully added
+        self.is_llm_response_active = false;
+        debug!("Set is_llm_response_active to false");
     }
 }

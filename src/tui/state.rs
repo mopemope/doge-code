@@ -229,6 +229,10 @@ pub struct TuiApp {
     pub cursor: usize,
     // spinner state for "Thinking..." display
     pub spinner_state: usize,
+    // Flag to prevent duplicate LLM response display
+    pub is_llm_response_active: bool,
+    /// Stores the content of the last LLM response added to the log to prevent duplicate printing.
+    pub last_llm_response_content: Option<String>,
 }
 
 impl TuiApp {
@@ -261,7 +265,9 @@ impl TuiApp {
             current_llm_response: None,
             llm_parsing_buffer: String::new(),
             cursor: 0,
-            spinner_state: 0, // Initialize spinner state
+            spinner_state: 0,              // Initialize spinner state
+            is_llm_response_active: false, // Initialize the flag
+            last_llm_response_content: None,
         };
         app.at_index.scan();
         app
@@ -341,6 +347,8 @@ impl TuiApp {
     }
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
+        // Clear the last LLM response content as a new log entry is being added
+        self.last_llm_response_content = None;
         for line in s.into().split('\n') {
             self.log.push(line.to_string());
         }
@@ -350,7 +358,15 @@ impl TuiApp {
         }
     }
 
+    /// Clears the log and resets the last LLM response content.
+    pub fn clear_log(&mut self) {
+        self.log.clear();
+        self.last_llm_response_content = None;
+    }
+
     pub fn dispatch(&mut self, line: &str) {
+        // Clear the last LLM response content as a new user command is being processed
+        self.last_llm_response_content = None;
         if self.handler.is_some() {
             let mut handler = self.handler.take().unwrap();
             handler.handle(line, self);
