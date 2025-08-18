@@ -35,7 +35,7 @@ pub async fn chat_tools_once(
         format!("Bearer {}", client.api_key).parse().unwrap(),
     );
 
-    if let Ok(payload) = serde_json::to_string(&req) {
+    if let Ok(payload) = serde_json::to_string_pretty(&req) {
         debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions (tools) payload");
     }
 
