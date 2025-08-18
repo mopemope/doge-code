@@ -20,7 +20,7 @@ impl TuiApp {
                 && last_spinner_update.elapsed() >= Duration::from_millis(200)
             {
                 self.spinner_state = self.spinner_state.wrapping_add(1);
-                debug!(spinner_state = self.spinner_state, "Spinner state updated"); // デバッグログ追加
+                // debug!(spinner_state = self.spinner_state, "Spinner state updated"); // デバッグログ追加
                 dirty = true;
                 last_spinner_update = Instant::now();
             }
