@@ -82,6 +82,7 @@ pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
 }
 
 // Build a render plan. cursor_char_idx is the character index within `input` (not counting the "> " prompt)
+#[allow(clippy::too_many_arguments)]
 pub fn build_render_plan(
     title: &str,
     status: Status,

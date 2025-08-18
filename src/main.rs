@@ -34,17 +34,13 @@ pub struct Cli {
     /// API key (set via env OPENAI_API_KEY recommended)
     #[arg(long)]
     pub api_key: Option<String>,
-
-    /// Log level (error,warn,info,debug,trace)
-    #[arg(long, default_value = "info")]
-    pub log_level: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
     let cli = Cli::parse();
-    logging::init_logging(&cli.log_level)?;
+    logging::init_logging()?;
 
     let cfg = AppConfig::from_cli(cli)?;
     info!(?cfg, "app config");
