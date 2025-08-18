@@ -1,8 +1,3 @@
-use anyhow::{Result, anyhow};
-use serde_json::json;
-
-use tracing::{debug, error, warn};
-
 use crate::llm::chat_with_tools::{
     ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
 };
@@ -10,6 +5,9 @@ use crate::llm::client_core::OpenAIClient;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage, ToolCall, ToolDef};
 use crate::tools::FsTools;
+use anyhow::{Result, anyhow};
+use serde_json::json;
+use tracing::{debug, error, warn};
 
 pub async fn chat_tools_once(
     client: &OpenAIClient,
@@ -36,7 +34,11 @@ pub async fn chat_tools_once(
     );
 
     if let Ok(payload) = serde_json::to_string_pretty(&req) {
-        debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions (tools) payload");
+        debug!(
+            payload=%payload,
+            endpoint=%url,
+            "sending chat.completions (tools) payload",
+        );
     }
 
     let resp = client
@@ -53,7 +55,10 @@ pub async fn chat_tools_once(
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
     let response_text: String = resp.text().await?;
-    debug!(target: "llm", response_body=%response_text, "llm chat_tools_once response");
+    debug!(
+        response_body=%response_text,
+        "llm chat_tools_once response"
+    );
     let body: ChatResponseWithTools = serde_json::from_str(&response_text)?;
     let msg = body
         .choices
@@ -147,13 +152,13 @@ pub async fn run_agent_loop(
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
-) -> Result<ChoiceMessage> {
-    debug!(target: "llm", "run_agent_loop called");
+) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
+    debug!("run_agent_loop called");
     let runtime = ToolRuntime::new(fs);
     let mut iters = 0usize;
     loop {
         iters += 1;
-        debug!(target: "llm", iteration = iters, messages = ?messages, "agent loop iteration");
+        debug!(iteration = iters, messages = ?messages, "agent loop iteration");
         if iters > runtime.max_iters {
             warn!(iters, "max tool iterations reached");
             return Err(anyhow!("max tool iterations reached"));
@@ -238,10 +243,13 @@ pub async fn run_agent_loop(
                     msg.content.clone().unwrap_or_default()
                 ));
             }
-            return Ok(ChoiceMessage {
-                role: "assistant".into(),
-                content: msg.content.clone().unwrap_or_default(),
-            });
+            return Ok((
+                messages,
+                ChoiceMessage {
+                    role: "assistant".into(),
+                    content: msg.content.clone().unwrap_or_default(),
+                },
+            ));
         }
     }
 }

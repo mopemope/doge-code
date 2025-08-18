@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Local;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tera::{Context, Tera};
 use tokio::sync::{RwLock, watch};
 use tracing::{error, info};
@@ -99,6 +99,8 @@ pub struct TuiExecutor {
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
     pub(crate) last_user_prompt: Option<String>,
+    // 会話履歴を保持するためのメッセージベクター
+    pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
 }
 
 impl TuiExecutor {
@@ -159,6 +161,7 @@ impl TuiExecutor {
             ui_tx: None,
             cancel_tx: None,
             last_user_prompt: None,
+            conversation_history: Arc::new(Mutex::new(Vec::new())), // 会話履歴を初期化
         })
     }
 }
@@ -323,6 +326,12 @@ impl CommandHandler for TuiExecutor {
                                 tool_calls: vec![],
                                 tool_call_id: None,
                             });
+
+                            // 既存の会話履歴を追加
+                            if let Ok(history) = self.conversation_history.lock() {
+                                msgs.extend(history.clone());
+                            }
+
                             msgs.push(crate::llm::ChatMessage {
                                 role: "user".into(),
                                 content: Some(content.clone()),
@@ -330,6 +339,7 @@ impl CommandHandler for TuiExecutor {
                                 tool_call_id: None,
                             });
                             let fs = self.tools.clone();
+                            let conversation_history = self.conversation_history.clone();
                             rt.spawn(async move {
                                 if *cancel_rx.borrow() {
                                     if let Some(tx) = tx {
@@ -342,16 +352,37 @@ impl CommandHandler for TuiExecutor {
                                     crate::llm::run_agent_loop(&c, &model, &fs, msgs, tx.clone())
                                         .await;
                                 match res {
-                                    Ok(msg) => {
+                                    Ok((updated_messages, final_msg)) => {
                                         if let Some(tx) = tx {
-                                            let _ = tx.send(msg.content);
+                                            let _ = tx.send(final_msg.content.clone());
                                             let _ = tx.send("::status:done".into());
+                                        }
+                                        // 会話履歴を更新（systemメッセージを除く全てのメッセージを保存）
+                                        if let Ok(mut history) = conversation_history.lock() {
+                                            // systemメッセージ以外の新しいメッセージを抽出
+                                            let new_messages: Vec<_> = updated_messages
+                                                .into_iter()
+                                                .filter(|msg| msg.role != "system")
+                                                .collect();
+
+                                            // 既存の履歴をクリアして新しいメッセージで置き換え
+                                            history.clear();
+                                            history.extend(new_messages);
                                         }
                                     }
                                     Err(e) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(format!("LLM error: {e}"));
                                             let _ = tx.send("::status:error".into());
+                                        }
+                                        // エラー時も会話履歴を更新（ユーザーの入力のみ）
+                                        if let Ok(mut history) = conversation_history.lock() {
+                                            history.push(crate::llm::ChatMessage {
+                                                role: "user".into(),
+                                                content: Some(content.clone()),
+                                                tool_calls: vec![],
+                                                tool_call_id: None,
+                                            });
                                         }
                                     }
                                 }
@@ -437,5 +468,67 @@ mod tests {
 
         let found_path = find_project_instructions_file(project_root);
         assert_eq!(found_path, None);
+    }
+
+    // 会話履歴の引き継ぎをテストする
+    #[tokio::test]
+    async fn test_conversation_history_persistence() {
+        use crate::llm::types::ChatMessage;
+        use std::sync::{Arc, Mutex};
+
+        // 会話履歴を模擬する
+        let conversation_history = Arc::new(Mutex::new(Vec::new()));
+
+        // 最初のメッセージを追加
+        {
+            let mut history = conversation_history.lock().unwrap();
+            history.push(ChatMessage {
+                role: "user".into(),
+                content: Some("こんにちは".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+            history.push(ChatMessage {
+                role: "assistant".into(),
+                content: Some("こんにちは！どのようにお手伝いできますか？".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+        }
+
+        // 会話履歴が正しく保持されているか確認
+        {
+            let history = conversation_history.lock().unwrap();
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0].role, "user");
+            assert_eq!(history[0].content, Some("こんにちは".into()));
+            assert_eq!(history[1].role, "assistant");
+            assert_eq!(
+                history[1].content,
+                Some("こんにちは！どのようにお手伝いできますか？".into())
+            );
+        }
+
+        // 新しいメッセージを追加
+        {
+            let mut history = conversation_history.lock().unwrap();
+            history.push(ChatMessage {
+                role: "user".into(),
+                content: Some("前回のメッセージは何でしたか？".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+        }
+
+        // 会話履歴が3つのメッセージを含んでいるか確認
+        {
+            let history = conversation_history.lock().unwrap();
+            assert_eq!(history.len(), 3);
+            assert_eq!(history[2].role, "user");
+            assert_eq!(
+                history[2].content,
+                Some("前回のメッセージは何でしたか？".into())
+            );
+        }
     }
 }
