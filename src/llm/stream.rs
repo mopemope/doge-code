@@ -76,7 +76,7 @@ impl OpenAIClient {
         );
 
         if let Ok(payload) = serde_json::to_string_pretty(&req) {
-            debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions payload (stream)");
+            debug!(payload=%payload, endpoint=%url, "sending chat.completions payload (stream)");
         }
 
         // Only retry establishing the stream, not mid-stream reads
@@ -161,14 +161,15 @@ impl OpenAIClient {
                                     continue;
                                 }
 
-                                debug!(target: "llm", response_chunk=%payload, "llm chat_stream response");
+                                debug!(response_chunk=%payload, "llm chat_stream response");
 
                                 if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
                                     for ch in json.choices {
                                         if let Some(reason) = ch.finish_reason
-                                            && reason == "stop" {
-                                                continue;
-                                            }
+                                            && reason == "stop"
+                                        {
+                                            continue;
+                                        }
                                         let delta = ch.delta.content;
                                         if !delta.is_empty() {
                                             out.push(Ok(delta));
@@ -176,11 +177,9 @@ impl OpenAIClient {
                                         if !ch.delta.tool_calls.is_empty()
                                             && let Ok(marker) =
                                                 serde_json::to_string(&ch.delta.tool_calls)
-                                            {
-                                                out.push(Ok(format!(
-                                                    "__TOOL_CALLS_DELTA__:{marker}"
-                                                )));
-                                            }
+                                        {
+                                            out.push(Ok(format!("__TOOL_CALLS_DELTA__:{marker}")));
+                                        }
                                     }
                                 }
                             }

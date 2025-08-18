@@ -70,7 +70,7 @@ impl OpenAIClient {
         );
 
         if let Ok(payload) = serde_json::to_string_pretty(&req) {
-            debug!(target: "llm", payload=%payload, endpoint=%url, "sending chat.completions payload");
+            debug!(payload=%payload, endpoint=%url, "sending chat.completions payload");
         }
 
         let max_attempts = self.llm_cfg.max_retries.saturating_add(1);
