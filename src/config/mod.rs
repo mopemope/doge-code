@@ -8,7 +8,6 @@ pub struct AppConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
-    pub log_level: String,
     pub project_root: PathBuf,
     pub llm: LlmConfig,
     pub enable_stream_tools: bool,
@@ -46,7 +45,6 @@ pub struct FileConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
-    pub log_level: Option<String>,
     pub project_root: Option<std::path::PathBuf>,
     pub llm: Option<PartialLlmConfig>,
     pub enable_stream_tools: Option<bool>,
@@ -89,14 +87,6 @@ impl AppConfig {
         } else {
             cli.model
         };
-        let log_level = if cli.log_level.is_empty() {
-            std::env::var("DOGE_LOG")
-                .ok()
-                .or(file_cfg.log_level)
-                .unwrap_or_else(|| "info".to_string())
-        } else {
-            cli.log_level
-        };
         let project_root = file_cfg.project_root.unwrap_or(project_root);
 
         let llm_defaults = LlmConfig::default();
@@ -133,7 +123,6 @@ impl AppConfig {
             base_url,
             model,
             api_key,
-            log_level,
             project_root,
             llm,
             enable_stream_tools: std::env::var("DOGE_STREAM_TOOLS")

@@ -272,7 +272,7 @@ impl Analyzer {
                 Ok(Err(e)) => {
                     error!("Task failed with error: {:?}", e);
                 }
-                Err(e) => {
+                Err(_e) => {
                     // error!("Task join failed with error: {:?}", e);
                 }
             }
