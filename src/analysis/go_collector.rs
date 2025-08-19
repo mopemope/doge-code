@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-use super::collector::{LanguageSpecificExtractor, name_from, node_text, push_symbol};
+use super::collector::{LanguageSpecificExtractor, name_from, node_text};
 
 // ---------------- Go Extractor -----------------
 pub struct GoExtractor;
@@ -70,7 +70,7 @@ fn handle_function_declaration(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -115,7 +115,7 @@ fn handle_method_declaration(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -155,7 +155,7 @@ fn handle_type_declaration(
                     file_total_lines,
                     function_lines: None,
                 };
-                push_symbol(map, symbol_info);
+                map.symbols.push(symbol_info);
             }
             if !c.goto_next_sibling() {
                 break;
@@ -192,7 +192,7 @@ fn handle_const_or_var_declaration(
                     file_total_lines,
                     function_lines: None,
                 };
-                push_symbol(map, symbol_info);
+                map.symbols.push(symbol_info);
             }
             if !c.goto_next_sibling() {
                 break;

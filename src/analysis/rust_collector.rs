@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-use super::collector::{LanguageSpecificExtractor, name_from, node_text, push_symbol};
+use super::collector::{LanguageSpecificExtractor, name_from, node_text};
 
 // ---------------- Rust Extractor -----------------
 pub struct RustExtractor;
@@ -82,7 +82,7 @@ fn handle_function_item(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -106,7 +106,7 @@ fn handle_struct_item(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -130,7 +130,7 @@ fn handle_enum_item(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -154,7 +154,7 @@ fn handle_trait_item(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -172,7 +172,7 @@ fn handle_mod_item(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_t
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -198,7 +198,7 @@ fn handle_let_declaration(
                 file_total_lines,
                 function_lines: None,
             };
-            push_symbol(map, symbol_info);
+            map.symbols.push(symbol_info);
         } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
             extract_identifiers_from_pattern(map, pattern, src, file, file_total_lines);
         }
@@ -226,7 +226,7 @@ fn extract_identifiers_from_pattern(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     } else {
         let mut c = pattern_node.walk();
         if c.goto_first_child() {
@@ -268,7 +268,7 @@ fn handle_impl_item(
         file_total_lines,
         function_lines: None,
     };
-    push_symbol(map, symbol_info);
+    map.symbols.push(symbol_info);
     walk_impl_items(
         map,
         &parent_name,
@@ -331,7 +331,7 @@ fn walk_impl_items(
                                 child.end_position().row - child.start_position().row + 1,
                             ),
                         };
-                        push_symbol(map, symbol_info);
+                        map.symbols.push(symbol_info);
                     } else {
                         let symbol_info = SymbolInfo {
                             name,
@@ -347,7 +347,7 @@ fn walk_impl_items(
                                 child.end_position().row - child.start_position().row + 1,
                             ),
                         };
-                        push_symbol(map, symbol_info);
+                        map.symbols.push(symbol_info);
                     }
                 }
             } else {

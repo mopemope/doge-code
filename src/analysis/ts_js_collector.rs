@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-use super::collector::{LanguageSpecificExtractor, name_from, node_text, push_symbol};
+use super::collector::{LanguageSpecificExtractor, name_from, node_text};
 
 // ---------------- TypeScript/JavaScript Extractor -----------------
 pub struct TypeScriptExtractor;
@@ -124,7 +124,7 @@ fn handle_function_declaration(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -148,7 +148,7 @@ fn handle_class_declaration(
         file_total_lines,
         function_lines: None,
     };
-    push_symbol(map, symbol_info);
+    map.symbols.push(symbol_info);
 }
 
 fn handle_method_definition(
@@ -174,7 +174,7 @@ fn handle_method_definition(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -198,7 +198,7 @@ fn handle_enum_declaration(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -222,7 +222,7 @@ fn handle_interface_declaration(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -253,7 +253,7 @@ fn handle_lexical_or_variable_declaration(
                     file_total_lines,
                     function_lines: None,
                 };
-                push_symbol(map, symbol_info);
+                map.symbols.push(symbol_info);
             }
             if !c.goto_next_sibling() {
                 break;

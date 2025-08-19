@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-use super::collector::{LanguageSpecificExtractor, name_from, node_text, push_symbol};
+use super::collector::{LanguageSpecificExtractor, name_from, node_text};
 
 // ---------------- Python Extractor -----------------
 pub struct PythonExtractor;
@@ -91,7 +91,7 @@ fn handle_function_definition(
             file_total_lines,
             function_lines: Some(function_lines),
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     }
 }
 
@@ -115,7 +115,7 @@ fn handle_class_definition(
         file_total_lines,
         function_lines: None,
     };
-    push_symbol(map, symbol_info);
+    map.symbols.push(symbol_info);
 }
 
 fn handle_assignment(
@@ -140,7 +140,7 @@ fn handle_assignment(
                 file_total_lines,
                 function_lines: None,
             };
-            push_symbol(map, symbol_info);
+            map.symbols.push(symbol_info);
         } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
             extract_identifiers_from_py_lhs(map, lhs, src, file, file_total_lines);
         }
@@ -168,7 +168,7 @@ fn extract_identifiers_from_py_lhs(
             file_total_lines,
             function_lines: None,
         };
-        push_symbol(map, symbol_info);
+        map.symbols.push(symbol_info);
     } else {
         let mut c = lhs_node.walk();
         if c.goto_first_child() {
