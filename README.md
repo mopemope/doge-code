@@ -1,31 +1,38 @@
 # doge-code
 
-An interactive TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to read, search, and edit code, and provides a fast, minimal TUI with streaming output and basic repository analysis.
+An interactive TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to autonomously read, analyze, search, and edit code across multiple programming languages, providing a fast, minimal TUI with streaming output and comprehensive repository analysis.
 
 ## Features
 
-- TUI mode
-- OpenAI-compatible Chat Completions API
-  - Streaming output (TUI) and tool-use agent loop
-  - Basic error handling and cancelation
-- Safe filesystem tools confined to the project root
-  - `/read`, `/write`, `/search` with path normalization and binary file guards
-- Repository map (Rust only for now) using tree-sitter
-  - `/map` lists Rust functions; planned: structs/enums/traits
-- TUI UX
-  - Real-time streaming output with status indicator (Idle/Streaming/Cancelled/Done/Error)
-  - Esc to cancel ongoing streaming
-  - Max log size with automatic truncation
-  - @-file completion for project files in the input field
-  - New: `/open <path>` launches your editor from TUI and safely returns
+### Core Capabilities
+- **Interactive TUI Interface** - Real-time streaming output with status indicators and cancellation support
+- **Multi-language Repository Analysis** - Static analysis using tree-sitter for Rust, TypeScript, JavaScript, Python, Go, and Java
+- **Autonomous Agent Loop** - LLM function calling with comprehensive tool execution and feedback loops
+- **OpenAI-compatible API Integration** - Streaming chat completions with tool use support
+- **Comprehensive Tool System** - 15+ built-in tools for filesystem operations, code analysis, and execution
+
+### Advanced Features
+- **Session Management** - Persistent conversation history with session creation, loading, and management
+- **Smart Configuration** - TOML config files, CLI arguments, and environment variables with XDG Base Directory compliance
+- **Theme System** - Dark/light themes with runtime switching via `/theme` command
+- **File Completion** - @-file completion for project files with intelligent path resolution
+- **Editor Integration** - `/open <path>` command launches your preferred editor and safely returns to TUI
+- **Project Instructions** - Automatic loading of project-specific instructions from AGENTS.md, QWEN.md, or GEMINI.md
+
+### TUI Experience
+- Real-time streaming output with status indicator (Idle/Streaming/Cancelled/Done/Error)
+- Esc to cancel ongoing streaming operations
+- Automatic log truncation with configurable limits
+- Input history persistence across sessions
+- Safe filesystem operations confined to project root
 
 ## Requirements
 
-- Rust toolchain (stable)
+- Rust toolchain (Edition 2024, stable)
 - Network access to an OpenAI-compatible endpoint (default: https://api.openai.com/v1)
 - An API key in `OPENAI_API_KEY` or provided via `--api-key`
 
-## Install
+## Installation
 
 ```bash
 cargo build --release
@@ -39,17 +46,17 @@ target/release/doge-code
 
 ## Configuration
 
-You can configure via a TOML config file, CLI flags, or environment variables (dotenv is supported).
+You can configure via TOML config file, CLI flags, or environment variables (dotenv is supported).
 
-Priority: CLI > Environment > Config file > Defaults.
+**Priority**: CLI > Environment > Config file > Defaults
 
-Config file search order (XDG Base Directory spec):
-1) `$DOGE_CODE_CONFIG` (explicit file path, highest priority)
-2) `$XDG_CONFIG_HOME/doge-code/config.toml`
-3) `~/.config/doge-code/config.toml`
-4) Each dir in `$XDG_CONFIG_DIRS` (colon-separated), checked in order: `dir/doge-code/config.toml`
+### Config File Locations (XDG Base Directory spec)
+1. `$DOGE_CODE_CONFIG` (explicit file path, highest priority)
+2. `$XDG_CONFIG_HOME/doge-code/config.toml`
+3. `~/.config/doge-code/config.toml`
+4. Each dir in `$XDG_CONFIG_DIRS` (colon-separated): `dir/doge-code/config.toml`
 
-Sample `config.toml`:
+### Sample Configuration
 
 ```toml
 # ~/.config/doge-code/config.toml
@@ -57,15 +64,12 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 api_key = "sk-..."
 log_level = "info"
+theme = "dark"
 # Optional project root override (absolute path)
 # project_root = "/path/to/project"
 ```
 
-Notes:
-- When a config file is successfully loaded, a log line is written: `loaded config file` with the resolved path (API keys are never logged).
-- If parsing fails, a warning is logged and execution continues with env/CLI/default values.
-
-CLI and environment variables (examples):
+### Environment Variables and CLI Options
 
 - `--base-url` or `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
 - `--model` or `OPENAI_MODEL` (default: `gpt-4o-mini`)
@@ -90,69 +94,145 @@ Run without flags to launch the TUI:
 ./target/release/doge-code
 ```
 
-Key points:
+### TUI Commands
 
-- Type plain prompts (no leading slash) to talk to the LLM.
-- Commands (recognized in TUI):
-  - `/help` – list commands
-  - `/map` – show a simple repo map (Rust fns only)
-  - `/tools` – list available tools
-  - `/clear` – clear the log area
-  - `/open <path>` – open a file in your editor (see below)
-  - `/retry` – resend your previous non-command input to the LLM
-  - `/cancel` – cancel an ongoing LLM streaming
-  - `/quit` – exit TUI
-- Status is shown in the header (Idle/Streaming/Cancelled/Done/Error)
-- Press `Esc` (or `Ctrl+C` once) to cancel streaming. Double `Ctrl+C` within 3s to exit.
-- Input history is persisted under `~/.config/doge-code/...` (XDG paths respected).
+- **Plain prompts** (no leading slash) - Talk to the LLM with full tool access
+- `/help` - List all available commands
+- `/map` - Show repository analysis (functions, classes, etc.)
+- `/tools` - List available tools
+- `/clear` - Clear the log area
+- `/open <path>` - Open a file in your editor (respects $EDITOR, $VISUAL, or defaults to vi)
+- `/theme <name>` - Switch theme (dark/light)
+- `/retry` - Resend your previous non-command input to the LLM
+- `/cancel` - Cancel ongoing LLM streaming
+- `/quit` - Exit TUI
 
-@-file completion:
+### Key Bindings
 
-- Type `@` to trigger file completion based on the current project root.
-- Navigate the popup with Up/Down; Enter to insert the selected path into input.
-- Recent selections are prioritized.
+- **Esc** (or `Ctrl+C` once) - Cancel streaming
+- **Double `Ctrl+C`** within 3s - Exit application
+- **Up/Down** - Navigate input history
+- **@** - Trigger file completion for project files
 
-New: `/open <path>` (TUI only)
+### File Completion
 
-- Launches your editor and temporarily suspends the TUI screen; upon editor exit, TUI is restored.
-- Editor selection order: `$EDITOR` → `$VISUAL` → `vi`.
-- Path resolution:
-  - Relative paths are resolved against the configured `project_root`.
-  - Absolute paths are allowed.
-  - If the path does not exist, an error is shown in the log.
-- Recommended workflow: type `/open @src/tui/view.rs` and use `@` completion to pick files.
+Type `@` to trigger file completion based on the current project root:
+- Navigate with Up/Down arrows
+- Enter to insert selected path
+- Recent selections are prioritized
+- Works with relative paths resolved against project root
 
-### Safety notes for Tools
+### Editor Integration
 
-- All file operations are restricted to the current project root directory.
-- Search skips common binary/big files; use a glob include to narrow scope.
+The `/open <path>` command:
+- Launches your editor and temporarily suspends TUI
+- Editor selection: `$EDITOR` → `$VISUAL` → `vi`
+- Supports both relative (to project root) and absolute paths
+- Safely returns to TUI after editor exit
+- Example: `/open @src/main.rs` (use @ completion to pick files)
 
-#### Tools module layout
+## Available Tools
 
-The filesystem tools are split per operation for maintainability:
+The LLM has access to comprehensive tools for autonomous operation:
 
-- `src/tools/mod.rs` — module wiring and re-exports
-- `src/tools/common.rs` — `FsTools` struct (holds project root)
-- `src/tools/read.rs` — `fs_read` implementation and path normalization
-- `src/tools/write.rs` — `fs_write` implementation (guards project root, creates parents)
-- `src/tools/search.rs` — `fs_search` implementation (regex over globbed files, skips binaries)
+### Filesystem Tools
+- `fs_read` - Read files with optional line range specification
+- `fs_write` - Write files with automatic parent directory creation
+- `fs_search` - Search files using regex patterns with glob filtering
+- `fs_list` - List directory contents with configurable depth
+- `find_file` - Find files by name pattern
 
-Public API remains the same via `pub use` in `tools::mod`.
+### Code Analysis Tools
+- `get_symbol_info` - Query repository map for functions, classes, and symbols
+- `search_repomap` - Search analyzed code symbols with filtering
+- `get_file_sha256` - Get file checksums for integrity verification
+
+### Development Tools
+- `execute_bash` - Execute shell commands safely
+- `create_patch` - Generate unified diff patches
+- `apply_patch` - Apply patches to files
+- `edit` - Advanced file editing with search/replace operations
+
+### Multi-file Operations
+- `read_many_files` - Read multiple files efficiently in parallel
+
+## Multi-language Support
+
+Repository analysis supports:
+
+- **Rust** (.rs) - Functions, structs, enums, traits, impl blocks
+- **TypeScript** (.ts, .tsx) - Functions, classes, interfaces, types
+- **JavaScript** (.js, .mjs, .cjs) - Functions, classes, objects
+- **Python** (.py) - Functions, classes, methods
+- **Go** (.go) - Functions, types, methods, interfaces
+- **Java** (.java) - Classes, methods, interfaces
+
+The analysis extracts:
+- Symbol names and types
+- File locations and line numbers
+- Function signatures and documentation
+- Hierarchical relationships
+
+## Session Management
+
+- **Automatic Persistence** - Conversation history saved automatically
+- **Session Creation** - Each conversation creates a unique session
+- **History Management** - Input history persists across sessions
+- **XDG Compliance** - Sessions stored in `~/.config/doge-code/sessions/`
+
+## Safety Features
+
+- **Project Root Confinement** - All file operations restricted to project directory
+- **Binary File Detection** - Automatic skipping of binary files in search operations
+- **Path Normalization** - Safe resolution of relative and absolute paths
+- **Graceful Error Handling** - Comprehensive error reporting and recovery
 
 ## Developer Notes
 
-- Edition: Rust 2024
-- Concurrency: tokio, `reqwest` for HTTP, streaming token handling
-- Parsing: `tree-sitter` + `tree-sitter-rust` for repo map (currently Rust functions)
-- Logging: `tracing` to `./debug.log` (set `DOGE_LOG`)
-- Tests: `cargo test`
+### Technical Stack
+- **Edition**: Rust 2024
+- **Concurrency**: tokio for async operations, reqwest for HTTP with streaming
+- **Parsing**: tree-sitter with language-specific parsers for multi-language analysis
+- **UI**: crossterm for cross-platform terminal handling
+- **Logging**: tracing framework with file output to `./debug.log`
+- **Configuration**: TOML with XDG Base Directory specification compliance
+- **Testing**: Comprehensive test suite with 61+ passing tests
+
+### Architecture
+- **Modular Design**: Separate modules for analysis, LLM client, tools, TUI, and configuration
+- **Async-First**: Non-blocking operations with tokio runtime
+- **Tool System**: Extensible tool architecture with LLM function calling integration
+- **Static Analysis**: tree-sitter based parsing with language-specific extractors
+- **Streaming**: Real-time LLM response streaming with cancellation support
+
+### Key Modules
+- `src/analysis/` - Multi-language static analysis and repository mapping
+- `src/llm/` - OpenAI-compatible client with streaming and tool execution
+- `src/tools/` - Comprehensive tool system for autonomous operations
+- `src/tui/` - Terminal user interface with event handling and rendering
+- `src/config/` - Configuration management with multiple sources
+- `src/session/` - Session persistence and history management
+
+### Testing
+Run the test suite:
+```bash
+cargo test
+```
+
+### Logging
+Application logs are written to `./debug.log` for debugging and troubleshooting.
 
 ## Roadmap
 
-- Map: extract structs/enums/traits/impl methods; add filters
-- Richer tool use via LLM (structured function calling)
-- Theming, color toggle, and configurable max-log lines
-- Session management enhancements (TUI) and better persistence UX
+### Planned Enhancements
+- **Extended Language Support** - Additional programming languages and frameworks
+- **Advanced Tool Integration** - More sophisticated development tools and integrations
+- **Enhanced UI/UX** - Improved theming, customizable layouts, and visual enhancements
+- **Performance Optimizations** - Faster analysis, caching improvements, and memory optimization
+- **Plugin System** - Extensible architecture for custom tools and integrations
+
+### Current Development
+See `.plan/` directory for detailed development plans and progress tracking.
 
 ## License
 
