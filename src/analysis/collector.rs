@@ -13,28 +13,8 @@ fn name_from(node: Node, field: &str, src: &str) -> Option<String> {
         .map(|n| node_text(n, src).to_string())
 }
 
-fn push_symbol(
-    map: &mut RepoMap,
-    kind: SymbolKind,
-    name: String,
-    node: Node,
-    file: &Path,
-    parent: Option<String>,
-) {
-    let start_line = node.start_position().row + 1;
-    let start_col = node.start_position().column + 1;
-    let end_line = node.end_position().row + 1;
-    let end_col = node.end_position().column + 1;
-    map.symbols.push(SymbolInfo {
-        name,
-        kind,
-        file: file.to_path_buf(),
-        start_line,
-        start_col,
-        end_line,
-        end_col,
-        parent,
-    });
+fn push_symbol(map: &mut RepoMap, symbol_info: SymbolInfo) {
+    map.symbols.push(symbol_info);
 }
 
 // Trait for language-specific symbol extraction
@@ -60,7 +40,9 @@ impl LanguageSpecificExtractor for RustExtractor {
         file: &Path,
     ) -> Result<()> {
         let root = tree.root_node();
-        visit_rust_node(map, root, src, file, None);
+        // ファイル全体の行数を計算
+        let file_total_lines = src.lines().count();
+        visit_rust_node(map, root, src, file, None, file_total_lines);
         Ok(())
     }
 }
@@ -71,53 +53,147 @@ fn visit_rust_node(
     src: &str,
     file: &Path,
     ctx_impl: Option<String>,
+    file_total_lines: usize,
 ) {
     match node.kind() {
         "function_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Function, name, node, file, None);
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Function,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "struct_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Struct, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Struct,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "enum_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Enum, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Enum,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "trait_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Trait, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Trait,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "mod_item" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Mod, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Mod,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "let_declaration" => {
             if let Some(pattern) = node.child_by_field_name("pattern") {
                 if pattern.kind() == "identifier" {
                     let name = node_text(pattern, src).to_string();
-                    push_symbol(map, SymbolKind::Variable, name, pattern, file, None);
+                    let symbol_info = SymbolInfo {
+                        name,
+                        kind: SymbolKind::Variable,
+                        file: file.to_path_buf(),
+                        start_line: pattern.start_position().row + 1,
+                        start_col: pattern.start_position().column + 1,
+                        end_line: pattern.end_position().row + 1,
+                        end_col: pattern.end_position().column + 1,
+                        parent: None,
+                        file_total_lines,
+                        function_lines: None,
+                    };
+                    push_symbol(map, symbol_info);
                 } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
                     fn extract_identifiers_from_pattern(
                         map: &mut RepoMap,
                         pattern_node: Node,
                         src: &str,
                         file: &Path,
+                        file_total_lines: usize,
                     ) {
                         if pattern_node.kind() == "identifier" {
                             let name = node_text(pattern_node, src).to_string();
-                            push_symbol(map, SymbolKind::Variable, name, pattern_node, file, None);
+                            let symbol_info = SymbolInfo {
+                                name,
+                                kind: SymbolKind::Variable,
+                                file: file.to_path_buf(),
+                                start_line: pattern_node.start_position().row + 1,
+                                start_col: pattern_node.start_position().column + 1,
+                                end_line: pattern_node.end_position().row + 1,
+                                end_col: pattern_node.end_position().column + 1,
+                                parent: None,
+                                file_total_lines,
+                                function_lines: None,
+                            };
+                            push_symbol(map, symbol_info);
                         } else {
                             let mut c = pattern_node.walk();
                             if c.goto_first_child() {
                                 loop {
-                                    extract_identifiers_from_pattern(map, c.node(), src, file);
+                                    extract_identifiers_from_pattern(
+                                        map,
+                                        c.node(),
+                                        src,
+                                        file,
+                                        file_total_lines,
+                                    );
                                     if !c.goto_next_sibling() {
                                         break;
                                     }
@@ -126,7 +202,9 @@ fn visit_rust_node(
                             }
                         }
                     }
-                    extract_identifiers_from_pattern(map, pattern, src, file);
+                    // ファイル全体の行数を計算
+                    let file_total_lines = src.lines().count();
+                    extract_identifiers_from_pattern(map, pattern, src, file, file_total_lines);
                 }
             }
         }
@@ -139,7 +217,19 @@ fn visit_rust_node(
                 parent_name = Some(node_text(tr, src).to_string());
             }
             let impl_name = parent_name.clone().unwrap_or_else(|| "impl".to_string());
-            push_symbol(map, SymbolKind::Impl, impl_name.clone(), node, file, None);
+            let symbol_info = SymbolInfo {
+                name: impl_name.clone(),
+                kind: SymbolKind::Impl,
+                file: file.to_path_buf(),
+                start_line: node.start_position().row + 1,
+                start_col: node.start_position().column + 1,
+                end_line: node.end_position().row + 1,
+                end_col: node.end_position().column + 1,
+                parent: None,
+                file_total_lines,
+                function_lines: None,
+            };
+            push_symbol(map, symbol_info);
             fn walk_impl_items(
                 map: &mut RepoMap,
                 parent_name: &Option<String>,
@@ -147,6 +237,7 @@ fn visit_rust_node(
                 node: Node,
                 src: &str,
                 file: &Path,
+                file_total_lines: usize,
             ) {
                 let mut cursor = node.walk();
                 if cursor.goto_first_child() {
@@ -176,27 +267,51 @@ fn visit_rust_node(
                             }
                             if let Some(name) = name_from(child, "name", src) {
                                 if has_receiver {
-                                    push_symbol(
-                                        map,
-                                        SymbolKind::Method,
+                                    let symbol_info = SymbolInfo {
                                         name,
-                                        child,
-                                        file,
-                                        parent_name.clone(),
-                                    );
+                                        kind: SymbolKind::Method,
+                                        file: file.to_path_buf(),
+                                        start_line: child.start_position().row + 1,
+                                        start_col: child.start_position().column + 1,
+                                        end_line: child.end_position().row + 1,
+                                        end_col: child.end_position().column + 1,
+                                        parent: parent_name.clone(),
+                                        file_total_lines,
+                                        function_lines: Some(
+                                            child.end_position().row - child.start_position().row
+                                                + 1,
+                                        ),
+                                    };
+                                    push_symbol(map, symbol_info);
                                 } else {
-                                    push_symbol(
-                                        map,
-                                        SymbolKind::AssocFn,
+                                    let symbol_info = SymbolInfo {
                                         name,
-                                        child,
-                                        file,
-                                        parent_name.clone(),
-                                    );
+                                        kind: SymbolKind::AssocFn,
+                                        file: file.to_path_buf(),
+                                        start_line: child.start_position().row + 1,
+                                        start_col: child.start_position().column + 1,
+                                        end_line: child.end_position().row + 1,
+                                        end_col: child.end_position().column + 1,
+                                        parent: parent_name.clone(),
+                                        file_total_lines,
+                                        function_lines: Some(
+                                            child.end_position().row - child.start_position().row
+                                                + 1,
+                                        ),
+                                    };
+                                    push_symbol(map, symbol_info);
                                 }
                             }
                         } else {
-                            walk_impl_items(map, parent_name, _impl_name, child, src, file);
+                            walk_impl_items(
+                                map,
+                                parent_name,
+                                _impl_name,
+                                child,
+                                src,
+                                file,
+                                file_total_lines,
+                            );
                         }
                         if !cursor.goto_next_sibling() {
                             break;
@@ -205,7 +320,15 @@ fn visit_rust_node(
                     cursor.goto_parent();
                 }
             }
-            walk_impl_items(&mut *map, &parent_name, &impl_name, node, src, file);
+            walk_impl_items(
+                &mut *map,
+                &parent_name,
+                &impl_name,
+                node,
+                src,
+                file,
+                file_total_lines,
+            );
         }
         _ => {}
     }
@@ -213,7 +336,14 @@ fn visit_rust_node(
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            visit_rust_node(map, cursor.node(), src, file, ctx_impl.clone());
+            visit_rust_node(
+                map,
+                cursor.node(),
+                src,
+                file,
+                ctx_impl.clone(),
+                file_total_lines,
+            );
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -273,15 +403,44 @@ fn collect_ts_js(
 }
 
 fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Option<String>) {
+    // ファイル全体の行数を計算
+    let file_total_lines = src.lines().count();
+
     match node.kind() {
         "function_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Function, name, node, file, None);
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Function,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "class_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Struct, name.clone(), node, file, None);
+                let symbol_info = SymbolInfo {
+                    name: name.clone(),
+                    kind: SymbolKind::Struct,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
                 let mut c = node.walk();
                 if c.goto_first_child() {
                     loop {
@@ -298,17 +457,55 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
         "method_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, src).to_string();
-                push_symbol(map, SymbolKind::Method, name, node, file, class_ctx.clone());
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Method,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: class_ctx.clone(),
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "enum_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Enum, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Enum,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "interface_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Trait, name, node, file, None);
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Trait,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -320,7 +517,19 @@ fn visit_ts_js(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx:
                         && let Some(id_node) = child.child_by_field_name("name")
                     {
                         let name = node_text(id_node, src).to_string();
-                        push_symbol(map, SymbolKind::Variable, name, id_node, file, None);
+                        let symbol_info = SymbolInfo {
+                            name,
+                            kind: SymbolKind::Variable,
+                            file: file.to_path_buf(),
+                            start_line: id_node.start_position().row + 1,
+                            start_col: id_node.start_position().column + 1,
+                            end_line: id_node.end_position().row + 1,
+                            end_col: id_node.end_position().column + 1,
+                            parent: None,
+                            file_total_lines,
+                            function_lines: None,
+                        };
+                        push_symbol(map, symbol_info);
                     }
                     if !c.goto_next_sibling() {
                         break;
@@ -361,6 +570,9 @@ impl LanguageSpecificExtractor for PythonExtractor {
 }
 
 fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Option<String>) {
+    // ファイル全体の行数を計算
+    let file_total_lines = src.lines().count();
+
     match node.kind() {
         "function_definition" => {
             if let Some(name) = name_from(node, "name", src) {
@@ -372,12 +584,38 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
                 } else {
                     SymbolKind::Function
                 };
-                push_symbol(map, kind, name, node, file, class_ctx.clone());
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: class_ctx.clone(),
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "class_definition" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Struct, name.clone(), node, file, None);
+                let symbol_info = SymbolInfo {
+                    name: name.clone(),
+                    kind: SymbolKind::Struct,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
                 let mut c = node.walk();
                 if c.goto_first_child() {
                     loop {
@@ -395,22 +633,53 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
             if let Some(lhs) = node.child_by_field_name("left") {
                 if lhs.kind() == "identifier" {
                     let name = node_text(lhs, src).to_string();
-                    push_symbol(map, SymbolKind::Variable, name, lhs, file, None);
+                    let symbol_info = SymbolInfo {
+                        name,
+                        kind: SymbolKind::Variable,
+                        file: file.to_path_buf(),
+                        start_line: lhs.start_position().row + 1,
+                        start_col: lhs.start_position().column + 1,
+                        end_line: lhs.end_position().row + 1,
+                        end_col: lhs.end_position().column + 1,
+                        parent: None,
+                        file_total_lines,
+                        function_lines: None,
+                    };
+                    push_symbol(map, symbol_info);
                 } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
                     fn extract_identifiers_from_py_lhs(
                         map: &mut RepoMap,
                         lhs_node: Node,
                         src: &str,
                         file: &Path,
+                        file_total_lines: usize,
                     ) {
                         if lhs_node.kind() == "identifier" {
                             let name = node_text(lhs_node, src).to_string();
-                            push_symbol(map, SymbolKind::Variable, name, lhs_node, file, None);
+                            let symbol_info = SymbolInfo {
+                                name,
+                                kind: SymbolKind::Variable,
+                                file: file.to_path_buf(),
+                                start_line: lhs_node.start_position().row + 1,
+                                start_col: lhs_node.start_position().column + 1,
+                                end_line: lhs_node.end_position().row + 1,
+                                end_col: lhs_node.end_position().column + 1,
+                                parent: None,
+                                file_total_lines,
+                                function_lines: None,
+                            };
+                            push_symbol(map, symbol_info);
                         } else {
                             let mut c = lhs_node.walk();
                             if c.goto_first_child() {
                                 loop {
-                                    extract_identifiers_from_py_lhs(map, c.node(), src, file);
+                                    extract_identifiers_from_py_lhs(
+                                        map,
+                                        c.node(),
+                                        src,
+                                        file,
+                                        file_total_lines,
+                                    );
                                     if !c.goto_next_sibling() {
                                         break;
                                     }
@@ -419,7 +688,9 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
                             }
                         }
                     }
-                    extract_identifiers_from_py_lhs(map, lhs, src, file);
+                    // ファイル全体の行数を計算
+                    let file_total_lines = src.lines().count();
+                    extract_identifiers_from_py_lhs(map, lhs, src, file, file_total_lines);
                 }
             }
         }
@@ -475,10 +746,27 @@ impl LanguageSpecificExtractor for GoExtractor {
 }
 
 fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx: Option<String>) {
+    // ファイル全体の行数を計算
+    let file_total_lines = src.lines().count();
+
     match node.kind() {
         "function_declaration" => {
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Function, name, node, file, None);
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Function,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "method_declaration" => {
@@ -503,7 +791,21 @@ fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx
             }
 
             if let Some(name) = name_from(node, "name", src) {
-                push_symbol(map, SymbolKind::Method, name, node, file, receiver_type);
+                // 関数の行数を計算
+                let function_lines = node.end_position().row - node.start_position().row + 1;
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Method,
+                    file: file.to_path_buf(),
+                    start_line: node.start_position().row + 1,
+                    start_col: node.start_position().column + 1,
+                    end_line: node.end_position().row + 1,
+                    end_col: node.end_position().column + 1,
+                    parent: receiver_type,
+                    file_total_lines,
+                    function_lines: Some(function_lines),
+                };
+                push_symbol(map, symbol_info);
             }
         }
         "type_declaration" => {
@@ -524,7 +826,19 @@ fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx
                         } else {
                             SymbolKind::Struct
                         };
-                        push_symbol(map, kind, name.clone(), child, file, None);
+                        let symbol_info = SymbolInfo {
+                            name: name.clone(),
+                            kind,
+                            file: file.to_path_buf(),
+                            start_line: child.start_position().row + 1,
+                            start_col: child.start_position().column + 1,
+                            end_line: child.end_position().row + 1,
+                            end_col: child.end_position().column + 1,
+                            parent: None,
+                            file_total_lines,
+                            function_lines: None,
+                        };
+                        push_symbol(map, symbol_info);
                     }
                     if !c.goto_next_sibling() {
                         break;
@@ -542,7 +856,19 @@ fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx
                         && let Some(name_node) = child.child_by_field_name("name")
                     {
                         let name = node_text(name_node, src).to_string();
-                        push_symbol(map, SymbolKind::Variable, name, name_node, file, None);
+                        let symbol_info = SymbolInfo {
+                            name,
+                            kind: SymbolKind::Variable,
+                            file: file.to_path_buf(),
+                            start_line: name_node.start_position().row + 1,
+                            start_col: name_node.start_position().column + 1,
+                            end_line: name_node.end_position().row + 1,
+                            end_col: name_node.end_position().column + 1,
+                            parent: None,
+                            file_total_lines,
+                            function_lines: None,
+                        };
+                        push_symbol(map, symbol_info);
                     }
                     if !c.goto_next_sibling() {
                         break;
