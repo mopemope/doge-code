@@ -88,10 +88,11 @@ fn handle_method_declaration(
             loop {
                 let child = cursor.node();
                 if child.kind() == "parameter_declaration"
-                    && let Some(type_node) = child.child_by_field_name("type") {
-                        receiver_type = Some(node_text(type_node, src).to_string());
-                        break;
-                    }
+                    && let Some(type_node) = child.child_by_field_name("type")
+                {
+                    receiver_type = Some(node_text(type_node, src).to_string());
+                    break;
+                }
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -130,31 +131,32 @@ fn handle_type_declaration(
         loop {
             let child = c.node();
             if child.kind() == "type_spec"
-                && let Some(name) = name_from(child, "name", src) {
-                    let type_node = child.child_by_field_name("type");
-                    let kind = if let Some(tn) = type_node {
-                        match tn.kind() {
-                            "struct_type" => SymbolKind::Struct,
-                            "interface_type" => SymbolKind::Trait,
-                            _ => SymbolKind::Struct,
-                        }
-                    } else {
-                        SymbolKind::Struct
-                    };
-                    let symbol_info = SymbolInfo {
-                        name: name.clone(),
-                        kind,
-                        file: file.to_path_buf(),
-                        start_line: child.start_position().row + 1,
-                        start_col: child.start_position().column + 1,
-                        end_line: child.end_position().row + 1,
-                        end_col: child.end_position().column + 1,
-                        parent: None,
-                        file_total_lines,
-                        function_lines: None,
-                    };
-                    push_symbol(map, symbol_info);
-                }
+                && let Some(name) = name_from(child, "name", src)
+            {
+                let type_node = child.child_by_field_name("type");
+                let kind = if let Some(tn) = type_node {
+                    match tn.kind() {
+                        "struct_type" => SymbolKind::Struct,
+                        "interface_type" => SymbolKind::Trait,
+                        _ => SymbolKind::Struct,
+                    }
+                } else {
+                    SymbolKind::Struct
+                };
+                let symbol_info = SymbolInfo {
+                    name: name.clone(),
+                    kind,
+                    file: file.to_path_buf(),
+                    start_line: child.start_position().row + 1,
+                    start_col: child.start_position().column + 1,
+                    end_line: child.end_position().row + 1,
+                    end_col: child.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
+            }
             if !c.goto_next_sibling() {
                 break;
             }
@@ -175,22 +177,23 @@ fn handle_const_or_var_declaration(
         loop {
             let child = c.node();
             if (child.kind() == "const_spec" || child.kind() == "var_spec")
-                && let Some(name_node) = child.child_by_field_name("name") {
-                    let name = node_text(name_node, src).to_string();
-                    let symbol_info = SymbolInfo {
-                        name,
-                        kind: SymbolKind::Variable,
-                        file: file.to_path_buf(),
-                        start_line: name_node.start_position().row + 1,
-                        start_col: name_node.start_position().column + 1,
-                        end_line: name_node.end_position().row + 1,
-                        end_col: name_node.end_position().column + 1,
-                        parent: None,
-                        file_total_lines,
-                        function_lines: None,
-                    };
-                    push_symbol(map, symbol_info);
-                }
+                && let Some(name_node) = child.child_by_field_name("name")
+            {
+                let name = node_text(name_node, src).to_string();
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Variable,
+                    file: file.to_path_buf(),
+                    start_line: name_node.start_position().row + 1,
+                    start_col: name_node.start_position().column + 1,
+                    end_line: name_node.end_position().row + 1,
+                    end_col: name_node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
+            }
             if !c.goto_next_sibling() {
                 break;
             }
