@@ -1,4 +1,4 @@
-use crate::analysis::{RepoMap, SymbolInfo};
+use crate::analysis::RepoMap;
 use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
@@ -11,10 +11,6 @@ pub(super) fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
 pub(super) fn name_from(node: Node, field: &str, src: &str) -> Option<String> {
     node.child_by_field_name(field)
         .map(|n| node_text(n, src).to_string())
-}
-
-pub(super) fn push_symbol(map: &mut RepoMap, symbol_info: SymbolInfo) {
-    map.symbols.push(symbol_info);
 }
 
 // Trait for language-specific symbol extraction
