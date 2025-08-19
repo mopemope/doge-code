@@ -8,6 +8,7 @@ pub mod get_file_sha256;
 pub mod list;
 pub mod read;
 pub mod read_many;
+pub mod search_repomap;
 pub mod search_text;
 pub mod symbol;
 pub mod write;
