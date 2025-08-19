@@ -9,6 +9,7 @@ use crate::tools::find_file;
 use crate::tools::list;
 use crate::tools::read;
 use crate::tools::read_many;
+use crate::tools::search_repomap;
 use crate::tools::search_text;
 use crate::tools::symbol;
 use crate::tools::symbol::SymbolTools;
@@ -17,6 +18,7 @@ use crate::tools::write;
 #[derive(Debug, Clone)]
 pub struct FsTools {
     symbol_tools: SymbolTools,
+    search_repomap_tools: search_repomap::RepomapSearchTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
 }
 
@@ -30,6 +32,7 @@ impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
         Self {
             symbol_tools: SymbolTools::new(),
+            search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             repomap,
         }
     }
@@ -125,6 +128,18 @@ impl FsTools {
         let repomap_guard = self.repomap.read().await;
         if let Some(map) = &*repomap_guard {
             self.symbol_tools.get_symbol_info(map, query, include, kind)
+        } else {
+            Err(anyhow::anyhow!("repomap is still generating"))
+        }
+    }
+
+    pub async fn search_repomap(
+        &self,
+        args: search_repomap::SearchRepomapArgs,
+    ) -> Result<Vec<search_repomap::RepomapSearchResult>> {
+        let repomap_guard = self.repomap.read().await;
+        if let Some(map) = &*repomap_guard {
+            self.search_repomap_tools.search_repomap(map, args)
         } else {
             Err(anyhow::anyhow!("repomap is still generating"))
         }

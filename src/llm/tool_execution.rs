@@ -339,6 +339,15 @@ pub async fn dispatch_tool_call(
                 Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
             }
         }
+        "search_repomap" => {
+            let args = serde_json::from_value::<crate::tools::search_repomap::SearchRepomapArgs>(
+                args_val,
+            )?;
+            match runtime.fs.search_repomap(args).await {
+                Ok(results) => Ok(json!({"ok": true, "results": results})),
+                Err(e) => Ok(json!({"ok": false, "error": format!("{e}")})),
+            }
+        }
         "execute_bash" => {
             let command = args_val
                 .get("command")
