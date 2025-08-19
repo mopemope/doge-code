@@ -1,5 +1,5 @@
 use crate::analysis::RepoMap;
-use crate::analysis::collector::{
+use crate::analysis::{
     GoExtractor, JavaScriptExtractor, LanguageSpecificExtractor, PythonExtractor, RustExtractor,
     TypeScriptExtractor,
 };
