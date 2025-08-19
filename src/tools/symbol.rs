@@ -118,6 +118,8 @@ mod tests {
             end_line: 10,
             end_col: 10,
             parent: None,
+            file_total_lines: 100,    // ダミーのファイル全体の行数
+            function_lines: Some(10), // ダミーの関数の行数
         }
     }
 

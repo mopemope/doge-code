@@ -40,6 +40,10 @@ pub struct SymbolInfo {
     pub end_line: usize,
     pub end_col: usize,
     pub parent: Option<String>,
+    /// ファイル全体の行数
+    pub file_total_lines: usize,
+    /// 関数の行数 (関数の場合のみ)
+    pub function_lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
