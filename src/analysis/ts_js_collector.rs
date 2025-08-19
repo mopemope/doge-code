@@ -238,22 +238,23 @@ fn handle_lexical_or_variable_declaration(
         loop {
             let child = c.node();
             if child.kind() == "variable_declarator"
-                && let Some(id_node) = child.child_by_field_name("name") {
-                    let name = node_text(id_node, src).to_string();
-                    let symbol_info = SymbolInfo {
-                        name,
-                        kind: SymbolKind::Variable,
-                        file: file.to_path_buf(),
-                        start_line: id_node.start_position().row + 1,
-                        start_col: id_node.start_position().column + 1,
-                        end_line: id_node.end_position().row + 1,
-                        end_col: id_node.end_position().column + 1,
-                        parent: None,
-                        file_total_lines,
-                        function_lines: None,
-                    };
-                    push_symbol(map, symbol_info);
-                }
+                && let Some(id_node) = child.child_by_field_name("name")
+            {
+                let name = node_text(id_node, src).to_string();
+                let symbol_info = SymbolInfo {
+                    name,
+                    kind: SymbolKind::Variable,
+                    file: file.to_path_buf(),
+                    start_line: id_node.start_position().row + 1,
+                    start_col: id_node.start_position().column + 1,
+                    end_line: id_node.end_position().row + 1,
+                    end_col: id_node.end_position().column + 1,
+                    parent: None,
+                    file_total_lines,
+                    function_lines: None,
+                };
+                push_symbol(map, symbol_info);
+            }
             if !c.goto_next_sibling() {
                 break;
             }
