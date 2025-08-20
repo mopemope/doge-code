@@ -5,8 +5,8 @@ use crossterm::style::Color;
 #[allow(dead_code)] // suppress warnings for fields intended for future use
 pub struct Theme {
     pub name: String,
-    pub header_fg: Color,
-    pub header_separator: Color,
+    pub footer_fg: Color,
+    pub footer_separator: Color,
     pub user_input_fg: Color,
     pub llm_response_bg: Color,
     pub llm_response_fg: Color,
@@ -29,8 +29,8 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             name: "dark".to_string(),
-            header_fg: Color::Cyan,
-            header_separator: Color::DarkGrey,
+            footer_fg: Color::Cyan,
+            footer_separator: Color::DarkGrey,
             user_input_fg: Color::Blue,
             llm_response_bg: Color::Black,
             llm_response_fg: Color::White,
@@ -53,8 +53,8 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             name: "light".to_string(),
-            header_fg: Color::DarkBlue,
-            header_separator: Color::Grey,
+            footer_fg: Color::DarkBlue,
+            footer_separator: Color::Grey,
             user_input_fg: Color::DarkBlue,
             llm_response_bg: Color::White,
             llm_response_fg: Color::Black,

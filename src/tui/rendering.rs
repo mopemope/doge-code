@@ -34,13 +34,14 @@ impl TuiApp {
         //     debug!("  [{}] '{}'", i, line);
         // }
 
-        // Draw header (2 lines)
+        // Draw footer (2 lines)
+        let footer_row = h.saturating_sub(3);
         queue!(
             stdout,
-            cursor::MoveTo(0, 0),
+            cursor::MoveTo(0, footer_row),
             terminal::Clear(ClearType::CurrentLine)
         )?;
-        if let Some(first) = plan.header_lines.first() {
+        if let Some(first) = plan.footer_lines.first() {
             // debug!(header_first_line = first, "Rendering header first line"); // デバッグログ追加
             // Check if the status contains spinner characters and apply appropriate colors
             if first.contains("Preparing") || first.contains("Sending") || first.contains("Waiting")
@@ -59,7 +60,7 @@ impl TuiApp {
                         let pattern_and_after = &first[pattern_pos..];
 
                         // Write the part before the status message
-                        queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                        queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                         write!(stdout, "{}", before_pattern)?;
 
                         // Write the status message in warning color
@@ -80,7 +81,7 @@ impl TuiApp {
 
                 if !found_pattern {
                     // Fallback
-                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                     write!(stdout, "{}", first)?;
                     queue!(stdout, ResetColor)?;
                 }
@@ -95,7 +96,7 @@ impl TuiApp {
                         let pattern_and_after = &first[pattern_pos..];
 
                         // Write the part before the status message
-                        queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                        queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                         write!(stdout, "{}", before_pattern)?;
 
                         // Write the status message in info color
@@ -116,7 +117,7 @@ impl TuiApp {
 
                 if !found_pattern {
                     // Fallback
-                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                     write!(stdout, "{}", first)?;
                     queue!(stdout, ResetColor)?;
                 }
@@ -127,7 +128,7 @@ impl TuiApp {
                     let thinking_and_spinner = &first[thinking_pos..];
 
                     // Write the part before "Thinking..."
-                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                     write!(stdout, "{}", before_thinking)?;
 
                     // Write "Thinking..." in status_idle_fg color
@@ -143,30 +144,30 @@ impl TuiApp {
                     queue!(stdout, ResetColor)?;
                 } else {
                     // Fallback if "Thinking..." is not found as expected
-                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                     write!(stdout, "{}", first)?;
                     queue!(stdout, ResetColor)?;
                 }
             } else {
-                queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
                 write!(stdout, "{}", first)?;
                 queue!(stdout, ResetColor)?;
             }
         }
         queue!(
             stdout,
-            cursor::MoveTo(0, 1),
+            cursor::MoveTo(0, footer_row + 1),
             terminal::Clear(ClearType::CurrentLine)
         )?;
-        if let Some(second) = plan.header_lines.get(1) {
-            queue!(stdout, SetForegroundColor(self.theme.header_separator))?;
+        if let Some(second) = plan.footer_lines.get(1) {
+            queue!(stdout, SetForegroundColor(self.theme.footer_separator))?;
             write!(stdout, "{second}")?;
             queue!(stdout, ResetColor)?;
         }
 
-        // Draw log area starting at row 2 up to h-2
-        let start_row = 2u16;
-        let max_rows = h.saturating_sub(2).saturating_sub(1); // leave one line for input
+        // Draw log area starting at row 0 up to h-4
+        let start_row = 0u16;
+        let max_rows = h.saturating_sub(4); // leave one line for input and 3 for footer
         let mut in_code_block = false; // new: flag whether inside a code block
         let mut in_llm_response_block = false; // flag to track if we are in an LLM response block
 
