@@ -131,7 +131,7 @@ impl TuiApp {
                                 debug!(target: "tui", filtered_status_msg = %msg, "Filtered out status message from log display");
                                 continue;
                             }
-                            
+
                             // Check if the message is the same as the last LLM response to avoid duplication
                             if self
                                 .last_llm_response_content
