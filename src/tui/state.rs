@@ -234,10 +234,13 @@ pub struct TuiApp {
     pub is_llm_response_active: bool,
     /// Stores the content of the last LLM response added to the log to prevent duplicate printing.
     pub last_llm_response_content: Option<String>,
+    // session management
+    // pub current_session: Option<SessionData>,
+    // pub session_store: SessionStore,
 }
 
 impl TuiApp {
-    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Self {
+    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
         let at_index = AtFileIndex::new(
@@ -247,6 +250,7 @@ impl TuiApp {
             "light" => Theme::light(),
             _ => Theme::dark(),
         };
+
         let app = Self {
             title: title.into(),
             input: String::new(),
@@ -271,8 +275,68 @@ impl TuiApp {
             last_llm_response_content: None,
         };
         app.at_index.scan();
-        app
+        Ok(app)
     }
+
+    /*
+    /// Switch to a different session
+    pub fn switch_session(&mut self, session_id: &str) -> Result<()> {
+        // Save current session if it exists
+        if let Some(ref current_session) = self.current_session {
+            self.session_store.save(current_session)?;
+        }
+
+        // Load the new session
+        let new_session = self.session_store.load(session_id)?;
+        self.current_session = Some(new_session);
+        self.log
+            .push(format!("Switched to session: {}", session_id));
+        Ok(())
+    }
+
+    /// Save the current session
+    pub fn save_current_session(&mut self) -> Result<()> {
+        if let Some(ref current_session) = self.current_session {
+            self.session_store.save(current_session)?;
+            self.log.push("Session saved".to_string());
+        }
+        Ok(())
+    }
+
+    /// List all sessions
+    pub fn list_sessions(&self) -> Result<Vec<crate::session::SessionMeta>> {
+        Ok(self.session_store.list()?)
+    }
+
+    /// Create a new session
+    pub fn create_session(&mut self, title: impl Into<String>) -> Result<String> {
+        // Save current session if it exists
+        if let Some(ref current_session) = self.current_session {
+            self.session_store.save(current_session)?;
+        }
+
+        let new_session = self.session_store.create(title)?;
+        let session_id = new_session.meta.id.clone();
+        self.current_session = Some(new_session);
+        self.log.push(format!(
+            "Created and switched to new session: {}",
+            session_id
+        ));
+        Ok(session_id)
+    }
+
+    /// Delete a session
+    pub fn delete_session(&mut self, session_id: &str) -> Result<()> {
+        self.session_store.delete(session_id)?;
+        self.log.push(format!("Deleted session: {}", session_id));
+        Ok(())
+    }
+
+    /// Get current session ID
+    pub fn current_session_id(&self) -> Option<String> {
+        self.current_session.as_ref().map(|s| s.meta.id.clone())
+    }
+    */
 
     pub fn with_handler(mut self, h: Box<dyn crate::tui::commands::CommandHandler + Send>) -> Self {
         self.handler = Some(h);
@@ -463,9 +527,8 @@ impl TuiApp {
 }
 
 fn history_store_path() -> std::path::PathBuf {
-    let base = crate::session::SessionStore::new_default()
-        .map(|s| s.root)
-        .unwrap_or_else(|_| std::path::PathBuf::from("./.doge/sessions"));
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let base = project_dir.join(".doge/sessions");
     std::fs::create_dir_all(&base).ok();
     base.join("input_history.json")
 }

@@ -1,7 +1,8 @@
 use crate::session::data::{SessionData, SessionMeta};
 use crate::session::error::SessionError;
+use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 pub struct SessionStore {
@@ -9,7 +10,7 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// 新しいSessionStoreを作成します。XDG Base Directory specificationに従ってセッションデータの保存場所を決定します。
+    /// 新しいSessionStoreを作成します。プロジェクトディレクトリ内の .doge/sessions にセッションデータを保存します。
     pub fn new_default() -> Result<Self, SessionError> {
         let base = default_store_dir()?;
         fs::create_dir_all(&base).map_err(SessionError::CreateDirError)?;
@@ -86,10 +87,8 @@ impl SessionStore {
         if !dir.exists() {
             return Err(SessionError::NotFound(id.to_string()));
         }
-        let meta_s =
-            fs::read_to_string(dir.join("meta.json")).map_err(SessionError::ReadError)?;
-        let meta: SessionMeta =
-            serde_json::from_str(&meta_s).map_err(SessionError::ParseError)?;
+        let meta_s = fs::read_to_string(dir.join("meta.json")).map_err(SessionError::ReadError)?;
+        let meta: SessionMeta = serde_json::from_str(&meta_s).map_err(SessionError::ParseError)?;
         let hist_s = fs::read_to_string(dir.join("history.json")).unwrap_or_else(|_| "[]".into());
         let history: Vec<String> = serde_json::from_str(&hist_s).unwrap_or_default();
         Ok(SessionData { meta, history })
@@ -126,14 +125,10 @@ impl SessionStore {
 }
 
 fn default_store_dir() -> Result<PathBuf, SessionError> {
-    use std::env;
-    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
-        return Ok(Path::new(&xdg).join("doge-code/sessions"));
-    }
-    if let Ok(home) = env::var("HOME") {
-        return Ok(Path::new(&home).join(".local/share/doge-code/sessions"));
-    }
-    Ok(PathBuf::from("./.doge/sessions"))
+    // プロジェクトディレクトリ内の .doge/sessions を使用する
+    let project_dir = env::current_dir().map_err(SessionError::ReadError)?;
+    let base = project_dir.join(".doge/sessions");
+    Ok(base)
 }
 
 #[cfg(test)]
