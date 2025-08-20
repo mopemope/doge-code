@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::time::{Duration, Instant};
-use tracing::debug; // tracingをインポート
+use tracing::debug;
 
 use crate::tui::state::{Status, TuiApp, save_input_history}; // import TuiApp and save_input_history
 
@@ -125,6 +125,13 @@ impl TuiApp {
                             dirty = true;
                         }
                         _ => {
+                            // Filter out status messages from being displayed in the log
+                            if msg.starts_with("::status:") {
+                                // Status messages should not be displayed in the log
+                                debug!(target: "tui", filtered_status_msg = %msg, "Filtered out status message from log display");
+                                continue;
+                            }
+                            
                             // Check if the message is the same as the last LLM response to avoid duplication
                             if self
                                 .last_llm_response_content
