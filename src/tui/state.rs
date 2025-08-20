@@ -31,7 +31,7 @@ pub enum Status {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderPlan {
-    pub header_lines: Vec<String>,
+    pub footer_lines: Vec<String>,
     pub log_lines: Vec<String>,
     pub input_line: String,
     // visual column within input_line where terminal cursor should be placed
@@ -139,7 +139,7 @@ pub fn build_render_plan(
     let title_full = format!("{title}{model_suffix} - [{status_str}]  {cwd}");
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
-    let header_lines = vec![title_trim, sep];
+    let footer_lines = vec![title_trim, sep];
 
     // Build wrapped physical lines from logs (from end to start to keep last rows)
     let max_log_rows = h.saturating_sub(3) as usize;
@@ -182,7 +182,7 @@ pub fn build_render_plan(
         // cursor col is width of chars[0..cursor_in_prompt]
         let col = widths[..cursor_in_prompt].iter().sum::<usize>() as u16;
         return RenderPlan {
-            header_lines,
+            footer_lines,
             log_lines,
             input_line,
             input_cursor_col: col,
@@ -219,7 +219,7 @@ pub fn build_render_plan(
     };
 
     RenderPlan {
-        header_lines,
+        footer_lines,
         log_lines,
         input_line,
         input_cursor_col: col,
