@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tera::{Context, Tera};
 use tokio::sync::{RwLock, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Finds the project instructions file based on a priority list.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
@@ -290,12 +290,154 @@ impl CommandHandler for TuiExecutor {
         match line {
             "/help" => {
                 ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>",
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force",
                 );
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
             "/clear" => {
                 ui.clear_log();
+            }
+            "/rebuild-force" => {
+                // Force complete rebuild (ignore cache)
+                ui.push_log("[Starting forced complete repomap rebuild (ignoring cache)...]");
+                let repomap_clone = self.repomap.clone();
+                let project_root = self.cfg.project_root.clone();
+                let ui_tx = self.ui_tx.clone();
+
+                tokio::spawn(async move {
+                    info!("Starting forced complete repomap rebuild");
+                    let start_time = std::time::Instant::now();
+
+                    let mut analyzer = match Analyzer::new(&project_root) {
+                        Ok(analyzer) => analyzer,
+                        Err(e) => {
+                            error!("Failed to create Analyzer: {:?}", e);
+                            if let Some(tx) = ui_tx {
+                                let _ = tx.send(format!("[Failed to create analyzer: {}]", e));
+                            }
+                            return;
+                        }
+                    };
+
+                    // Clear cache first to force complete rebuild
+                    if let Err(e) = analyzer.clear_cache() {
+                        warn!("Failed to clear cache before forced rebuild: {}", e);
+                    }
+
+                    match analyzer.build_parallel().await {
+                        Ok(map) => {
+                            let duration = start_time.elapsed();
+                            let symbol_count = map.symbols.len();
+                            *repomap_clone.write().await = Some(map);
+
+                            info!(
+                                "Forced repomap rebuild completed in {:?} with {} symbols",
+                                duration, symbol_count
+                            );
+                            if let Some(tx) = ui_tx {
+                                let _ = tx.send(format!(
+                                    "[Forced rebuild completed in {:?} - {} symbols found (cache cleared)]",
+                                    duration, symbol_count
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to force rebuild RepoMap: {:?}", e);
+                            if let Some(tx) = ui_tx {
+                                let _ =
+                                    tx.send(format!("[Failed to force rebuild repomap: {}]", e));
+                            }
+                        }
+                    }
+                });
+            }
+            "/rebuild" => {
+                // Rebuild repomap (with option to force full rebuild)
+                ui.push_log("[Starting repomap rebuild...]");
+                let repomap_clone = self.repomap.clone();
+                let project_root = self.cfg.project_root.clone();
+                let ui_tx = self.ui_tx.clone();
+
+                tokio::spawn(async move {
+                    info!("Starting repomap rebuild");
+                    let start_time = std::time::Instant::now();
+
+                    let mut analyzer = match Analyzer::new(&project_root) {
+                        Ok(analyzer) => analyzer,
+                        Err(e) => {
+                            error!("Failed to create Analyzer: {:?}", e);
+                            if let Some(tx) = ui_tx {
+                                let _ = tx.send(format!("[Failed to create analyzer: {}]", e));
+                            }
+                            return;
+                        }
+                    };
+
+                    match analyzer.build().await {
+                        Ok(map) => {
+                            let duration = start_time.elapsed();
+                            let symbol_count = map.symbols.len();
+                            *repomap_clone.write().await = Some(map);
+
+                            info!(
+                                "Repomap rebuild completed in {:?} with {} symbols",
+                                duration, symbol_count
+                            );
+                            if let Some(tx) = ui_tx {
+                                let _ = tx.send(format!(
+                                    "[Repomap rebuild completed in {:?} - {} symbols found]",
+                                    duration, symbol_count
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to rebuild RepoMap: {:?}", e);
+                            if let Some(tx) = ui_tx {
+                                let _ = tx.send(format!("[Failed to rebuild repomap: {}]", e));
+                            }
+                        }
+                    }
+                });
+            }
+            "/clear-cache" => {
+                // Clear repomap cache
+                match Analyzer::new(&self.cfg.project_root) {
+                    Ok(analyzer) => {
+                        match analyzer.clear_cache() {
+                            Ok(()) => {
+                                ui.push_log("[Cache cleared successfully]");
+                                // Trigger repomap regeneration
+                                let repomap_clone = self.repomap.clone();
+                                let project_root = self.cfg.project_root.clone();
+                                tokio::spawn(async move {
+                                    info!("Regenerating repomap after cache clear");
+                                    let mut analyzer = match Analyzer::new(&project_root) {
+                                        Ok(analyzer) => analyzer,
+                                        Err(e) => {
+                                            error!("Failed to create Analyzer: {:?}", e);
+                                            return;
+                                        }
+                                    };
+                                    match analyzer.build().await {
+                                        Ok(map) => {
+                                            *repomap_clone.write().await = Some(map);
+                                            info!("Repomap regenerated successfully");
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to regenerate RepoMap: {:?}", e);
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                ui.push_log(format!("[Failed to clear cache: {}]", e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        ui.push_log(format!("[Failed to create analyzer: {}]", e));
+                    }
+                }
             }
             "/cancel" => {
                 if let Some(tx) = &self.cancel_tx {
