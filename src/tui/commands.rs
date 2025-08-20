@@ -301,7 +301,7 @@ impl CommandHandler for TuiExecutor {
                 if let Some(tx) = &self.cancel_tx {
                     let _ = tx.send(true);
                     if let Some(tx) = &self.ui_tx {
-                        let _ = tx.send("::status:cancelled ".into());
+                        let _ = tx.send("::status:cancelled".into());
                     }
                     ui.push_log("[Cancelled]");
                     self.cancel_tx = None;
@@ -485,7 +485,7 @@ impl CommandHandler for TuiExecutor {
                                     Ok((updated_messages, final_msg)) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(final_msg.content.clone());
-                                            let _ = tx.send("::status:done ".into());
+                                            let _ = tx.send("::status:done".into());
                                         }
                                         // 会話履歴を更新（systemメッセージを除く全てのメッセージを保存）
                                         if let Ok(mut history) = conversation_history.lock() {
