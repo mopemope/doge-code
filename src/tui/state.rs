@@ -5,7 +5,6 @@ use crossterm::{
 };
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
-use tracing::debug; // tracingをインポート
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::completion::{AtFileIndex, CompletionState};
@@ -20,7 +19,11 @@ pub enum LlmResponseSegment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Idle,
-    Streaming,
+    Preparing,  // リクエスト準備中
+    Sending,    // リクエスト送信中
+    Waiting,    // レスポンス待機中
+    Streaming,  // ストリーミング受信中
+    Processing, // ツール実行中
     Cancelled,
     Done,
     Error,
@@ -96,15 +99,34 @@ pub fn build_render_plan(
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
-        Status::Idle => "Idle".to_string(), // Status::Idle の場合は "Idle" を表示
-        Status::Streaming => {
-            // Define spinner characters
-            let spinner_chars = ['/', '-', '\\', '|'];
-            // Get the current spinner character based on spinner_state
+        Status::Idle => "Ready".to_string(),
+        Status::Preparing => {
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            let status_str = format!("Thinking... {}", spinner_char);
-            debug!(status_str = %status_str, "Generated status string for Streaming"); // Added debug log
-            status_str
+            format!("Preparing request... {}", spinner_char)
+        }
+        Status::Sending => {
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!("Sending request... {}", spinner_char)
+        }
+        Status::Waiting => {
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!(
+                "Waiting for response... {} (Press Esc to cancel)",
+                spinner_char
+            )
+        }
+        Status::Streaming => {
+            let spinner_chars = ['⚡', '✨', '⭐', '🌟'];
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!("Receiving response... {}", spinner_char)
+        }
+        Status::Processing => {
+            let spinner_chars = ['⚙', '⚡', '🔧', '⚒'];
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!("Processing tools... {}", spinner_char)
         }
         Status::Cancelled => "Cancelled".to_string(),
         Status::Done => "Done".to_string(),

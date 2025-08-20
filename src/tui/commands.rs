@@ -433,10 +433,12 @@ impl CommandHandler for TuiExecutor {
                             ui.push_log(String::new());
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
-                            // LLMリクエスト開始を通知
+
+                            // LLMリクエスト準備開始を通知
                             if let Some(tx) = &self.ui_tx {
-                                let _ = tx.send("::status:streaming ".into());
+                                let _ = tx.send("::status:preparing".into());
                             }
+
                             // Build initial messages with optional system prompt + user
                             let mut msgs = Vec::new();
                             // Load system prompt
@@ -465,11 +467,17 @@ impl CommandHandler for TuiExecutor {
                             rt.spawn(async move {
                                 if *cancel_rx.borrow() {
                                     if let Some(tx) = tx {
-                                        let _ = tx.send("::status:cancelled ".into());
+                                        let _ = tx.send("::status:cancelled".into());
                                         let _ = tx.send("[Cancelled]".into());
                                     }
                                     return;
                                 }
+
+                                // リクエスト送信開始を通知
+                                if let Some(tx) = &tx {
+                                    let _ = tx.send("::status:sending".into());
+                                }
+
                                 let res =
                                     crate::llm::run_agent_loop(&c, &model, &fs, msgs, tx.clone())
                                         .await;
@@ -500,7 +508,7 @@ impl CommandHandler for TuiExecutor {
                                     Err(e) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(format!("LLM error: {e}"));
-                                            let _ = tx.send("::status:error ".into());
+                                            let _ = tx.send("::status:error".into());
                                         }
                                         // エラー時も会話履歴を更新（ユーザーの入力のみ）
                                         if let Ok(mut history) = conversation_history.lock() {

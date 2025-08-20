@@ -42,10 +42,86 @@ impl TuiApp {
         )?;
         if let Some(first) = plan.header_lines.first() {
             // debug!(header_first_line = first, "Rendering header first line"); // デバッグログ追加
-            // Check if the status is "Thinking..." and apply spinner color
-            if first.contains("Thinking") {
-                // "Thinking..." から "Thinking" に変更
-                // Find the position of "Thinking..." and the spinner character
+            // Check if the status contains spinner characters and apply appropriate colors
+            if first.contains("Preparing") || first.contains("Sending") || first.contains("Waiting")
+            {
+                // Find the position of the status message and spinner
+                let status_patterns = [
+                    "Preparing request...",
+                    "Sending request...",
+                    "Waiting for response...",
+                ];
+                let mut found_pattern = false;
+
+                for pattern in &status_patterns {
+                    if let Some(pattern_pos) = first.find(pattern) {
+                        let before_pattern = &first[..pattern_pos];
+                        let pattern_and_after = &first[pattern_pos..];
+
+                        // Write the part before the status message
+                        queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                        write!(stdout, "{}", before_pattern)?;
+
+                        // Write the status message in warning color
+                        queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
+                        write!(stdout, "{}", pattern)?;
+
+                        // Write the rest (spinner and additional text) in spinner color
+                        let after_pattern = &pattern_and_after[pattern.len()..];
+                        if !after_pattern.is_empty() {
+                            queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
+                            write!(stdout, "{}", after_pattern)?;
+                        }
+                        queue!(stdout, ResetColor)?;
+                        found_pattern = true;
+                        break;
+                    }
+                }
+
+                if !found_pattern {
+                    // Fallback
+                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    write!(stdout, "{}", first)?;
+                    queue!(stdout, ResetColor)?;
+                }
+            } else if first.contains("Receiving response") || first.contains("Processing tools") {
+                // Handle streaming and processing states
+                let status_patterns = ["Receiving response...", "Processing tools..."];
+                let mut found_pattern = false;
+
+                for pattern in &status_patterns {
+                    if let Some(pattern_pos) = first.find(pattern) {
+                        let before_pattern = &first[..pattern_pos];
+                        let pattern_and_after = &first[pattern_pos..];
+
+                        // Write the part before the status message
+                        queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                        write!(stdout, "{}", before_pattern)?;
+
+                        // Write the status message in info color
+                        queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
+                        write!(stdout, "{}", pattern)?;
+
+                        // Write the rest (spinner) in spinner color
+                        let after_pattern = &pattern_and_after[pattern.len()..];
+                        if !after_pattern.is_empty() {
+                            queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
+                            write!(stdout, "{}", after_pattern)?;
+                        }
+                        queue!(stdout, ResetColor)?;
+                        found_pattern = true;
+                        break;
+                    }
+                }
+
+                if !found_pattern {
+                    // Fallback
+                    queue!(stdout, SetForegroundColor(self.theme.header_fg))?;
+                    write!(stdout, "{}", first)?;
+                    queue!(stdout, ResetColor)?;
+                }
+            } else if first.contains("Thinking...") {
+                // Legacy support for old "Thinking..." format
                 if let Some(thinking_pos) = first.find("Thinking...") {
                     let before_thinking = &first[..thinking_pos];
                     let thinking_and_spinner = &first[thinking_pos..];
@@ -59,7 +135,6 @@ impl TuiApp {
                     write!(stdout, "Thinking...")?;
 
                     // Write the spinner character in spinner_fg color
-                    // Get the first character after "Thinking... "
                     let spinner_part = &thinking_and_spinner["Thinking...".len()..];
                     if let Some(spinner_char) = spinner_part.chars().next() {
                         queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;

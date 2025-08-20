@@ -15,12 +15,19 @@ impl TuiApp {
         let mut is_streaming = false; // track streaming state
         let mut last_spinner_update = Instant::now(); // Track last spinner update time
         loop {
-            // Update spinner state if status is Idle and enough time has passed
-            if self.status == Status::Idle
-                && last_spinner_update.elapsed() >= Duration::from_millis(200)
+            // Update spinner state for active statuses and enough time has passed
+            let should_update_spinner = matches!(
+                self.status,
+                Status::Preparing
+                    | Status::Sending
+                    | Status::Waiting
+                    | Status::Streaming
+                    | Status::Processing
+            );
+
+            if should_update_spinner && last_spinner_update.elapsed() >= Duration::from_millis(150)
             {
                 self.spinner_state = self.spinner_state.wrapping_add(1);
-                // debug!(spinner_state = self.spinner_state, "Spinner state updated"); // デバッグログ追加
                 dirty = true;
                 last_spinner_update = Instant::now();
             }
@@ -51,6 +58,24 @@ impl TuiApp {
                             self.status = Status::Cancelled;
                             dirty = true;
                         }
+                        "::status:preparing" => {
+                            self.status = Status::Preparing;
+                            dirty = true;
+                            // Reset spinner state when transitioning to Preparing
+                            self.spinner_state = 0;
+                        }
+                        "::status:sending" => {
+                            self.status = Status::Sending;
+                            dirty = true;
+                            // Reset spinner state when transitioning to Sending
+                            self.spinner_state = 0;
+                        }
+                        "::status:waiting" => {
+                            self.status = Status::Waiting;
+                            dirty = true;
+                            // Reset spinner state when transitioning to Waiting
+                            self.spinner_state = 0;
+                        }
                         "::status:streaming" => {
                             if !is_streaming {
                                 // Removed: self.push_log(" --- LLM Response Start --- ".to_string());
@@ -61,6 +86,12 @@ impl TuiApp {
                             self.status = Status::Streaming;
                             dirty = true;
                             // Reset spinner state when transitioning to Streaming
+                            self.spinner_state = 0;
+                        }
+                        "::status:processing" => {
+                            self.status = Status::Processing;
+                            dirty = true;
+                            // Reset spinner state when transitioning to Processing
                             self.spinner_state = 0;
                         }
                         "::status:error" => {
