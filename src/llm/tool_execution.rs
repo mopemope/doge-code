@@ -190,28 +190,61 @@ pub async fn run_agent_loop(
             });
             for tc in msg.tool_calls {
                 if let Some(tx) = &ui_tx {
-                    // For fs_write, exclude the content field when logging
-                    let log_message = if tc.function.name == "fs_write" {
-                        let args_str = tc.function.arguments.clone();
-                        // Parse JSON and remove content field
-                        if let Ok(mut args_val) =
-                            serde_json::from_str::<serde_json::Value>(&args_str)
-                        {
-                            // remove the content field
-                            args_val.as_object_mut().map(|obj| obj.remove("content"));
-                            if let Ok(filtered_args_str) = serde_json::to_string(&args_val) {
-                                format!("[tool] {}({})", tc.function.name, filtered_args_str)
-                            } else {
-                                // If serialization fails, fall back to original args
-                                format!("[tool] {}({})", tc.function.name, args_str)
+                    let mut args_str = tc.function.arguments.clone();
+
+                    // Parse arguments as JSON to modify them
+                    if let Ok(mut args_val) =
+                        serde_json::from_str::<serde_json::Value>(&mut args_str)
+                    {
+                        if let Some(obj) = args_val.as_object_mut() {
+                            // Special handling for fs_write: remove content before logging
+                            if tc.function.name == "fs_write" {
+                                obj.remove("content");
                             }
-                        } else {
-                            // If parsing fails, fall back to original args
-                            format!("[tool] {}({})", tc.function.name, args_str)
+
+                            // Shorten paths for common path keys
+                            for key in ["path", "paths", "file_path", "filename"].iter() {
+                                if let Some(value) = obj.get_mut(*key) {
+                                    if value.is_string() {
+                                        if let Some(path_str) = value.as_str()
+                                            && let Some(file_name) = std::path::Path::new(path_str)
+                                                .file_name()
+                                                .and_then(|s| s.to_str())
+                                        {
+                                            *value = file_name.to_string().into();
+                                        }
+                                    } else if value.is_array()
+                                        && let Some(arr) = value.as_array_mut()
+                                    {
+                                        for item in arr.iter_mut() {
+                                            if let Some(path_str) = item.as_str()
+                                                && let Some(file_name) =
+                                                    std::path::Path::new(path_str)
+                                                        .file_name()
+                                                        .and_then(|s| s.to_str())
+                                            {
+                                                *item = file_name.to_string().into();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                        format!("[tool] {}({})", tc.function.name, tc.function.arguments)
-                    };
+
+                        if let Ok(modified_args_str) = serde_json::to_string(&args_val) {
+                            args_str = modified_args_str;
+                        }
+                    }
+
+                    const MAX_LEN: usize = 120;
+                    if args_str.len() > MAX_LEN {
+                        // Truncate and add ellipsis
+                        let mut truncated = args_str.chars().take(MAX_LEN - 3).collect::<String>();
+                        truncated.push_str("...");
+                        args_str = truncated;
+                    }
+
+                    let log_message = format!("[tool] {}({})", tc.function.name, args_str);
                     let _ = tx.send(log_message);
                 }
                 let res = tokio::time::timeout(runtime.tool_timeout, async {
