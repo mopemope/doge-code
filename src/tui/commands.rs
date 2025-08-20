@@ -2,7 +2,8 @@ use crate::analysis::{Analyzer, RepoMap};
 use crate::assets::Assets;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
-use crate::tui::theme::Theme; // newly added
+use crate::tui::commands_sessions::SessionManager;
+use crate::tui::theme::Theme;
 use crate::tui::view::TuiApp;
 use anyhow::Result;
 use chrono::Local;
@@ -101,6 +102,8 @@ pub struct TuiExecutor {
     pub(crate) last_user_prompt: Option<String>,
     // 会話履歴を保持するためのメッセージベクター
     pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
+    // Session management
+    pub(crate) session_manager: Arc<Mutex<SessionManager>>,
 }
 
 impl TuiExecutor {
@@ -152,6 +155,9 @@ impl TuiExecutor {
         let mut history = crate::llm::ChatHistory::new(12_000, Some(sys_prompt));
         history.append_system_once();
 
+        // Initialize session manager
+        let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
+
         Ok(Self {
             cfg,
             tools,
@@ -162,7 +168,113 @@ impl TuiExecutor {
             cancel_tx: None,
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(Vec::new())), // 会話履歴を初期化
+            session_manager,
         })
+    }
+
+    fn handle_session_command(&mut self, args: &str, ui: &mut TuiApp) -> Result<()> {
+        let args: Vec<&str> = args.split_whitespace().collect();
+        if args.is_empty() {
+            ui.push_log("Usage: /session <new|list|switch|save|delete|current|clear>");
+            return Ok(());
+        }
+
+        let mut session_manager = self.session_manager.lock().unwrap();
+
+        match args[0] {
+            "list" => match session_manager.list_sessions() {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        ui.push_log("No sessions found.");
+                    } else {
+                        ui.push_log("Sessions:");
+                        for session in sessions {
+                            ui.push_log(format!(
+                                "  {} - {} (Created: {})",
+                                session.id, session.title, session.created_at
+                            ));
+                        }
+                    }
+                }
+                Err(e) => ui.push_log(format!("Failed to list sessions: {}", e)),
+            },
+            "new" => {
+                let title = if args.len() > 1 {
+                    args[1..].join(" ")
+                } else {
+                    "Untitled".to_string()
+                };
+                match session_manager.create_session(&title) {
+                    Ok(()) => {
+                        if let Some(info) = session_manager.current_session_info() {
+                            ui.push_log(format!("Created new session:\n{}", info));
+                        }
+                    }
+                    Err(e) => ui.push_log(format!("Failed to create session: {}", e)),
+                }
+            }
+            "switch" => {
+                if args.len() != 2 {
+                    ui.push_log("Usage: /session switch <id>");
+                    return Ok(());
+                }
+                let id = args[1];
+                match session_manager.load_session(id) {
+                    Ok(()) => {
+                        if let Some(info) = session_manager.current_session_info() {
+                            ui.push_log(format!("Switched to session:\n{}", info));
+                        }
+                        // Load conversation history from session
+                        if let (Some(session), Ok(mut history)) = (
+                            &session_manager.current_session,
+                            self.conversation_history.lock(),
+                        ) {
+                            history.clear();
+                            // Deserialize session history entries into ChatMessage objects
+                            for entry in &session.history {
+                                if let Ok(msg) =
+                                    serde_json::from_str::<crate::llm::types::ChatMessage>(entry)
+                                {
+                                    history.push(msg);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => ui.push_log(format!("Failed to switch session: {}", e)),
+                }
+            }
+            "save" => {
+                // This is implicitly handled when history is updated.
+                // We can add an explicit save if needed.
+                ui.push_log("Session is saved automatically.");
+            }
+            "delete" => {
+                if args.len() != 2 {
+                    ui.push_log("Usage: /session delete <id>");
+                    return Ok(());
+                }
+                let id = args[1];
+                match session_manager.delete_session(id) {
+                    Ok(()) => ui.push_log(format!("Deleted session: {}", id)),
+                    Err(e) => ui.push_log(format!("Failed to delete session: {}", e)),
+                }
+            }
+            "current" => {
+                if let Some(info) = session_manager.current_session_info() {
+                    ui.push_log(info);
+                } else {
+                    ui.push_log("No session loaded.");
+                }
+            }
+            "clear" => match session_manager.clear_current_session_history() {
+                Ok(()) => ui.push_log("Cleared current session history."),
+                Err(e) => ui.push_log(format!("Failed to clear session history: {}", e)),
+            },
+            _ => {
+                ui.push_log("Unknown session command. Usage: /session <new|list|switch|save|delete|current|clear>");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -178,10 +290,10 @@ impl CommandHandler for TuiExecutor {
         match line {
             "/help" => {
                 ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>",
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>",
                 );
             }
-            "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write"),
+            "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
             "/clear" => {
                 ui.clear_log();
             }
@@ -189,7 +301,7 @@ impl CommandHandler for TuiExecutor {
                 if let Some(tx) = &self.cancel_tx {
                     let _ = tx.send(true);
                     if let Some(tx) = &self.ui_tx {
-                        let _ = tx.send("::status:cancelled".into());
+                        let _ = tx.send("::status:cancelled ".into());
                     }
                     ui.push_log("[Cancelled]");
                     self.cancel_tx = None;
@@ -199,7 +311,7 @@ impl CommandHandler for TuiExecutor {
             }
             "/retry" => {
                 if self.cancel_tx.is_some() {
-                    ui.push_log("[busy] streaming in progress; use /cancel first");
+                    ui.push_log("[busy] streaming in progress; use /cancel first ");
                     return;
                 }
                 match self.last_user_prompt.clone() {
@@ -217,7 +329,7 @@ impl CommandHandler for TuiExecutor {
                 tokio::spawn(async move {
                     let repomap_guard = repomap.read().await;
                     if let Some(map) = &*repomap_guard {
-                        let _ = ui_tx.send(format!("RepoMap: {} symbols", map.symbols.len()));
+                        let _ = ui_tx.send(format!("RepoMap: {} symbols ", map.symbols.len()));
                         for s in map.symbols.iter().take(50) {
                             let _ = ui_tx.send(format!(
                                 "{} {}  @{}:{}",
@@ -297,6 +409,15 @@ impl CommandHandler for TuiExecutor {
                     }
                     return;
                 }
+
+                if let Some(rest) = line.strip_prefix("/session ") {
+                    match self.handle_session_command(rest.trim(), ui) {
+                        Ok(_) => {} // No-op on success
+                        Err(e) => ui.push_log(format!("Error handling session command: {}", e)),
+                    }
+                    return;
+                }
+
                 if !line.starts_with('/') {
                     let rest = line;
                     self.last_user_prompt = Some(rest.to_string());
@@ -314,7 +435,7 @@ impl CommandHandler for TuiExecutor {
                             self.cancel_tx = Some(cancel_tx);
                             // LLMリクエスト開始を通知
                             if let Some(tx) = &self.ui_tx {
-                                let _ = tx.send("::status:streaming".into());
+                                let _ = tx.send("::status:streaming ".into());
                             }
                             // Build initial messages with optional system prompt + user
                             let mut msgs = Vec::new();
@@ -340,10 +461,11 @@ impl CommandHandler for TuiExecutor {
                             });
                             let fs = self.tools.clone();
                             let conversation_history = self.conversation_history.clone();
+                            let session_manager = self.session_manager.clone();
                             rt.spawn(async move {
                                 if *cancel_rx.borrow() {
                                     if let Some(tx) = tx {
-                                        let _ = tx.send("::status:cancelled".into());
+                                        let _ = tx.send("::status:cancelled ".into());
                                         let _ = tx.send("[Cancelled]".into());
                                     }
                                     return;
@@ -355,7 +477,7 @@ impl CommandHandler for TuiExecutor {
                                     Ok((updated_messages, final_msg)) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(final_msg.content.clone());
-                                            let _ = tx.send("::status:done".into());
+                                            let _ = tx.send("::status:done ".into());
                                         }
                                         // 会話履歴を更新（systemメッセージを除く全てのメッセージを保存）
                                         if let Ok(mut history) = conversation_history.lock() {
@@ -368,12 +490,17 @@ impl CommandHandler for TuiExecutor {
                                             // 既存の履歴をクリアして新しいメッセージで置き換え
                                             history.clear();
                                             history.extend(new_messages);
+
+                                            // セッションにも会話履歴を保存
+                                            let mut sm = session_manager.lock().unwrap();
+                                            let _ =
+                                                sm.update_current_session_with_history(&history);
                                         }
                                     }
                                     Err(e) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(format!("LLM error: {e}"));
-                                            let _ = tx.send("::status:error".into());
+                                            let _ = tx.send("::status:error ".into());
                                         }
                                         // エラー時も会話履歴を更新（ユーザーの入力のみ）
                                         if let Ok(mut history) = conversation_history.lock() {
@@ -383,6 +510,11 @@ impl CommandHandler for TuiExecutor {
                                                 tool_calls: vec![],
                                                 tool_call_id: None,
                                             });
+
+                                            // セッションにも会話履歴を保存
+                                            let mut sm = session_manager.lock().unwrap();
+                                            let _ =
+                                                sm.update_current_session_with_history(&history);
                                         }
                                     }
                                 }
@@ -490,7 +622,7 @@ mod tests {
             });
             history.push(ChatMessage {
                 role: "assistant".into(),
-                content: Some("こんにちは！どのようにお手伝いできますか？".into()),
+                content: Some("こんにちは!どのようにお手伝いできますか?".into()),
                 tool_calls: vec![],
                 tool_call_id: None,
             });
@@ -505,7 +637,7 @@ mod tests {
             assert_eq!(history[1].role, "assistant");
             assert_eq!(
                 history[1].content,
-                Some("こんにちは！どのようにお手伝いできますか？".into())
+                Some("こんにちは!どのようにお手伝いできますか?".into())
             );
         }
 
@@ -514,7 +646,7 @@ mod tests {
             let mut history = conversation_history.lock().unwrap();
             history.push(ChatMessage {
                 role: "user".into(),
-                content: Some("前回のメッセージは何でしたか？".into()),
+                content: Some("前回のメッセージは何でしたか?".into()),
                 tool_calls: vec![],
                 tool_call_id: None,
             });
@@ -527,7 +659,7 @@ mod tests {
             assert_eq!(history[2].role, "user");
             assert_eq!(
                 history[2].content,
-                Some("前回のメッセージは何でしたか？".into())
+                Some("前回のメッセージは何でしたか?".into())
             );
         }
     }

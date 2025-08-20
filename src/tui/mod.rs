@@ -3,6 +3,7 @@
 
 // pub mod app;
 pub mod commands;
+pub mod commands_sessions; // Add this line
 pub mod commands_test;
 pub mod completion;
 pub mod event_loop;

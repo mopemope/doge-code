@@ -49,11 +49,11 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(cfg: AppConfig) -> Result<()> {
-    let app = TuiApp::new(
+    let mut app = TuiApp::new(
         "🦮 doge-code - /help, Esc or /quit to exit",
         Some(cfg.model.clone()),
         &cfg.theme, // pass theme name
-    );
+    )?;
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");
 
@@ -68,7 +68,7 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
         }
     };
 
-    let mut app = app.with_handler(Box::new(exec));
+    app = app.with_handler(Box::new(exec));
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
     Ok(())

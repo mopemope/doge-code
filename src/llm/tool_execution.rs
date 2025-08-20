@@ -193,9 +193,7 @@ pub async fn run_agent_loop(
                     let mut args_str = tc.function.arguments.clone();
 
                     // Parse arguments as JSON to modify them
-                    if let Ok(mut args_val) =
-                        serde_json::from_str::<serde_json::Value>(&mut args_str)
-                    {
+                    if let Ok(mut args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
                         if let Some(obj) = args_val.as_object_mut() {
                             // Special handling for fs_write: remove content before logging
                             if tc.function.name == "fs_write" {
