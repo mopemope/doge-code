@@ -8,3 +8,6 @@ pub mod state;
 pub mod state_render;
 pub mod theme;
 pub mod view;
+
+#[cfg(test)]
+mod test_token_display;

@@ -61,6 +61,7 @@ pub fn build_render_plan(
     h: u16,
     model: Option<&str>,
     spinner_state: usize, // Add spinner_state parameter
+    tokens_used: u32,     // Add tokens_used parameter
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -106,7 +107,12 @@ pub fn build_render_plan(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
     let model_suffix = model.map(|m| format!(" - model:{m}")).unwrap_or_default();
-    let title_full = format!("{title}{model_suffix} - [{status_str}]  {cwd}");
+    let tokens_suffix = if tokens_used > 0 {
+        format!(" - tokens:{}", tokens_used)
+    } else {
+        String::new()
+    };
+    let title_full = format!("{title}{model_suffix}{tokens_suffix} - [{status_str}]  {cwd}");
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
     let footer_lines = vec![title_trim, sep];
@@ -234,6 +240,8 @@ pub struct TuiApp {
     // session management
     // pub current_session: Option<SessionData>,
     // pub session_store: SessionStore,
+    // Token usage tracking
+    pub tokens_used: u32,
 }
 
 impl TuiApp {
@@ -271,6 +279,7 @@ impl TuiApp {
             is_llm_response_active: false, // Initialize the flag
             last_llm_response_content: None,
             input_mode: InputMode::default(),
+            tokens_used: 0,
         };
         app.at_index.scan();
         Ok(app)
