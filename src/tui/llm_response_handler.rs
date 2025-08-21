@@ -66,29 +66,6 @@ impl TuiApp {
         self.is_llm_response_active = true;
         debug!("Set is_llm_response_active to true");
 
-        // Clean up any existing incomplete LLM response block at the end of self.log
-        // to prevent duplicate content display
-        let mut start_index = None;
-        for (i, line) in self.log.iter().enumerate().rev() {
-            if line.trim() == "[LlmResponseStart]" {
-                start_index = Some(i);
-                break;
-            }
-            // If we find an end marker before a start marker, it means the block is already closed
-            if line.trim() == "[LlmResponseEnd]" {
-                break;
-            }
-        }
-
-        if let Some(start_idx) = start_index {
-            debug!(
-                "Cleaning up existing incomplete LLM response block starting at index {}",
-                start_idx
-            );
-            // Truncate the log to remove the incomplete block
-            self.log.truncate(start_idx);
-        }
-
         // Consume the parsing buffer
         let buffer = std::mem::take(&mut self.llm_parsing_buffer);
         debug!(buffer_content = %buffer, "Finalizing LLM response. Buffer is empty: {}", buffer.is_empty());
@@ -151,10 +128,6 @@ impl TuiApp {
             });
         }
 
-        // Add a marker for the start of the LLM response block
-        self.log.push("[LlmResponseStart]".to_string());
-        debug!("Added [LlmResponseStart] marker to log");
-
         // Convert response_segments (Vec<LlmResponseSegment>) into flat String lines and append to self.log
         // This needs to be done after adding the start marker so that the rendering logic can detect the content
         for segment in response_segments {
@@ -173,10 +146,6 @@ impl TuiApp {
                 }
             }
         }
-
-        // Add a marker for the end of the LLM response block
-        self.log.push("[LlmResponseEnd]".to_string());
-        debug!("Added [LlmResponseEnd] marker to log");
 
         // Log the last few lines of self.log after modification for debugging
         debug!("self.log after finalize_and_append_llm_response:");
