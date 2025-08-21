@@ -16,14 +16,22 @@ pub enum LlmResponseSegment {
     CodeBlock { language: String, content: String },
 }
 
+#[derive(PartialEq, Default, Clone, Copy, Debug)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    Shell,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Idle,
-    Preparing,  // リクエスト準備中
-    Sending,    // リクエスト送信中
-    Waiting,    // レスポンス待機中
-    Streaming,  // ストリーミング受信中
-    Processing, // ツール実行中
+    Preparing,           // リクエスト準備中
+    Sending,             // リクエスト送信中
+    Waiting,             // レスポンス待機中
+    Streaming,           // ストリーミング受信中
+    Processing,          // ツール実行中
+    ShellCommandRunning, // シェルコマンド実行中
     Cancelled,
     Done,
     Error,
@@ -47,6 +55,7 @@ pub fn build_render_plan(
     status: Status,
     log: &[String],
     input: &str,
+    input_mode: InputMode,
     cursor_char_idx: usize,
     w: u16,
     h: u16,
@@ -84,6 +93,11 @@ pub fn build_render_plan(
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
             format!("Processing tools... {}", spinner_char)
         }
+        Status::ShellCommandRunning => {
+            let spinner_chars = ['⚙', '⚡', '🔧', '⚒'];
+            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
+            format!("Executing command... {}", spinner_char)
+        }
         Status::Cancelled => "Cancelled".to_string(),
         Status::Done => "Done".to_string(),
         Status::Error => "Error".to_string(),
@@ -118,7 +132,10 @@ pub fn build_render_plan(
 
     // Prepare prompt+input as a sequence of chars with widths
     let prompt = {
-        let mut s = String::from("> ");
+        let mut s = match input_mode {
+            InputMode::Normal => String::from("> "),
+            InputMode::Shell => String::from("$ "),
+        };
         s.push_str(input);
         s
     };
@@ -212,6 +229,8 @@ pub struct TuiApp {
     pub is_llm_response_active: bool,
     /// Stores the content of the last LLM response added to the log to prevent duplicate printing.
     pub last_llm_response_content: Option<String>,
+    // Input mode
+    pub input_mode: InputMode,
     // session management
     // pub current_session: Option<SessionData>,
     // pub session_store: SessionStore,
@@ -251,6 +270,7 @@ impl TuiApp {
             spinner_state: 0,              // Initialize spinner state
             is_llm_response_active: false, // Initialize the flag
             last_llm_response_content: None,
+            input_mode: InputMode::default(),
         };
         app.at_index.scan();
         Ok(app)

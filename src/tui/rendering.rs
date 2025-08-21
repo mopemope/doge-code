@@ -1,439 +1,220 @@
-use anyhow::Result;
-use crossterm::{
-    cursor, queue,
-    style::{ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, ClearType},
+use crate::tui::state::{LlmResponseSegment, RenderPlan, TuiApp, build_render_plan};
+use crate::tui::theme::Theme;
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, ListItem, Paragraph, Wrap},
 };
-use std::io::{self, Write};
-use tracing::info;
-
-use crate::tui::state::{TuiApp, build_render_plan}; // import TuiApp
+use std::io;
+use std::rc::Rc;
 
 impl TuiApp {
-    pub fn draw_with_model(&self, model: Option<&str>) -> Result<()> {
-        let mut stdout = io::stdout();
-        let (w, h) = terminal::size()?;
-        // compute cursor char index for build_render_plan
-        let cursor_idx = self.cursor;
+    pub fn draw_with_model(&mut self, model: Option<&str>) -> io::Result<()> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+        terminal.draw(|f| self.view(f, model))?;
+        Ok(())
+    }
+
+    pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
+        let theme = &self.theme;
+        let size = f.area();
         let plan = build_render_plan(
             &self.title,
             self.status,
             &self.log,
             &self.input,
-            cursor_idx,
-            w,
-            h,
+            self.input_mode,
+            self.cursor,
+            size.width,
+            size.height,
             model,
-            self.spinner_state, // Pass spinner_state
+            self.spinner_state,
         );
 
-        // debug!("Starting draw_with_model");
-        // // Log plan.log_lines for debugging
-        // debug!("plan.log_lines for debugging:");
-        // for (i, line) in plan.log_lines.iter().enumerate() {
-        //     debug!("  [{}] '{}'", i, line);
-        // }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // Header
+                Constraint::Min(1),    // Main content
+                Constraint::Length(1), // Footer
+            ])
+            .split(size);
 
-        // Draw footer (2 lines)
-        let footer_row = h.saturating_sub(3);
-        queue!(
-            stdout,
-            cursor::MoveTo(0, footer_row),
-            terminal::Clear(ClearType::CurrentLine)
-        )?;
-        if let Some(first) = plan.footer_lines.first() {
-            // debug!(header_first_line = first, "Rendering header first line"); // デバッグログ追加
-            // Check if the status contains spinner characters and apply appropriate colors
-            if first.contains("Preparing") || first.contains("Sending") || first.contains("Waiting")
-            {
-                // Find the position of the status message and spinner
-                let status_patterns = [
-                    "Preparing request...",
-                    "Sending request...",
-                    "Waiting for response...",
-                ];
-                let mut found_pattern = false;
+        self.render_header(f, chunks[0], &plan, theme);
+        self.render_main_content(f, chunks[1], &plan, theme);
+        self.render_footer(f, chunks[2], &plan, theme);
 
-                for pattern in &status_patterns {
-                    if let Some(pattern_pos) = first.find(pattern) {
-                        let before_pattern = &first[..pattern_pos];
-                        let pattern_and_after = &first[pattern_pos..];
+        self.render_completion(f, chunks[1], theme); // Render completion over main content
 
-                        // Write the part before the status message
-                        queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                        write!(stdout, "{}", before_pattern)?;
-
-                        // Write the status message in warning color
-                        queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
-                        write!(stdout, "{}", pattern)?;
-
-                        // Write the rest (spinner and additional text) in spinner color
-                        let after_pattern = &pattern_and_after[pattern.len()..];
-                        if !after_pattern.is_empty() {
-                            queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
-                            write!(stdout, "{}", after_pattern)?;
-                        }
-                        queue!(stdout, ResetColor)?;
-                        found_pattern = true;
-                        break;
-                    }
-                }
-
-                if !found_pattern {
-                    // Fallback
-                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                    write!(stdout, "{}", first)?;
-                    queue!(stdout, ResetColor)?;
-                }
-            } else if first.contains("Receiving response") || first.contains("Processing tools") {
-                // Handle streaming and processing states
-                let status_patterns = ["Receiving response...", "Processing tools..."];
-                let mut found_pattern = false;
-
-                for pattern in &status_patterns {
-                    if let Some(pattern_pos) = first.find(pattern) {
-                        let before_pattern = &first[..pattern_pos];
-                        let pattern_and_after = &first[pattern_pos..];
-
-                        // Write the part before the status message
-                        queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                        write!(stdout, "{}", before_pattern)?;
-
-                        // Write the status message in info color
-                        queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
-                        write!(stdout, "{}", pattern)?;
-
-                        // Write the rest (spinner) in spinner color
-                        let after_pattern = &pattern_and_after[pattern.len()..];
-                        if !after_pattern.is_empty() {
-                            queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
-                            write!(stdout, "{}", after_pattern)?;
-                        }
-                        queue!(stdout, ResetColor)?;
-                        found_pattern = true;
-                        break;
-                    }
-                }
-
-                if !found_pattern {
-                    // Fallback
-                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                    write!(stdout, "{}", first)?;
-                    queue!(stdout, ResetColor)?;
-                }
-            } else if first.contains("Thinking...") {
-                // Legacy support for old "Thinking..." format
-                if let Some(thinking_pos) = first.find("Thinking...") {
-                    let before_thinking = &first[..thinking_pos];
-                    let thinking_and_spinner = &first[thinking_pos..];
-
-                    // Write the part before "Thinking..."
-                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                    write!(stdout, "{}", before_thinking)?;
-
-                    // Write "Thinking..." in status_idle_fg color
-                    queue!(stdout, SetForegroundColor(self.theme.status_idle_fg))?;
-                    write!(stdout, "Thinking...")?;
-
-                    // Write the spinner character in spinner_fg color
-                    let spinner_part = &thinking_and_spinner["Thinking...".len()..];
-                    if let Some(spinner_char) = spinner_part.chars().next() {
-                        queue!(stdout, SetForegroundColor(self.theme.spinner_fg))?;
-                        write!(stdout, "{}", spinner_char)?;
-                    }
-                    queue!(stdout, ResetColor)?;
-                } else {
-                    // Fallback if "Thinking..." is not found as expected
-                    queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                    write!(stdout, "{}", first)?;
-                    queue!(stdout, ResetColor)?;
-                }
-            } else {
-                queue!(stdout, SetForegroundColor(self.theme.footer_fg))?;
-                write!(stdout, "{}", first)?;
-                queue!(stdout, ResetColor)?;
-            }
-        }
-        queue!(
-            stdout,
-            cursor::MoveTo(0, footer_row + 1),
-            terminal::Clear(ClearType::CurrentLine)
-        )?;
-        if let Some(second) = plan.footer_lines.get(1) {
-            queue!(stdout, SetForegroundColor(self.theme.footer_separator))?;
-            write!(stdout, "{second}")?;
-            queue!(stdout, ResetColor)?;
-        }
-
-        // Draw log area starting at row 0 up to h-4
-        let start_row = 0u16;
-        let max_rows = h.saturating_sub(4); // leave one line for input and 3 for footer
-        let mut in_code_block = false; // new: flag whether inside a code block
-        let mut in_llm_response_block = false; // flag to track if we are in an LLM response block
-
-        let mut i = 0;
-        while i < plan.log_lines.len() && i < max_rows as usize {
-            let row = start_row + i as u16;
-            queue!(
-                stdout,
-                cursor::MoveTo(0, row),
-                terminal::Clear(ClearType::CurrentLine)
-            )?;
-
-            let cmp = plan.log_lines[i].as_str();
-
-            // Check for LLM response block start marker (trimmed for flexibility)
-            if cmp.trim() == "[LlmResponseStart]" {
-                // debug!("Found [LlmResponseStart] marker at line {}, row {}", i, row);
-                // info!("Detected [LlmResponseStart] marker");
-                // Draw top border
-                if i < max_rows as usize - 1 {
-                    queue!(
-                        stdout,
-                        cursor::MoveTo(0, row),
-                        terminal::Clear(ClearType::CurrentLine)
-                    )?;
-                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                    write!(stdout, "┌")?;
-                    for _ in 0..(w - 2) {
-                        write!(stdout, "─")?;
-                    }
-                    write!(stdout, "┐")?;
-                    queue!(stdout, ResetColor)?;
-                    i += 1;
-                    in_llm_response_block = true;
-                    // info!("Drew top border of LLM response box");
-                } else {
-                    break; // Not enough space for a box
-                }
-                // debug!("Finished drawing top border for [LlmResponseStart]");
-                continue;
-            }
-
-            // Check for LLM response block end marker (trimmed for flexibility)
-            if cmp.trim() == "[LlmResponseEnd]" {
-                // debug!("Found [LlmResponseEnd] marker at line {}, row {}", i, row);
-                // info!("Detected [LlmResponseEnd] marker");
-                // Draw bottom border
-                if i < max_rows as usize {
-                    // If we are in an LLM response block, we need to draw the bottom border on the current row
-                    // and not skip to the next line
-                    if in_llm_response_block {
-                        queue!(
-                            stdout,
-                            cursor::MoveTo(0, row),
-                            terminal::Clear(ClearType::CurrentLine)
-                        )?;
-                        queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                        write!(stdout, "└")?;
-                        for _ in 0..(w - 2) {
-                            write!(stdout, "─")?;
-                        }
-                        write!(stdout, "┘")?;
-                        queue!(stdout, ResetColor)?;
-                        in_llm_response_block = false;
-                        info!("Drew bottom border of LLM response box");
-                    }
-                }
-                // debug!("Finished drawing bottom border for [LlmResponseEnd]");
-                i += 1;
-                continue;
-            }
-
-            // If we are in an LLM response block, handle it
-            if in_llm_response_block {
-                // debug!(
-                //     "Drawing line inside LLM response block at line {}, row {}: '{}'",
-                //     i, row, cmp
-                // );
-                // info!("Drawing line inside LLM response block: {}", cmp);
-                // Check for special markers
-                if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
-                    in_code_block = true;
-                    // Skip drawing this line
-                    i += 1;
-                    continue;
-                } else if cmp == " [CodeBlockEnd]" {
-                    in_code_block = false;
-                    // Skip drawing this line
-                    i += 1;
-                    continue;
-                }
-
-                // If we are in a code block, draw the line with code block styling
-                if in_code_block {
-                    queue!(stdout, cursor::MoveTo(0, row))?;
-                    queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-                    queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
-                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                    write!(stdout, "{}", plan.log_lines[i])?;
-                    queue!(stdout, ResetColor)?;
-                    i += 1;
-                    continue;
-                }
-
-                // Draw the line inside the box
-                queue!(stdout, cursor::MoveTo(0, row))?;
-                queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                write!(stdout, "│")?;
-                write!(
-                    stdout,
-                    "{:<width$}",
-                    plan.log_lines[i],
-                    width = (w - 2) as usize
-                )?;
-                write!(stdout, "│")?;
-                queue!(stdout, ResetColor)?;
-                i += 1;
-            } else {
-                // debug!(
-                //     "Drawing line outside LLM response block at line {}, row {}: '{}'",
-                //     i, row, cmp
-                // );
-                // Handle non-LLM response lines (user input, info, errors, etc.)
-
-                // Check for special markers
-                if cmp.starts_with(" [CodeBlockStart(") && cmp.ends_with(")]") {
-                    in_code_block = true;
-                    i += 1;
-                    continue;
-                } else if cmp == " [CodeBlockEnd]" {
-                    in_code_block = false;
-                    i += 1;
-                    continue;
-                }
-
-                // If in code block, draw with code block styling
-                if in_code_block {
-                    queue!(stdout, SetBackgroundColor(self.theme.llm_code_block_bg))?;
-                    queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                    i += 1;
-                    continue;
-                }
-
-                // Draw other lines with their respective styles
-                if cmp.starts_with("> ") {
-                    queue!(stdout, SetForegroundColor(self.theme.user_input_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                } else if cmp.contains("[Cancelled]")
-                    || cmp.contains("[cancelled]")
-                    || cmp.contains("[canceled]")
-                {
-                    queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                } else if cmp.starts_with('[') {
-                    queue!(stdout, SetForegroundColor(self.theme.info_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                } else if cmp.starts_with("LLM error:")
-                    || cmp.contains("error")
-                    || cmp.contains("Error")
-                {
-                    queue!(stdout, SetForegroundColor(self.theme.error_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                } else if cmp.contains("warning") || cmp.contains("Warning") {
-                    queue!(stdout, SetForegroundColor(self.theme.warning_fg))?;
-                    write!(stdout, "{cmp}")?;
-                    queue!(stdout, ResetColor)?;
-                } else {
-                    // Regular text line, draw normally
-                    write!(stdout, "{cmp}")?;
-                }
-                i += 1;
-            }
-        }
-
-        // If we're still in an LLM response block at the end, close it
-        if in_llm_response_block {
-            info!("Closing LLM response block at the end");
-            let row = start_row + i as u16;
-            if i < max_rows as usize {
-                queue!(stdout, cursor::MoveTo(0, row))?;
-                queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-                queue!(stdout, SetForegroundColor(self.theme.llm_response_fg))?;
-                queue!(stdout, SetBackgroundColor(self.theme.llm_response_bg))?;
-                write!(stdout, "└")?;
-                for _ in 0..(w - 2) {
-                    write!(stdout, "─")?;
-                }
-                write!(stdout, "┘")?;
-                queue!(stdout, ResetColor)?;
-                i += 1;
-            }
-        }
-
-        // Clear any remaining rows in the log area if current content is shorter
-        let used_rows = i as u16;
-        for row in start_row + used_rows..start_row + max_rows {
-            queue!(
-                stdout,
-                cursor::MoveTo(0, row),
-                terminal::Clear(ClearType::CurrentLine)
-            )?;
-        }
-        // Clear any remaining rows in the log area if current content is shorter
-        let used_rows = plan.log_lines.len() as u16;
-        for row in start_row + used_rows..start_row + max_rows {
-            queue!(
-                stdout,
-                cursor::MoveTo(0, row),
-                terminal::Clear(ClearType::CurrentLine)
-            )?;
-        }
-
-        // Draw input line at bottom
-        let input_row = h.saturating_sub(1);
-        queue!(
-            stdout,
-            cursor::MoveTo(0, input_row),
-            terminal::Clear(ClearType::CurrentLine)
-        )?;
-        write!(stdout, "{}", plan.input_line)?;
-
-        // draw completion popup above input if visible
-        if self.compl.visible && !self.compl.items.is_empty() {
-            let popup_h = std::cmp::min(self.compl.items.len(), 50) as u16;
-            for i in 0..popup_h as usize {
-                let row = input_row.saturating_sub(1 + i as u16);
-                let item = &self.compl.items[i];
-                let mark = if i == self.compl.selected { ">" } else { " " };
-                let line = format!(
-                    "{mark} {}  [{}]",
-                    item.rel,
-                    item.ext.clone().unwrap_or_default()
-                );
-                queue!(
-                    stdout,
-                    cursor::MoveTo(0, row),
-                    terminal::Clear(ClearType::CurrentLine)
-                )?;
-                if i == self.compl.selected {
-                    queue!(
-                        stdout,
-                        SetBackgroundColor(self.theme.completion_selected_bg),
-                        SetForegroundColor(self.theme.completion_selected_fg)
-                    )?;
-                } else {
-                    queue!(stdout, SetForegroundColor(self.theme.completion_item_fg))?;
-                }
-                write!(stdout, "{line}")?;
-                if i == self.compl.selected {
-                    queue!(stdout, ResetColor)?;
-                }
-            }
-        }
-
-        // Position terminal cursor at visual column provided by plan
-        let col = plan.input_cursor_col;
-        queue!(stdout, cursor::MoveTo(col, input_row), cursor::Show)?;
-
-        stdout.flush()?;
-        Ok(())
+        f.set_cursor(plan.input_cursor_col, chunks[2].y);
     }
+
+    fn render_header(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        let header_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+
+        let title_text = if !plan.footer_lines.is_empty() {
+            plan.footer_lines[0].clone()
+        } else {
+            String::new()
+        };
+        let title = Paragraph::new(title_text)
+            .style(theme.footer_style)
+            .alignment(Alignment::Left);
+        f.render_widget(title, header_chunks[0]);
+
+        let separator_text = if plan.footer_lines.len() > 1 {
+            plan.footer_lines[1].clone()
+        } else {
+            "-".repeat(area.width as usize)
+        };
+        let separator = Paragraph::new(separator_text).style(theme.footer_style);
+        f.render_widget(separator, header_chunks[1]);
+    }
+
+    fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut is_in_code_block = false;
+
+        for log_line in &plan.log_lines {
+            if log_line.starts_with("```") {
+                is_in_code_block = !is_in_code_block;
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    theme.code_block_style,
+                )));
+            } else if is_in_code_block {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    theme.code_block_style,
+                )));
+            } else if log_line.starts_with("[shell]$") {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    Style::default().fg(Color::Yellow),
+                )));
+            } else if log_line.starts_with("[stdout]") {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    Style::default().fg(Color::White),
+                )));
+            } else if log_line.starts_with("[stderr]") {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+            } else if log_line.starts_with("> ") {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    Style::default().fg(Color::Cyan),
+                )));
+            } else {
+                lines.push(Line::from(log_line.as_str()));
+            }
+        }
+
+        if let Some(response_segments) = &self.current_llm_response {
+            for segment in response_segments {
+                match segment {
+                    LlmResponseSegment::Text { content } => {
+                        lines.push(Line::from(Span::styled(
+                            content.clone(),
+                            theme.llm_response_style,
+                        )));
+                    }
+                    LlmResponseSegment::CodeBlock { language, content } => {
+                        let lang_line = format!("```{language}");
+                        lines.push(Line::from(Span::styled(lang_line, theme.code_block_style)));
+                        for line in content.lines() {
+                            lines.push(Line::from(Span::styled(
+                                line.to_string(),
+                                theme.code_block_style,
+                            )));
+                        }
+                        lines.push(Line::from(Span::styled(
+                            "```".to_string(),
+                            theme.code_block_style,
+                        )));
+                    }
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(lines)
+            .style(theme.log_style)
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+    }
+
+    fn render_footer(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        let mut input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
+            theme.shell_input_style
+        } else {
+            theme.input_style
+        };
+
+        if self.status == crate::tui::state::Status::ShellCommandRunning {
+            input_style = input_style.fg(Color::DarkGray);
+        }
+
+        let input = Paragraph::new(plan.input_line.as_str())
+            .style(input_style)
+            .block(Block::default());
+        f.render_widget(input, area);
+    }
+
+    fn render_completion(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        if !self.compl.visible {
+            return;
+        }
+
+        let max_items = 10;
+        let items_to_show = self.compl.items.iter().take(max_items).collect::<Vec<_>>();
+        let list_height = items_to_show.len() as u16;
+        let list_width = items_to_show
+            .iter()
+            .map(|item| item.rel.len())
+            .max()
+            .unwrap_or(20) as u16
+            + 4;
+
+        if area.height < list_height + 2 || area.width < list_width + 2 {
+            return;
+        }
+
+        let completion_area = Rect {
+            x: area.x + 1,
+            y: area.y + area.height.saturating_sub(list_height + 2),
+            width: list_width,
+            height: list_height + 2,
+        };
+
+        let list_items: Vec<ListItem> = items_to_show
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let style = if i == self.compl.selected {
+                    theme.completion_selected_style
+                } else {
+                    theme.completion_style
+                };
+                ListItem::new(item.rel.as_str()).style(style)
+            })
+            .collect();
+
+        let list = ratatui::widgets::List::new(list_items)
+            .block(Block::default().borders(Borders::ALL).title("Completion"))
+            .style(theme.completion_style);
+
+        f.render_widget(list, completion_area);
+    }
+}
+
+pub fn layout_with_footer(area: Rect, footer_height: u16) -> Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
+        .split(area)
 }
