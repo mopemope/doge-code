@@ -1,76 +1,45 @@
-use crossterm::style::Color;
-// use serde::{Deserialize, Serialize}; // removed
+use ratatui::style::{Color, Style};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // suppress warnings for fields intended for future use
 pub struct Theme {
     pub name: String,
-    pub footer_fg: Color,
-    pub footer_separator: Color,
-    pub user_input_fg: Color,
-    pub llm_response_bg: Color,
-    pub llm_response_fg: Color,
-    pub llm_code_block_bg: Color, // new: background color for code blocks
-    pub info_fg: Color,
-    pub warning_fg: Color,
-    pub error_fg: Color,
-    pub status_idle_fg: Color,
-    pub status_streaming_fg: Color,
-    pub status_cancelled_fg: Color,
-    pub status_done_fg: Color,
-    pub status_error_fg: Color,
-    pub completion_selected_bg: Color,
-    pub completion_selected_fg: Color,
-    pub completion_item_fg: Color,
-    pub spinner_fg: Color, // new: color for the spinner
+    pub footer_style: Style,
+    pub log_style: Style,
+    pub input_style: Style,
+    pub shell_input_style: Style,
+    pub llm_response_style: Style,
+    pub code_block_style: Style,
+    pub completion_style: Style,
+    pub completion_selected_style: Style,
 }
 
 impl Theme {
     pub fn dark() -> Self {
         Self {
             name: "dark".to_string(),
-            footer_fg: Color::Cyan,
-            footer_separator: Color::DarkGrey,
-            user_input_fg: Color::Blue,
-            llm_response_bg: Color::Black,
-            llm_response_fg: Color::White,
-            llm_code_block_bg: Color::DarkGrey, // new: code block background for dark theme
-            info_fg: Color::DarkGrey,
-            warning_fg: Color::Yellow,
-            error_fg: Color::Red,
-            status_idle_fg: Color::Cyan,
-            status_streaming_fg: Color::Green,
-            status_cancelled_fg: Color::Yellow,
-            status_done_fg: Color::Green,
-            status_error_fg: Color::Red,
-            completion_selected_bg: Color::DarkGrey,
-            completion_selected_fg: Color::White,
-            completion_item_fg: Color::Grey,
-            spinner_fg: Color::Cyan, // new: spinner color for dark theme
+            footer_style: Style::default().fg(Color::Cyan),
+            log_style: Style::default().fg(Color::White),
+            input_style: Style::default().fg(Color::White),
+            shell_input_style: Style::default().fg(Color::Yellow),
+            llm_response_style: Style::default().fg(Color::Green),
+            code_block_style: Style::default().fg(Color::LightCyan),
+            completion_style: Style::default().fg(Color::Gray),
+            completion_selected_style: Style::default().bg(Color::DarkGray).fg(Color::White),
         }
     }
 
     pub fn light() -> Self {
         Self {
             name: "light".to_string(),
-            footer_fg: Color::DarkBlue,
-            footer_separator: Color::Grey,
-            user_input_fg: Color::DarkBlue,
-            llm_response_bg: Color::White,
-            llm_response_fg: Color::Black,
-            llm_code_block_bg: Color::Grey, // new: code block background for light theme
-            info_fg: Color::Grey,
-            warning_fg: Color::DarkYellow,
-            error_fg: Color::DarkRed,
-            status_idle_fg: Color::DarkBlue,
-            status_streaming_fg: Color::DarkGreen,
-            status_cancelled_fg: Color::DarkYellow,
-            status_done_fg: Color::DarkGreen,
-            status_error_fg: Color::DarkRed,
-            completion_selected_bg: Color::Grey,
-            completion_selected_fg: Color::Black,
-            completion_item_fg: Color::DarkGrey,
-            spinner_fg: Color::DarkBlue, // new: spinner color for light theme
+            footer_style: Style::default().fg(Color::Blue),
+            log_style: Style::default().fg(Color::Black),
+            input_style: Style::default().fg(Color::Black),
+            shell_input_style: Style::default().fg(Color::Blue),
+            llm_response_style: Style::default().fg(Color::Green),
+            code_block_style: Style::default().fg(Color::Magenta),
+            completion_style: Style::default().fg(Color::DarkGray),
+            completion_selected_style: Style::default().bg(Color::Gray).fg(Color::Black),
         }
     }
 }

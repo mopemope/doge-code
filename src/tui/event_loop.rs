@@ -1,9 +1,10 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::time::{Duration, Instant};
+use tokio::process::Command;
 use tracing::debug;
 
-use crate::tui::state::{Status, TuiApp, save_input_history}; // import TuiApp and save_input_history
+use crate::tui::state::{InputMode, Status, TuiApp, save_input_history};
 
 impl TuiApp {
     pub fn event_loop(&mut self) -> Result<()> {
@@ -39,10 +40,25 @@ impl TuiApp {
                     drained.push(msg);
                 }
                 for msg in drained {
+                    // Shell command outputs
+                    if let Some(output) = msg.strip_prefix("::shell_stdout:") {
+                        for line in output.lines() {
+                            self.push_log(format!("[stdout] {}", line));
+                        }
+                        dirty = true;
+                        continue;
+                    }
+                    if let Some(output) = msg.strip_prefix("::shell_stderr:") {
+                        for line in output.lines() {
+                            self.push_log(format!("[stderr] {}", line));
+                        }
+                        dirty = true;
+                        continue;
+                    }
+
                     match msg.as_str() {
                         "::status:done" => {
                             if is_streaming {
-                                // Removed: self.push_log(" --- LLM Response End --- ".to_string());
                                 self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
@@ -51,7 +67,6 @@ impl TuiApp {
                         }
                         "::status:cancelled" => {
                             if is_streaming {
-                                // Removed: self.push_log(" --- LLM Response End (Cancelled) --- ".to_string());
                                 self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
@@ -61,42 +76,40 @@ impl TuiApp {
                         "::status:preparing" => {
                             self.status = Status::Preparing;
                             dirty = true;
-                            // Reset spinner state when transitioning to Preparing
                             self.spinner_state = 0;
                         }
                         "::status:sending" => {
                             self.status = Status::Sending;
                             dirty = true;
-                            // Reset spinner state when transitioning to Sending
                             self.spinner_state = 0;
                         }
                         "::status:waiting" => {
                             self.status = Status::Waiting;
                             dirty = true;
-                            // Reset spinner state when transitioning to Waiting
                             self.spinner_state = 0;
                         }
                         "::status:streaming" => {
                             if !is_streaming {
-                                // Removed: self.push_log(" --- LLM Response Start --- ".to_string());
                                 self.current_llm_response = Some(Vec::new());
                                 self.llm_parsing_buffer.clear();
                                 is_streaming = true;
                             }
                             self.status = Status::Streaming;
                             dirty = true;
-                            // Reset spinner state when transitioning to Streaming
                             self.spinner_state = 0;
                         }
                         "::status:processing" => {
                             self.status = Status::Processing;
                             dirty = true;
-                            // Reset spinner state when transitioning to Processing
+                            self.spinner_state = 0;
+                        }
+                        "::status:shell_running" => {
+                            self.status = Status::ShellCommandRunning;
+                            dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:error" => {
                             if is_streaming {
-                                // Removed: self.push_log(" --- LLM Response End (Error) --- ".to_string());
                                 self.finalize_and_append_llm_response("");
                                 is_streaming = false;
                             }
@@ -125,21 +138,17 @@ impl TuiApp {
                             dirty = true;
                         }
                         _ => {
-                            // Filter out status messages from being displayed in the log
                             if msg.starts_with("::status:") {
-                                // Status messages should not be displayed in the log
                                 debug!(target: "tui", filtered_status_msg = %msg, "Filtered out status message from log display");
                                 continue;
                             }
 
-                            // Check if the message is the same as the last LLM response to avoid duplication
                             if self
                                 .last_llm_response_content
                                 .as_ref()
                                 .is_some_and(|last_content| msg == *last_content)
                             {
                                 debug!(target: "tui", "Skipping duplicate LLM response message: {}", msg);
-                                // Clear the stored content after matching to allow future messages
                                 self.last_llm_response_content = None;
                             } else {
                                 self.push_log(msg);
@@ -150,19 +159,29 @@ impl TuiApp {
                 }
             }
 
-            if event::poll(Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(k) => match k.code {
-                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            let now = Instant::now();
-                            if let Some(prev) = last_ctrl_c_at
-                                && now.duration_since(prev) <= Duration::from_secs(3)
-                            {
-                                return Ok(());
-                            }
-                            last_ctrl_c_at = Some(now);
-                            self.dispatch("/cancel");
-                            self.push_log("[Press Ctrl+C again within 3s to exit]");
+            if event::poll(Duration::from_millis(50))?
+                && let Event::Key(k) = event::read()?
+            {
+                // Global key handlers
+                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let now = Instant::now();
+                    if let Some(prev) = last_ctrl_c_at
+                        && now.duration_since(prev) <= Duration::from_secs(3)
+                    {
+                        return Ok(());
+                    }
+                    last_ctrl_c_at = Some(now);
+                    self.dispatch("/cancel");
+                    self.push_log("[Press Ctrl+C again within 3s to exit]");
+                    dirty = true;
+                    continue;
+                }
+
+                // Mode-specific key handlers
+                match self.input_mode {
+                    InputMode::Normal => match k.code {
+                        KeyCode::Char('!') if self.input.is_empty() => {
+                            self.input_mode = InputMode::Shell;
                             dirty = true;
                         }
                         KeyCode::Esc => {
@@ -191,129 +210,171 @@ impl TuiApp {
                             }
                             self.dispatch(&line);
                             dirty = true;
-                            // reset cursor to start of new empty input
                             self.cursor = 0;
-                            // Reset spinner state when a new command is issued
                             self.spinner_state = 0;
                         }
-                        KeyCode::Backspace => {
-                            if self.compl.visible {
-                                // if completion visible, backspace should close it and also backspace input
-                                let changed = self.backspace_at_cursor();
-                                self.compl.reset();
-                                if changed && self.history_index == self.input_history.len() {
-                                    self.draft = self.input.clone();
-                                }
-                            } else {
-                                let changed = self.backspace_at_cursor();
-                                if changed && self.history_index == self.input_history.len() {
-                                    self.draft = self.input.clone();
-                                }
-                                self.update_completion();
-                            }
+                        _ => {
+                            self.handle_common_input_keys(k);
                             dirty = true;
                         }
-                        KeyCode::Delete => {
-                            let changed = self.delete_at_cursor();
-                            if changed && self.history_index == self.input_history.len() {
-                                self.draft = self.input.clone();
-                            }
-                            self.update_completion();
-                            dirty = true;
-                        }
-                        KeyCode::Left => {
-                            if self.cursor > 0 {
-                                self.cursor -= 1;
-                                dirty = true;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if self.cursor < self.input.chars().count() {
-                                self.cursor += 1;
-                                dirty = true;
-                            }
-                        }
-                        KeyCode::Home => {
+                    },
+                    InputMode::Shell => match k.code {
+                        KeyCode::Esc => {
+                            self.input_mode = InputMode::Normal;
+                            self.input.clear();
                             self.cursor = 0;
                             dirty = true;
                         }
-                        KeyCode::End => {
-                            self.cursor = self.input.chars().count();
-                            dirty = true;
-                        }
-                        KeyCode::Up => {
-                            if self.compl.visible {
-                                if !self.compl.items.is_empty() {
-                                    self.compl.selected =
-                                        (self.compl.selected + 1) % self.compl.items.len();
-                                    dirty = true;
+                        KeyCode::Enter => {
+                            let command = std::mem::take(&mut self.input);
+                            if !command.trim().is_empty() {
+                                self.push_log(format!("[shell]$ {}", command));
+                                if self.input_history.last().map(|s| s.as_str())
+                                    != Some(command.as_str())
+                                {
+                                    self.input_history.push(command.clone());
+                                    save_input_history(&self.input_history);
                                 }
-                            } else if self.history_index > 0 {
-                                if self.history_index == self.input_history.len() {
-                                    self.draft = self.input.clone();
-                                }
-                                self.history_index -= 1;
-                                self.input = self.input_history[self.history_index].clone();
-                                // reset cursor to end of loaded history line
-                                self.cursor = self.input.chars().count();
-                                dirty = true;
-                            }
-                        }
-                        KeyCode::Down => {
-                            if self.compl.visible {
-                                if !self.compl.items.is_empty() {
-                                    if self.compl.selected == 0 {
-                                        self.compl.selected = self.compl.items.len() - 1;
-                                    } else {
-                                        self.compl.selected -= 1;
+                                self.history_index = self.input_history.len();
+                                self.draft.clear();
+
+                                let tx = self.inbox_tx.clone().unwrap();
+                                tokio::spawn(async move {
+                                    tx.send("::status:shell_running".to_string()).ok();
+                                    let output =
+                                        Command::new("bash").arg("-c").arg(&command).output().await;
+                                    tx.send("::status:done".to_string()).ok();
+
+                                    match output {
+                                        Ok(output) => {
+                                            if !output.stdout.is_empty() {
+                                                let stdout =
+                                                    String::from_utf8_lossy(&output.stdout)
+                                                        .to_string();
+                                                tx.send(format!("::shell_stdout:{}", stdout)).ok();
+                                            }
+                                            if !output.stderr.is_empty() {
+                                                let stderr =
+                                                    String::from_utf8_lossy(&output.stderr)
+                                                        .to_string();
+                                                tx.send(format!("::shell_stderr:{}", stderr)).ok();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tx.send(format!(
+                                                "::shell_stderr:Failed to execute command: {}",
+                                                e
+                                            ))
+                                            .ok();
+                                        }
                                     }
-                                    dirty = true;
-                                }
-                            } else if self.history_index < self.input_history.len() {
-                                self.history_index += 1;
-                                if self.history_index == self.input_history.len() {
-                                    self.input = self.draft.clone();
-                                } else {
-                                    self.input = self.input_history[self.history_index].clone();
-                                }
-                                self.cursor = self.input.chars().count();
-                                dirty = true;
+                                });
                             }
-                        }
-                        KeyCode::Char(c) => {
-                            if c == ' ' && self.compl.visible {
-                                self.compl.reset();
-                                self.compl.suppress_once = true;
-                                self.insert_at_cursor(&c.to_string());
-                                if self.history_index == self.input_history.len() {
-                                    self.draft = self.input.clone();
-                                }
-                                dirty = true;
-                                continue;
-                            }
-                            self.insert_at_cursor(&c.to_string());
-                            if c == '@' {
-                                self.compl.suppress_once = false;
-                            }
-                            if self.history_index == self.input_history.len() {
-                                self.draft = self.input.clone();
-                            }
-                            self.update_completion();
+                            self.cursor = 0;
                             dirty = true;
                         }
-                        _ => {}
+                        _ => {
+                            self.handle_common_input_keys(k);
+                            dirty = true;
+                        }
                     },
-                    Event::Resize(_, _) => {
-                        dirty = true;
-                    }
-                    _ => {}
                 }
             }
 
             if dirty {
-                self.draw_with_model(self.model.as_deref())?;
+                let model = self.model.clone();
+                self.draw_with_model(model.as_deref())?;
                 dirty = false;
             }
+        }
+    }
+
+    // Helper function for common input key handling
+    fn handle_common_input_keys(&mut self, k: event::KeyEvent) {
+        match k.code {
+            KeyCode::Backspace => {
+                if self.compl.visible {
+                    let changed = self.backspace_at_cursor();
+                    self.compl.reset();
+                    if changed && self.history_index == self.input_history.len() {
+                        self.draft = self.input.clone();
+                    }
+                } else {
+                    let changed = self.backspace_at_cursor();
+                    if changed && self.history_index == self.input_history.len() {
+                        self.draft = self.input.clone();
+                    }
+                    self.update_completion();
+                }
+            }
+            KeyCode::Delete => {
+                let changed = self.delete_at_cursor();
+                if changed && self.history_index == self.input_history.len() {
+                    self.draft = self.input.clone();
+                }
+                self.update_completion();
+            }
+            KeyCode::Left => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.cursor < self.input.chars().count() {
+                    self.cursor += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+            }
+            KeyCode::End => {
+                self.cursor = self.input.chars().count();
+            }
+            KeyCode::Up => {
+                if self.compl.visible {
+                    if !self.compl.items.is_empty() {
+                        self.compl.selected = (self.compl.selected + self.compl.items.len() - 1)
+                            % self.compl.items.len();
+                    }
+                } else if self.history_index > 0 {
+                    if self.history_index == self.input_history.len() {
+                        self.draft = self.input.clone();
+                    }
+                    self.history_index -= 1;
+                    self.input = self.input_history[self.history_index].clone();
+                    self.cursor = self.input.chars().count();
+                }
+            }
+            KeyCode::Down => {
+                if self.compl.visible {
+                    if !self.compl.items.is_empty() {
+                        self.compl.selected = (self.compl.selected + 1) % self.compl.items.len();
+                    }
+                } else if self.history_index < self.input_history.len() {
+                    self.history_index += 1;
+                    if self.history_index == self.input_history.len() {
+                        self.input = self.draft.clone();
+                    } else {
+                        self.input = self.input_history[self.history_index].clone();
+                    }
+                    self.cursor = self.input.chars().count();
+                }
+            }
+            KeyCode::Char(c) => {
+                if c == ' ' && self.compl.visible {
+                    self.compl.reset();
+                    self.compl.suppress_once = true;
+                }
+                self.insert_at_cursor(&c.to_string());
+                if c == '@' {
+                    self.compl.suppress_once = false;
+                }
+                if self.history_index == self.input_history.len() {
+                    self.draft = self.input.clone();
+                }
+                self.update_completion();
+            }
+            _ => {}
         }
     }
 }
