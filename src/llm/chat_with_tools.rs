@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::llm::types::{ChatMessage, ToolCall, ToolDef};
+use crate::llm::types::{ChatMessage, ToolCall, ToolDef, Usage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequestWithTools {
@@ -32,6 +32,7 @@ pub struct ChoiceWithTools {
 pub struct ChatResponseWithTools {
     pub id: Option<String>,
     pub choices: Vec<ChoiceWithTools>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

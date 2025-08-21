@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 /// Finds the project instructions file based on a priority list.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
 pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
-    let priority_files = ["AGENTS.md", "GEMINI.md", "QWEN.md"];
+    let priority_files = ["AGENTS.md", "QWEN.md", "GEMINI.md"];
     for file_name in &priority_files {
         let path = project_root.join(file_name);
         if path.exists() {
@@ -290,7 +290,7 @@ impl CommandHandler for TuiExecutor {
         match line {
             "/help" => {
                 ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force",
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force, /tokens",
                 );
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
@@ -556,6 +556,17 @@ impl CommandHandler for TuiExecutor {
                     match self.handle_session_command(rest.trim(), ui) {
                         Ok(_) => {} // No-op on success
                         Err(e) => ui.push_log(format!("Error handling session command: {}", e)),
+                    }
+                    return;
+                }
+
+                // Handle /tokens command to show token usage
+                if line == "/tokens" {
+                    if let Some(client) = &self.client {
+                        let tokens_used = client.get_tokens_used();
+                        ui.push_log(format!("Total tokens used: {}", tokens_used));
+                    } else {
+                        ui.push_log("No LLM client available.");
                     }
                     return;
                 }

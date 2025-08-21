@@ -62,7 +62,15 @@ pub struct Choice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub id: Option<String>,
     pub choices: Vec<Choice>,
+    pub usage: Option<Usage>,
 }

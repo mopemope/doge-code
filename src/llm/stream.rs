@@ -5,7 +5,7 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::llm::client_core::OpenAIClient;
-use crate::llm::types::ChatMessage;
+use crate::llm::types::{ChatMessage, Usage};
 
 // Stream types
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -48,6 +48,7 @@ pub struct StreamChoice {
 pub struct ChatStreamChunk {
     pub id: Option<String>,
     pub choices: Vec<StreamChoice>,
+    pub usage: Option<Usage>,
 }
 
 impl OpenAIClient {
@@ -164,6 +165,11 @@ impl OpenAIClient {
                                 debug!(response_chunk=%payload, "llm chat_stream response");
 
                                 if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
+                                    // Track token usage if available
+                                    if let Some(usage) = &json.usage {
+                                        self.add_tokens(usage.total_tokens);
+                                    }
+
                                     for ch in json.choices {
                                         if let Some(reason) = ch.finish_reason
                                             && reason == "stop"
