@@ -123,6 +123,13 @@ impl TuiApp {
                             self.status = Status::Done;
                             dirty = true;
                         }
+                        _ if msg.starts_with("::tokens:") => {
+                            let tokens_str = &msg["::tokens:".len()..];
+                            if let Ok(tokens) = tokens_str.parse::<u32>() {
+                                self.tokens_used = tokens;
+                                dirty = true;
+                            }
+                        }
                         _ if msg.starts_with("::status:error:") => {
                             let content = &msg["::status:error:".len()..];
                             self.finalize_and_append_llm_response(content);
@@ -133,6 +140,15 @@ impl TuiApp {
                         _ => {
                             if msg.starts_with("::status:") {
                                 debug!(target: "tui", filtered_status_msg = %msg, "Filtered out status message from log display");
+                                continue;
+                            }
+
+                            // Handle token updates
+                            if let Some(tokens_str) = msg.strip_prefix("::tokens:") {
+                                if let Ok(tokens) = tokens_str.parse::<u32>() {
+                                    self.tokens_used = tokens;
+                                    dirty = true;
+                                }
                                 continue;
                             }
 

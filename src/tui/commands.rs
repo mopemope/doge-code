@@ -290,7 +290,7 @@ impl CommandHandler for TuiExecutor {
         match line {
             "/help" => {
                 ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force, /tokens",
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force, /tokens, /set-tokens <count>",
                 );
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
@@ -571,6 +571,21 @@ impl CommandHandler for TuiExecutor {
                     return;
                 }
 
+                // Handle /set-tokens command for testing token display
+                if let Some(tokens_str) = line.strip_prefix("/set-tokens ") {
+                    if let Ok(tokens) = tokens_str.trim().parse::<u32>() {
+                        ui.tokens_used = tokens;
+                        ui.push_log(format!("Set token count to: {}", tokens));
+                        // Redraw to show updated token count
+                        if let Err(e) = ui.draw_with_model(Some(&self.cfg.model)) {
+                            ui.push_log(format!("Failed to redraw: {e}"));
+                        }
+                    } else {
+                        ui.push_log("Invalid token count. Usage: /set-tokens <number>");
+                    }
+                    return;
+                }
+
                 if !line.starts_with('/') {
                     let rest = line;
                     self.last_user_prompt = Some(rest.to_string());
@@ -634,11 +649,15 @@ impl CommandHandler for TuiExecutor {
                                 let res =
                                     crate::llm::run_agent_loop(&c, &model, &fs, msgs, tx.clone())
                                         .await;
+                                // Get token usage after the agent loop completes
+                                let tokens_used = c.get_tokens_used();
                                 match res {
                                     Ok((updated_messages, final_msg)) => {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(final_msg.content.clone());
                                             let _ = tx.send("::status:done".into());
+                                            // Send token usage update
+                                            let _ = tx.send(format!("::tokens:{}", tokens_used));
                                         }
                                         // 会話履歴を更新（systemメッセージを除く全てのメッセージを保存）
                                         if let Ok(mut history) = conversation_history.lock() {
@@ -662,6 +681,8 @@ impl CommandHandler for TuiExecutor {
                                         if let Some(tx) = tx {
                                             let _ = tx.send(format!("LLM error: {e}"));
                                             let _ = tx.send("::status:error".into());
+                                            // Send token usage update even on error
+                                            let _ = tx.send(format!("::tokens:{}", tokens_used));
                                         }
                                         // エラー時も会話履歴を更新（ユーザーの入力のみ）
                                         if let Ok(mut history) = conversation_history.lock() {

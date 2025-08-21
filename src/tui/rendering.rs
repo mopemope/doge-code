@@ -28,6 +28,7 @@ impl TuiApp {
             size.height,
             model,
             self.spinner_state,
+            self.tokens_used,
         );
 
         let chunks = Layout::default()
