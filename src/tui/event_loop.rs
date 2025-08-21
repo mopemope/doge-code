@@ -41,16 +41,9 @@ impl TuiApp {
                 }
                 for msg in drained {
                     // Shell command outputs
-                    if let Some(output) = msg.strip_prefix("::shell_stdout:") {
+                    if let Some(output) = msg.strip_prefix("::shell_output:") {
                         for line in output.lines() {
-                            self.push_log(format!("[stdout] {}", line));
-                        }
-                        dirty = true;
-                        continue;
-                    }
-                    if let Some(output) = msg.strip_prefix("::shell_stderr:") {
-                        for line in output.lines() {
-                            self.push_log(format!("[stderr] {}", line));
+                            self.push_log(line.to_string());
                         }
                         dirty = true;
                         continue;
@@ -241,28 +234,27 @@ impl TuiApp {
                                 let tx = self.inbox_tx.clone().unwrap();
                                 tokio::spawn(async move {
                                     tx.send("::status:shell_running".to_string()).ok();
-                                    let output =
-                                        Command::new("bash").arg("-c").arg(&command).output().await;
+                                    let command_with_redirect = format!("{} 2>&1", command);
+                                    let output = Command::new("bash")
+                                        .arg("-c")
+                                        .arg(&command_with_redirect)
+                                        .output()
+                                        .await;
                                     tx.send("::status:done".to_string()).ok();
 
                                     match output {
                                         Ok(output) => {
                                             if !output.stdout.is_empty() {
-                                                let stdout =
+                                                let output_str =
                                                     String::from_utf8_lossy(&output.stdout)
                                                         .to_string();
-                                                tx.send(format!("::shell_stdout:{}", stdout)).ok();
-                                            }
-                                            if !output.stderr.is_empty() {
-                                                let stderr =
-                                                    String::from_utf8_lossy(&output.stderr)
-                                                        .to_string();
-                                                tx.send(format!("::shell_stderr:{}", stderr)).ok();
+                                                tx.send(format!("::shell_output:{}", output_str))
+                                                    .ok();
                                             }
                                         }
                                         Err(e) => {
                                             tx.send(format!(
-                                                "::shell_stderr:Failed to execute command: {}",
+                                                "::shell_output:Failed to execute command: {}",
                                                 e
                                             ))
                                             .ok();
