@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 /// Finds the project instructions file based on a priority list.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order within the project root.
 pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<PathBuf> {
-    let priority_files = ["AGENTS.md", "QWEN.md", "GEMINI.md"];
+    let priority_files = ["AGENTS.md", "GEMINI.md", "QWEN.md"];
     for file_name in &priority_files {
         let path = project_root.join(file_name);
         if path.exists() {
