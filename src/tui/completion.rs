@@ -6,8 +6,6 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub rel: String,
-    pub base: String,
-    pub dir: String,
     pub ext: Option<String>,
     #[allow(dead_code)]
     pub size: u64,
@@ -76,20 +74,10 @@ impl AtFileIndex {
                 }
                 if let Ok(relp) = p.strip_prefix(&root) {
                     let rel = relp.to_string_lossy().replace('\\', "/");
-                    let base = p
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let dir = rel
-                        .rsplit_once('/')
-                        .map(|(d, _)| d.to_string())
-                        .unwrap_or_else(|| "".into());
                     let ext = p.extension().map(|s| s.to_string_lossy().to_string());
                     let (size, mtime) = file_meta(p);
                     v.push(FileEntry {
                         rel,
-                        base,
-                        dir,
                         ext,
                         size,
                         mtime,
@@ -105,10 +93,6 @@ impl AtFileIndex {
 
     pub fn complete(&self, query: &str) -> Vec<FileEntry> {
         let q = query.trim_start_matches('@');
-        let (dir_pref, pat) = match q.rsplit_once('/') {
-            Some((d, b)) => (Some(d.to_string()), b.to_string()),
-            None => (None, q.to_string()),
-        };
         let entries = self
             .entries
             .read()
@@ -118,23 +102,18 @@ impl AtFileIndex {
         let recent = self.recent.read().ok();
         let mut scored: Vec<(i32, i32, i32, i64, usize)> = Vec::new();
         for (idx, e) in entries.iter().enumerate() {
-            if let Some(dp) = &dir_pref
-                && !e.dir.starts_with(dp)
-            {
-                continue;
-            }
-            let (tier, score) = match_tier(&e.base, &pat);
-            if tier == 3 && pat.is_empty() {
-                continue;
-            }
+            let (tier, score) = match_tier(&e.rel, q);
+
             if tier == i32::MAX {
                 continue;
             }
+
             let rec_rank = recent
                 .as_ref()
                 .and_then(|r| r.rank(&e.rel))
                 .map(|x| x as i32)
                 .unwrap_or(9999);
+
             let mtime_key = e.mtime.map(|t| t.timestamp()).unwrap_or(0);
             // store index to pick entry later
             scored.push((tier, -score, rec_rank, -mtime_key, idx));
@@ -143,7 +122,7 @@ impl AtFileIndex {
         scored
             .into_iter()
             .filter_map(|t| entries.get(t.4).cloned())
-            .take(20)
+            .take(50)
             .collect()
     }
 }
@@ -216,5 +195,50 @@ impl CompletionState {
         self.query.clear();
         self.items.clear();
         self.selected = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn completion_filtering_works() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Create some dummy files
+        File::create(root.join("README.md")).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        File::create(root.join("src/main.rs")).unwrap();
+        File::create(root.join("src/lib.rs")).unwrap();
+        std::fs::create_dir(root.join("src/tui")).unwrap();
+        File::create(root.join("src/tui/completion.rs")).unwrap();
+
+        let index = AtFileIndex::new(root);
+        index.scan();
+
+        // Test completion for "src/"
+        let completions = index.complete("@src/");
+        assert_eq!(completions.len(), 3);
+        assert!(completions.iter().any(|e| e.rel == "src/main.rs"));
+        assert!(completions.iter().any(|e| e.rel == "src/lib.rs"));
+        assert!(completions.iter().any(|e| e.rel == "src/tui/completion.rs"));
+
+        // Test completion for "src/tui/comp"
+        let completions = index.complete("@src/tui/comp");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].rel, "src/tui/completion.rs");
+
+        // Test completion for "README"
+        let completions = index.complete("@README");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].rel, "README.md");
+
+        // Test for empty query
+        let completions = index.complete("@");
+        assert_eq!(completions.len(), 4);
     }
 }
