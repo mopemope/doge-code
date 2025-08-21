@@ -398,7 +398,7 @@ impl TuiApp {
 
         // draw completion popup above input if visible
         if self.compl.visible && !self.compl.items.is_empty() {
-            let popup_h = std::cmp::min(self.compl.items.len(), 10) as u16;
+            let popup_h = std::cmp::min(self.compl.items.len(), 50) as u16;
             for i in 0..popup_h as usize {
                 let row = input_row.saturating_sub(1 + i as u16);
                 let item = &self.compl.items[i];

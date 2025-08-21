@@ -326,23 +326,49 @@ impl TuiApp {
     }
 
     pub fn current_at_token(&self) -> Option<String> {
-        let s = self.input.as_str();
-        let mut start = None;
-        for (i, ch) in s.char_indices() {
-            if ch == '@' {
-                start = Some(i);
-            }
-            if ch.is_whitespace()
-                && let Some(st) = start
-            {
-                if i > st {
-                    return Some(s[st..i].to_string());
-                } else {
-                    start = None;
-                }
+        let s = &self.input;
+        let cursor_char = self.cursor;
+
+        // Find the start of the word under the cursor
+        let mut start_char = 0;
+        for i in (0..cursor_char).rev() {
+            if s.chars().nth(i).unwrap().is_whitespace() {
+                start_char = i + 1;
+                break;
             }
         }
-        start.map(|st| s[st..].to_string())
+
+        // Find the end of the word
+        let mut end_char = s.chars().count();
+        for i in start_char..s.chars().count() {
+            if s.chars().nth(i).unwrap().is_whitespace() {
+                end_char = i;
+                break;
+            }
+        }
+
+        // If cursor is outside the word, no token
+        if cursor_char < start_char || cursor_char > end_char {
+            return None;
+        }
+
+        // If cursor is at the end of the word, it's only valid if it's also the end of the string.
+        // If there is a char at `end_char` it must be a whitespace, so cursor at `end_char` is outside.
+        if cursor_char == end_char && end_char < s.chars().count() {
+            return None;
+        }
+
+        let token: String = s
+            .chars()
+            .skip(start_char)
+            .take(end_char - start_char)
+            .collect();
+
+        if token.starts_with('@') {
+            Some(token)
+        } else {
+            None
+        }
     }
 
     pub fn update_completion(&mut self) {
@@ -351,42 +377,15 @@ impl TuiApp {
             self.compl.visible = false;
             return;
         }
-        // Only trigger completion when the character immediately before the cursor is '@'.
-        let prev_char_is_at = match self.cursor {
-            0 => false,
-            _ => self.input.chars().nth(self.cursor - 1) == Some('@'),
-        };
-        if !prev_char_is_at {
-            self.compl.reset();
-            return;
-        }
-        // If this '@' starts a new token (BOL or preceded by whitespace)
-        let prev2_is_space = if self.cursor < 2 {
-            true
+
+        if let Some(tok) = self.current_at_token() {
+            self.compl.visible = true;
+            self.compl.query = tok.clone();
+            self.compl.items = self.at_index.complete(&tok);
+            self.compl.selected = 0;
         } else {
-            match self.input.chars().nth(self.cursor.saturating_sub(2)) {
-                Some(c) => c.is_whitespace(),
-                None => true,
-            }
-        };
-        if prev2_is_space {
-            let tok = "@".to_string();
-            self.compl.visible = true;
-            self.compl.query = tok.clone();
-            self.compl.items = self.at_index.complete(&tok);
-            self.compl.selected = 0;
-            return;
+            self.compl.reset();
         }
-        if let Some(tok) = self.current_at_token()
-            && tok.starts_with('@')
-        {
-            self.compl.visible = true;
-            self.compl.query = tok.clone();
-            self.compl.items = self.at_index.complete(&tok);
-            self.compl.selected = 0;
-            return;
-        }
-        self.compl.reset();
     }
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
@@ -531,4 +530,55 @@ pub(crate) fn save_input_history(hist: &[String]) {
         path,
         serde_json::to_string_pretty(&out).unwrap_or("[]".into()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_app() -> TuiApp {
+        TuiApp::new("test", None, "dark").unwrap()
+    }
+
+    #[test]
+    fn test_current_at_token() {
+        let mut app = create_test_app();
+
+        // No token
+        app.input = "hello world".to_string();
+        app.cursor = 5;
+        assert_eq!(app.current_at_token(), None);
+
+        // Cursor at the beginning of a token
+        app.input = "hello @world".to_string();
+        app.cursor = 6;
+        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+
+        // Cursor in the middle of a token
+        app.input = "hello @world".to_string();
+        app.cursor = 9;
+        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+
+        // Cursor at the end of a token
+        app.input = "hello @world".to_string();
+        app.cursor = 12;
+        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+
+        // Not a token
+        app.input = "hello world@".to_string();
+        app.cursor = 12;
+        assert_eq!(app.current_at_token(), None);
+
+        // Multiple tokens
+        app.input = "hello @world1 @world2".to_string();
+        app.cursor = 9;
+        assert_eq!(app.current_at_token(), Some("@world1".to_string()));
+        app.cursor = 18;
+        assert_eq!(app.current_at_token(), Some("@world2".to_string()));
+
+        // Cursor on whitespace
+        app.input = "hello @world1 @world2".to_string();
+        app.cursor = 13;
+        assert_eq!(app.current_at_token(), None);
+    }
 }
