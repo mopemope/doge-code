@@ -60,6 +60,12 @@ pub async fn chat_tools_once(
         "llm chat_tools_once response"
     );
     let body: ChatResponseWithTools = serde_json::from_str(&response_text)?;
+
+    // Track token usage if available
+    if let Some(usage) = &body.usage {
+        client.add_tokens(usage.total_tokens);
+    }
+
     let msg = body
         .choices
         .into_iter()

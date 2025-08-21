@@ -1,5 +1,7 @@
 use anyhow::Result;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -13,6 +15,8 @@ pub struct OpenAIClient {
     pub api_key: String,
     pub(crate) inner: reqwest::Client,
     pub llm_cfg: LlmConfig,
+    /// Tracks total tokens used by this client
+    pub tokens_used: Arc<AtomicU32>,
 }
 
 impl OpenAIClient {
@@ -23,6 +27,7 @@ impl OpenAIClient {
             api_key: api_key.into(),
             inner,
             llm_cfg: LlmConfig::default(),
+            tokens_used: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -46,6 +51,16 @@ impl OpenAIClient {
             base = base.trim_end_matches('/').to_string();
         }
         format!("{base}/v1/chat/completions")
+    }
+
+    /// Get the total number of tokens used by this client
+    pub fn get_tokens_used(&self) -> u32 {
+        self.tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Add tokens to the total count
+    pub fn add_tokens(&self, tokens: u32) {
+        self.tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -131,6 +146,11 @@ impl OpenAIClient {
                     let body: Result<ChatResponse, _> = serde_json::from_str(&response_text);
                     match body {
                         Ok(body) => {
+                            // Track token usage if available
+                            if let Some(usage) = &body.usage {
+                                self.add_tokens(usage.total_tokens);
+                            }
+
                             if let Some(msg) = body.choices.into_iter().next().map(|c| c.message) {
                                 return Ok(msg);
                             } else {
@@ -240,7 +260,7 @@ mod tests {
         let server = Server::run();
         // Phase 1: expect a single 500 and verify it happens
         server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
                 .times(1)
                 .respond_with(
                     status_code(500)
@@ -274,7 +294,7 @@ mod tests {
 
         // Phase 2: expect a single 200 and verify success with one retry allowed
         server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
                 .times(1)
                 .respond_with(json_encoded(serde_json::json!({
                     "id": "test",
@@ -312,7 +332,7 @@ mod tests {
     async fn chat_once_non200_is_error_no_retry_on_400() {
         let server = Server::run();
         server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
                 .respond_with(status_code(400).body("bad")),
         );
         let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
@@ -347,6 +367,7 @@ mod tests {
             api_key: "x".into(),
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
+            tokens_used: Arc::new(AtomicU32::new(0)),
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -354,7 +375,18 @@ mod tests {
             api_key: "x".into(),
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
+            tokens_used: Arc::new(AtomicU32::new(0)),
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn token_tracking() {
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        assert_eq!(client.get_tokens_used(), 0);
+        client.add_tokens(100);
+        assert_eq!(client.get_tokens_used(), 100);
+        client.add_tokens(50);
+        assert_eq!(client.get_tokens_used(), 150);
     }
 }
