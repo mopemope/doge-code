@@ -5,7 +5,6 @@ use ratatui::{
     widgets::{Block, Borders, ListItem, Paragraph, Wrap},
 };
 use std::io;
-use std::rc::Rc;
 
 impl TuiApp {
     pub fn draw_with_model(&mut self, model: Option<&str>) -> io::Result<()> {
@@ -46,7 +45,7 @@ impl TuiApp {
 
         self.render_completion(f, chunks[1], theme); // Render completion over main content
 
-        f.set_cursor(plan.input_cursor_col, chunks[2].y);
+        f.set_cursor_position((plan.input_cursor_col, chunks[2].y));
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
@@ -210,11 +209,4 @@ impl TuiApp {
 
         f.render_widget(list, completion_area);
     }
-}
-
-pub fn layout_with_footer(area: Rect, footer_height: u16) -> Rc<[Rect]> {
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
-        .split(area)
 }

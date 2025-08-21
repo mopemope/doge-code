@@ -6,7 +6,6 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub rel: String,
-    pub ext: Option<String>,
     #[allow(dead_code)]
     pub size: u64,
     pub mtime: Option<DateTime<Utc>>,
@@ -74,14 +73,8 @@ impl AtFileIndex {
                 }
                 if let Ok(relp) = p.strip_prefix(&root) {
                     let rel = relp.to_string_lossy().replace('\\', "/");
-                    let ext = p.extension().map(|s| s.to_string_lossy().to_string());
                     let (size, mtime) = file_meta(p);
-                    v.push(FileEntry {
-                        rel,
-                        ext,
-                        size,
-                        mtime,
-                    });
+                    v.push(FileEntry { rel, size, mtime });
                 }
             }
         }
