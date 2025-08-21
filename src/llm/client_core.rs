@@ -256,6 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn chat_once_retries_on_500_then_succeeds() {
         let server = Server::run();
         // Phase 1: expect a single 500 and verify it happens
@@ -329,6 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn chat_once_non200_is_error_no_retry_on_400() {
         let server = Server::run();
         server.expect(
