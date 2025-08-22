@@ -620,6 +620,7 @@ dependencies = [
  "glob",
  "globwalk",
  "httptest",
+ "ignore",
  "num_cpus",
  "ratatui",
  "regex",
