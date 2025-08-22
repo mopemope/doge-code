@@ -118,6 +118,15 @@ impl AtFileIndex {
             .take(50)
             .collect()
     }
+
+    pub fn complete_slash_command(&self, query: &str, commands: &[String]) -> Vec<String> {
+        let q = query.trim_start_matches('/');
+        commands
+            .iter()
+            .filter(|cmd| cmd.trim_start_matches('/').starts_with(q))
+            .cloned()
+            .collect()
+    }
 }
 
 fn should_skip(p: &Path) -> bool {
@@ -180,6 +189,8 @@ pub struct CompletionState {
     pub selected: usize,
     // suppress reopening completion once right after it was closed/applied
     pub suppress_once: bool,
+    // Slash command completion items
+    pub slash_command_items: Vec<String>,
 }
 
 impl CompletionState {
@@ -188,6 +199,7 @@ impl CompletionState {
         self.query.clear();
         self.items.clear();
         self.selected = 0;
+        self.slash_command_items.clear();
     }
 }
 
