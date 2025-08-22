@@ -1,0 +1,30 @@
+use crate::analysis::RepoMap;
+use crate::llm::OpenAIClient;
+use crate::tools::FsTools;
+use crate::tui::commands_sessions::SessionManager;
+use crate::tui::view::TuiApp;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{RwLock, watch};
+
+pub trait CommandHandler {
+    fn handle(&mut self, line: &str, ui: &mut TuiApp);
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+pub struct TuiExecutor {
+    pub(crate) cfg: crate::config::AppConfig,
+    pub(crate) tools: FsTools,
+    pub(crate) repomap: Arc<RwLock<Option<RepoMap>>>,
+    pub(crate) client: Option<OpenAIClient>,
+    #[allow(dead_code)]
+    pub(crate) history: crate::llm::ChatHistory,
+    pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
+    pub(crate) cancel_tx: Option<watch::Sender<bool>>,
+    pub(crate) last_user_prompt: Option<String>,
+    // 会話履歴を保持するためのメッセージベクター
+    pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
+    // Session management
+    pub(crate) session_manager: Arc<Mutex<SessionManager>>,
+    // Available slash commands
+    pub(crate) slash_commands: Vec<String>,
+}
