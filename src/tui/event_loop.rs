@@ -7,12 +7,15 @@ use tracing::debug;
 use crate::tui::state::{InputMode, Status, TuiApp, save_input_history};
 
 impl TuiApp {
-    pub fn event_loop(&mut self) -> Result<()> {
+    pub fn event_loop(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
         if self.history_index > self.input_history.len() {
             self.history_index = self.input_history.len();
         }
         let mut last_ctrl_c_at: Option<Instant> = None;
-        let mut dirty = true; // initial full render
+
         let mut is_streaming = false; // track streaming state
         let mut last_spinner_update = Instant::now(); // Track last spinner update time
         loop {
@@ -29,7 +32,7 @@ impl TuiApp {
             if should_update_spinner && last_spinner_update.elapsed() >= Duration::from_millis(150)
             {
                 self.spinner_state = self.spinner_state.wrapping_add(1);
-                dirty = true;
+                self.dirty = true;
                 last_spinner_update = Instant::now();
             }
 
@@ -45,7 +48,7 @@ impl TuiApp {
                         for line in output.lines() {
                             self.push_log(line.to_string());
                         }
-                        dirty = true;
+                        self.dirty = true;
                         continue;
                     }
 
@@ -56,7 +59,7 @@ impl TuiApp {
                                 is_streaming = false;
                             }
                             self.status = Status::Done;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         "::status:cancelled" => {
                             if is_streaming {
@@ -64,21 +67,21 @@ impl TuiApp {
                                 is_streaming = false;
                             }
                             self.status = Status::Cancelled;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         "::status:preparing" => {
                             self.status = Status::Preparing;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:sending" => {
                             self.status = Status::Sending;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:waiting" => {
                             self.status = Status::Waiting;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:streaming" => {
@@ -88,17 +91,17 @@ impl TuiApp {
                                 is_streaming = true;
                             }
                             self.status = Status::Streaming;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:processing" => {
                             self.status = Status::Processing;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:shell_running" => {
                             self.status = Status::ShellCommandRunning;
-                            dirty = true;
+                            self.dirty = true;
                             self.spinner_state = 0;
                         }
                         "::status:error" => {
@@ -107,13 +110,13 @@ impl TuiApp {
                                 is_streaming = false;
                             }
                             self.status = Status::Error;
-                            dirty = true;
+                            self.dirty = true;
                         }
 
                         _ if msg.starts_with("::append:") => {
                             let payload = &msg["::append:".len()..];
                             self.append_stream_token_structured(payload);
-                            dirty = true;
+                            self.dirty = true;
                         }
                         _ if msg.starts_with("::status:done:") => {
                             let content = &msg["::status:done:".len()..];
@@ -121,13 +124,13 @@ impl TuiApp {
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Done;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         _ if msg.starts_with("::tokens:") => {
                             let tokens_str = &msg["::tokens:".len()..];
                             if let Ok(tokens) = tokens_str.parse::<u32>() {
                                 self.tokens_used = tokens;
-                                dirty = true;
+                                self.dirty = true;
                             }
                         }
                         _ if msg.starts_with("::status:error:") => {
@@ -135,7 +138,7 @@ impl TuiApp {
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Error;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         _ => {
                             if msg.starts_with("::status:") {
@@ -147,7 +150,7 @@ impl TuiApp {
                             if let Some(tokens_str) = msg.strip_prefix("::tokens:") {
                                 if let Ok(tokens) = tokens_str.parse::<u32>() {
                                     self.tokens_used = tokens;
-                                    dirty = true;
+                                    self.dirty = true;
                                 }
                                 continue;
                             }
@@ -162,7 +165,7 @@ impl TuiApp {
                             } else {
                                 self.push_log(msg);
                             }
-                            dirty = true;
+                            self.dirty = true;
                         }
                     }
                 }
@@ -182,7 +185,7 @@ impl TuiApp {
                     last_ctrl_c_at = Some(now);
                     self.dispatch("/cancel");
                     self.push_log("[Press Ctrl+C again within 3s to exit]");
-                    dirty = true;
+                    self.dirty = true;
                     continue;
                 }
 
@@ -191,16 +194,16 @@ impl TuiApp {
                     InputMode::Normal => match k.code {
                         KeyCode::Char('!') if self.input.is_empty() => {
                             self.input_mode = InputMode::Shell;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         KeyCode::Esc => {
                             self.dispatch("/cancel");
-                            dirty = true;
+                            self.dirty = true;
                         }
                         KeyCode::Enter => {
                             if self.compl.visible {
                                 self.apply_completion();
-                                dirty = true;
+                                self.dirty = true;
                                 continue;
                             }
                             let line = std::mem::take(&mut self.input);
@@ -218,13 +221,13 @@ impl TuiApp {
                                 return Ok(());
                             }
                             self.dispatch(&line);
-                            dirty = true;
+                            self.dirty = true;
                             self.cursor = 0;
                             self.spinner_state = 0;
                         }
                         _ => {
                             self.handle_common_input_keys(k);
-                            dirty = true;
+                            self.dirty = true;
                         }
                     },
                     InputMode::Shell => match k.code {
@@ -232,7 +235,7 @@ impl TuiApp {
                             self.input_mode = InputMode::Normal;
                             self.input.clear();
                             self.cursor = 0;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         KeyCode::Enter => {
                             let command = std::mem::take(&mut self.input);
@@ -279,20 +282,20 @@ impl TuiApp {
                                 });
                             }
                             self.cursor = 0;
-                            dirty = true;
+                            self.dirty = true;
                         }
                         _ => {
                             self.handle_common_input_keys(k);
-                            dirty = true;
+                            self.dirty = true;
                         }
                     },
                 }
             }
 
-            if dirty {
+            if self.dirty {
                 let model = self.model.clone();
-                self.draw_with_model(model.as_deref())?;
-                dirty = false;
+                terminal.draw(|f| self.view(f, model.as_deref()))?;
+                self.dirty = false;
             }
         }
     }
