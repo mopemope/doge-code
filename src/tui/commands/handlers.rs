@@ -133,9 +133,7 @@ impl CommandHandler for TuiExecutor {
                     }
                 }
                 // Redraw after theme change
-                if let Err(e) = ui.draw_with_model(Some(&self.cfg.model)) {
-                    ui.push_log(format!("Failed to redraw after theme change: {e}"));
-                }
+                ui.dirty = true;
             }
             _ => {
                 if let Some(rest) = line.strip_prefix("/open ") {

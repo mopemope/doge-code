@@ -248,6 +248,8 @@ pub struct TuiApp {
     // pub session_store: SessionStore,
     // Token usage tracking
     pub tokens_used: u32,
+    // redraw flag
+    pub dirty: bool,
 }
 
 impl TuiApp {
@@ -286,6 +288,7 @@ impl TuiApp {
             last_llm_response_content: None,
             input_mode: InputMode::default(),
             tokens_used: 0,
+            dirty: true, // initial full render
         };
         app.at_index.scan();
         Ok(app)
@@ -577,7 +580,9 @@ impl TuiApp {
         terminal::enable_raw_mode()?;
         execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
         let _guard = TuiGuard;
-        self.event_loop()
+        let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        self.event_loop(&mut terminal)
     }
 }
 

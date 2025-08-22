@@ -4,16 +4,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, ListItem, Paragraph, Wrap},
 };
-use std::io;
 
 impl TuiApp {
-    pub fn draw_with_model(&mut self, model: Option<&str>) -> io::Result<()> {
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
-        terminal.draw(|f| self.view(f, model))?;
-        Ok(())
-    }
-
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let theme = &self.theme;
         let size = f.area();
