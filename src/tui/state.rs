@@ -91,17 +91,17 @@ pub fn build_render_plan(
             )
         }
         Status::Streaming => {
-            let spinner_chars = ['⚡', '✨', '⭐', '🌟'];
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
             format!("Receiving response... {}", spinner_char)
         }
         Status::Processing => {
-            let spinner_chars = ['⚙', '⚡', '🔧', '⚒'];
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
             format!("Processing tools... {}", spinner_char)
         }
         Status::ShellCommandRunning => {
-            let spinner_chars = ['⚙', '⚡', '🔧', '⚒'];
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
             format!("Executing command... {}", spinner_char)
         }
