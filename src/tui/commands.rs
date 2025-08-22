@@ -172,11 +172,9 @@ impl TuiExecutor {
             "/retry".to_string(),
             "/theme".to_string(),
             "/session".to_string(),
-            "/clear-cache".to_string(),
             "/rebuild".to_string(),
             "/rebuild-force".to_string(),
             "/tokens".to_string(),
-            "/set-tokens".to_string(),
         ];
 
         Ok(Self {
@@ -312,7 +310,7 @@ impl CommandHandler for TuiExecutor {
         match line {
             "/help" => {
                 ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /clear-cache, /rebuild, /rebuild-force, /tokens, /set-tokens <count>",
+                    "/help, /map, /tools, /clear, /open <path>, /quit, /retry, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /rebuild, /rebuild-force, /tokens",
                 );
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
@@ -421,46 +419,7 @@ impl CommandHandler for TuiExecutor {
                     }
                 });
             }
-            "/clear-cache" => {
-                // Clear repomap cache
-                match Analyzer::new(&self.cfg.project_root) {
-                    Ok(analyzer) => {
-                        match analyzer.clear_cache() {
-                            Ok(()) => {
-                                ui.push_log("[Cache cleared successfully]");
-                                // Trigger repomap regeneration
-                                let repomap_clone = self.repomap.clone();
-                                let project_root = self.cfg.project_root.clone();
-                                tokio::spawn(async move {
-                                    info!("Regenerating repomap after cache clear");
-                                    let mut analyzer = match Analyzer::new(&project_root) {
-                                        Ok(analyzer) => analyzer,
-                                        Err(e) => {
-                                            error!("Failed to create Analyzer: {:?}", e);
-                                            return;
-                                        }
-                                    };
-                                    match analyzer.build().await {
-                                        Ok(map) => {
-                                            *repomap_clone.write().await = Some(map);
-                                            info!("Repomap regenerated successfully");
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to regenerate RepoMap: {:?}", e);
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                ui.push_log(format!("[Failed to clear cache: {}]", e));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        ui.push_log(format!("[Failed to create analyzer: {}]", e));
-                    }
-                }
-            }
+
             "/cancel" => {
                 if let Some(tx) = &self.cancel_tx {
                     let _ = tx.send(true);
@@ -589,21 +548,6 @@ impl CommandHandler for TuiExecutor {
                         ui.push_log(format!("Total tokens used: {}", tokens_used));
                     } else {
                         ui.push_log("No LLM client available.");
-                    }
-                    return;
-                }
-
-                // Handle /set-tokens command for testing token display
-                if let Some(tokens_str) = line.strip_prefix("/set-tokens ") {
-                    if let Ok(tokens) = tokens_str.trim().parse::<u32>() {
-                        ui.tokens_used = tokens;
-                        ui.push_log(format!("Set token count to: {}", tokens));
-                        // Redraw to show updated token count
-                        if let Err(e) = ui.draw_with_model(Some(&self.cfg.model)) {
-                            ui.push_log(format!("Failed to redraw: {e}"));
-                        }
-                    } else {
-                        ui.push_log("Invalid token count. Usage: /set-tokens <number>");
                     }
                     return;
                 }
