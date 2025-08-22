@@ -10,6 +10,12 @@ use unicode_width::UnicodeWidthChar;
 use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::theme::Theme;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CurrentToken {
+    FilePath(String),
+    SlashCommand(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum LlmResponseSegment {
     Text { content: String },
@@ -354,7 +360,7 @@ impl TuiApp {
         self.inbox_tx.clone()
     }
 
-    pub fn current_at_token(&self) -> Option<String> {
+    pub fn current_at_token(&self) -> Option<CurrentToken> {
         let s = &self.input;
         let cursor_char = self.cursor;
 
@@ -394,7 +400,9 @@ impl TuiApp {
             .collect();
 
         if token.starts_with('@') {
-            Some(token)
+            Some(CurrentToken::FilePath(token))
+        } else if token.starts_with('/') {
+            Some(CurrentToken::SlashCommand(token))
         } else {
             None
         }
@@ -409,9 +417,29 @@ impl TuiApp {
 
         if let Some(tok) = self.current_at_token() {
             self.compl.visible = true;
-            self.compl.query = tok.clone();
-            self.compl.items = self.at_index.complete(&tok);
-            self.compl.selected = 0;
+            match tok {
+                CurrentToken::FilePath(ref token) => {
+                    self.compl.query = token.clone();
+                    self.compl.items = self.at_index.complete(token);
+                    self.compl.slash_command_items.clear();
+                    self.compl.selected = 0;
+                }
+                CurrentToken::SlashCommand(ref token) => {
+                    self.compl.query = token.clone();
+                    // Get the slash commands from the handler if it's a TuiExecutor
+                    if let Some(handler) = &self.handler
+                        && let Some(executor) = handler
+                            .as_any()
+                            .downcast_ref::<crate::tui::commands::TuiExecutor>()
+                    {
+                        self.compl.slash_command_items = self
+                            .at_index
+                            .complete_slash_command(token, &executor.slash_commands);
+                    }
+                    self.compl.items.clear();
+                    self.compl.selected = 0;
+                }
+            }
         } else {
             self.compl.reset();
         }
@@ -451,23 +479,44 @@ impl TuiApp {
         if !self.compl.visible {
             return;
         }
-        if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
-            if let Some(tok) = self.current_at_token()
-                && let Some(pos) = self.input.rfind(&tok)
+        // Check if we're completing slash commands or file paths
+        if !self.compl.slash_command_items.is_empty() {
+            // Handle slash command completion
+            if let Some(item) = self
+                .compl
+                .slash_command_items
+                .get(self.compl.selected)
+                .cloned()
+                && let Some(CurrentToken::SlashCommand(ref tok)) = self.current_at_token()
+                && let Some(pos) = self.input.rfind(tok)
             {
                 // compute char index of pos
                 let prefix = &self.input[..pos];
                 let start_char_idx = prefix.chars().count();
-                let mut ins = format!("@{}", item.rel);
-                if ins.contains(' ') {
-                    ins = format!("@\"{}\"", item.rel);
-                }
-                self.input.replace_range(pos..pos + tok.len(), &ins);
+                self.input.replace_range(pos..pos + tok.len(), &item);
                 // update cursor to after inserted text
-                self.cursor = start_char_idx + ins.chars().count();
+                self.cursor = start_char_idx + item.chars().count();
             }
-            if let Ok(mut r) = self.at_index.recent.write() {
-                r.touch(&item.rel);
+        } else {
+            // Handle file path completion
+            if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
+                if let Some(CurrentToken::FilePath(ref tok)) = self.current_at_token()
+                    && let Some(pos) = self.input.rfind(tok)
+                {
+                    // compute char index of pos
+                    let prefix = &self.input[..pos];
+                    let start_char_idx = prefix.chars().count();
+                    let mut ins = format!("@{}", item.rel);
+                    if ins.contains(' ') {
+                        ins = format!("@\"{}\"", item.rel);
+                    }
+                    self.input.replace_range(pos..pos + tok.len(), &ins);
+                    // update cursor to after inserted text
+                    self.cursor = start_char_idx + ins.chars().count();
+                }
+                if let Ok(mut r) = self.at_index.recent.write() {
+                    r.touch(&item.rel);
+                }
             }
         }
         self.compl.reset();
@@ -581,17 +630,26 @@ mod tests {
         // Cursor at the beginning of a token
         app.input = "hello @world".to_string();
         app.cursor = 6;
-        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::FilePath("@world".to_string()))
+        );
 
         // Cursor in the middle of a token
         app.input = "hello @world".to_string();
         app.cursor = 9;
-        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::FilePath("@world".to_string()))
+        );
 
         // Cursor at the end of a token
         app.input = "hello @world".to_string();
         app.cursor = 12;
-        assert_eq!(app.current_at_token(), Some("@world".to_string()));
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::FilePath("@world".to_string()))
+        );
 
         // Not a token
         app.input = "hello world@".to_string();
@@ -601,13 +659,27 @@ mod tests {
         // Multiple tokens
         app.input = "hello @world1 @world2".to_string();
         app.cursor = 9;
-        assert_eq!(app.current_at_token(), Some("@world1".to_string()));
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::FilePath("@world1".to_string()))
+        );
         app.cursor = 18;
-        assert_eq!(app.current_at_token(), Some("@world2".to_string()));
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::FilePath("@world2".to_string()))
+        );
 
         // Cursor on whitespace
         app.input = "hello @world1 @world2".to_string();
         app.cursor = 13;
         assert_eq!(app.current_at_token(), None);
+
+        // Slash command
+        app.input = "/help".to_string();
+        app.cursor = 3;
+        assert_eq!(
+            app.current_at_token(),
+            Some(CurrentToken::SlashCommand("/help".to_string()))
+        );
     }
 }

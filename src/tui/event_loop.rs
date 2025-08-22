@@ -340,9 +340,14 @@ impl TuiApp {
             }
             KeyCode::Up => {
                 if self.compl.visible {
-                    if !self.compl.items.is_empty() {
-                        self.compl.selected = (self.compl.selected + self.compl.items.len() - 1)
-                            % self.compl.items.len();
+                    // Determine the number of items based on what type of completion is active
+                    let item_count = if !self.compl.slash_command_items.is_empty() {
+                        self.compl.slash_command_items.len()
+                    } else {
+                        self.compl.items.len()
+                    };
+                    if item_count > 0 {
+                        self.compl.selected = (self.compl.selected + item_count - 1) % item_count;
                     }
                 } else if self.history_index > 0 {
                     if self.history_index == self.input_history.len() {
@@ -355,8 +360,14 @@ impl TuiApp {
             }
             KeyCode::Down => {
                 if self.compl.visible {
-                    if !self.compl.items.is_empty() {
-                        self.compl.selected = (self.compl.selected + 1) % self.compl.items.len();
+                    // Determine the number of items based on what type of completion is active
+                    let item_count = if !self.compl.slash_command_items.is_empty() {
+                        self.compl.slash_command_items.len()
+                    } else {
+                        self.compl.items.len()
+                    };
+                    if item_count > 0 {
+                        self.compl.selected = (self.compl.selected + 1) % item_count;
                     }
                 } else if self.history_index < self.input_history.len() {
                     self.history_index += 1;
@@ -368,13 +379,19 @@ impl TuiApp {
                     self.cursor = self.input.chars().count();
                 }
             }
+            KeyCode::Tab => {
+                if self.compl.visible {
+                    self.apply_completion();
+                    self.compl.reset();
+                }
+            }
             KeyCode::Char(c) => {
                 if c == ' ' && self.compl.visible {
                     self.compl.reset();
                     self.compl.suppress_once = true;
                 }
                 self.insert_at_cursor(&c.to_string());
-                if c == '@' {
+                if c == '@' || c == '/' {
                     self.compl.suppress_once = false;
                 }
                 if self.history_index == self.input_history.len() {

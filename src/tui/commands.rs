@@ -88,6 +88,7 @@ fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
 
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 pub struct TuiExecutor {
@@ -104,6 +105,8 @@ pub struct TuiExecutor {
     pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
     // Session management
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
+    // Available slash commands
+    pub(crate) slash_commands: Vec<String>,
 }
 
 impl TuiExecutor {
@@ -158,6 +161,24 @@ impl TuiExecutor {
         // Initialize session manager
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
+        // Initialize slash commands
+        let slash_commands = vec![
+            "/help".to_string(),
+            "/map".to_string(),
+            "/tools".to_string(),
+            "/clear".to_string(),
+            "/open".to_string(),
+            "/quit".to_string(),
+            "/retry".to_string(),
+            "/theme".to_string(),
+            "/session".to_string(),
+            "/clear-cache".to_string(),
+            "/rebuild".to_string(),
+            "/rebuild-force".to_string(),
+            "/tokens".to_string(),
+            "/set-tokens".to_string(),
+        ];
+
         Ok(Self {
             cfg,
             tools,
@@ -169,6 +190,7 @@ impl TuiExecutor {
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(Vec::new())), // 会話履歴を初期化
             session_manager,
+            slash_commands,
         })
     }
 
@@ -709,6 +731,10 @@ impl CommandHandler for TuiExecutor {
                 }
             }
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

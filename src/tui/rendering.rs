@@ -170,12 +170,30 @@ impl TuiApp {
             return;
         }
 
+        // Determine if we're showing file paths or slash commands
+        let is_slash_command = !self.compl.slash_command_items.is_empty();
+
         let max_items = 10;
-        let items_to_show = self.compl.items.iter().take(max_items).collect::<Vec<_>>();
+        let items_to_show: Vec<String> = if is_slash_command {
+            self.compl
+                .slash_command_items
+                .iter()
+                .take(max_items)
+                .cloned()
+                .collect()
+        } else {
+            self.compl
+                .items
+                .iter()
+                .take(max_items)
+                .map(|item| item.rel.clone())
+                .collect()
+        };
+
         let list_height = items_to_show.len() as u16;
         let list_width = items_to_show
             .iter()
-            .map(|item| item.rel.len())
+            .map(|item| item.chars().count())
             .max()
             .unwrap_or(20) as u16
             + 4;
@@ -200,12 +218,20 @@ impl TuiApp {
                 } else {
                     theme.completion_style
                 };
-                ListItem::new(item.rel.as_str()).style(style)
+                ListItem::new(item.as_str()).style(style)
             })
             .collect();
 
         let list = ratatui::widgets::List::new(list_items)
-            .block(Block::default().borders(Borders::ALL).title("Completion"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if is_slash_command {
+                        "Slash Commands"
+                    } else {
+                        "Completion"
+                    }),
+            )
             .style(theme.completion_style);
 
         f.render_widget(list, completion_area);
