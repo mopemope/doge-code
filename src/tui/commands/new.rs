@@ -24,7 +24,7 @@ impl TuiExecutor {
                 project_root
             );
             let start_time = std::time::Instant::now();
-            let mut analyzer = match Analyzer::new(&project_root) {
+            let mut analyzer = match Analyzer::new(&project_root).await {
                 Ok(analyzer) => analyzer,
                 Err(e) => {
                     error!("Failed to create Analyzer: {:?}", e);

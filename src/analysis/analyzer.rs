@@ -262,12 +262,14 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+    pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         let mut parser = Parser::new();
         let lang: Language = tree_sitter_rust::LANGUAGE.into();
         parser.set_language(&lang).context("set rust language")?;
-        let cache_store = RepomapStore::new(root.clone())?;
+        let cache_store = RepomapStore::new(root.clone())
+            .await
+            .context("Failed to create RepomapStore")?;
         Ok(Self {
             root,
             parser,
@@ -429,9 +431,19 @@ impl Analyzer {
         info!("Calculated hashes for {} files", current_hashes.len());
 
         // キャッシュの有効性をチェック
-        if self.cache_store.is_cache_valid(&current_hashes)? {
+        if self
+            .cache_store
+            .is_cache_valid(&current_hashes)
+            .await
+            .context("Failed to check cache validity")?
+        {
             info!("Cache is valid, loading from cache");
-            if let Some(cache) = self.cache_store.load()? {
+            if let Some(cache) = self
+                .cache_store
+                .load()
+                .await
+                .context("Failed to load cache")?
+            {
                 let duration = start_time.elapsed();
                 info!(
                     "Loaded RepoMap from cache in {:?}. Found {} symbols from {} files.",
@@ -444,7 +456,12 @@ impl Analyzer {
         }
 
         // キャッシュが無効または存在しない場合は、差分更新を試行
-        let repomap = if let Some(cached_data) = self.cache_store.load()? {
+        let repomap = if let Some(cached_data) = self
+            .cache_store
+            .load()
+            .await
+            .context("Failed to load cache")?
+        {
             info!("Cache exists but is invalid, attempting incremental update");
             self.build_incremental(cached_data, &current_hashes).await?
         } else {
@@ -454,7 +471,7 @@ impl Analyzer {
 
         // 新しいキャッシュを保存
         let cache = RepomapCache::new(self.root.clone(), repomap.clone(), current_hashes);
-        if let Err(e) = self.cache_store.save(&cache) {
+        if let Err(e) = self.cache_store.save(&cache).await {
             warn!("Failed to save repomap cache: {}", e);
         }
 
@@ -579,7 +596,10 @@ impl Analyzer {
     }
 
     /// キャッシュをクリア
-    pub fn clear_cache(&self) -> Result<()> {
-        self.cache_store.clear()
+    pub async fn clear_cache(&self) -> Result<()> {
+        self.cache_store
+            .clear()
+            .await
+            .context("Failed to clear cache")
     }
 }
