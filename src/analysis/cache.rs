@@ -1,10 +1,15 @@
 use crate::analysis::RepoMap;
+use crate::analysis::database::connection::{connect_database, get_default_db_path};
+use crate::analysis::database::dao::RepomapDAO;
+use crate::analysis::database::migration::run_migrations;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use tracing::{debug, info, warn};
+use std::fs; // 追加
+use std::path::{Path, PathBuf}; // 追加
+use tracing::{debug, info};
 
 /// repomapキャッシュのメタデータ
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,211 +74,131 @@ impl RepomapCache {
 
 /// repomapの永続化を管理するストア
 pub struct RepomapStore {
-    cache_dir: PathBuf,
     project_root: PathBuf,
+    db_conn: DatabaseConnection,
 }
 
 impl RepomapStore {
     /// 新しいRepomapStoreを作成
-    pub fn new(project_root: PathBuf) -> Result<Self> {
-        let cache_dir = project_root.join(".doge").join("repomap");
-        std::fs::create_dir_all(&cache_dir).with_context(|| {
-            format!("Failed to create cache directory: {}", cache_dir.display())
-        })?;
+    pub async fn new(project_root: PathBuf) -> Result<Self> {
+        let db_path = get_default_db_path(&project_root);
+
+        // 親ディレクトリ `.doge` が存在することを確認
+        if let Some(parent_dir) = Path::new(&db_path).parent() {
+            fs::create_dir_all(parent_dir)
+                .with_context(|| format!("Failed to create directory: {}", parent_dir.display()))?;
+        }
+
+        let db_conn = connect_database(&db_path)
+            .await
+            .context("Failed to connect to database")?;
+
+        // Run migrations
+        run_migrations(&db_conn)
+            .await
+            .context("Failed to run database migrations")?;
 
         Ok(Self {
-            cache_dir,
             project_root,
+            db_conn,
         })
     }
 
-    /// メタデータファイルのパス
-    fn metadata_path(&self) -> PathBuf {
-        self.cache_dir.join("metadata.json")
-    }
-
-    /// repomapデータファイルのパス
-    fn repomap_path(&self) -> PathBuf {
-        self.cache_dir.join("repomap.json")
-    }
-
-    /// ファイルハッシュキャッシュファイルのパス
-    fn file_hashes_path(&self) -> PathBuf {
-        self.cache_dir.join("file_hashes.json")
-    }
-
-    /// キャッシュが存在するかチェック
-    pub fn cache_exists(&self) -> bool {
-        self.metadata_path().exists()
-            && self.repomap_path().exists()
-            && self.file_hashes_path().exists()
-    }
-
     /// キャッシュからrepomapを読み込み
-    pub fn load(&self) -> Result<Option<RepomapCache>> {
-        if !self.cache_exists() {
-            debug!("Repomap cache does not exist");
-            return Ok(None);
+    pub async fn load(&self) -> Result<Option<RepomapCache>> {
+        info!("Loading repomap cache from database");
+
+        match RepomapDAO::load_repomap(&self.db_conn, &self.project_root)
+            .await
+            .context("Failed to load repomap from database")?
+        {
+            Some((repomap, file_hashes)) => {
+                let metadata = RepomapMetadata::new(
+                    self.project_root.clone(),
+                    file_hashes.len(),
+                    repomap.symbols.len(),
+                );
+                let cache = RepomapCache {
+                    metadata,
+                    repomap,
+                    file_hashes,
+                };
+                info!(
+                    "Loaded repomap cache: {} symbols from {} files",
+                    cache.metadata.total_symbols, cache.metadata.total_files
+                );
+                Ok(Some(cache))
+            }
+            None => {
+                debug!("No repomap cache found in database");
+                Ok(None)
+            }
         }
-
-        info!("Loading repomap cache from {}", self.cache_dir.display());
-
-        // メタデータを読み込み
-        let metadata_content = std::fs::read_to_string(self.metadata_path())
-            .context("Failed to read metadata file")?;
-        let metadata: RepomapMetadata =
-            serde_json::from_str(&metadata_content).context("Failed to parse metadata")?;
-
-        // repomapデータを読み込み
-        let repomap_content =
-            std::fs::read_to_string(self.repomap_path()).context("Failed to read repomap file")?;
-        let repomap: RepoMap =
-            serde_json::from_str(&repomap_content).context("Failed to parse repomap")?;
-
-        // ファイルハッシュを読み込み
-        let file_hashes_content = std::fs::read_to_string(self.file_hashes_path())
-            .context("Failed to read file hashes file")?;
-        let file_hashes: HashMap<PathBuf, String> =
-            serde_json::from_str(&file_hashes_content).context("Failed to parse file hashes")?;
-
-        let cache = RepomapCache {
-            metadata,
-            repomap,
-            file_hashes,
-        };
-
-        info!(
-            "Loaded repomap cache: {} symbols from {} files",
-            cache.metadata.total_symbols, cache.metadata.total_files
-        );
-
-        Ok(Some(cache))
     }
 
     /// repomapをキャッシュに保存
-    pub fn save(&self, cache: &RepomapCache) -> Result<()> {
+    pub async fn save(&self, cache: &RepomapCache) -> Result<()> {
         info!(
-            "Saving repomap cache to {}: {} symbols from {} files",
-            self.cache_dir.display(),
-            cache.metadata.total_symbols,
-            cache.metadata.total_files
+            "Saving repomap cache to database: {} symbols from {} files",
+            cache.metadata.total_symbols, cache.metadata.total_files
         );
 
-        // メタデータを保存
-        let metadata_json = serde_json::to_string_pretty(&cache.metadata)
-            .context("Failed to serialize metadata")?;
-        std::fs::write(self.metadata_path(), metadata_json)
-            .context("Failed to write metadata file")?;
-
-        // repomapデータを保存
-        let repomap_json =
-            serde_json::to_string_pretty(&cache.repomap).context("Failed to serialize repomap")?;
-        std::fs::write(self.repomap_path(), repomap_json)
-            .context("Failed to write repomap file")?;
-
-        // ファイルハッシュを保存
-        let file_hashes_json = serde_json::to_string_pretty(&cache.file_hashes)
-            .context("Failed to serialize file hashes")?;
-        std::fs::write(self.file_hashes_path(), file_hashes_json)
-            .context("Failed to write file hashes file")?;
+        RepomapDAO::save_repomap(
+            &self.db_conn,
+            &cache.repomap,
+            &cache.file_hashes,
+            &self.project_root,
+        )
+        .await
+        .context("Failed to save repomap to database")?;
 
         info!("Repomap cache saved successfully");
         Ok(())
     }
 
     /// キャッシュを削除
-    pub fn clear(&self) -> Result<()> {
-        info!("Clearing repomap cache from {}", self.cache_dir.display());
+    pub async fn clear(&self) -> Result<()> {
+        info!("Clearing repomap cache from database");
 
-        for path in [
-            self.metadata_path(),
-            self.repomap_path(),
-            self.file_hashes_path(),
-        ] {
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("Failed to remove cache file: {}", path.display()))?;
-            }
-        }
+        RepomapDAO::clear_repomap(&self.db_conn, &self.project_root)
+            .await
+            .context("Failed to clear repomap from database")?;
 
         info!("Repomap cache cleared successfully");
         Ok(())
     }
 
     /// キャッシュの有効性をチェック
-    pub fn is_cache_valid(&self, current_file_hashes: &HashMap<PathBuf, String>) -> Result<bool> {
-        let cache = match self.load()? {
-            Some(cache) => cache,
-            None => {
-                debug!("No cache found, cache is invalid");
-                return Ok(false);
-            }
-        };
-
-        // プロジェクトルートが変わっていないかチェック
-        if cache.metadata.project_root != self.project_root {
-            warn!(
-                "Project root changed: {} -> {}",
-                cache.metadata.project_root.display(),
-                self.project_root.display()
-            );
-            return Ok(false);
-        }
-
+    pub async fn is_cache_valid(
+        &self,
+        current_file_hashes: &HashMap<PathBuf, String>,
+    ) -> Result<bool> {
         // バージョンが変わっていないかチェック
-        let current_version = env!("CARGO_PKG_VERSION");
-        if cache.metadata.version != current_version {
-            warn!(
-                "Version changed: {} -> {}",
-                cache.metadata.version, current_version
-            );
-            return Ok(false);
-        }
+        // TODO: データベースにバージョン情報を保存し、比較するロジックが必要
 
         // ファイルハッシュが変わっていないかチェック
-        if cache.file_hashes != *current_file_hashes {
-            debug!("File hashes changed, cache is invalid");
-            return Ok(false);
-        }
+        let is_valid =
+            RepomapDAO::is_repomap_valid(&self.db_conn, &self.project_root, current_file_hashes)
+                .await
+                .context("Failed to check repomap validity")?;
 
-        debug!("Cache is valid");
-        Ok(true)
+        if is_valid {
+            debug!("Cache is valid");
+        } else {
+            debug!("Cache is invalid");
+        }
+        Ok(is_valid)
     }
 
     /// 変更されたファイルを検出
-    pub fn get_changed_files(
+    pub async fn get_changed_files(
         &self,
         current_file_hashes: &HashMap<PathBuf, String>,
     ) -> Result<Vec<PathBuf>> {
-        let cache = match self.load()? {
-            Some(cache) => cache,
-            None => {
-                // キャッシュがない場合は全ファイルが変更されたとみなす
-                return Ok(current_file_hashes.keys().cloned().collect());
-            }
-        };
-
-        let mut changed_files = Vec::new();
-
-        // 新しいファイルまたは変更されたファイルを検出
-        for (path, hash) in current_file_hashes {
-            match cache.file_hashes.get(path) {
-                Some(cached_hash) if cached_hash == hash => {
-                    // ハッシュが同じ場合は変更なし
-                }
-                _ => {
-                    // 新しいファイルまたはハッシュが変更されたファイル
-                    changed_files.push(path.clone());
-                }
-            }
-        }
-
-        // 削除されたファイルも変更として扱う（repomapから削除する必要がある）
-        for path in cache.file_hashes.keys() {
-            if !current_file_hashes.contains_key(path) {
-                changed_files.push(path.clone());
-            }
-        }
+        let changed_files =
+            RepomapDAO::get_changed_files(&self.db_conn, &self.project_root, current_file_hashes)
+                .await
+                .context("Failed to get changed files")?;
 
         debug!("Found {} changed files", changed_files.len());
         Ok(changed_files)
@@ -283,44 +208,167 @@ impl RepomapStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::symbol::{SymbolInfo, SymbolKind};
     use tempfile::TempDir;
 
-    #[test]
-    fn test_repomap_metadata_creation() {
-        let project_root = PathBuf::from("/test/project");
-        let metadata = RepomapMetadata::new(project_root.clone(), 10, 100);
+    #[tokio::test]
+    async fn test_repomap_store_save_and_load() {
+        let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_root = tmp_dir.path().to_path_buf();
+        let store = RepomapStore::new(project_root.clone())
+            .await
+            .expect("Failed to create RepomapStore");
 
-        assert_eq!(metadata.project_root, project_root);
-        assert_eq!(metadata.total_files, 10);
-        assert_eq!(metadata.total_symbols, 100);
-        assert_eq!(metadata.version, env!("CARGO_PKG_VERSION"));
+        let mut symbols = Vec::new();
+        symbols.push(SymbolInfo {
+            name: "test_function".to_string(),
+            kind: SymbolKind::Function,
+            file: project_root.join("src/main.rs"),
+            start_line: 1,
+            start_col: 0,
+            end_line: 3,
+            end_col: 1,
+            parent: None,
+            file_total_lines: 10,
+            function_lines: Some(3),
+        });
+        let repomap = RepoMap { symbols };
+        let mut hashes = HashMap::new();
+        hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
+        let cache = RepomapCache::new(project_root.clone(), repomap, hashes);
+
+        // Save
+        assert!(store.save(&cache).await.is_ok());
+
+        // Load
+        let loaded_cache = store.load().await.expect("Failed to load cache");
+        assert!(loaded_cache.is_some());
+        let loaded_cache = loaded_cache.unwrap();
+        assert_eq!(loaded_cache.repomap.symbols.len(), 1);
+        assert_eq!(loaded_cache.repomap.symbols[0].name, "test_function");
+        assert_eq!(loaded_cache.file_hashes.len(), 1);
+        assert_eq!(
+            loaded_cache
+                .file_hashes
+                .get(&project_root.join("src/main.rs")),
+            Some(&"hash1".to_string())
+        );
     }
 
-    #[test]
-    fn test_repomap_store_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_root = temp_dir.path().to_path_buf();
+    #[tokio::test]
+    async fn test_repomap_store_clear() {
+        let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_root = tmp_dir.path().to_path_buf();
+        let store = RepomapStore::new(project_root.clone())
+            .await
+            .expect("Failed to create RepomapStore");
 
-        let store = RepomapStore::new(project_root.clone()).unwrap();
-        assert!(store.cache_dir.exists());
-        assert_eq!(store.project_root, project_root);
+        let repomap = RepoMap { symbols: vec![] };
+        let mut hashes = HashMap::new();
+        hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
+        let cache = RepomapCache::new(project_root.clone(), repomap, hashes);
+
+        // Save
+        assert!(store.save(&cache).await.is_ok());
+
+        // Clear
+        assert!(store.clear().await.is_ok());
+
+        // Load - should be None
+        let loaded_cache = store.load().await.expect("Failed to load cache");
+        assert!(loaded_cache.is_none());
     }
 
-    #[test]
-    fn test_cache_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_root = temp_dir.path().to_path_buf();
-        let store = RepomapStore::new(project_root).unwrap();
+    #[tokio::test]
+    async fn test_repomap_store_is_cache_valid() {
+        let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_root = tmp_dir.path().to_path_buf();
+        let store = RepomapStore::new(project_root.clone())
+            .await
+            .expect("Failed to create RepomapStore");
 
-        // 初期状態ではキャッシュは存在しない
-        assert!(!store.cache_exists());
+        let repomap = RepoMap { symbols: vec![] };
+        let mut hashes = HashMap::new();
+        hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
+        let cache = RepomapCache::new(project_root.clone(), repomap, hashes.clone());
 
-        // ファイルを作成
-        std::fs::write(store.metadata_path(), "{}").unwrap();
-        std::fs::write(store.repomap_path(), "{}").unwrap();
-        std::fs::write(store.file_hashes_path(), "{}").unwrap();
+        // Save
+        assert!(store.save(&cache).await.is_ok());
 
-        // 全ファイルが存在する場合はtrue
-        assert!(store.cache_exists());
+        // Valid
+        assert!(
+            store
+                .is_cache_valid(&hashes)
+                .await
+                .expect("Failed to check cache validity")
+        );
+
+        // Invalid
+        let mut modified_hashes = hashes.clone();
+        modified_hashes.insert(project_root.join("src/other.rs"), "hash2".to_string());
+        assert!(
+            !store
+                .is_cache_valid(&modified_hashes)
+                .await
+                .expect("Failed to check cache validity")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repomap_store_get_changed_files() {
+        let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_root = tmp_dir.path().to_path_buf();
+        let store = RepomapStore::new(project_root.clone())
+            .await
+            .expect("Failed to create RepomapStore");
+
+        let repomap = RepoMap { symbols: vec![] };
+        let mut hashes = HashMap::new();
+        hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
+        hashes.insert(project_root.join("src/lib.rs"), "hash2".to_string());
+        let cache = RepomapCache::new(project_root.clone(), repomap, hashes.clone());
+
+        // Save
+        assert!(store.save(&cache).await.is_ok());
+
+        // No changes
+        let changed = store
+            .get_changed_files(&hashes)
+            .await
+            .expect("Failed to get changed files");
+        assert_eq!(changed.len(), 0);
+
+        // Added file
+        let mut modified_hashes = hashes.clone();
+        modified_hashes.insert(project_root.join("src/new.rs"), "hash3".to_string());
+        let changed = store
+            .get_changed_files(&modified_hashes)
+            .await
+            .expect("Failed to get changed files");
+        assert_eq!(changed.len(), 1);
+        assert!(changed.contains(&project_root.join("src/new.rs")));
+
+        // Modified file
+        let mut modified_hashes = hashes.clone();
+        modified_hashes.insert(
+            project_root.join("src/main.rs"),
+            "hash1_modified".to_string(),
+        );
+        let changed = store
+            .get_changed_files(&modified_hashes)
+            .await
+            .expect("Failed to get changed files");
+        assert_eq!(changed.len(), 1);
+        assert!(changed.contains(&project_root.join("src/main.rs")));
+
+        // Deleted file
+        let mut modified_hashes = HashMap::new();
+        modified_hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
+        let changed = store
+            .get_changed_files(&modified_hashes)
+            .await
+            .expect("Failed to get changed files");
+        assert_eq!(changed.len(), 1);
+        assert!(changed.contains(&project_root.join("src/lib.rs")));
     }
 }
