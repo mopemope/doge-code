@@ -3,6 +3,10 @@ name = "doge-code"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "dgc"
+path = "src/main.rs"
+
 [dependencies]
 unicode-width = "0.2"
 anyhow = "1"
@@ -21,7 +25,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "gzip", "brotli", "z
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "process", "full"] }
 dotenvy = "0.15"
 
-bincode = "1"
+#bincode = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tree-sitter = "0.23"
 tree-sitter-rust = "0.23"
@@ -36,9 +40,9 @@ fastrand = "2"
 diffy = "0.3"
 sha2 = "0.10"
 rust-embed = "8"
-tera = "1.20.0"
+tera = "1.20"
 num_cpus = "1.0"
-ratatui = { version = "0.29.0", features = ["crossterm", "serde"] }
+ratatui = { version = "0.29", features = ["crossterm", "serde"] }
 ignore = "0.4"
 
 # SeaORM for SQLite persistence
