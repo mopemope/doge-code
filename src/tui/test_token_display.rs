@@ -26,9 +26,11 @@ mod tests {
             cursor_char_idx,
             w,
             h,
+            h.saturating_sub(3), // main_content_height
             model,
             spinner_state,
             tokens_used,
+            &crate::tui::state::ScrollState::default(),
         );
 
         // Check that the token count is included in the title
@@ -61,9 +63,11 @@ mod tests {
             cursor_char_idx,
             w,
             h,
+            h.saturating_sub(3), // main_content_height
             model,
             spinner_state,
             tokens_used,
+            &crate::tui::state::ScrollState::default(),
         );
 
         // Check that the token count is not included in the title when it's 0

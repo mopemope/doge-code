@@ -86,7 +86,6 @@ impl TuiApp {
                         }
                         "::status:streaming" => {
                             if !is_streaming {
-                                self.current_llm_response = Some(Vec::new());
                                 self.llm_parsing_buffer.clear();
                                 is_streaming = true;
                             }
@@ -199,6 +198,41 @@ impl TuiApp {
                         KeyCode::Esc => {
                             self.dispatch("/cancel");
                             self.dirty = true;
+                        }
+                        KeyCode::PageUp => {
+                            let visible_lines = terminal
+                                .size()
+                                .map(|s| {
+                                    // Calculate actual main content height: total - header(2) - footer(1)
+                                    s.height.saturating_sub(3) as usize
+                                })
+                                .unwrap_or(20);
+                            self.page_up(visible_lines);
+                        }
+                        KeyCode::PageDown => {
+                            let visible_lines = terminal
+                                .size()
+                                .map(|s| {
+                                    // Calculate actual main content height: total - header(2) - footer(1)
+                                    s.height.saturating_sub(3) as usize
+                                })
+                                .unwrap_or(20);
+                            self.page_down(visible_lines);
+                        }
+                        KeyCode::Home if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.scroll_to_top();
+                        }
+                        KeyCode::End if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.scroll_to_bottom();
+                        }
+                        KeyCode::Up if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.scroll_up(1);
+                        }
+                        KeyCode::Down if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.scroll_down(1);
+                        }
+                        KeyCode::Char('l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.scroll_to_bottom();
                         }
                         KeyCode::Enter => {
                             if self.compl.visible {
