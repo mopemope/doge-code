@@ -405,8 +405,7 @@ mod tests {
     async fn test_save_and_load_repomap() {
         let (_tmp_dir, db) = setup_test_db().await;
         let project_root = PathBuf::from("/test/project");
-        let mut symbols = Vec::new();
-        symbols.push(AnalysisSymbolInfo {
+        let symbols = vec![AnalysisSymbolInfo {
             name: "test_function".to_string(),
             kind: SymbolKind::Function,
             file: PathBuf::from("/test/project/src/main.rs"),
@@ -417,7 +416,7 @@ mod tests {
             parent: None,
             file_total_lines: 10,
             function_lines: Some(3),
-        });
+        }];
         let repomap = RepoMap { symbols };
         let mut hashes = HashMap::new();
         hashes.insert(
