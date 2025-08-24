@@ -22,7 +22,7 @@ impl Theme {
             log_style: Style::default().fg(Color::White),
             input_style: Style::default().fg(Color::White),
             shell_input_style: Style::default().fg(Color::Yellow),
-            llm_response_style: Style::default().fg(Color::Green),
+            llm_response_style: Style::default().fg(Color::White), // Changed from Green to White
             code_block_style: Style::default().fg(Color::LightCyan),
             completion_style: Style::default().fg(Color::Gray),
             completion_selected_style: Style::default().bg(Color::DarkGray).fg(Color::White),
@@ -36,7 +36,7 @@ impl Theme {
             log_style: Style::default().fg(Color::Black),
             input_style: Style::default().fg(Color::Black),
             shell_input_style: Style::default().fg(Color::Blue),
-            llm_response_style: Style::default().fg(Color::Green),
+            llm_response_style: Style::default().fg(Color::White), // Changed from Green to White
             code_block_style: Style::default().fg(Color::Magenta),
             completion_style: Style::default().fg(Color::DarkGray),
             completion_selected_style: Style::default().bg(Color::Gray).fg(Color::Black),
