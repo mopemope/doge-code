@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// 実行コンテキスト
+/// Execution context
 #[derive(Debug)]
 pub struct ExecutionContext {
     completed_steps: HashMap<String, StepResult>,
@@ -55,7 +55,7 @@ impl ExecutionContext {
     }
 }
 
-/// タスク実行エンジン
+/// Task execution engine
 pub struct TaskExecutor {
     client: OpenAIClient,
     model: String,
@@ -71,7 +71,7 @@ impl TaskExecutor {
         }
     }
 
-    /// タスク計画を実行
+    /// Execute task plan
     pub async fn execute_plan(
         &self,
         plan: TaskPlan,
@@ -80,7 +80,10 @@ impl TaskExecutor {
         info!("Starting execution of plan: {}", plan.id);
 
         if let Some(tx) = &ui_tx {
-            let _ = tx.send(format!("🚀 タスク実行開始: {}", plan.original_request));
+            let _ = tx.send(format!(
+                "[START] Task execution started: {}",
+                plan.original_request
+            ));
         }
 
         let mut context = ExecutionContext::new();
@@ -88,7 +91,7 @@ impl TaskExecutor {
         let total_steps = plan.steps.len();
 
         for (index, step) in plan.steps.iter().enumerate() {
-            // 依存関係チェック
+            // Check dependencies
             if !self.check_dependencies(step, &context) {
                 let error_msg = format!("Dependencies not satisfied for step: {}", step.id);
                 error!("{}", error_msg);
@@ -102,17 +105,17 @@ impl TaskExecutor {
                 });
             }
 
-            // 進捗通知
+            // Progress notification
             if let Some(tx) = &ui_tx {
                 let _ = tx.send(format!(
-                    "📋 ステップ {}/{}: {}",
+                    "[STEP] Step {}/{}: {}",
                     index + 1,
                     total_steps,
                     step.description
                 ));
             }
 
-            // ステップ実行
+            // Step execution
             let step_start = chrono::Utc::now();
             match self.execute_step(step, &mut context, &ui_tx).await {
                 Ok(result) => {
@@ -130,7 +133,7 @@ impl TaskExecutor {
                     successful_steps += 1;
 
                     if let Some(tx) = &ui_tx {
-                        let _ = tx.send(format!("✅ 完了: {}", step.description));
+                        let _ = tx.send(format!("[DONE] Completed: {}", step.description));
                     }
                 }
                 Err(e) => {
@@ -150,10 +153,10 @@ impl TaskExecutor {
                     context.mark_completed(&step.id, step_result);
 
                     if let Some(tx) = &ui_tx {
-                        let _ = tx.send(format!("❌ 失敗: {} - {}", step.description, e));
+                        let _ = tx.send(format!("[ERROR] Failed: {} - {}", step.description, e));
                     }
 
-                    // エラー時は実行を停止
+                    // Stop execution on error
                     break;
                 }
             }
@@ -164,12 +167,12 @@ impl TaskExecutor {
 
         let final_message = if success {
             format!(
-                "✨ タスク完了! {}/{} ステップが成功しました",
+                "[SUCCESS] Task completed! {}/{} steps succeeded",
                 successful_steps, total_steps
             )
         } else {
             format!(
-                "⚠️ タスク部分完了: {}/{} ステップが成功しました",
+                "[WARNING] Task partially completed: {}/{} steps succeeded",
                 successful_steps, total_steps
             )
         };
@@ -187,7 +190,7 @@ impl TaskExecutor {
         })
     }
 
-    /// 依存関係をチェック
+    /// Check dependencies
     fn check_dependencies(&self, step: &TaskStep, context: &ExecutionContext) -> bool {
         for dep in &step.dependencies {
             if !context.is_completed(dep) {
@@ -195,7 +198,7 @@ impl TaskExecutor {
                 return false;
             }
 
-            // 依存ステップが失敗していないかチェック
+            // Check if dependent step has not failed
             if let Some(result) = context.get_result(dep)
                 && !result.success
             {
@@ -206,7 +209,7 @@ impl TaskExecutor {
         true
     }
 
-    /// 個別ステップを実行
+    /// Execute individual step
     async fn execute_step(
         &self,
         step: &TaskStep,
@@ -215,7 +218,7 @@ impl TaskExecutor {
     ) -> Result<String> {
         debug!("Executing step: {} ({})", step.id, step.description);
 
-        // ステップタイプに応じた実行
+        // Execute based on step type
         match step.step_type {
             StepType::Analysis => self.execute_analysis_step(step, context, ui_tx).await,
             StepType::Planning => self.execute_planning_step(step, context, ui_tx).await,
@@ -227,7 +230,7 @@ impl TaskExecutor {
         }
     }
 
-    /// 分析ステップを実行
+    /// Execute analysis step
     async fn execute_analysis_step(
         &self,
         step: &TaskStep,
@@ -238,7 +241,7 @@ impl TaskExecutor {
         self.execute_llm_step(&prompt, step, ui_tx).await
     }
 
-    /// 計画ステップを実行
+    /// Execute planning step
     async fn execute_planning_step(
         &self,
         step: &TaskStep,
@@ -249,7 +252,7 @@ impl TaskExecutor {
         self.execute_llm_step(&prompt, step, ui_tx).await
     }
 
-    /// 実装ステップを実行
+    /// Execute implementation step
     async fn execute_implementation_step(
         &self,
         step: &TaskStep,
@@ -260,7 +263,7 @@ impl TaskExecutor {
         self.execute_llm_step(&prompt, step, ui_tx).await
     }
 
-    /// 検証ステップを実行
+    /// Execute validation step
     async fn execute_validation_step(
         &self,
         step: &TaskStep,
@@ -270,13 +273,13 @@ impl TaskExecutor {
         let prompt = self.build_validation_prompt(step, context);
         let result = self.execute_llm_step(&prompt, step, ui_tx).await?;
 
-        // 検証条件をチェック
+        // Check validation criteria
         self.validate_step_criteria(step, &result).await?;
 
         Ok(result)
     }
 
-    /// クリーンアップステップを実行
+    /// Execute cleanup step
     async fn execute_cleanup_step(
         &self,
         step: &TaskStep,
@@ -287,7 +290,7 @@ impl TaskExecutor {
         self.execute_llm_step(&prompt, step, ui_tx).await
     }
 
-    /// LLMステップを実行
+    /// Execute LLM step
     async fn execute_llm_step(
         &self,
         prompt: &str,
@@ -297,7 +300,10 @@ impl TaskExecutor {
         debug!("Executing LLM step: {}", step.description);
 
         if let Some(tx) = ui_tx {
-            let _ = tx.send(format!("🤖 LLMでステップを実行中: {}", step.description));
+            let _ = tx.send(format!(
+                "[LLM] Executing step with LLM: {}",
+                step.description
+            ));
         }
 
         let messages = vec![ChatMessage {
@@ -307,7 +313,7 @@ impl TaskExecutor {
             tool_call_id: None,
         }];
 
-        // LLMエージェントループを実行
+        // Run LLM agent loop
         match run_agent_loop(
             &self.client,
             &self.model,
@@ -322,7 +328,7 @@ impl TaskExecutor {
                 debug!("LLM step completed successfully");
 
                 if let Some(tx) = ui_tx {
-                    let _ = tx.send(format!("✅ LLMステップ完了: {}", step.description));
+                    let _ = tx.send(format!("[DONE] LLM step completed: {}", step.description));
                 }
 
                 Ok(result)
@@ -331,7 +337,10 @@ impl TaskExecutor {
                 error!("LLM step failed: {}", e);
 
                 if let Some(tx) = ui_tx {
-                    let _ = tx.send(format!("❌ LLMステップ失敗: {} - {}", step.description, e));
+                    let _ = tx.send(format!(
+                        "[ERROR] LLM step failed: {} - {}",
+                        step.description, e
+                    ));
                 }
 
                 Err(anyhow!("LLM step execution failed: {}", e))
@@ -339,7 +348,7 @@ impl TaskExecutor {
         }
     }
 
-    /// 計画プロンプトを構築
+    /// Build analysis prompt
     fn build_analysis_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
             r#"# 分析タスク実行
@@ -372,7 +381,7 @@ impl TaskExecutor {
             step.validation_criteria.join("\n- ")
         );
 
-        // 過去のステップ結果を含める
+        // Include results from previous steps
         if !context.completed_steps.is_empty() {
             prompt.push_str("\n## 前のステップの結果\n");
             for (i, result) in context.completed_steps().iter().enumerate() {
@@ -390,7 +399,7 @@ impl TaskExecutor {
         prompt
     }
 
-    /// 計画プロンプトを構築
+    /// Build planning prompt
     fn build_planning_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
             r#"# 計画タスク実行
@@ -423,7 +432,7 @@ impl TaskExecutor {
             step.validation_criteria.join("\n- ")
         );
 
-        // 分析結果を含める
+        // Include analysis results
         if !context.completed_steps.is_empty() {
             prompt.push_str("\n## 分析結果\n");
             for result in context.completed_steps() {
@@ -436,7 +445,7 @@ impl TaskExecutor {
         prompt
     }
 
-    /// 実装プロンプトを構築
+    /// Build implementation prompt
     fn build_implementation_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
             r#"# 実装タスク実行
@@ -470,7 +479,7 @@ impl TaskExecutor {
             step.validation_criteria.join("\n- ")
         );
 
-        // 計画結果を含める
+        // Include planning results
         if !context.completed_steps.is_empty() {
             prompt.push_str("\n## 実行計画\n");
             for result in context.completed_steps() {
@@ -485,7 +494,7 @@ impl TaskExecutor {
         prompt
     }
 
-    /// 検証プロンプトを構築
+    /// Build validation prompt
     fn build_validation_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
             r#"# 検証タスク実行
@@ -519,7 +528,7 @@ impl TaskExecutor {
             step.validation_criteria.join("\n- ")
         );
 
-        // 実装結果を含める
+        // Include implementation results
         if !context.completed_steps.is_empty() {
             prompt.push_str("\n## 実装結果\n");
             for result in context.completed_steps() {
@@ -533,6 +542,7 @@ impl TaskExecutor {
     }
 
     /// クリーンアップ プロンプトを構築
+    /// Build cleanup prompt
     fn build_cleanup_prompt(&self, step: &TaskStep, _context: &ExecutionContext) -> String {
         format!(
             r#"# クリーンアップタスク実行
@@ -567,29 +577,29 @@ impl TaskExecutor {
         )
     }
 
-    /// ステップの検証条件をチェック
+    /// Check step validation criteria
     async fn validate_step_criteria(&self, step: &TaskStep, result: &str) -> Result<()> {
         for criteria in &step.validation_criteria {
             match criteria.as_str() {
                 "コンパイル成功" | "構文エラーなし" => {
-                    // cargo checkを実行
+                    // Run cargo check
                     if let Err(e) = self.fs_tools.execute_bash("cargo check").await {
                         return Err(anyhow!("Compilation failed: {}", e));
                     }
                 }
                 "テストが通る" => {
-                    // cargo testを実行
+                    // Run cargo test
                     if let Err(e) = self.fs_tools.execute_bash("cargo test").await {
                         return Err(anyhow!("Tests failed: {}", e));
                     }
                 }
                 "ファイルが存在する" => {
-                    // 結果からファイルパスを抽出して存在確認
-                    // 簡易実装: 後で改善
+                    // Extract file paths from results and check existence
+                    // Simple implementation: Improve later
                     debug!("File existence check: {}", result);
                 }
                 _ => {
-                    // その他の条件は結果テキストに含まれているかチェック
+                    // Check if other criteria are contained in the result text
                     if !result.to_lowercase().contains(&criteria.to_lowercase()) {
                         warn!("Validation criteria '{}' not met in result", criteria);
                     }
@@ -600,7 +610,7 @@ impl TaskExecutor {
     }
 }
 
-/// タスク計画を作成
+/// Create task plan
 pub fn create_task_plan(
     original_request: String,
     classification: TaskClassification,
@@ -677,10 +687,10 @@ mod tests {
         )
         .with_dependencies(vec!["step1".to_string()]);
 
-        // 依存関係が満たされていない場合
+        // If dependencies are not satisfied
         assert!(!executor.check_dependencies(&step, &context));
 
-        // 依存関係を満たす
+        // Satisfy dependencies
         context.mark_completed(
             "step1",
             StepResult {
@@ -693,7 +703,7 @@ mod tests {
             },
         );
 
-        // 依存関係が満たされている場合
+        // If dependencies are satisfied
         assert!(executor.check_dependencies(&step, &context));
     }
 
@@ -723,7 +733,7 @@ mod tests {
         let executor = create_test_executor();
         let mut context = ExecutionContext::new();
 
-        // 分析結果を追加
+        // Add analysis results
         context.mark_completed(
             "analysis_1",
             StepResult {
@@ -756,11 +766,11 @@ mod tests {
     fn test_execution_context() {
         let mut context = ExecutionContext::new();
 
-        // 初期状態
+        // Initial state
         assert!(!context.is_completed("step1"));
         assert!(context.completed_steps().is_empty());
 
-        // ステップ完了を記録
+        // Record step completion
         let result = StepResult {
             step_id: "step1".to_string(),
             success: true,
@@ -772,12 +782,12 @@ mod tests {
 
         context.mark_completed("step1", result.clone());
 
-        // 完了状態を確認
+        // Verify completion state
         assert!(context.is_completed("step1"));
         assert_eq!(context.completed_steps().len(), 1);
         assert_eq!(context.get_result("step1").unwrap().step_id, "step1");
 
-        // アーティファクトを追加
+        // Add artifacts
         context.add_artifact("new_file.rs".to_string());
         assert!(context.artifacts().contains(&"new_file.rs".to_string()));
     }

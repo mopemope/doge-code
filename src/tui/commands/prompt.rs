@@ -54,7 +54,7 @@ pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
         String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
             .unwrap_or_default();
 
-    context.insert("date", &Local::now().format("%Y年%m月%d日 %A").to_string());
+    context.insert("date", &Local::now().format("%Y-%m-%d %A").to_string());
     context.insert("os", &std::env::consts::OS);
     context.insert("project_dir", &cfg.project_root.to_string_lossy());
     context.insert(

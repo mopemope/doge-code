@@ -28,6 +28,7 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  /session <cmd> - Session management (new|list|switch|save|delete|current|clear)");
                 ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
                 ui.push_log("  /tokens - Show token usage");
+                ui.push_log("  /plan - Analyze task and planning");
                 ui.push_log("");
                 ui.push_log("Scroll controls:");
                 ui.push_log("  Page Up/Down - Scroll by page");
@@ -229,37 +230,40 @@ impl CommandHandler for TuiExecutor {
 
                     ui.push_log(format!("> /plan {}", task_description));
 
-                    // 非同期処理のためにtokioランタイムを使用
+                    // Use tokio runtime for asynchronous processing
                     let task_analyzer = &self.task_analyzer;
                     let task_desc = task_description.to_string();
 
-                    // 分析は同期的に実行
+                    // Analysis is performed synchronously
                     match task_analyzer.analyze(&task_desc) {
                         Ok(classification) => {
-                            ui.push_log("🔍 タスクを分析中...");
-                            ui.push_log(format!("📋 タスク分類: {:?}", classification.task_type));
+                            ui.push_log("[ANALYSIS] Analyzing task...");
                             ui.push_log(format!(
-                                "🎯 複雑度: {:.1}/1.0",
+                                "[PLANNING] Task classification: {:?}",
+                                classification.task_type
+                            ));
+                            ui.push_log(format!(
+                                "[TARGET] Complexity: {:.1}/1.0",
                                 classification.complexity_score
                             ));
                             ui.push_log(format!(
-                                "📊 推定ステップ数: {}",
+                                "[STATS] Estimated steps: {}",
                                 classification.estimated_steps
                             ));
                             ui.push_log(format!(
-                                "⚠️ リスクレベル: {:?}",
+                                "[WARNING] Risk level: {:?}",
                                 classification.risk_level
                             ));
                             ui.push_log(format!(
-                                "🔧 必要ツール: {}",
+                                "[TOOLS] Required tools: {}",
                                 classification.required_tools.join(", ")
                             ));
                             ui.push_log(format!(
-                                "✅ 信頼度: {:.1}%",
+                                "[CONFIRMED] Confidence: {:.1}%",
                                 classification.confidence * 100.0
                             ));
 
-                            // 分解は非同期で実行するため、別スレッドで処理
+                            // Decomposition is performed asynchronously in a separate thread
                             let rt = tokio::runtime::Handle::current();
                             let task_analyzer_clone = task_analyzer.clone();
                             let ui_tx = self.ui_tx.clone();
@@ -269,19 +273,19 @@ impl CommandHandler for TuiExecutor {
                                 match task_analyzer_clone.decompose(&classification, &task_desc).await {
                                     Ok(steps) => {
                                         if let Some(tx) = ui_tx {
-                                            let _ = tx.send(format!("\n📝 実行計画 ({} ステップ):", steps.len()));
+                                            let _ = tx.send(format!("[PLAN] Execution plan ({} steps):", steps.len()));
 
                                             for (i, step) in steps.iter().enumerate() {
                                                 let step_icon = match step.step_type {
-                                                    crate::planning::StepType::Analysis => "🔍",
-                                                    crate::planning::StepType::Planning => "📋",
-                                                    crate::planning::StepType::Implementation => "⚙️",
-                                                    crate::planning::StepType::Validation => "✅",
-                                                    crate::planning::StepType::Cleanup => "🧹",
+                                                    crate::planning::StepType::Analysis => "[ANALYSIS]",
+                                                    crate::planning::StepType::Planning => "[PLANNING]",
+                                                    crate::planning::StepType::Implementation => "[IMPLEMENTATION]",
+                                                    crate::planning::StepType::Validation => "[VALIDATION]",
+                                                    crate::planning::StepType::Cleanup => "[CLEANUP]",
                                                 };
 
                                                 let _ = tx.send(format!(
-                                                    "  {}. {} {} ({}秒)",
+                                                    "  {}. {} {} ({}s)",
                                                     i + 1,
                                                     step_icon,
                                                     step.description,
@@ -289,11 +293,11 @@ impl CommandHandler for TuiExecutor {
                                                 ));
 
                                                 if !step.dependencies.is_empty() {
-                                                    let _ = tx.send(format!("     依存: {}", step.dependencies.join(", ")));
+                                                    let _ = tx.send(format!("     Dependencies: {}", step.dependencies.join(", ")));
                                                 }
 
                                                 if !step.required_tools.is_empty() {
-                                                    let _ = tx.send(format!("     ツール: {}", step.required_tools.join(", ")));
+                                                    let _ = tx.send(format!("     Tools: {}", step.required_tools.join(", ")));
                                                 }
                                             }
 
@@ -303,21 +307,21 @@ impl CommandHandler for TuiExecutor {
                                                 steps,
                                             );
 
-                                            // 計画を登録
+                                            // Register the plan
                                             if let Ok(plan_manager) = plan_manager.lock() {
                                                 match plan_manager.register_plan(plan.clone()) {
                                                     Ok(plan_id) => {
-                                                        let _ = tx.send(format!("\n⏱️ 総推定時間: {}秒", plan.total_estimated_duration));
-                                                        let _ = tx.send(format!("📋 計画ID: {}", plan_id));
-                                                        let _ = tx.send("\n💡 実行方法:".to_string());
-                                                        let _ = tx.send("   /execute        - 最新の計画を実行".to_string());
-                                                        let _ = tx.send(format!("   /execute {}  - この計画を実行", plan_id));
-                                                        let _ = tx.send("   または「この計画を実行して」等の指示".to_string());
+                                                        let _ = tx.send(format!("[TIMER] Total estimated time: {}s", plan.total_estimated_duration));
+                                                        let _ = tx.send(format!("[ID] Plan ID: {}", plan_id));
+                                                        let _ = tx.send("[INFO] How to execute:".to_string());
+                                                        let _ = tx.send("   /execute        - Execute the latest plan".to_string());
+                                                        let _ = tx.send(format!("   /execute {}  - Execute this plan", plan_id));
+                                                        let _ = tx.send("   Or give instructions like 'execute this plan'".to_string());
 
                                                         info!("Generated and registered plan with ID: {}", plan_id);
                                                     }
                                                     Err(e) => {
-                                                        let _ = tx.send(format!("❌ 計画の登録に失敗: {}", e));
+                                                        let _ = tx.send(format!("[ERROR] Failed to register plan: {}", e));
                                                     }
                                                 }
                                             }
@@ -325,14 +329,14 @@ impl CommandHandler for TuiExecutor {
                                     }
                                     Err(e) => {
                                         if let Some(tx) = ui_tx {
-                                            let _ = tx.send(format!("❌ ステップ分解に失敗: {}", e));
+                                            let _ = tx.send(format!("[ERROR] Failed to decompose steps: {}", e));
                                         }
                                     }
                                 }
                             });
                         }
                         Err(e) => {
-                            ui.push_log(format!("❌ タスク分析に失敗: {}", e));
+                            ui.push_log(format!("[ERROR] Failed to analyze task: {}", e));
                         }
                     }
                     return;
@@ -358,7 +362,7 @@ impl CommandHandler for TuiExecutor {
                     self.last_user_prompt = Some(rest.to_string());
                     ui.push_log(format!("> {rest}"));
 
-                    // 計画実行の自動検出
+                    // Auto-detect plan execution
                     let plan_to_execute = {
                         if let Ok(plan_manager) = self.plan_manager.lock() {
                             plan_manager.find_executable_plan(rest)
@@ -369,12 +373,12 @@ impl CommandHandler for TuiExecutor {
 
                     if let Some(plan_execution) = plan_to_execute {
                         ui.push_log(format!(
-                            "🎯 実行可能な計画を検出: {}",
+                            "[TARGET] Executable plan detected: {}",
                             plan_execution.plan.original_request
                         ));
-                        ui.push_log(format!("📋 計画ID: {}", plan_execution.plan.id));
+                        ui.push_log(format!("[ID] Plan ID: {}", plan_execution.plan.id));
 
-                        // 計画実行を開始
+                        // Start plan execution
                         let plan_id = plan_execution.plan.id.clone();
                         self.execute_plan_async(&plan_id, ui);
                         return;
@@ -392,7 +396,7 @@ impl CommandHandler for TuiExecutor {
                             let (cancel_tx, cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
 
-                            // LLMリクエスト準備開始を通知
+                            // Notify that LLM request preparation has started
                             if let Some(tx) = &self.ui_tx {
                                 let _ = tx.send("::status:preparing".into());
                             }
@@ -409,7 +413,7 @@ impl CommandHandler for TuiExecutor {
                                 tool_call_id: None,
                             });
 
-                            // 既存の会話履歴を追加
+                            // Add existing conversation history
                             if let Ok(history) = self.conversation_history.lock() {
                                 msgs.extend(history.clone());
                             }
@@ -432,7 +436,7 @@ impl CommandHandler for TuiExecutor {
                                     return;
                                 }
 
-                                // リクエスト送信開始を通知
+                                // Notify that request sending has started
                                 if let Some(tx) = &tx {
                                     let _ = tx.send("::status:sending".into());
                                 }
@@ -450,19 +454,19 @@ impl CommandHandler for TuiExecutor {
                                             // Send token usage update
                                             let _ = tx.send(format!("::tokens:{}", tokens_used));
                                         }
-                                        // 会話履歴を更新（systemメッセージを除く全てのメッセージを保存）
+                                        // Update conversation history (save all messages except system messages)
                                         if let Ok(mut history) = conversation_history.lock() {
-                                            // systemメッセージ以外の新しいメッセージを抽出
+                                            // Extract new messages that are not system messages
                                             let new_messages: Vec<_> = updated_messages
                                                 .into_iter()
                                                 .filter(|msg| msg.role != "system")
                                                 .collect();
 
-                                            // 既存の履歴をクリアして新しいメッセージで置き換え
+                                            // Clear existing history and replace with new messages
                                             history.clear();
                                             history.extend(new_messages);
 
-                                            // セッションにも会話履歴を保存
+                                            // Also save conversation history to session
                                             let mut sm = session_manager.lock().unwrap();
                                             let _ =
                                                 sm.update_current_session_with_history(&history);
@@ -475,7 +479,7 @@ impl CommandHandler for TuiExecutor {
                                             // Send token usage update even on error
                                             let _ = tx.send(format!("::tokens:{}", tokens_used));
                                         }
-                                        // エラー時も会話履歴を更新（ユーザーの入力のみ）
+                                        // Update conversation history on error (only user input)
                                         if let Ok(mut history) = conversation_history.lock() {
                                             history.push(crate::llm::ChatMessage {
                                                 role: "user".into(),
@@ -484,7 +488,7 @@ impl CommandHandler for TuiExecutor {
                                                 tool_call_id: None,
                                             });
 
-                                            // セッションにも会話履歴を保存
+                                            // Also save conversation history to session
                                             let mut sm = session_manager.lock().unwrap();
                                             let _ =
                                                 sm.update_current_session_with_history(&history);
@@ -511,7 +515,7 @@ impl TuiExecutor {
     /// Handle /execute command
     fn handle_execute_command(&mut self, plan_id: &str, ui: &mut TuiApp) {
         if plan_id.is_empty() {
-            // 最新の計画を実行
+            // Execute the latest plan
             let latest_plan = {
                 if let Ok(plan_manager) = self.plan_manager.lock() {
                     plan_manager.get_latest_plan()
@@ -523,17 +527,17 @@ impl TuiExecutor {
             if let Some(plan_execution) = latest_plan {
                 let plan_id = plan_execution.plan.id.clone();
                 ui.push_log(format!(
-                    "🎯 最新の計画を実行: {}",
+                    "[TARGET] Executing latest plan: {}",
                     plan_execution.plan.original_request
                 ));
                 self.execute_plan_async(&plan_id, ui);
             } else {
                 ui.push_log(
-                    "❌ 実行可能な計画が見つかりません。まず /plan でタスクを分析してください。",
+                    "[ERROR] No executable plan found. Please analyze a task with /plan first.",
                 );
             }
         } else {
-            // 指定された計画を実行
+            // Execute the specified plan
             let plan_exists = {
                 if let Ok(plan_manager) = self.plan_manager.lock() {
                     plan_manager.get_plan(plan_id).is_some()
@@ -543,10 +547,10 @@ impl TuiExecutor {
             };
 
             if plan_exists {
-                ui.push_log(format!("🎯 計画を実行: {}", plan_id));
+                ui.push_log(format!("[TARGET] Executing plan: {}", plan_id));
                 self.execute_plan_async(plan_id, ui);
             } else {
-                ui.push_log(format!("❌ 計画ID '{}' が見つかりません。", plan_id));
+                ui.push_log(format!("[ERROR] Plan ID '{}' not found.", plan_id));
             }
         }
     }
@@ -558,30 +562,33 @@ impl TuiExecutor {
             let recent_plans = plan_manager.get_recent_plans();
             let stats = plan_manager.get_statistics();
 
-            ui.push_log("📊 計画統計:");
-            ui.push_log(format!("   総計画数: {}", stats.total_plans));
-            ui.push_log(format!("   アクティブ: {}", stats.active_plans));
-            ui.push_log(format!("   完了: {}", stats.completed_plans));
-            ui.push_log(format!("   失敗: {}", stats.failed_plans));
-            ui.push_log(format!("   キャンセル: {}", stats.cancelled_plans));
+            ui.push_log("[STATS] Plan statistics:");
+            ui.push_log(format!("   Total plans: {}", stats.total_plans));
+            ui.push_log(format!("   Active: {}", stats.active_plans));
+            ui.push_log(format!("   Completed: {}", stats.completed_plans));
+            ui.push_log(format!("   Failed: {}", stats.failed_plans));
+            ui.push_log(format!("   Cancelled: {}", stats.cancelled_plans));
             if stats.average_completion_time > 0.0 {
                 ui.push_log(format!(
-                    "   平均実行時間: {:.1}秒",
+                    "   Average completion time: {:.1}s",
                     stats.average_completion_time
                 ));
             }
 
             if !active_plans.is_empty() {
-                ui.push_log("\n📋 アクティブな計画:");
+                ui.push_log(
+                    "
+[ACTIVE] Active plans:",
+                );
                 for plan_execution in &active_plans {
                     let status_icon = match plan_execution.status {
-                        crate::planning::PlanStatus::Created => "⏳",
-                        crate::planning::PlanStatus::Running => "🔄",
-                        crate::planning::PlanStatus::Paused => "⏸️",
-                        _ => "❓",
+                        crate::planning::PlanStatus::Created => "[CREATED]",
+                        crate::planning::PlanStatus::Running => "[RUNNING]",
+                        crate::planning::PlanStatus::Paused => "[PAUSED]",
+                        _ => "[UNKNOWN]",
                     };
                     ui.push_log(format!(
-                        "   {} {} - {} ({} ステップ)",
+                        "   {} {} - {} ({} steps)",
                         status_icon,
                         &plan_execution.plan.id[..8],
                         plan_execution.plan.original_request,
@@ -591,13 +598,16 @@ impl TuiExecutor {
             }
 
             if !recent_plans.is_empty() {
-                ui.push_log("\n📚 最近の計画履歴:");
+                ui.push_log(
+                    "
+[HISTORY] Recent plan history:",
+                );
                 for plan_execution in recent_plans.iter().rev().take(5) {
                     let status_icon = match plan_execution.status {
-                        crate::planning::PlanStatus::Completed => "✅",
-                        crate::planning::PlanStatus::Failed => "❌",
-                        crate::planning::PlanStatus::Cancelled => "🚫",
-                        _ => "❓",
+                        crate::planning::PlanStatus::Completed => "[COMPLETED]",
+                        crate::planning::PlanStatus::Failed => "[FAILED]",
+                        crate::planning::PlanStatus::Cancelled => "[CANCELLED]",
+                        _ => "[UNKNOWN]",
                     };
                     ui.push_log(format!(
                         "   {} {} - {}",
@@ -609,17 +619,17 @@ impl TuiExecutor {
             }
 
             if active_plans.is_empty() && recent_plans.is_empty() {
-                ui.push_log("📝 計画がありません。/plan <タスク> で新しい計画を作成してください。");
+                ui.push_log("[INFO] No plans available. Create a new plan with /plan <task>.");
             }
         } else {
-            ui.push_log("❌ 計画管理システムにアクセスできません。");
+            ui.push_log("[ERROR] Cannot access plan management system.");
         }
     }
 
     /// Execute plan asynchronously
     fn execute_plan_async(&mut self, plan_id: &str, ui: &mut TuiApp) {
         if self.client.is_none() {
-            ui.push_log("❌ LLMクライアントが設定されていません。");
+            ui.push_log("[ERROR] LLM client is not configured.");
             return;
         }
 
@@ -627,25 +637,25 @@ impl TuiExecutor {
             if let Ok(plan_manager) = self.plan_manager.lock() {
                 plan_manager.get_plan(plan_id)
             } else {
-                ui.push_log("❌ 計画管理システムにアクセスできません。");
+                ui.push_log("[ERROR] Cannot access plan management system.");
                 return;
             }
         };
 
         let Some(plan_execution) = plan_execution else {
-            ui.push_log(format!("❌ 計画ID '{}' が見つかりません。", plan_id));
+            ui.push_log(format!("[ERROR] Plan ID '{}' not found.", plan_id));
             return;
         };
 
-        // 実行開始
+        // Start execution
         if let Ok(plan_manager) = self.plan_manager.lock()
             && let Err(e) = plan_manager.start_execution(plan_id)
         {
-            ui.push_log(format!("❌ 計画実行の開始に失敗: {}", e));
+            ui.push_log(format!("[ERROR] Failed to start plan execution: {}", e));
             return;
         }
 
-        ui.push_log("🚀 計画実行を開始します...");
+        ui.push_log("[INFO] Starting plan execution...");
 
         let rt = tokio::runtime::Handle::current();
         let client = self.client.as_ref().unwrap().clone();
@@ -667,16 +677,21 @@ impl TuiExecutor {
 
                     if let Some(tx) = ui_tx {
                         if result.success {
-                            let _ = tx.send("🎉 計画実行が正常に完了しました！".to_string());
+                            let _ = tx.send(
+                                "[SUCCESS] Plan execution completed successfully!".to_string(),
+                            );
                         } else {
                             let _ = tx.send(format!(
-                                "⚠️ 計画実行が部分的に完了: {}",
+                                "[WARNING] Plan execution partially completed: {}",
                                 result.final_message
                             ));
                         }
-                        let _ = tx.send(format!("📊 実行時間: {}秒", result.total_duration));
                         let _ = tx.send(format!(
-                            "✅ 完了ステップ: {}/{}",
+                            "[TIMER] Execution time: {}s",
+                            result.total_duration
+                        ));
+                        let _ = tx.send(format!(
+                            "[CONFIRMED] Completed steps: {}/{}",
                             result.completed_steps.len(),
                             result.completed_steps.len()
                         ));
@@ -688,7 +703,7 @@ impl TuiExecutor {
                     }
 
                     if let Some(tx) = ui_tx {
-                        let _ = tx.send(format!("❌ 計画実行に失敗: {}", e));
+                        let _ = tx.send(format!("[ERROR] Plan execution failed: {}", e));
                     }
                 }
             }
