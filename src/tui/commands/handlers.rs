@@ -16,9 +16,30 @@ impl CommandHandler for TuiExecutor {
         }
         match line {
             "/help" => {
-                ui.push_log(
-                    "/help, /map, /tools, /clear, /open <path>, /quit, /theme <name>, /session <new|list|switch|save|delete|current|clear>, /rebuild-repomap, /tokens",
-                );
+                ui.push_log("Available commands:");
+                ui.push_log("  /help - Show this help message");
+                ui.push_log("  /map - Show repository analysis");
+                ui.push_log("  /tools - List available tools");
+                ui.push_log("  /clear - Clear the log area");
+                ui.push_log("  /open <path> - Open a file in your editor");
+                ui.push_log("  /quit - Exit the application");
+                ui.push_log("  /theme <name> - Switch theme (dark/light)");
+                ui.push_log("  /session <cmd> - Session management (new|list|switch|save|delete|current|clear)");
+                ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
+                ui.push_log("  /tokens - Show token usage");
+                ui.push_log("");
+                ui.push_log("Scroll controls:");
+                ui.push_log("  Page Up/Down - Scroll by page");
+                ui.push_log("  Ctrl+Up/Down - Scroll by line");
+                ui.push_log("  Ctrl+Home - Scroll to top");
+                ui.push_log("  Ctrl+End - Scroll to bottom");
+                ui.push_log("  Ctrl+L - Return to bottom (auto-scroll)");
+                ui.push_log("");
+                ui.push_log("Other controls:");
+                ui.push_log("  @ - File completion");
+                ui.push_log("  ! - Shell mode (at start of empty line)");
+                ui.push_log("  Esc - Cancel operation or exit shell mode");
+                ui.push_log("  Ctrl+C - Cancel (press twice to exit)");
             }
             "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
             "/clear" => {

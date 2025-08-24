@@ -5,6 +5,7 @@ use crossterm::{
 };
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
+use tracing::debug;
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::completion::{AtFileIndex, CompletionState};
@@ -14,12 +15,6 @@ use crate::tui::theme::Theme;
 pub enum CurrentToken {
     FilePath(String),
     SlashCommand(String),
-}
-
-#[derive(Debug, Clone)]
-pub enum LlmResponseSegment {
-    Text { content: String },
-    CodeBlock { language: String, content: String },
 }
 
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
@@ -50,6 +45,33 @@ pub struct RenderPlan {
     pub input_line: String,
     // visual column within input_line where terminal cursor should be placed
     pub input_cursor_col: u16,
+    // scroll indicator info
+    pub scroll_info: Option<ScrollInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollInfo {
+    pub current_line: usize,
+    pub total_lines: usize,
+    pub is_scrolling: bool,
+    pub new_messages: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollState {
+    pub offset: usize,       // 表示開始行のオフセット（0が最新）
+    pub auto_scroll: bool,   // 自動スクロール有効/無効
+    pub new_messages: usize, // スクロール中に追加された新しいメッセージ数
+}
+
+impl Default for ScrollState {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            auto_scroll: true,
+            new_messages: 0,
+        }
+    }
 }
 
 pub use crate::tui::state_render::{truncate_display, wrap_display};
@@ -64,10 +86,12 @@ pub fn build_render_plan(
     input_mode: InputMode,
     cursor_char_idx: usize,
     w: u16,
-    h: u16,
+    _h: u16, // Total height (not used directly, main_content_height is used instead)
+    main_content_height: u16, // Add actual main content area height
     model: Option<&str>,
-    spinner_state: usize, // Add spinner_state parameter
-    tokens_used: u32,     // Add tokens_used parameter
+    spinner_state: usize,       // Add spinner_state parameter
+    tokens_used: u32,           // Add tokens_used parameter
+    scroll_state: &ScrollState, // Add scroll_state parameter
 ) -> RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -123,24 +147,71 @@ pub fn build_render_plan(
     let sep = "-".repeat(w_usize);
     let footer_lines = vec![title_trim, sep];
 
-    // Build wrapped physical lines from logs (from end to start to keep last rows)
-    let max_log_rows = h.saturating_sub(3) as usize;
-    let mut phys_rev: Vec<String> = Vec::new();
-    for line in log.iter().rev() {
+    // Build wrapped physical lines from logs with scroll support
+    let max_log_rows = main_content_height as usize;
+    let mut all_phys_lines: Vec<String> = Vec::new();
+
+    debug!(target: "tui_render", "build_render_plan: max_log_rows={}, input_log_lines={}", 
+        max_log_rows, log.len());
+
+    // Build all physical lines first
+    for (i, line) in log.iter().enumerate() {
         let line = line.trim_end_matches('\n');
         let parts = wrap_display(line, w_usize);
-        for p in parts.into_iter().rev() {
-            phys_rev.push(p);
-            if phys_rev.len() >= max_log_rows {
-                break;
-            }
-        }
-        if phys_rev.len() >= max_log_rows {
-            break;
-        }
+        debug!(target: "tui_render", "Log line {}: '{}' -> {} wrapped parts", i, line, parts.len());
+        all_phys_lines.extend(parts);
     }
-    phys_rev.reverse();
-    let log_lines = phys_rev;
+
+    let total_lines = all_phys_lines.len();
+    debug!(target: "tui_render", "Total physical lines after wrapping: {}", total_lines);
+
+    // Apply scroll offset
+    let log_lines = if scroll_state.auto_scroll || scroll_state.offset == 0 {
+        // Show the most recent lines (bottom of log)
+        let start_idx = total_lines.saturating_sub(max_log_rows);
+        debug!(target: "tui_render", "Auto-scroll: showing lines {}..{} (total={})", 
+            start_idx, total_lines, total_lines);
+        let mut lines = all_phys_lines[start_idx..].to_vec();
+        // Ensure we don't exceed the display area
+        if lines.len() > max_log_rows {
+            lines.truncate(max_log_rows);
+            debug!(target: "tui_render", "Truncated to {} lines to fit display area", max_log_rows);
+        }
+        lines
+    } else {
+        // Show lines based on scroll offset (offset 0 = most recent, higher = older)
+        let end_idx = total_lines.saturating_sub(scroll_state.offset);
+        let start_idx = end_idx.saturating_sub(max_log_rows);
+        debug!(target: "tui_render", "Manual scroll: offset={}, showing lines {}..{} (total={})", 
+            scroll_state.offset, start_idx, end_idx, total_lines);
+        let mut lines = all_phys_lines[start_idx..end_idx].to_vec();
+        // Ensure we don't exceed the display area
+        if lines.len() > max_log_rows {
+            lines.truncate(max_log_rows);
+            debug!(target: "tui_render", "Truncated to {} lines to fit display area", max_log_rows);
+        }
+        lines
+    };
+
+    debug!(target: "tui_render", "Final log_lines count: {} (max_log_rows={}, area_allows={})", 
+        log_lines.len(), max_log_rows, max_log_rows);
+
+    // Create scroll info
+    let scroll_info = if total_lines > max_log_rows {
+        let current_line = if scroll_state.auto_scroll || scroll_state.offset == 0 {
+            total_lines
+        } else {
+            total_lines.saturating_sub(scroll_state.offset)
+        };
+        Some(ScrollInfo {
+            current_line,
+            total_lines,
+            is_scrolling: !scroll_state.auto_scroll && scroll_state.offset > 0,
+            new_messages: scroll_state.new_messages,
+        })
+    } else {
+        None
+    };
 
     // Prepare prompt+input as a sequence of chars with widths
     let prompt = {
@@ -171,6 +242,7 @@ pub fn build_render_plan(
             log_lines,
             input_line,
             input_cursor_col: col,
+            scroll_info,
         };
     }
 
@@ -208,6 +280,7 @@ pub fn build_render_plan(
         log_lines,
         input_line,
         input_cursor_col: col,
+        scroll_info,
     }
 }
 
@@ -230,8 +303,7 @@ pub struct TuiApp {
     pub compl: CompletionState,
     // theme
     pub theme: Theme,
-    // llm response
-    pub(crate) current_llm_response: Option<Vec<LlmResponseSegment>>,
+    // llm parsing buffer for streaming
     pub(crate) llm_parsing_buffer: String,
     // cursor position within input in number of chars (not bytes)
     pub cursor: usize,
@@ -250,6 +322,8 @@ pub struct TuiApp {
     pub tokens_used: u32,
     // redraw flag
     pub dirty: bool,
+    // scroll state
+    pub scroll_state: ScrollState,
 }
 
 impl TuiApp {
@@ -280,7 +354,6 @@ impl TuiApp {
             at_index,
             compl: Default::default(),
             theme,
-            current_llm_response: None,
             llm_parsing_buffer: String::new(),
             cursor: 0,
             spinner_state: 0,              // Initialize spinner state
@@ -289,6 +362,7 @@ impl TuiApp {
             input_mode: InputMode::default(),
             tokens_used: 0,
             dirty: true, // initial full render
+            scroll_state: ScrollState::default(),
         };
         app.at_index.scan();
         Ok(app)
@@ -449,21 +523,84 @@ impl TuiApp {
     }
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
-        // Clear the last LLM response content as a new log entry is being added
-        self.last_llm_response_content = None;
-        for line in s.into().split('\n') {
+        let lines_before = self.log.len();
+        let content = s.into();
+        for line in content.split('\n') {
             self.log.push(line.to_string());
         }
         if self.log.len() > self.max_log_lines {
             let overflow = self.log.len() - self.max_log_lines;
             self.log.drain(0..overflow);
         }
+
+        let lines_added = self.log.len().saturating_sub(lines_before);
+        debug!(target: "tui_log", "push_log: added {} lines, total now {}, content: '{}'", 
+            lines_added, self.log.len(), content.chars().take(50).collect::<String>());
+
+        // Count new messages when not auto-scrolling
+        if !self.scroll_state.auto_scroll {
+            let new_lines = self.log.len().saturating_sub(lines_before);
+            self.scroll_state.new_messages =
+                self.scroll_state.new_messages.saturating_add(new_lines);
+            debug!(target: "tui_log", "New messages count: {}", self.scroll_state.new_messages);
+        }
+
+        // Auto-scroll to bottom when new content is added
+        if self.scroll_state.auto_scroll {
+            self.scroll_state.offset = 0;
+        }
+    }
+
+    /// Scroll up by the specified number of lines
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_state.auto_scroll = false;
+        self.scroll_state.offset = self.scroll_state.offset.saturating_add(lines);
+        self.dirty = true;
+    }
+
+    /// Scroll down by the specified number of lines
+    pub fn scroll_down(&mut self, lines: usize) {
+        if self.scroll_state.offset <= lines {
+            self.scroll_state.offset = 0;
+            self.scroll_state.auto_scroll = true;
+            self.scroll_state.new_messages = 0; // Clear new message count when reaching bottom
+        } else {
+            self.scroll_state.offset = self.scroll_state.offset.saturating_sub(lines);
+        }
+        self.dirty = true;
+    }
+
+    /// Scroll to the top of the log
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_state.auto_scroll = false;
+        // Set offset to maximum to show the oldest content
+        self.scroll_state.offset = self.log.len();
+        self.dirty = true;
+    }
+
+    /// Scroll to the bottom of the log (enable auto-scroll)
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_state.auto_scroll = true;
+        self.scroll_state.offset = 0;
+        self.scroll_state.new_messages = 0; // Clear new message count
+        self.dirty = true;
+    }
+
+    /// Page up (scroll up by visible area size)
+    pub fn page_up(&mut self, visible_lines: usize) {
+        self.scroll_up(visible_lines.saturating_sub(1).max(1));
+    }
+
+    /// Page down (scroll down by visible area size)
+    pub fn page_down(&mut self, visible_lines: usize) {
+        self.scroll_down(visible_lines.saturating_sub(1).max(1));
     }
 
     /// Clears the log and resets the last LLM response content.
     pub fn clear_log(&mut self) {
         self.log.clear();
         self.last_llm_response_content = None;
+        self.scroll_state = ScrollState::default();
     }
 
     pub fn dispatch(&mut self, line: &str) {

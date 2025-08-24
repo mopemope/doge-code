@@ -1,14 +1,36 @@
-use crate::tui::state::{LlmResponseSegment, RenderPlan, TuiApp, build_render_plan};
+use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, ListItem, Paragraph},
 };
+use tracing::debug;
 
 impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let theme = &self.theme;
         let size = f.area();
+
+        debug!(target: "tui_render", "Screen size: {}x{}", size.width, size.height);
+
+        // Calculate layout first to get actual main content area height
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // Header
+                Constraint::Min(1),    // Main content
+                Constraint::Length(1), // Footer
+            ])
+            .split(size);
+
+        let main_content_height = chunks[1].height;
+        debug!(target: "tui_render", "Layout chunks: header={}x{}, main={}x{}, footer={}x{}", 
+            chunks[0].width, chunks[0].height,
+            chunks[1].width, chunks[1].height,
+            chunks[2].width, chunks[2].height);
+        debug!(target: "tui_render", "Main content area height: {}", main_content_height);
+        debug!(target: "tui_render", "Total log lines: {}", self.log.len());
+
         let plan = build_render_plan(
             &self.title,
             self.status,
@@ -18,19 +40,15 @@ impl TuiApp {
             self.cursor,
             size.width,
             size.height,
+            main_content_height,
             model,
             self.spinner_state,
             self.tokens_used,
+            &self.scroll_state,
         );
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // Header
-                Constraint::Min(1),    // Main content
-                Constraint::Length(1), // Footer
-            ])
-            .split(size);
+        debug!(target: "tui_render", "Render plan: log_lines={}, scroll_info={:?}", 
+            plan.log_lines.len(), plan.scroll_info);
 
         self.render_header(f, chunks[0], &plan, theme);
         self.render_main_content(f, chunks[1], &plan, theme);
@@ -47,11 +65,30 @@ impl TuiApp {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
-        let title_text = if !plan.footer_lines.is_empty() {
+        let mut title_text = if !plan.footer_lines.is_empty() {
             plan.footer_lines[0].clone()
         } else {
             String::new()
         };
+
+        // Add scroll indicator to title if scrolling
+        if let Some(scroll_info) = &plan.scroll_info {
+            if scroll_info.is_scrolling {
+                let mut scroll_indicator = format!(
+                    " [SCROLL: {}/{}]",
+                    scroll_info.current_line, scroll_info.total_lines
+                );
+                if scroll_info.new_messages > 0 {
+                    scroll_indicator.push_str(&format!(" (+{})", scroll_info.new_messages));
+                }
+                title_text.push_str(&scroll_indicator);
+            } else if scroll_info.total_lines > 0 {
+                // Show total lines even when not scrolling if there's content
+                let lines_indicator = format!(" [{}L]", scroll_info.total_lines);
+                title_text.push_str(&lines_indicator);
+            }
+        }
+
         let title = Paragraph::new(title_text)
             .style(theme.footer_style)
             .alignment(Alignment::Left);
@@ -67,11 +104,32 @@ impl TuiApp {
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        debug!(target: "tui_render", "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}", 
+            area.width, area.height, area.x, area.y, plan.log_lines.len());
+
+        // Check if we have more lines than the area can display
+        if plan.log_lines.len() > area.height as usize {
+            debug!(target: "tui_render", "WARNING: More lines ({}) than area height ({})", 
+                plan.log_lines.len(), area.height);
+        }
+
         let mut lines: Vec<Line> = Vec::new();
         let mut is_in_code_block = false;
 
-        for log_line in &plan.log_lines {
-            if log_line.starts_with("```") {
+        // Ensure we don't try to render more lines than the area can display
+        let max_displayable = area.height as usize;
+        let lines_to_render = plan.log_lines.len().min(max_displayable);
+
+        debug!(target: "tui_render", "Rendering {} lines (max displayable: {})", 
+            lines_to_render, max_displayable);
+
+        for (i, log_line) in plan.log_lines.iter().take(lines_to_render).enumerate() {
+            if i < 5 || i >= lines_to_render.saturating_sub(5) {
+                debug!(target: "tui_render", "Line {}: '{}'", i, 
+                    log_line.chars().take(50).collect::<String>());
+            }
+
+            if log_line.starts_with("```") || log_line.trim_start().starts_with("```") {
                 is_in_code_block = !is_in_code_block;
                 lines.push(Line::from(Span::styled(
                     log_line.clone(),
@@ -102,42 +160,31 @@ impl TuiApp {
                     log_line.clone(),
                     Style::default().fg(Color::Cyan),
                 )));
+            } else if log_line.starts_with("[tool]") {
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    Style::default().fg(Color::Green),
+                )));
+            } else if log_line.starts_with("  ") {
+                // LLM response with margin - use special styling
+                lines.push(Line::from(Span::styled(
+                    log_line.clone(),
+                    theme.llm_response_style,
+                )));
             } else {
                 lines.push(Line::from(log_line.as_str()));
             }
         }
 
-        if let Some(response_segments) = &self.current_llm_response {
-            for segment in response_segments {
-                match segment {
-                    LlmResponseSegment::Text { content } => {
-                        lines.push(Line::from(Span::styled(
-                            content.clone(),
-                            theme.llm_response_style,
-                        )));
-                    }
-                    LlmResponseSegment::CodeBlock { language, content } => {
-                        let lang_line = format!("```{language}");
-                        lines.push(Line::from(Span::styled(lang_line, theme.code_block_style)));
-                        for line in content.lines() {
-                            lines.push(Line::from(Span::styled(
-                                line.to_string(),
-                                theme.code_block_style,
-                            )));
-                        }
-                        lines.push(Line::from(Span::styled(
-                            "```".to_string(),
-                            theme.code_block_style,
-                        )));
-                    }
-                }
-            }
-        }
+        debug!(target: "tui_render", "Created {} lines for Paragraph widget", lines.len());
 
         let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
-            .wrap(Wrap { trim: false });
+            .block(Block::default()); // Add block to ensure proper boundaries
         f.render_widget(paragraph, area);
+
+        debug!(target: "tui_render", "Paragraph widget rendered {} lines in area {}x{}", 
+            lines_to_render, area.width, area.height);
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
