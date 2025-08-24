@@ -1,27 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-/// タスクの種類を表す列挙型
+/// Enumeration representing task types
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskType {
-    /// 単純なファイル操作（読み書き、検索）
+    /// Simple file operations (read, write, search)
     SimpleFileOperation,
-    /// 単一ファイルの小さな編集
+    /// Small edits to a single file
     SimpleCodeEdit,
-    /// 検索・調査タスク
+    /// Search and investigation tasks
     SimpleSearch,
-    /// 複数ファイルの変更
+    /// Changes to multiple files
     MultiFileEdit,
-    /// リファクタリング
+    /// Refactoring
     Refactoring,
-    /// 新機能実装
+    /// New feature implementation
     FeatureImplementation,
-    /// アーキテクチャ変更
+    /// Architecture changes
     ArchitecturalChange,
-    /// 大規模リファクタリング
+    /// Large-scale refactoring
     LargeRefactoring,
-    /// プロジェクト構造変更
+    /// Project structure changes
     ProjectRestructure,
-    /// 不明・分類不可
+    /// Unknown or unclassifiable
     Unknown,
 }
 
@@ -34,22 +34,22 @@ pub enum RiskLevel {
     Critical,
 }
 
-/// ステップの種類
+/// Step types
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepType {
-    /// 分析・調査
+    /// Analysis and investigation
     Analysis,
-    /// 計画・設計
+    /// Planning and design
     Planning,
-    /// 実装
+    /// Implementation
     Implementation,
-    /// 検証・テスト
+    /// Validation and testing
     Validation,
-    /// 後処理・クリーンアップ
+    /// Post-processing and cleanup
     Cleanup,
 }
 
-/// タスクの分類結果
+/// Task classification result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskClassification {
     pub task_type: TaskType,
@@ -60,7 +60,7 @@ pub struct TaskClassification {
     pub confidence: f32,
 }
 
-/// 実行ステップ
+/// Execution step
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStep {
     pub id: String,
@@ -73,7 +73,7 @@ pub struct TaskStep {
     pub prompt_template: Option<String>,
 }
 
-/// タスク実行計画
+/// Task execution plan
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPlan {
     pub id: String,
@@ -84,7 +84,7 @@ pub struct TaskPlan {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// ステップ実行結果
+/// Step execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub step_id: String,
@@ -95,7 +95,7 @@ pub struct StepResult {
     pub error_message: Option<String>,
 }
 
-/// タスク実行結果
+/// Task execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
     pub plan_id: String,
@@ -106,7 +106,7 @@ pub struct ExecutionResult {
 }
 
 impl TaskType {
-    /// タスクタイプの複雑度を返す（0.0-1.0）
+    /// Returns the complexity of the task type (0.0-1.0)
     pub fn base_complexity(&self) -> f32 {
         match self {
             TaskType::SimpleFileOperation => 0.1,
@@ -122,7 +122,7 @@ impl TaskType {
         }
     }
 
-    /// 推定ステップ数を返す
+    /// Returns the estimated number of steps
     pub fn estimated_steps(&self) -> usize {
         match self {
             TaskType::SimpleFileOperation => 2,
@@ -138,7 +138,7 @@ impl TaskType {
         }
     }
 
-    /// リスクレベルを返す
+    /// Returns the risk level
     pub fn risk_level(&self) -> RiskLevel {
         match self {
             TaskType::SimpleFileOperation => RiskLevel::Low,
@@ -156,7 +156,7 @@ impl TaskType {
 }
 
 impl TaskStep {
-    /// 新しいステップを作成
+    /// Creates a new step
     pub fn new(
         id: String,
         description: String,
@@ -175,25 +175,25 @@ impl TaskStep {
         }
     }
 
-    /// 依存関係を追加
+    /// Adds dependencies
     pub fn with_dependencies(mut self, dependencies: Vec<String>) -> Self {
         self.dependencies = dependencies;
         self
     }
 
-    /// 推定時間を設定
+    /// Sets the estimated time
     pub fn with_duration(mut self, duration_secs: u64) -> Self {
         self.estimated_duration = duration_secs;
         self
     }
 
-    /// 検証条件を追加
+    /// Adds validation criteria
     pub fn with_validation(mut self, criteria: Vec<String>) -> Self {
         self.validation_criteria = criteria;
         self
     }
 
-    /// プロンプトテンプレートを設定
+    /// Sets the prompt template
     pub fn with_prompt_template(mut self, template: String) -> Self {
         self.prompt_template = Some(template);
         self

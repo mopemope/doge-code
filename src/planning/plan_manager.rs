@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-/// 計画の実行状態
+/// Plan execution status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanStatus {
     /// 作成済み、実行待ち
@@ -23,7 +23,7 @@ pub enum PlanStatus {
     Cancelled,
 }
 
-/// 実行中の計画情報
+/// Information of plan being executed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanExecution {
     pub plan: TaskPlan,
@@ -36,18 +36,18 @@ pub struct PlanExecution {
     pub pause_reason: Option<String>,
 }
 
-/// 計画管理システム
+/// Plan management system
 #[derive(Debug)]
 pub struct PlanManager {
-    /// アクティブな計画（メモリ内）
+    /// Active plans (in memory)
     active_plans: Arc<Mutex<HashMap<String, PlanExecution>>>,
-    /// 最近の計画（履歴）
+    /// Recent plans (history)
     recent_plans: Arc<Mutex<Vec<PlanExecution>>>,
-    /// 現在実行中の計画ID
+    /// Currently executing plan ID
     current_execution: Arc<Mutex<Option<String>>>,
-    /// 計画の保存ディレクトリ
+    /// Directory to save plans
     plans_dir: PathBuf,
-    /// 最大履歴保持数
+    /// Maximum history retention count
     max_history: usize,
 }
 
@@ -66,14 +66,14 @@ impl PlanManager {
         })
     }
 
-    /// 計画保存ディレクトリを取得
+    /// Get plan save directory
     fn get_plans_directory() -> Result<PathBuf> {
         let config_dir =
             dirs::config_dir().ok_or_else(|| anyhow!("Could not determine config directory"))?;
         Ok(config_dir.join("doge-code").join("plans"))
     }
 
-    /// 新しい計画を登録
+    /// Register new plan
     pub fn register_plan(&self, plan: TaskPlan) -> Result<String> {
         let plan_id = plan.id.clone();
 
@@ -113,19 +113,19 @@ impl PlanManager {
         active_plans.values().cloned().collect()
     }
 
-    /// 最近の計画履歴を取得
+    /// Get recent plan history
     pub fn get_recent_plans(&self) -> Vec<PlanExecution> {
         let recent_plans = self.recent_plans.lock().unwrap();
         recent_plans.clone()
     }
 
-    /// 現在実行中の計画IDを取得
+    /// Get currently executing plan ID
     pub fn get_current_execution(&self) -> Option<String> {
         let current = self.current_execution.lock().unwrap();
         current.clone()
     }
 
-    /// 計画の実行を開始
+    /// Start plan execution
     pub fn start_execution(&self, plan_id: &str) -> Result<()> {
         {
             let mut active_plans = self.active_plans.lock().unwrap();
@@ -158,7 +158,7 @@ impl PlanManager {
         Ok(())
     }
 
-    /// 計画の実行を一時停止
+    /// Pause plan execution
     pub fn pause_execution(&self, plan_id: &str, reason: Option<String>) -> Result<()> {
         {
             let mut active_plans = self.active_plans.lock().unwrap();
@@ -186,7 +186,7 @@ impl PlanManager {
         Ok(())
     }
 
-    /// 計画の実行を完了
+    /// Complete plan execution
     pub fn complete_execution(&self, plan_id: &str, result: ExecutionResult) -> Result<()> {
         let execution = {
             let mut active_plans = self.active_plans.lock().unwrap();
@@ -236,7 +236,7 @@ impl PlanManager {
         Ok(())
     }
 
-    /// 計画の実行をキャンセル
+    /// Cancel plan execution
     pub fn cancel_execution(&self, plan_id: &str) -> Result<()> {
         let execution = {
             let mut active_plans = self.active_plans.lock().unwrap();
@@ -271,7 +271,7 @@ impl PlanManager {
         Ok(())
     }
 
-    /// ステップの完了を記録
+    /// Record step completion
     pub fn record_step_completion(&self, plan_id: &str, step_result: StepResult) -> Result<()> {
         let execution_clone = {
             let mut active_plans = self.active_plans.lock().unwrap();
@@ -300,7 +300,7 @@ impl PlanManager {
             .cloned()
     }
 
-    /// 実行可能な計画を検索（キーワードマッチング）
+    /// Search for executable plans (keyword matching)
     pub fn find_executable_plan(&self, user_input: &str) -> Option<PlanExecution> {
         let active_plans = self.active_plans.lock().unwrap();
 
@@ -350,7 +350,7 @@ impl PlanManager {
         Ok(())
     }
 
-    /// ディスクから計画を読み込み
+    /// Load plan from disk
     pub fn load_plan_from_disk(&self, plan_id: &str) -> Result<PlanExecution> {
         let file_path = self.plans_dir.join(format!("{}.json", plan_id));
         let json_data = std::fs::read_to_string(file_path)?;
@@ -358,7 +358,7 @@ impl PlanManager {
         Ok(execution)
     }
 
-    /// 古い計画ファイルをクリーンアップ
+    /// Clean up old plan files
     pub fn cleanup_old_plans(&self, days: u64) -> Result<usize> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(days as i64);
         let mut cleaned_count = 0;
@@ -380,7 +380,7 @@ impl PlanManager {
         Ok(cleaned_count)
     }
 
-    /// 統計情報を取得
+    /// Get statistics
     pub fn get_statistics(&self) -> PlanStatistics {
         let active_plans = self.active_plans.lock().unwrap();
         let recent_plans = self.recent_plans.lock().unwrap();

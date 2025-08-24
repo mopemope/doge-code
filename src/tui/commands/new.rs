@@ -102,7 +102,7 @@ impl TuiExecutor {
             ui_tx: None,
             cancel_tx: None,
             last_user_prompt: None,
-            conversation_history: Arc::new(Mutex::new(Vec::new())), // 会話履歴を初期化
+            conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history
             session_manager,
             slash_commands,
             task_analyzer,

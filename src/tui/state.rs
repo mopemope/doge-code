@@ -27,12 +27,12 @@ pub enum InputMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Idle,
-    Preparing,           // リクエスト準備中
-    Sending,             // リクエスト送信中
-    Waiting,             // レスポンス待機中
-    Streaming,           // ストリーミング受信中
-    Processing,          // ツール実行中
-    ShellCommandRunning, // シェルコマンド実行中
+    Preparing,           // Request preparation
+    Sending,             // Request sending
+    Waiting,             // Response waiting
+    Streaming,           // Streaming reception
+    Processing,          // Tool execution
+    ShellCommandRunning, // Shell command execution
     Cancelled,
     Done,
     Error,
@@ -59,9 +59,9 @@ pub struct ScrollInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrollState {
-    pub offset: usize,       // 表示開始行のオフセット（0が最新）
-    pub auto_scroll: bool,   // 自動スクロール有効/無効
-    pub new_messages: usize, // スクロール中に追加された新しいメッセージ数
+    pub offset: usize,       // Display start line offset (0 is the latest)
+    pub auto_scroll: bool,   // Auto-scroll enabled/disabled
+    pub new_messages: usize, // Number of new messages added during scrolling
 }
 
 impl Default for ScrollState {

@@ -22,7 +22,7 @@ pub struct TuiExecutor {
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
     pub(crate) last_user_prompt: Option<String>,
-    // 会話履歴を保持するためのメッセージベクター
+    // Message vector for holding conversation history
     pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
     // Session management
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
