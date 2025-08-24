@@ -3,6 +3,7 @@ pub mod assets;
 pub mod config;
 pub mod llm;
 pub mod logging;
+pub mod planning;
 pub mod session;
 pub mod tools;
 mod tui;

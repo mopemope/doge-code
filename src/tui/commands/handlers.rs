@@ -1,4 +1,5 @@
 use crate::analysis::Analyzer;
+use crate::planning::create_task_plan;
 use crate::tui::commands::core::{CommandHandler, TuiExecutor};
 use crate::tui::theme::Theme;
 use crate::tui::view::TuiApp;
@@ -218,10 +219,167 @@ impl CommandHandler for TuiExecutor {
                     return;
                 }
 
+                // Handle /plan command for task analysis and planning
+                if let Some(rest) = line.strip_prefix("/plan ") {
+                    let task_description = rest.trim();
+                    if task_description.is_empty() {
+                        ui.push_log("Usage: /plan <task description>");
+                        return;
+                    }
+
+                    ui.push_log(format!("> /plan {}", task_description));
+
+                    // 非同期処理のためにtokioランタイムを使用
+                    let task_analyzer = &self.task_analyzer;
+                    let task_desc = task_description.to_string();
+
+                    // 分析は同期的に実行
+                    match task_analyzer.analyze(&task_desc) {
+                        Ok(classification) => {
+                            ui.push_log("🔍 タスクを分析中...");
+                            ui.push_log(format!("📋 タスク分類: {:?}", classification.task_type));
+                            ui.push_log(format!(
+                                "🎯 複雑度: {:.1}/1.0",
+                                classification.complexity_score
+                            ));
+                            ui.push_log(format!(
+                                "📊 推定ステップ数: {}",
+                                classification.estimated_steps
+                            ));
+                            ui.push_log(format!(
+                                "⚠️ リスクレベル: {:?}",
+                                classification.risk_level
+                            ));
+                            ui.push_log(format!(
+                                "🔧 必要ツール: {}",
+                                classification.required_tools.join(", ")
+                            ));
+                            ui.push_log(format!(
+                                "✅ 信頼度: {:.1}%",
+                                classification.confidence * 100.0
+                            ));
+
+                            // 分解は非同期で実行するため、別スレッドで処理
+                            let rt = tokio::runtime::Handle::current();
+                            let task_analyzer_clone = task_analyzer.clone();
+                            let ui_tx = self.ui_tx.clone();
+                            let plan_manager = self.plan_manager.clone();
+
+                            rt.spawn(async move {
+                                match task_analyzer_clone.decompose(&classification, &task_desc).await {
+                                    Ok(steps) => {
+                                        if let Some(tx) = ui_tx {
+                                            let _ = tx.send(format!("\n📝 実行計画 ({} ステップ):", steps.len()));
+
+                                            for (i, step) in steps.iter().enumerate() {
+                                                let step_icon = match step.step_type {
+                                                    crate::planning::StepType::Analysis => "🔍",
+                                                    crate::planning::StepType::Planning => "📋",
+                                                    crate::planning::StepType::Implementation => "⚙️",
+                                                    crate::planning::StepType::Validation => "✅",
+                                                    crate::planning::StepType::Cleanup => "🧹",
+                                                };
+
+                                                let _ = tx.send(format!(
+                                                    "  {}. {} {} ({}秒)",
+                                                    i + 1,
+                                                    step_icon,
+                                                    step.description,
+                                                    step.estimated_duration
+                                                ));
+
+                                                if !step.dependencies.is_empty() {
+                                                    let _ = tx.send(format!("     依存: {}", step.dependencies.join(", ")));
+                                                }
+
+                                                if !step.required_tools.is_empty() {
+                                                    let _ = tx.send(format!("     ツール: {}", step.required_tools.join(", ")));
+                                                }
+                                            }
+
+                                            let plan = create_task_plan(
+                                                task_desc,
+                                                classification,
+                                                steps,
+                                            );
+
+                                            // 計画を登録
+                                            if let Ok(plan_manager) = plan_manager.lock() {
+                                                match plan_manager.register_plan(plan.clone()) {
+                                                    Ok(plan_id) => {
+                                                        let _ = tx.send(format!("\n⏱️ 総推定時間: {}秒", plan.total_estimated_duration));
+                                                        let _ = tx.send(format!("📋 計画ID: {}", plan_id));
+                                                        let _ = tx.send("\n💡 実行方法:".to_string());
+                                                        let _ = tx.send("   /execute        - 最新の計画を実行".to_string());
+                                                        let _ = tx.send(format!("   /execute {}  - この計画を実行", plan_id));
+                                                        let _ = tx.send("   または「この計画を実行して」等の指示".to_string());
+
+                                                        info!("Generated and registered plan with ID: {}", plan_id);
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(format!("❌ 計画の登録に失敗: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(tx) = ui_tx {
+                                            let _ = tx.send(format!("❌ ステップ分解に失敗: {}", e));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            ui.push_log(format!("❌ タスク分析に失敗: {}", e));
+                        }
+                    }
+                    return;
+                }
+
+                // Handle /execute command for plan execution
+                if let Some(rest) = line.strip_prefix("/execute") {
+                    let plan_id = rest.trim();
+                    ui.push_log(format!("> /execute {}", plan_id));
+                    self.handle_execute_command(plan_id, ui);
+                    return;
+                }
+
+                // Handle /plans command to list plans
+                if line == "/plans" {
+                    ui.push_log("> /plans");
+                    self.handle_plans_command(ui);
+                    return;
+                }
+
                 if !line.starts_with('/') {
                     let rest = line;
                     self.last_user_prompt = Some(rest.to_string());
                     ui.push_log(format!("> {rest}"));
+
+                    // 計画実行の自動検出
+                    let plan_to_execute = {
+                        if let Ok(plan_manager) = self.plan_manager.lock() {
+                            plan_manager.find_executable_plan(rest)
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(plan_execution) = plan_to_execute {
+                        ui.push_log(format!(
+                            "🎯 実行可能な計画を検出: {}",
+                            plan_execution.plan.original_request
+                        ));
+                        ui.push_log(format!("📋 計画ID: {}", plan_execution.plan.id));
+
+                        // 計画実行を開始
+                        let plan_id = plan_execution.plan.id.clone();
+                        self.execute_plan_async(&plan_id, ui);
+                        return;
+                    }
+
                     match self.client.as_ref() {
                         Some(c) => {
                             let rt = tokio::runtime::Handle::current();
@@ -346,5 +504,194 @@ impl CommandHandler for TuiExecutor {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl TuiExecutor {
+    /// Handle /execute command
+    fn handle_execute_command(&mut self, plan_id: &str, ui: &mut TuiApp) {
+        if plan_id.is_empty() {
+            // 最新の計画を実行
+            let latest_plan = {
+                if let Ok(plan_manager) = self.plan_manager.lock() {
+                    plan_manager.get_latest_plan()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(plan_execution) = latest_plan {
+                let plan_id = plan_execution.plan.id.clone();
+                ui.push_log(format!(
+                    "🎯 最新の計画を実行: {}",
+                    plan_execution.plan.original_request
+                ));
+                self.execute_plan_async(&plan_id, ui);
+            } else {
+                ui.push_log(
+                    "❌ 実行可能な計画が見つかりません。まず /plan でタスクを分析してください。",
+                );
+            }
+        } else {
+            // 指定された計画を実行
+            let plan_exists = {
+                if let Ok(plan_manager) = self.plan_manager.lock() {
+                    plan_manager.get_plan(plan_id).is_some()
+                } else {
+                    false
+                }
+            };
+
+            if plan_exists {
+                ui.push_log(format!("🎯 計画を実行: {}", plan_id));
+                self.execute_plan_async(plan_id, ui);
+            } else {
+                ui.push_log(format!("❌ 計画ID '{}' が見つかりません。", plan_id));
+            }
+        }
+    }
+
+    /// Handle /plans command
+    fn handle_plans_command(&mut self, ui: &mut TuiApp) {
+        if let Ok(plan_manager) = self.plan_manager.lock() {
+            let active_plans = plan_manager.list_active_plans();
+            let recent_plans = plan_manager.get_recent_plans();
+            let stats = plan_manager.get_statistics();
+
+            ui.push_log("📊 計画統計:");
+            ui.push_log(format!("   総計画数: {}", stats.total_plans));
+            ui.push_log(format!("   アクティブ: {}", stats.active_plans));
+            ui.push_log(format!("   完了: {}", stats.completed_plans));
+            ui.push_log(format!("   失敗: {}", stats.failed_plans));
+            ui.push_log(format!("   キャンセル: {}", stats.cancelled_plans));
+            if stats.average_completion_time > 0.0 {
+                ui.push_log(format!(
+                    "   平均実行時間: {:.1}秒",
+                    stats.average_completion_time
+                ));
+            }
+
+            if !active_plans.is_empty() {
+                ui.push_log("\n📋 アクティブな計画:");
+                for plan_execution in &active_plans {
+                    let status_icon = match plan_execution.status {
+                        crate::planning::PlanStatus::Created => "⏳",
+                        crate::planning::PlanStatus::Running => "🔄",
+                        crate::planning::PlanStatus::Paused => "⏸️",
+                        _ => "❓",
+                    };
+                    ui.push_log(format!(
+                        "   {} {} - {} ({} ステップ)",
+                        status_icon,
+                        &plan_execution.plan.id[..8],
+                        plan_execution.plan.original_request,
+                        plan_execution.plan.steps.len()
+                    ));
+                }
+            }
+
+            if !recent_plans.is_empty() {
+                ui.push_log("\n📚 最近の計画履歴:");
+                for plan_execution in recent_plans.iter().rev().take(5) {
+                    let status_icon = match plan_execution.status {
+                        crate::planning::PlanStatus::Completed => "✅",
+                        crate::planning::PlanStatus::Failed => "❌",
+                        crate::planning::PlanStatus::Cancelled => "🚫",
+                        _ => "❓",
+                    };
+                    ui.push_log(format!(
+                        "   {} {} - {}",
+                        status_icon,
+                        &plan_execution.plan.id[..8],
+                        plan_execution.plan.original_request
+                    ));
+                }
+            }
+
+            if active_plans.is_empty() && recent_plans.is_empty() {
+                ui.push_log("📝 計画がありません。/plan <タスク> で新しい計画を作成してください。");
+            }
+        } else {
+            ui.push_log("❌ 計画管理システムにアクセスできません。");
+        }
+    }
+
+    /// Execute plan asynchronously
+    fn execute_plan_async(&mut self, plan_id: &str, ui: &mut TuiApp) {
+        if self.client.is_none() {
+            ui.push_log("❌ LLMクライアントが設定されていません。");
+            return;
+        }
+
+        let plan_execution = {
+            if let Ok(plan_manager) = self.plan_manager.lock() {
+                plan_manager.get_plan(plan_id)
+            } else {
+                ui.push_log("❌ 計画管理システムにアクセスできません。");
+                return;
+            }
+        };
+
+        let Some(plan_execution) = plan_execution else {
+            ui.push_log(format!("❌ 計画ID '{}' が見つかりません。", plan_id));
+            return;
+        };
+
+        // 実行開始
+        if let Ok(plan_manager) = self.plan_manager.lock()
+            && let Err(e) = plan_manager.start_execution(plan_id)
+        {
+            ui.push_log(format!("❌ 計画実行の開始に失敗: {}", e));
+            return;
+        }
+
+        ui.push_log("🚀 計画実行を開始します...");
+
+        let rt = tokio::runtime::Handle::current();
+        let client = self.client.as_ref().unwrap().clone();
+        let model = self.cfg.model.clone();
+        let fs_tools = self.tools.clone();
+        let ui_tx = self.ui_tx.clone();
+        let plan_manager = self.plan_manager.clone();
+        let plan_id = plan_id.to_string();
+        let plan = plan_execution.plan;
+
+        rt.spawn(async move {
+            let executor = crate::planning::TaskExecutor::new(client, model, fs_tools);
+
+            match executor.execute_plan(plan, ui_tx.clone()).await {
+                Ok(result) => {
+                    if let Ok(pm) = plan_manager.lock() {
+                        let _ = pm.complete_execution(&plan_id, result.clone());
+                    }
+
+                    if let Some(tx) = ui_tx {
+                        if result.success {
+                            let _ = tx.send("🎉 計画実行が正常に完了しました！".to_string());
+                        } else {
+                            let _ = tx.send(format!(
+                                "⚠️ 計画実行が部分的に完了: {}",
+                                result.final_message
+                            ));
+                        }
+                        let _ = tx.send(format!("📊 実行時間: {}秒", result.total_duration));
+                        let _ = tx.send(format!(
+                            "✅ 完了ステップ: {}/{}",
+                            result.completed_steps.len(),
+                            result.completed_steps.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    if let Ok(pm) = plan_manager.lock() {
+                        let _ = pm.cancel_execution(&plan_id);
+                    }
+
+                    if let Some(tx) = ui_tx {
+                        let _ = tx.send(format!("❌ 計画実行に失敗: {}", e));
+                    }
+                }
+            }
+        });
     }
 }

@@ -219,8 +219,7 @@ mod tests {
             .await
             .expect("Failed to create RepomapStore");
 
-        let mut symbols = Vec::new();
-        symbols.push(SymbolInfo {
+        let symbols = vec![SymbolInfo {
             name: "test_function".to_string(),
             kind: SymbolKind::Function,
             file: project_root.join("src/main.rs"),
@@ -231,7 +230,7 @@ mod tests {
             parent: None,
             file_total_lines: 10,
             function_lines: Some(3),
-        });
+        }];
         let repomap = RepoMap { symbols };
         let mut hashes = HashMap::new();
         hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());

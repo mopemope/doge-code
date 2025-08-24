@@ -1,0 +1,730 @@
+use crate::analysis::RepoMap;
+use crate::llm::{ChatMessage, OpenAIClient, run_agent_loop};
+use crate::planning::task_types::*;
+use crate::tools::FsTools;
+use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+
+/// LLMを活用したタスク分解器
+#[derive(Clone)]
+pub struct LlmTaskDecomposer {
+    client: OpenAIClient,
+    model: String,
+    fs_tools: FsTools,
+    repomap: Arc<RwLock<Option<RepoMap>>>,
+}
+
+/// LLMからの分解結果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmDecompositionResult {
+    pub reasoning: String,
+    pub steps: Vec<LlmTaskStep>,
+    pub complexity_assessment: String,
+    pub risks: Vec<String>,
+    pub prerequisites: Vec<String>,
+}
+
+/// LLMが生成するタスクステップ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTaskStep {
+    pub id: String,
+    pub description: String,
+    pub step_type: String, // "analysis", "planning", "implementation", "validation", "cleanup"
+    pub dependencies: Vec<String>,
+    pub estimated_duration_minutes: u32,
+    pub required_tools: Vec<String>,
+    pub validation_criteria: Vec<String>,
+    pub detailed_instructions: String,
+    pub potential_issues: Vec<String>,
+}
+
+/// プロジェクトコンテキスト情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectContext {
+    pub project_type: String,
+    pub main_languages: Vec<String>,
+    pub key_files: Vec<String>,
+    pub architecture_notes: String,
+    pub recent_changes: Vec<String>,
+}
+
+impl LlmTaskDecomposer {
+    /// 新しいLLMタスク分解器を作成
+    pub fn new(
+        client: OpenAIClient,
+        model: String,
+        fs_tools: FsTools,
+        repomap: Arc<RwLock<Option<RepoMap>>>,
+    ) -> Self {
+        Self {
+            client,
+            model,
+            fs_tools,
+            repomap,
+        }
+    }
+
+    /// 複雑なタスクをLLMを使って分解
+    pub async fn decompose_complex_task(
+        &self,
+        task_description: &str,
+        classification: &TaskClassification,
+    ) -> Result<Vec<TaskStep>> {
+        info!(
+            "Starting LLM-assisted decomposition for: {}",
+            task_description
+        );
+
+        // 1. プロジェクトコンテキストを収集
+        let project_context = self.gather_project_context().await?;
+
+        // 2. LLMに分解を依頼
+        let llm_result = self
+            .request_llm_decomposition(task_description, classification, &project_context)
+            .await?;
+
+        // 3. LLMの結果を内部形式に変換
+        let steps = self.convert_llm_steps_to_task_steps(llm_result.steps)?;
+
+        // 4. 分解結果を検証・調整
+        let validated_steps = self
+            .validate_and_adjust_steps(steps, classification)
+            .await?;
+
+        info!(
+            "LLM decomposition completed with {} steps",
+            validated_steps.len()
+        );
+        Ok(validated_steps)
+    }
+
+    /// プロジェクトコンテキストを収集
+    async fn gather_project_context(&self) -> Result<ProjectContext> {
+        debug!("Gathering project context");
+
+        let mut context = ProjectContext {
+            project_type: "Unknown".to_string(),
+            main_languages: Vec::new(),
+            key_files: Vec::new(),
+            architecture_notes: String::new(),
+            recent_changes: Vec::new(),
+        };
+
+        // Cargo.tomlの存在確認でRustプロジェクトかチェック
+        if self.fs_tools.fs_read("Cargo.toml", None, None).is_ok() {
+            context.project_type = "Rust".to_string();
+            context.main_languages.push("Rust".to_string());
+            context.key_files.push("Cargo.toml".to_string());
+            context.key_files.push("src/main.rs".to_string());
+        }
+
+        // package.jsonの存在確認でNode.jsプロジェクトかチェック
+        if self.fs_tools.fs_read("package.json", None, None).is_ok() {
+            if context.project_type == "Unknown" {
+                context.project_type = "Node.js".to_string();
+            } else {
+                context.project_type = format!("{}/Node.js", context.project_type);
+            }
+            context.main_languages.push("JavaScript".to_string());
+            context.main_languages.push("TypeScript".to_string());
+            context.key_files.push("package.json".to_string());
+        }
+
+        // repomapから主要ファイルを取得
+        if let Some(repomap) = self.repomap.read().await.as_ref() {
+            // ファイルサイズでソートして主要ファイルを特定
+            let mut files_with_size: Vec<_> = repomap
+                .symbols
+                .iter()
+                .map(|symbol| symbol.file.to_string_lossy().to_string())
+                .collect();
+            files_with_size.sort();
+            files_with_size.dedup();
+
+            // 上位10ファイルを主要ファイルとして追加
+            for file in files_with_size.iter().take(10) {
+                if !context.key_files.contains(file) {
+                    context.key_files.push(file.clone());
+                }
+            }
+
+            // アーキテクチャノートを生成
+            let total_symbols = repomap.symbols.len();
+            let total_files = files_with_size.len();
+            context.architecture_notes = format!(
+                "Project contains {} symbols across {} files. Main modules appear to be organized in a typical {} project structure.",
+                total_symbols, total_files, context.project_type
+            );
+        }
+
+        debug!("Project context gathered: {:?}", context);
+        Ok(context)
+    }
+
+    /// LLMに分解を依頼
+    async fn request_llm_decomposition(
+        &self,
+        task_description: &str,
+        classification: &TaskClassification,
+        project_context: &ProjectContext,
+    ) -> Result<LlmDecompositionResult> {
+        debug!("Requesting LLM decomposition");
+
+        let prompt =
+            self.build_decomposition_prompt(task_description, classification, project_context);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(prompt),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+
+        match run_agent_loop(&self.client, &self.model, &self.fs_tools, messages, None).await {
+            Ok((_, choice_message)) => {
+                // LLMの応答をパース
+                self.parse_llm_response(&choice_message.content).await
+            }
+            Err(e) => {
+                error!("LLM decomposition request failed: {}", e);
+                Err(anyhow!("LLM decomposition failed: {}", e))
+            }
+        }
+    }
+
+    /// 分解プロンプトを構築
+    fn build_decomposition_prompt(
+        &self,
+        task_description: &str,
+        classification: &TaskClassification,
+        project_context: &ProjectContext,
+    ) -> String {
+        format!(
+            r#"
+# タスク分解エキスパートシステム
+
+あなたは経験豊富なソフトウェアエンジニアリングのエキスパートです。
+複雑なタスクを実行可能な具体的なステップに分解することが専門です。
+
+## 分解対象タスク
+**タスク**: {}
+
+## タスク分類情報
+- **タイプ**: {:?}
+- **複雑度**: {:.2}/1.0
+- **推定ステップ数**: {}
+- **リスクレベル**: {:?}
+- **信頼度**: {:.1}%
+
+## プロジェクトコンテキスト
+- **プロジェクトタイプ**: {}
+- **主要言語**: {}
+- **重要ファイル**: {}
+- **アーキテクチャ**: {}
+
+## 利用可能なツール
+- fs_read: ファイル読み込み
+- fs_write: ファイル書き込み
+- edit: ファイル編集（部分的な変更）
+- search_text: テキスト検索
+- find_file: ファイル検索
+- get_symbol_info: シンボル情報取得
+- search_repomap: リポジトリマップ検索
+- execute_bash: シェルコマンド実行
+- create_patch: パッチ作成
+- apply_patch: パッチ適用
+
+## 分解要件
+
+以下のJSON形式で、実行可能なステップに分解してください：
+
+```json
+{{
+  "reasoning": "分解の理由と戦略の説明",
+  "complexity_assessment": "複雑さの詳細評価",
+  "risks": ["リスク1", "リスク2"],
+  "prerequisites": ["前提条件1", "前提条件2"],
+  "steps": [
+    {{
+      "id": "step_1",
+      "description": "ステップの簡潔な説明",
+      "step_type": "analysis|planning|implementation|validation|cleanup",
+      "dependencies": [],
+      "estimated_duration_minutes": 5,
+      "required_tools": ["tool1", "tool2"],
+      "validation_criteria": ["検証条件1", "検証条件2"],
+      "detailed_instructions": "詳細な実行手順",
+      "potential_issues": ["潜在的な問題1", "潜在的な問題2"]
+    }}
+  ]
+}}
+```
+
+## 重要な指針
+
+1. **具体性**: 各ステップは明確で実行可能であること
+2. **段階性**: 複雑なタスクは小さなステップに分割
+3. **依存関係**: ステップ間の依存関係を明確に
+4. **検証**: 各ステップに適切な検証条件を設定
+5. **リスク管理**: 潜在的な問題を事前に特定
+6. **ツール活用**: 利用可能なツールを効果的に使用
+7. **時間見積もり**: 現実的な時間見積もりを提供
+
+特に以下の点に注意してください：
+- ファイル変更前には必ず現在の状態を分析
+- 大きな変更は段階的に実行
+- 各段階でコンパイル/テストによる検証
+- バックアップや元に戻す手順も考慮
+- エラー処理と回復手順を含める
+
+JSON形式で回答してください。
+"#,
+            task_description,
+            classification.task_type,
+            classification.complexity_score,
+            classification.estimated_steps,
+            classification.risk_level,
+            classification.confidence * 100.0,
+            project_context.project_type,
+            project_context.main_languages.join(", "),
+            project_context.key_files.join(", "),
+            project_context.architecture_notes
+        )
+    }
+
+    /// LLMの応答をパース
+    async fn parse_llm_response(&self, response: &str) -> Result<LlmDecompositionResult> {
+        debug!("Parsing LLM response");
+
+        // JSONブロックを抽出
+        let json_start = response.find("```json").or_else(|| response.find('{'));
+        let json_end = response.rfind("```").or_else(|| response.rfind('}'));
+
+        let json_content = match (json_start, json_end) {
+            (Some(start), Some(end)) => {
+                let start_pos = if response[start..].starts_with("```json") {
+                    start + 7 // "```json".len()
+                } else {
+                    start
+                };
+                let end_pos = if response[..end].ends_with('}')
+                    && response.get(end..end + 3) == Some("```")
+                {
+                    end
+                } else {
+                    end + 1
+                };
+                &response[start_pos..end_pos]
+            }
+            _ => response, // JSONブロックが見つからない場合は全体を試す
+        };
+
+        match serde_json::from_str::<LlmDecompositionResult>(json_content.trim()) {
+            Ok(result) => {
+                debug!("Successfully parsed LLM decomposition result");
+                Ok(result)
+            }
+            Err(e) => {
+                warn!("Failed to parse LLM response as JSON: {}", e);
+                warn!("Response content: {}", json_content);
+
+                // フォールバック: 構造化されていない応答から基本的なステップを抽出
+                self.extract_fallback_steps(response).await
+            }
+        }
+    }
+
+    /// フォールバック: 構造化されていない応答からステップを抽出
+    async fn extract_fallback_steps(&self, response: &str) -> Result<LlmDecompositionResult> {
+        debug!("Extracting fallback steps from unstructured response");
+
+        let lines: Vec<&str> = response.lines().collect();
+        let mut steps = Vec::new();
+        let mut step_counter = 1;
+
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // ステップらしい行を検出（番号付きリスト、箇条書きなど）
+            if line.starts_with(char::is_numeric)
+                || line.starts_with("- ")
+                || line.starts_with("* ")
+                || line.starts_with("1.")
+                || line.starts_with("2.")
+            {
+                let description = line
+                    .trim_start_matches(char::is_numeric)
+                    .trim_start_matches('.')
+                    .trim_start_matches('-')
+                    .trim_start_matches('*')
+                    .trim()
+                    .to_string();
+
+                if !description.is_empty() && description.len() > 10 {
+                    let step_type = self.infer_step_type(&description);
+                    let tools = self.infer_required_tools(&description);
+
+                    steps.push(LlmTaskStep {
+                        id: format!("fallback_step_{}", step_counter),
+                        description: description.clone(),
+                        step_type,
+                        dependencies: if step_counter > 1 {
+                            vec![format!("fallback_step_{}", step_counter - 1)]
+                        } else {
+                            vec![]
+                        },
+                        estimated_duration_minutes: 10,
+                        required_tools: tools,
+                        validation_criteria: vec!["ステップが完了している".to_string()],
+                        detailed_instructions: description,
+                        potential_issues: vec!["予期しない問題が発生する可能性".to_string()],
+                    });
+
+                    step_counter += 1;
+                }
+            }
+        }
+
+        if steps.is_empty() {
+            return Err(anyhow!("Could not extract any steps from LLM response"));
+        }
+
+        Ok(LlmDecompositionResult {
+            reasoning: "LLMの応答から自動抽出されたステップです".to_string(),
+            steps,
+            complexity_assessment: "中程度の複雑さと推定されます".to_string(),
+            risks: vec!["詳細な分析が不十分な可能性".to_string()],
+            prerequisites: vec!["プロジェクトの基本的な理解".to_string()],
+        })
+    }
+
+    /// ステップタイプを推測
+    fn infer_step_type(&self, description: &str) -> String {
+        let desc_lower = description.to_lowercase();
+
+        if desc_lower.contains("分析") || desc_lower.contains("調査") || desc_lower.contains("確認")
+        {
+            "analysis".to_string()
+        } else if desc_lower.contains("計画")
+            || desc_lower.contains("設計")
+            || desc_lower.contains("検討")
+        {
+            "planning".to_string()
+        } else if desc_lower.contains("実装")
+            || desc_lower.contains("作成")
+            || desc_lower.contains("変更")
+            || desc_lower.contains("追加")
+        {
+            "implementation".to_string()
+        } else if desc_lower.contains("テスト")
+            || desc_lower.contains("検証")
+            || desc_lower.contains("確認")
+        {
+            "validation".to_string()
+        } else if desc_lower.contains("クリーンアップ") || desc_lower.contains("整理") {
+            "cleanup".to_string()
+        } else {
+            "implementation".to_string() // デフォルト
+        }
+    }
+
+    /// 必要なツールを推測
+    fn infer_required_tools(&self, description: &str) -> Vec<String> {
+        let desc_lower = description.to_lowercase();
+        let mut tools = Vec::new();
+
+        if desc_lower.contains("読") || desc_lower.contains("確認") {
+            tools.push("fs_read".to_string());
+        }
+        if desc_lower.contains("書") || desc_lower.contains("作成") {
+            tools.push("fs_write".to_string());
+        }
+        if desc_lower.contains("編集") || desc_lower.contains("変更") {
+            tools.push("edit".to_string());
+        }
+        if desc_lower.contains("検索") || desc_lower.contains("探") {
+            tools.push("search_text".to_string());
+        }
+        if desc_lower.contains("実行") || desc_lower.contains("コマンド") {
+            tools.push("execute_bash".to_string());
+        }
+        if desc_lower.contains("シンボル") || desc_lower.contains("関数") {
+            tools.push("get_symbol_info".to_string());
+        }
+
+        if tools.is_empty() {
+            tools.push("fs_read".to_string()); // デフォルト
+        }
+
+        tools
+    }
+
+    /// LLMステップを内部形式に変換
+    fn convert_llm_steps_to_task_steps(
+        &self,
+        llm_steps: Vec<LlmTaskStep>,
+    ) -> Result<Vec<TaskStep>> {
+        debug!(
+            "Converting {} LLM steps to internal format",
+            llm_steps.len()
+        );
+
+        let mut task_steps = Vec::new();
+
+        for llm_step in llm_steps {
+            let step_type = match llm_step.step_type.as_str() {
+                "analysis" => StepType::Analysis,
+                "planning" => StepType::Planning,
+                "implementation" => StepType::Implementation,
+                "validation" => StepType::Validation,
+                "cleanup" => StepType::Cleanup,
+                _ => {
+                    warn!(
+                        "Unknown step type: {}, defaulting to Implementation",
+                        llm_step.step_type
+                    );
+                    StepType::Implementation
+                }
+            };
+
+            let task_step = TaskStep {
+                id: llm_step.id,
+                description: llm_step.description,
+                step_type,
+                dependencies: llm_step.dependencies,
+                estimated_duration: (llm_step.estimated_duration_minutes * 60) as u64, // 秒に変換
+                required_tools: llm_step.required_tools,
+                validation_criteria: llm_step.validation_criteria,
+                prompt_template: Some(llm_step.detailed_instructions),
+            };
+
+            task_steps.push(task_step);
+        }
+
+        Ok(task_steps)
+    }
+
+    /// 分解結果を検証・調整
+    async fn validate_and_adjust_steps(
+        &self,
+        steps: Vec<TaskStep>,
+        classification: &TaskClassification,
+    ) -> Result<Vec<TaskStep>> {
+        debug!("Validating and adjusting {} steps", steps.len());
+
+        let mut validated_steps = Vec::new();
+
+        for step in steps {
+            let mut adjusted_step = step;
+
+            // 時間見積もりの調整
+            adjusted_step.estimated_duration = adjusted_step.estimated_duration.clamp(30, 3600);
+
+            // 必要ツールの検証
+            adjusted_step.required_tools =
+                self.validate_required_tools(adjusted_step.required_tools);
+
+            // 依存関係の検証
+            adjusted_step.dependencies =
+                self.validate_dependencies(&adjusted_step.dependencies, &validated_steps);
+
+            // 検証条件の追加
+            if adjusted_step.validation_criteria.is_empty() {
+                adjusted_step.validation_criteria =
+                    self.generate_default_validation_criteria(&adjusted_step.step_type);
+            }
+
+            validated_steps.push(adjusted_step);
+        }
+
+        // 複雑度に応じた最終調整
+        if classification.complexity_score > 0.8 && validated_steps.len() < 5 {
+            warn!("High complexity task has few steps, adding safety validation step");
+            validated_steps.push(
+                TaskStep::new(
+                    "final_safety_check".to_string(),
+                    "最終的な安全性チェックと動作確認".to_string(),
+                    StepType::Validation,
+                    vec!["execute_bash".to_string()],
+                )
+                .with_duration(300)
+                .with_validation(vec!["全体的な動作が正常".to_string()]),
+            );
+        }
+
+        info!(
+            "Validation completed: {} steps validated",
+            validated_steps.len()
+        );
+        Ok(validated_steps)
+    }
+
+    /// 必要ツールの検証
+    fn validate_required_tools(&self, tools: Vec<String>) -> Vec<String> {
+        let valid_tools = [
+            "fs_read",
+            "fs_write",
+            "edit",
+            "search_text",
+            "find_file",
+            "get_symbol_info",
+            "search_repomap",
+            "execute_bash",
+            "create_patch",
+            "apply_patch",
+            "fs_list",
+            "get_file_sha256",
+        ];
+
+        tools
+            .into_iter()
+            .filter(|tool| valid_tools.contains(&tool.as_str()))
+            .collect()
+    }
+
+    /// 依存関係の検証
+    fn validate_dependencies(
+        &self,
+        dependencies: &[String],
+        existing_steps: &[TaskStep],
+    ) -> Vec<String> {
+        let existing_ids: Vec<String> = existing_steps.iter().map(|s| s.id.clone()).collect();
+
+        dependencies
+            .iter()
+            .filter(|dep| existing_ids.contains(dep))
+            .cloned()
+            .collect()
+    }
+
+    /// デフォルト検証条件を生成
+    fn generate_default_validation_criteria(&self, step_type: &StepType) -> Vec<String> {
+        match step_type {
+            StepType::Analysis => vec!["分析が完了している".to_string()],
+            StepType::Planning => vec!["計画が明確である".to_string()],
+            StepType::Implementation => vec![
+                "実装が完了している".to_string(),
+                "コンパイルエラーなし".to_string(),
+            ],
+            StepType::Validation => vec!["検証が成功している".to_string()],
+            StepType::Cleanup => vec!["クリーンアップが完了している".to_string()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::OpenAIClient;
+    use crate::tools::FsTools;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn test_project_context_gathering() {
+        // モックのFsToolsとrepomapを作成
+        let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
+        let fs_tools = FsTools::new(repomap.clone());
+
+        // モックのOpenAIClientを作成（テスト用）
+        let client = OpenAIClient::new(
+            "https://api.openai.com/v1".to_string(),
+            "test-key".to_string(),
+        )
+        .unwrap();
+
+        let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+
+        let context = decomposer.gather_project_context().await.unwrap();
+
+        // 基本的な構造が正しいことを確認
+        assert!(!context.project_type.is_empty());
+        assert!(!context.main_languages.is_empty() || context.project_type == "Unknown");
+    }
+
+    #[test]
+    fn test_step_type_inference() {
+        let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
+        let fs_tools = FsTools::new(repomap.clone());
+        let client = OpenAIClient::new(
+            "https://api.openai.com/v1".to_string(),
+            "test-key".to_string(),
+        )
+        .unwrap();
+
+        let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+
+        assert_eq!(decomposer.infer_step_type("コードを分析する"), "analysis");
+        assert_eq!(decomposer.infer_step_type("計画を作成する"), "planning");
+        assert_eq!(
+            decomposer.infer_step_type("機能を実装する"),
+            "implementation"
+        );
+        assert_eq!(decomposer.infer_step_type("テストを実行する"), "validation");
+        assert_eq!(decomposer.infer_step_type("ファイルを整理する"), "cleanup");
+    }
+
+    #[test]
+    fn test_tool_inference() {
+        let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
+        let fs_tools = FsTools::new(repomap.clone());
+        let client = OpenAIClient::new(
+            "https://api.openai.com/v1".to_string(),
+            "test-key".to_string(),
+        )
+        .unwrap();
+
+        let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+
+        let tools = decomposer.infer_required_tools("ファイルを読んで編集する");
+        assert!(tools.contains(&"fs_read".to_string()));
+        assert!(tools.contains(&"edit".to_string()));
+
+        let tools = decomposer.infer_required_tools("コードを検索する");
+        assert!(tools.contains(&"search_text".to_string()));
+
+        let tools = decomposer.infer_required_tools("コマンドを実行する");
+        assert!(tools.contains(&"execute_bash".to_string()));
+    }
+
+    #[test]
+    fn test_llm_step_conversion() {
+        let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
+        let fs_tools = FsTools::new(repomap.clone());
+        let client = OpenAIClient::new(
+            "https://api.openai.com/v1".to_string(),
+            "test-key".to_string(),
+        )
+        .unwrap();
+
+        let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+
+        let llm_steps = vec![LlmTaskStep {
+            id: "test_step".to_string(),
+            description: "テストステップ".to_string(),
+            step_type: "analysis".to_string(),
+            dependencies: vec![],
+            estimated_duration_minutes: 5,
+            required_tools: vec!["fs_read".to_string()],
+            validation_criteria: vec!["完了している".to_string()],
+            detailed_instructions: "詳細な手順".to_string(),
+            potential_issues: vec![],
+        }];
+
+        let task_steps = decomposer
+            .convert_llm_steps_to_task_steps(llm_steps)
+            .unwrap();
+
+        assert_eq!(task_steps.len(), 1);
+        assert_eq!(task_steps[0].id, "test_step");
+        assert_eq!(task_steps[0].description, "テストステップ");
+        assert_eq!(task_steps[0].step_type, StepType::Analysis);
+        assert_eq!(task_steps[0].estimated_duration, 300); // 5分 = 300秒
+    }
+}

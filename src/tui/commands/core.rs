@@ -1,5 +1,6 @@
 use crate::analysis::RepoMap;
 use crate::llm::OpenAIClient;
+use crate::planning::{PlanManager, TaskAnalyzer};
 use crate::tools::FsTools;
 use crate::tui::commands_sessions::SessionManager;
 use crate::tui::view::TuiApp;
@@ -27,4 +28,8 @@ pub struct TuiExecutor {
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
     // Available slash commands
     pub(crate) slash_commands: Vec<String>,
+    // Task analyzer for planning
+    pub(crate) task_analyzer: TaskAnalyzer,
+    // Plan manager for execution
+    pub(crate) plan_manager: Arc<Mutex<PlanManager>>,
 }
