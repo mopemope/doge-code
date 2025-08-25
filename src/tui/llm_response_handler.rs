@@ -9,15 +9,32 @@ impl TuiApp {
         // Clear the last LLM response content as streaming has started/resumed
         self.last_llm_response_content = None;
 
-        // Append received token to the parsing buffer for final processing
-        self.llm_parsing_buffer.push_str(s);
-        debug!(appended_content = %s, "Appended token to llm_parsing_buffer");
+        // Sanitize incoming token to avoid terminal-control sequences that can break raw mode
+        fn sanitize_for_display(input: &str) -> String {
+            // Remove common ANSI CSI sequences
+            let csi_re = Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap();
+            // Remove OSC sequences: ESC ] ... BEL or ESC \
+            let osc_re = Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").unwrap();
 
-        // For immediate display during streaming, add the raw token with margin
+            let mut s = csi_re.replace_all(input, "").to_string();
+            s = osc_re.replace_all(&s, "").to_string();
+
+            // Remove other control chars except newline and tab
+            s.chars()
+                .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+                .collect()
+        }
+
+        let clean = sanitize_for_display(s);
+
+        // Append received (sanitized) token to the parsing buffer for final processing
+        self.llm_parsing_buffer.push_str(&clean);
+        debug!(appended_content = %clean, "Appended token to llm_parsing_buffer");
+
+        // For immediate display during streaming, add the sanitized token with margin
         // This will be replaced by structured content when streaming completes
-        if !s.trim().is_empty() {
-            let lines: Vec<&str> = s.lines().collect();
-            for line in lines {
+        if !clean.trim().is_empty() {
+            for line in clean.lines() {
                 let line_with_margin = format!("  {}", line); // 2-space margin for streaming content
                 self.push_log(line_with_margin);
             }
