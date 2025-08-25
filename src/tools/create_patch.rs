@@ -33,7 +33,11 @@ pub struct CreatePatchResult {
 }
 
 pub async fn create_patch(params: CreatePatchParams) -> Result<CreatePatchResult> {
-    let patch = diffy::create_patch(&params.original_content, &params.modified_content);
+    // Normalize line endings to LF for consistent diffing.
+    let original_normalized = params.original_content.replace("\r\n", "\n");
+    let modified_normalized = params.modified_content.replace("\r\n", "\n");
+
+    let patch = diffy::create_patch(&original_normalized, &modified_normalized);
     Ok(CreatePatchResult {
         patch_content: patch.to_string(),
     })
@@ -63,5 +67,43 @@ mod tests {
         let result = create_patch(params).await.unwrap();
         assert!(result.patch_content.contains("-line two"));
         assert!(result.patch_content.contains("+line 2"));
+    }
+
+    #[tokio::test]
+    async fn test_create_patch_with_mixed_line_endings() {
+        let params = CreatePatchParams {
+            original_content: "windows\r\nline\r\n".to_string(),
+            modified_content: "unix\nline\n".to_string(),
+        };
+        let result = create_patch(params).await.unwrap();
+        assert!(result.patch_content.contains("-windows"));
+        assert!(!result.patch_content.contains("-line")); // This line is unchanged, so it should not be in the patch with a '-' prefix
+        assert!(result.patch_content.contains("+unix"));
+        assert!(result.patch_content.contains(" line")); // This line is unchanged, so it should be in the patch with a space prefix
+    }
+
+    #[tokio::test]
+    async fn test_create_patch_crlf_to_lf() {
+        let params = CreatePatchParams {
+            original_content: "crlf\r\nending\r\n".to_string(),
+            modified_content: "crlf\nending\n".to_string(),
+        };
+        let result = create_patch(params).await.unwrap();
+        // diffy::create_patch returns a header even if there are no changes.
+        // A patch with no actual changes will have no "hunks".
+        let patch = diffy::Patch::from_str(&result.patch_content).unwrap();
+        assert!(patch.hunks().is_empty(), "Patch should have no hunks for content that is identical after normalization.");
+    }
+
+    #[tokio::test]
+    async fn test_create_patch_with_mixed_endings_in_modified_content() {
+        let params = CreatePatchParams {
+            original_content: "line 1\nline 2\n".to_string(),
+            modified_content: "line 1\r\nline two\n".to_string(),
+        };
+        let result = create_patch(params).await.unwrap();
+        assert!(result.patch_content.contains("-line 2"));
+        assert!(result.patch_content.contains("+line two"));
+        assert!(!result.patch_content.contains("\r"));
     }
 }

@@ -54,14 +54,19 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
     }
 
     // 1. Read file content
-    let original_content = fs::read_to_string(path)
+    let original_content_raw = fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
-    // 2. Verify file hash (if provided)
+    // Detect line ending style
+    let has_crlf = original_content_raw.contains("\r\n");
+    // Normalize line endings to LF for consistent diffing
+    let original_content = original_content_raw.replace("\r\n", "\n");
+
+    // 2. Verify file hash (if provided) - check against raw content
     if let Some(expected_hash) = &params.file_hash_sha256 {
         let mut hasher = Sha256::new();
-        hasher.update(original_content.as_bytes());
+        hasher.update(original_content_raw.as_bytes());
         let actual_hash = format!("{:x}", hasher.finalize());
 
         if &actual_hash != expected_hash {
@@ -69,7 +74,7 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
                 success: false,
                 message: "File hash mismatch. The file content has changed since it was last read."
                     .to_string(),
-                original_content: Some(original_content),
+                original_content: Some(original_content_raw),
                 modified_content: None,
             });
         }
@@ -79,37 +84,42 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
     let patch = diffy::Patch::from_str(patch_content)
         .map_err(|e| anyhow::anyhow!("Failed to parse patch: {e}"))?;
 
-    let patched_content = match diffy::apply(&original_content, &patch) {
+    let mut patched_content_lf = match diffy::apply(&original_content, &patch) {
         Ok(content) => content,
         Err(e) => {
             return Ok(ApplyPatchResult {
                 success: false,
                 message: format!("Failed to apply patch: {e}"),
-                original_content: Some(original_content),
+                original_content: Some(original_content_raw),
                 modified_content: None,
             });
         }
     };
 
+    // Restore original line endings if necessary
+    if has_crlf {
+        patched_content_lf = patched_content_lf.replace('\n', "\r\n");
+    }
+
     if dry_run {
         return Ok(ApplyPatchResult {
             success: true,
             message: "Dry run successful. Patch can be applied cleanly.".to_string(),
-            original_content: Some(original_content),
-            modified_content: Some(patched_content),
+            original_content: Some(original_content_raw),
+            modified_content: Some(patched_content_lf),
         });
     }
 
     // 4. Write the modified content back to the file
-    fs::write(path, &patched_content)
+    fs::write(path, &patched_content_lf)
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
     Ok(ApplyPatchResult {
         success: true,
         message: "File patched successfully.".to_string(),
-        original_content: Some(original_content),
-        modified_content: Some(patched_content),
+        original_content: Some(original_content_raw),
+        modified_content: Some(patched_content_lf),
     })
 }
 
@@ -206,5 +216,168 @@ mod tests {
         let result = apply_patch(params).await.unwrap();
         assert!(!result.success);
         assert!(result.message.contains("File hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_create_and_apply_patch_integration() {
+        let original_content = "line 1\nline 2\nline 3\n";
+        let modified_content = "line 1\nline two\nline 3\n";
+
+        // Create a temporary file with the original content
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(original_content.as_bytes()).unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+
+        // 1. Create the patch
+        let patch_content = create_patch_content(original_content, modified_content);
+        assert!(patch_content.contains("-line 2"));
+        assert!(patch_content.contains("+line two"));
+
+        // 2. Apply the patch
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+            file_hash_sha256: Some(calculate_sha256(original_content)),
+            dry_run: Some(false),
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        // 3. Verify the result
+        assert!(result.success);
+        let final_content = fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_conflict() {
+        let original_content = "line A\nline B\nline C\n";
+        let modified_content = "line A\nline Bee\nline C\n";
+        let actual_content_in_file = "line A\nline Z\nline C\n"; // This is different from original_content
+
+        // Create a temporary file with the "actual" content
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file
+            .write_all(actual_content_in_file.as_bytes())
+            .unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+
+        // 1. Create the patch based on the "original" content
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        // 2. Attempt to apply the patch to the "actual" content
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+            // Note: We use the hash of the *actual* content for the check to pass
+            file_hash_sha256: Some(calculate_sha256(actual_content_in_file)),
+            dry_run: Some(false),
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        // 3. Verify that the patch application failed due to content mismatch
+        assert!(!result.success);
+        assert!(result.message.contains("Failed to apply patch"));
+
+        // Ensure the file content remains unchanged
+        let final_content = fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(final_content, actual_content_in_file);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_requires_absolute_path() {
+        let params = ApplyPatchParams {
+            file_path: "relative/path/to/file.txt".to_string(),
+            patch_content: "any patch".to_string(),
+            file_hash_sha256: None,
+            dry_run: Some(false),
+        };
+
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("File path must be absolute"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_with_crlf_line_endings() {
+        let original_content = "first line\r\nsecond line\r\n";
+        let modified_content = "first line\r\nsecond line modified\r\n";
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(original_content.as_bytes()).unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+
+        // Create patch using LF-normalized content, as our tool now handles this internally
+        let patch_content = create_patch_content(
+            &original_content.replace("\r\n", "\n"),
+            &modified_content.replace("\r\n", "\n"),
+        );
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+            file_hash_sha256: Some(calculate_sha256(original_content)),
+            dry_run: Some(false),
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success, "Patch should apply cleanly. Message: {}", result.message);
+
+        let final_content = fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_no_newline_at_end_of_file() {
+        let original_content = "hello";
+        let modified_content = "hello world";
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(original_content.as_bytes()).unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+            file_hash_sha256: Some(calculate_sha256(original_content)),
+            dry_run: Some(false),
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_large_change() {
+        let original_content = std::iter::repeat("line\n").take(100).collect::<String>();
+        let modified_content = std::iter::repeat("changed line\n")
+            .take(100)
+            .collect::<String>();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(original_content.as_bytes()).unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+
+        let patch_content = create_patch_content(&original_content, &modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+            file_hash_sha256: Some(calculate_sha256(&original_content)),
+            dry_run: Some(false),
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(final_content, modified_content);
     }
 }
