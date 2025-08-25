@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-/// ファイルのSHA256ハッシュを計算
+/// Calculate SHA256 hash of a file
 pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     let content = fs::read(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -17,13 +17,13 @@ pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash))
 }
 
-/// 複数ファイルのハッシュを並列計算
+/// Calculate hashes of multiple files in parallel
 pub async fn calculate_file_hashes(file_paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     use tokio::task;
 
     let mut tasks = Vec::new();
 
-    // ファイルを並列処理用にチャンクに分割
+    // Split files into chunks for parallel processing
     let chunk_size = std::cmp::max(1, file_paths.len() / num_cpus::get());
     let chunks: Vec<Vec<PathBuf>> = file_paths
         .chunks(chunk_size)
@@ -74,7 +74,7 @@ pub async fn calculate_file_hashes(file_paths: &[PathBuf]) -> HashMap<PathBuf, S
     all_hashes
 }
 
-/// ファイルハッシュの差分を計算
+/// Calculate file hash differences
 pub fn calculate_hash_diff(
     old_hashes: &HashMap<PathBuf, String>,
     new_hashes: &HashMap<PathBuf, String>,
@@ -87,14 +87,14 @@ pub fn calculate_hash_diff(
     for (path, new_hash) in new_hashes {
         match old_hashes.get(path) {
             Some(old_hash) if old_hash == new_hash => {
-                // ハッシュが同じ場合は変更なし
+                // No changes if hashes are the same
             }
             Some(_) => {
-                // ハッシュが変更された
+                // Hash has changed
                 modified.push(path.clone());
             }
             None => {
-                // 新しいファイル
+                // New file
                 added.push(path.clone());
             }
         }
@@ -114,7 +114,7 @@ pub fn calculate_hash_diff(
     }
 }
 
-/// ファイルハッシュの差分情報
+/// File hash difference information
 #[derive(Debug, Clone)]
 pub struct HashDiff {
     pub added: Vec<PathBuf>,
@@ -123,17 +123,17 @@ pub struct HashDiff {
 }
 
 impl HashDiff {
-    /// 変更があるかどうか
+    /// Whether there are changes
     pub fn has_changes(&self) -> bool {
         !self.added.is_empty() || !self.modified.is_empty() || !self.removed.is_empty()
     }
 
-    /// 変更されたファイルの総数
+    /// Total number of changed files
     pub fn total_changes(&self) -> usize {
         self.added.len() + self.modified.len() + self.removed.len()
     }
 
-    /// 変更されたファイルのリスト（追加・変更のみ、削除は除く）
+    /// List of changed files (added/modified only, excluding deleted)
     pub fn changed_files(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
         files.extend(self.added.iter().cloned());

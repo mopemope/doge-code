@@ -1,6 +1,6 @@
 use crate::tui::state::TuiApp; // import TuiApp
 use regex::Regex;
-use tracing::debug; // tracingをインポート
+use tracing::debug; // import tracing
 
 // Implement LLM response handling logic for TuiApp
 impl TuiApp {

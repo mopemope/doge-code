@@ -324,7 +324,7 @@ impl Analyzer {
         self.build_with_cache().await
     }
 
-    /// キャッシュを使用してrepomapを構築
+    /// Build repomap using cache
     pub async fn build_with_cache(&mut self) -> Result<RepoMap> {
         info!(
             "Starting to build RepoMap with cache for project at {:?}",
@@ -332,7 +332,7 @@ impl Analyzer {
         );
         let start_time = std::time::Instant::now();
 
-        // 対象ファイルを検索
+        // Search for target files
         let files = find_target_files(&self.root)?;
         info!("Found {} target files for analysis", files.len());
 
@@ -396,7 +396,7 @@ impl Analyzer {
         Ok(repomap)
     }
 
-    /// 差分更新でrepomapを構築
+    /// Build repomap with incremental updates
     async fn build_incremental(
         &mut self,
         cached_data: RepomapCache,
@@ -419,14 +419,14 @@ impl Analyzer {
             diff.removed.len()
         );
 
-        // 変更されたファイルのみを解析
+        // Analyze only changed files
         let changed_files = diff.changed_files();
         let mut new_maps = Vec::new();
 
         if !changed_files.is_empty() {
             info!("Re-analyzing {} changed files", changed_files.len());
 
-            // 変更されたファイルを並列処理
+            // Process changed files in parallel
             let chunk_size = std::cmp::max(1, changed_files.len() / num_cpus::get());
             let chunks: Vec<Vec<PathBuf>> = changed_files
                 .chunks(chunk_size)
@@ -477,7 +477,7 @@ impl Analyzer {
             }
         }
 
-        // 既存のrepomapから削除されたファイルのシンボルを除去
+        // Remove symbols from deleted files from the existing repomap
         let mut updated_repomap = cached_data.repomap;
         if !diff.removed.is_empty() {
             info!("Removing symbols from {} deleted files", diff.removed.len());
@@ -486,13 +486,13 @@ impl Analyzer {
                 .retain(|symbol| !diff.removed.contains(&symbol.file));
         }
 
-        // 変更されたファイルのシンボルを除去（新しいシンボルで置き換えるため）
+        // Remove symbols from changed files (to be replaced with new symbols)
         let changed_files_set: std::collections::HashSet<_> = changed_files.iter().collect();
         updated_repomap
             .symbols
             .retain(|symbol| !changed_files_set.contains(&symbol.file));
 
-        // 新しいシンボルを追加
+        // Add new symbols
         for new_map in new_maps {
             updated_repomap = updated_repomap.merge(new_map);
         }
@@ -505,7 +505,7 @@ impl Analyzer {
         Ok(updated_repomap)
     }
 
-    /// キャッシュをクリア
+    /// Clear cache
     pub async fn clear_cache(&self) -> Result<()> {
         self.cache_store
             .clear()

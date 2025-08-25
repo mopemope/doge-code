@@ -10,14 +10,14 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// 新しいSessionStoreを作成します。プロジェクトディレクトリ内の .doge/sessions にセッションデータを保存します。
+    /// Create a new SessionStore. Session data is stored in .doge/sessions in the project directory.
     pub fn new_default() -> Result<Self, SessionError> {
         let base = default_store_dir()?;
         fs::create_dir_all(&base).map_err(SessionError::CreateDirError)?;
         Ok(Self { root: base })
     }
 
-    /// 指定されたパスをルートディレクトリとするSessionStoreを作成します。
+    /// Create a SessionStore with the specified path as the root directory.
     #[allow(dead_code)]
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let root = root.into();
@@ -25,7 +25,7 @@ impl SessionStore {
         Ok(Self { root })
     }
 
-    /// すべてのセッションのメタデータを取得し、作成日時で降順にソートして返します。
+    /// Get metadata for all sessions and return them sorted by creation date in descending order.
     pub fn list(&self) -> Result<Vec<SessionMeta>, SessionError> {
         let mut out = Vec::new();
         if !self.root.exists() {
@@ -53,7 +53,7 @@ impl SessionStore {
         Ok(out)
     }
 
-    /// 新しいセッションを作成し、セッションデータを返します。
+    /// Create a new session and return the session data.
     pub fn create(&self, title: impl Into<String>) -> Result<SessionData, SessionError> {
         let id = Uuid::new_v4().to_string();
         let dir = self.root.join(&id);
@@ -77,7 +77,7 @@ impl SessionStore {
         Ok(data)
     }
 
-    /// セッションIDを指定して、セッションデータを読み込みます。
+    /// Load session data by specifying the session ID.
     pub fn load(&self, id: &str) -> Result<SessionData, SessionError> {
         // Validate ID format if necessary
         if id.is_empty() {
@@ -94,7 +94,7 @@ impl SessionStore {
         Ok(SessionData { meta, history })
     }
 
-    /// セッションデータを保存します。
+    /// Save the session data.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
         let dir = self.root.join(&data.meta.id);
         fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
@@ -111,7 +111,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// セッションIDを指定して、セッションデータを削除します。
+    /// Delete session data by specifying the session ID.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
         if id.is_empty() {
             return Err(SessionError::InvalidId(id.to_string()));
@@ -125,7 +125,7 @@ impl SessionStore {
 }
 
 fn default_store_dir() -> Result<PathBuf, SessionError> {
-    // プロジェクトディレクトリ内の .doge/sessions を使用する
+    // Use .doge/sessions in the project directory
     let project_dir = env::current_dir().map_err(SessionError::ReadError)?;
     let base = project_dir.join(".doge/sessions");
     Ok(base)

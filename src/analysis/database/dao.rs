@@ -130,7 +130,7 @@ impl RepomapDAO {
         }
 
         let symbols: Vec<AnalysisSymbolInfo> = if symbol_models.is_empty() {
-            vec![] // symbols が空でも OK
+            vec![] // symbols can be empty
         } else {
             symbol_models
                 .into_iter()
@@ -389,7 +389,7 @@ mod tests {
     async fn setup_test_db() -> (TempDir, DatabaseConnection) {
         let tmp_dir = TempDir::new().expect("Failed to create temp dir");
         let db_path = tmp_dir.path().join("test.db");
-        // 添加 `mode=rwc` 查询参数以确保文件被创建
+        // Add `mode=rwc` query parameter to ensure the file is created
         let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
         let db = Database::connect(&db_url)
             .await

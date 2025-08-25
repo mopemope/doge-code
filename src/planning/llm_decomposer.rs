@@ -78,18 +78,18 @@ impl LlmTaskDecomposer {
             task_description
         );
 
-        // 1. プロジェクトコンテキストを収集
+        // 1. Gather project context
         let project_context = self.gather_project_context().await?;
 
-        // 2. LLMに分解を依頼
+        // 2. Request decomposition from LLM
         let llm_result = self
             .request_llm_decomposition(task_description, classification, &project_context)
             .await?;
 
-        // 3. LLMの結果を内部形式に変換
+        // 3. Convert LLM results to internal format
         let steps = self.convert_llm_steps_to_task_steps(llm_result.steps)?;
 
-        // 4. 分解結果を検証・調整
+        // 4. Validate and adjust decomposition results
         let validated_steps = self
             .validate_and_adjust_steps(steps, classification)
             .await?;
@@ -113,7 +113,7 @@ impl LlmTaskDecomposer {
             recent_changes: Vec::new(),
         };
 
-        // Cargo.tomlの存在確認でRustプロジェクトかチェック
+        // Check if it's a Rust project by checking for Cargo.toml
         if self.fs_tools.fs_read("Cargo.toml", None, None).is_ok() {
             context.project_type = "Rust".to_string();
             context.main_languages.push("Rust".to_string());
@@ -121,7 +121,7 @@ impl LlmTaskDecomposer {
             context.key_files.push("src/main.rs".to_string());
         }
 
-        // package.jsonの存在確認でNode.jsプロジェクトかチェック
+        // Check if it's a Node.js project by checking for package.json
         if self.fs_tools.fs_read("package.json", None, None).is_ok() {
             if context.project_type == "Unknown" {
                 context.project_type = "Node.js".to_string();
@@ -133,9 +133,9 @@ impl LlmTaskDecomposer {
             context.key_files.push("package.json".to_string());
         }
 
-        // repomapから主要ファイルを取得
+        // Get key files from repomap
         if let Some(repomap) = self.repomap.read().await.as_ref() {
-            // ファイルサイズでソートして主要ファイルを特定
+            // Identify key files by sorting by file size
             let mut files_with_size: Vec<_> = repomap
                 .symbols
                 .iter()
@@ -144,14 +144,14 @@ impl LlmTaskDecomposer {
             files_with_size.sort();
             files_with_size.dedup();
 
-            // 上位10ファイルを主要ファイルとして追加
+            // Add top 10 files as key files
             for file in files_with_size.iter().take(10) {
                 if !context.key_files.contains(file) {
                     context.key_files.push(file.clone());
                 }
             }
 
-            // アーキテクチャノートを生成
+            // Generate architecture notes
             let total_symbols = repomap.symbols.len();
             let total_files = files_with_size.len();
             context.architecture_notes = format!(
@@ -185,7 +185,7 @@ impl LlmTaskDecomposer {
 
         match run_agent_loop(&self.client, &self.model, &self.fs_tools, messages, None).await {
             Ok((_, choice_message)) => {
-                // LLMの応答をパース
+                // Parse LLM response
                 self.parse_llm_response(&choice_message.content).await
             }
             Err(e) => {
@@ -204,40 +204,40 @@ impl LlmTaskDecomposer {
     ) -> String {
         format!(
             r#"
-# タスク分解エキスパートシステム
+# Task Decomposition Expert System
 
-あなたは経験豊富なソフトウェアエンジニアリングのエキスパートです。
-複雑なタスクを実行可能な具体的なステップに分解することが専門です。
+You are an experienced software engineering expert.
+You specialize in decomposing complex tasks into actionable, concrete steps.
 
-## 分解対象タスク
-**タスク**: {}
+## Task to Decompose
+**Task**: {}
 
-## タスク分類情報
-- **タイプ**: {:?}
-- **複雑度**: {:.2}/1.0
-- **推定ステップ数**: {}
-- **リスクレベル**: {:?}
-- **信頼度**: {:.1}%
+## Task Classification Information
+- **Type**: {:?}
+- **Complexity**: {:.2}/1.0
+- **Estimated Steps**: {}
+- **Risk Level**: {:?}
+- **Confidence**: {:.1}%
 
-## プロジェクトコンテキスト
-- **プロジェクトタイプ**: {}
-- **主要言語**: {}
-- **重要ファイル**: {}
-- **アーキテクチャ**: {}
+## Project Context
+- **Project Type**: {}
+- **Main Languages**: {}
+- **Key Files**: {}
+- **Architecture**: {}
 
-## 利用可能なツール
-- fs_read: ファイル読み込み
-- fs_write: ファイル書き込み
-- edit: ファイル編集（部分的な変更）
-- search_text: テキスト検索
-- find_file: ファイル検索
-- get_symbol_info: シンボル情報取得
-- search_repomap: リポジトリマップ検索
-- execute_bash: シェルコマンド実行
-- create_patch: パッチ作成
-- apply_patch: パッチ適用
+## Available Tools
+- fs_read: Read files
+- fs_write: Write files
+- edit: Edit files (partial changes)
+- search_text: Search text
+- find_file: Find files
+- get_symbol_info: Get symbol information
+- search_repomap: Search repository map
+- execute_bash: Execute shell commands
+- create_patch: Create patches
+- apply_patch: Apply patches
 
-## 分解要件
+## Decomposition Requirements
 
 以下のJSON形式で、実行可能なステップに分解してください：
 
@@ -263,24 +263,24 @@ impl LlmTaskDecomposer {
 }}
 ```
 
-## 重要な指針
+## Key Guidelines
 
-1. **具体性**: 各ステップは明確で実行可能であること
-2. **段階性**: 複雑なタスクは小さなステップに分割
-3. **依存関係**: ステップ間の依存関係を明確に
-4. **検証**: 各ステップに適切な検証条件を設定
-5. **リスク管理**: 潜在的な問題を事前に特定
-6. **ツール活用**: 利用可能なツールを効果的に使用
-7. **時間見積もり**: 現実的な時間見積もりを提供
+1. **Specificity**: Each step must be clear and actionable
+2. **Gradualism**: Complex tasks should be divided into small steps
+3. **Dependencies**: Clearly define dependencies between steps
+4. **Validation**: Set appropriate validation criteria for each step
+5. **Risk Management**: Identify potential issues in advance
+6. **Tool Utilization**: Effectively use available tools
+7. **Time Estimation**: Provide realistic time estimates
 
-特に以下の点に注意してください：
-- ファイル変更前には必ず現在の状態を分析
-- 大きな変更は段階的に実行
-- 各段階でコンパイル/テストによる検証
-- バックアップや元に戻す手順も考慮
-- エラー処理と回復手順を含める
+Pay special attention to the following points:
+- Always analyze the current state before changing files
+- Execute large changes in stages
+- Validate with compilation/testing at each stage
+- Consider backup and rollback procedures
+- Include error handling and recovery procedures
 
-JSON形式で回答してください。
+Respond in JSON format.
 "#,
             task_description,
             classification.task_type,
@@ -299,7 +299,7 @@ JSON形式で回答してください。
     async fn parse_llm_response(&self, response: &str) -> Result<LlmDecompositionResult> {
         debug!("Parsing LLM response");
 
-        // JSONブロックを抽出
+        // Extract JSON block
         let json_start = response.find("```json").or_else(|| response.find('{'));
         let json_end = response.rfind("```").or_else(|| response.rfind('}'));
 
@@ -331,7 +331,7 @@ JSON形式で回答してください。
                 warn!("Failed to parse LLM response as JSON: {}", e);
                 warn!("Response content: {}", json_content);
 
-                // フォールバック: 構造化されていない応答から基本的なステップを抽出
+                // Fallback: Extract basic steps from unstructured response
                 self.extract_fallback_steps(response).await
             }
         }
@@ -351,7 +351,7 @@ JSON形式で回答してください。
                 continue;
             }
 
-            // ステップらしい行を検出（番号付きリスト、箇条書きなど）
+            // Detect step-like lines (numbered lists, bullet points, etc.)
             if line.starts_with(char::is_numeric)
                 || line.starts_with("- ")
                 || line.starts_with("* ")
@@ -381,9 +381,9 @@ JSON形式で回答してください。
                         },
                         estimated_duration_minutes: 10,
                         required_tools: tools,
-                        validation_criteria: vec!["ステップが完了している".to_string()],
+                        validation_criteria: vec!["Step is completed".to_string()],
                         detailed_instructions: description,
-                        potential_issues: vec!["予期しない問題が発生する可能性".to_string()],
+                        potential_issues: vec!["Unexpected issues may occur".to_string()],
                     });
 
                     step_counter += 1;
@@ -396,15 +396,15 @@ JSON形式で回答してください。
         }
 
         Ok(LlmDecompositionResult {
-            reasoning: "LLMの応答から自動抽出されたステップです".to_string(),
+            reasoning: "Steps automatically extracted from LLM response".to_string(),
             steps,
-            complexity_assessment: "中程度の複雑さと推定されます".to_string(),
-            risks: vec!["詳細な分析が不十分な可能性".to_string()],
-            prerequisites: vec!["プロジェクトの基本的な理解".to_string()],
+            complexity_assessment: "Estimated to be of moderate complexity".to_string(),
+            risks: vec!["Possibility of insufficient detailed analysis".to_string()],
+            prerequisites: vec!["Basic understanding of the project".to_string()],
         })
     }
 
-    /// ステップタイプを推測
+    /// Infer step type
     fn infer_step_type(&self, description: &str) -> String {
         let desc_lower = description.to_lowercase();
 
@@ -430,7 +430,7 @@ JSON形式で回答してください。
         } else if desc_lower.contains("クリーンアップ") || desc_lower.contains("整理") {
             "cleanup".to_string()
         } else {
-            "implementation".to_string() // デフォルト
+            "implementation".to_string() // Default
         }
     }
 
@@ -459,7 +459,7 @@ JSON形式で回答してください。
         }
 
         if tools.is_empty() {
-            tools.push("fs_read".to_string()); // デフォルト
+            tools.push("fs_read".to_string()); // Default
         }
 
         tools
@@ -498,7 +498,7 @@ JSON形式で回答してください。
                 description: llm_step.description,
                 step_type,
                 dependencies: llm_step.dependencies,
-                estimated_duration: (llm_step.estimated_duration_minutes * 60) as u64, // 秒に変換
+                estimated_duration: (llm_step.estimated_duration_minutes * 60) as u64, // Convert to seconds
                 required_tools: llm_step.required_tools,
                 validation_criteria: llm_step.validation_criteria,
                 prompt_template: Some(llm_step.detailed_instructions),
@@ -523,18 +523,18 @@ JSON形式で回答してください。
         for step in steps {
             let mut adjusted_step = step;
 
-            // 時間見積もりの調整
+            // Adjust time estimates
             adjusted_step.estimated_duration = adjusted_step.estimated_duration.clamp(30, 3600);
 
-            // 必要ツールの検証
+            // Validate required tools
             adjusted_step.required_tools =
                 self.validate_required_tools(adjusted_step.required_tools);
 
-            // 依存関係の検証
+            // Validate dependencies
             adjusted_step.dependencies =
                 self.validate_dependencies(&adjusted_step.dependencies, &validated_steps);
 
-            // 検証条件の追加
+            // Add validation criteria
             if adjusted_step.validation_criteria.is_empty() {
                 adjusted_step.validation_criteria =
                     self.generate_default_validation_criteria(&adjusted_step.step_type);
@@ -543,18 +543,18 @@ JSON形式で回答してください。
             validated_steps.push(adjusted_step);
         }
 
-        // 複雑度に応じた最終調整
+        // Final adjustment based on complexity
         if classification.complexity_score > 0.8 && validated_steps.len() < 5 {
             warn!("High complexity task has few steps, adding safety validation step");
             validated_steps.push(
                 TaskStep::new(
                     "final_safety_check".to_string(),
-                    "最終的な安全性チェックと動作確認".to_string(),
+                    "Final safety check and operation verification".to_string(),
                     StepType::Validation,
                     vec!["execute_bash".to_string()],
                 )
                 .with_duration(300)
-                .with_validation(vec!["全体的な動作が正常".to_string()]),
+                .with_validation(vec!["Overall operation is normal".to_string()]),
             );
         }
 
@@ -565,7 +565,7 @@ JSON形式で回答してください。
         Ok(validated_steps)
     }
 
-    /// 必要ツールの検証
+    /// Validate required tools
     fn validate_required_tools(&self, tools: Vec<String>) -> Vec<String> {
         let valid_tools = [
             "fs_read",
@@ -606,14 +606,14 @@ JSON形式で回答してください。
     /// Generate default validation criteria
     fn generate_default_validation_criteria(&self, step_type: &StepType) -> Vec<String> {
         match step_type {
-            StepType::Analysis => vec!["分析が完了している".to_string()],
-            StepType::Planning => vec!["計画が明確である".to_string()],
+            StepType::Analysis => vec!["Analysis is completed".to_string()],
+            StepType::Planning => vec!["Plan is clear".to_string()],
             StepType::Implementation => vec![
-                "実装が完了している".to_string(),
-                "コンパイルエラーなし".to_string(),
+                "Implementation is completed".to_string(),
+                "No compilation errors".to_string(),
             ],
-            StepType::Validation => vec!["検証が成功している".to_string()],
-            StepType::Cleanup => vec!["クリーンアップが完了している".to_string()],
+            StepType::Validation => vec!["Validation is successful".to_string()],
+            StepType::Cleanup => vec!["Cleanup is completed".to_string()],
         }
     }
 }
@@ -628,11 +628,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_project_context_gathering() {
-        // モックのFsToolsとrepomapを作成
+        // Create mock FsTools and repomap
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
         let fs_tools = FsTools::new(repomap.clone());
 
-        // モックのOpenAIClientを作成（テスト用）
+        // Create mock OpenAIClient (for testing)
         let client = OpenAIClient::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
@@ -643,7 +643,7 @@ mod tests {
 
         let context = decomposer.gather_project_context().await.unwrap();
 
-        // 基本的な構造が正しいことを確認
+        // Verify that the basic structure is correct
         assert!(!context.project_type.is_empty());
         assert!(!context.main_languages.is_empty() || context.project_type == "Unknown");
     }

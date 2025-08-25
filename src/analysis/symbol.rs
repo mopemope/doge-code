@@ -40,9 +40,9 @@ pub struct SymbolInfo {
     pub end_line: usize,
     pub end_col: usize,
     pub parent: Option<String>,
-    /// ファイル全体の行数
+    /// Total number of lines in the file
     pub file_total_lines: usize,
-    /// 関数の行数 (関数の場合のみ)
+    /// Number of lines in the function (only for functions)
     pub function_lines: Option<usize>,
 }
 

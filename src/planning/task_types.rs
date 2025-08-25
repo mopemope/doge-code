@@ -25,7 +25,7 @@ pub enum TaskType {
     Unknown,
 }
 
-/// リスクレベル
+/// Risk level
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RiskLevel {
     Low,
@@ -90,7 +90,7 @@ pub struct StepResult {
     pub step_id: String,
     pub success: bool,
     pub output: String,
-    pub artifacts: Vec<String>, // 生成されたファイルパスなど
+    pub artifacts: Vec<String>, // Generated file paths, etc.
     pub duration: u64,
     pub error_message: Option<String>,
 }
@@ -168,7 +168,7 @@ impl TaskStep {
             description,
             step_type,
             dependencies: Vec::new(),
-            estimated_duration: 60, // デフォルト1分
+            estimated_duration: 60, // Default 1 minute
             required_tools,
             validation_criteria: Vec::new(),
             prompt_template: None,

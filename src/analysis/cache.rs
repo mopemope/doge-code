@@ -11,7 +11,7 @@ use std::fs; // 追加
 use std::path::{Path, PathBuf}; // 追加
 use tracing::{debug, info};
 
-/// repomapキャッシュのメタデータ
+/// repomap cache metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepomapMetadata {
     pub version: String,
@@ -47,7 +47,7 @@ impl RepomapMetadata {
 pub struct RepomapCache {
     pub metadata: RepomapMetadata,
     pub repomap: RepoMap,
-    pub file_hashes: HashMap<PathBuf, String>, // ファイルパス -> SHA256ハッシュ
+    pub file_hashes: HashMap<PathBuf, String>, // file path -> SHA256 hash
 }
 
 impl RepomapCache {
@@ -72,14 +72,14 @@ impl RepomapCache {
     }
 }
 
-/// repomapの永続化を管理するストア
+/// Store that manages repomap persistence
 pub struct RepomapStore {
     project_root: PathBuf,
     db_conn: DatabaseConnection,
 }
 
 impl RepomapStore {
-    /// 新しいRepomapStoreを作成
+    /// Create a new RepomapStore
     pub async fn new(project_root: PathBuf) -> Result<Self> {
         let db_path = get_default_db_path(&project_root);
 
@@ -104,7 +104,7 @@ impl RepomapStore {
         })
     }
 
-    /// キャッシュからrepomapを読み込み
+    /// Load repomap from cache
     pub async fn load(&self) -> Result<Option<RepomapCache>> {
         info!("Loading repomap cache from database");
 
@@ -136,7 +136,7 @@ impl RepomapStore {
         }
     }
 
-    /// repomapをキャッシュに保存
+    /// Save repomap to cache
     pub async fn save(&self, cache: &RepomapCache) -> Result<()> {
         info!(
             "Saving repomap cache to database: {} symbols from {} files",
@@ -156,7 +156,7 @@ impl RepomapStore {
         Ok(())
     }
 
-    /// キャッシュを削除
+    /// Delete cache
     pub async fn clear(&self) -> Result<()> {
         info!("Clearing repomap cache from database");
 
@@ -168,15 +168,15 @@ impl RepomapStore {
         Ok(())
     }
 
-    /// キャッシュの有効性をチェック
+    /// Check cache validity
     pub async fn is_cache_valid(
         &self,
         current_file_hashes: &HashMap<PathBuf, String>,
     ) -> Result<bool> {
-        // バージョンが変わっていないかチェック
-        // TODO: データベースにバージョン情報を保存し、比較するロジックが必要
+        // Check if the version has changed
+        // TODO: Need logic to save version information in the database and compare
 
-        // ファイルハッシュが変わっていないかチェック
+        // Check if the file hash has changed
         let is_valid =
             RepomapDAO::is_repomap_valid(&self.db_conn, &self.project_root, current_file_hashes)
                 .await
@@ -190,7 +190,7 @@ impl RepomapStore {
         Ok(is_valid)
     }
 
-    /// 変更されたファイルを検出
+    /// Detect changed files
     pub async fn get_changed_files(
         &self,
         current_file_hashes: &HashMap<PathBuf, String>,
