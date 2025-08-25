@@ -13,7 +13,7 @@ You have access to the following tools for interacting with the file system and 
 
 - **fs_read**: Reads the content of a text file from the absolute path. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.
 
-- **search_text**: Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.
+- **search_text**: Searches for a regular expression `search_pattern` within the content of files. It returns matching lines along with their file paths and line numbers. The `file_glob` argument is **mandatory** and must be a glob pattern that includes a file extension to scope the search (e.g., `src/**/*.rs`, `*.toml`). This tool is for searching file contents, not file names.
 
 - **fs_write**: Writes or overwrites text content to a specified file from the absolute path. It automatically creates parent directories if they don't exist. Use this tool for creating new files from scratch (e.g., a new module, test file, or configuration file) or for completely replacing the content of an existing file. For partial modifications to existing files, `edit` or `apply_patch` are generally safer and recommended.
 

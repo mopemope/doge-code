@@ -11,7 +11,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_text".to_string(),
-            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used.".to_string(),
+            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used. The `file_glob` argument is mandatory and must include a file extension to scope the search precisely.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -21,10 +21,10 @@ pub fn tool_def() -> ToolDef {
                     },
                     "file_glob": {
                         "type": "string",
-                        "description": "A glob pattern to filter which files are searched (e.g., 'src/**/*.rs', '*.toml'). Defaults to all files if not provided."
+                        "description": "A glob pattern to filter which files are searched. This pattern must include a file extension. Examples: 'src/**/*.rs', 'tests/*.test.ts', '*.toml'."
                     }
                 },
-                "required": ["search_pattern"]
+                "required": ["search_pattern", "file_glob"]
             }),
         },
     }
@@ -82,23 +82,52 @@ pub fn search_text(
         cmd.arg(".");
     }
 
-    let output = cmd.output().context("failed to execute ripgrep")?;
-    let stdout = String::from_utf8(output.stdout).context("ripgrep output is not utf-8")?;
+    // Spawn ripgrep and stream its stdout to avoid loading everything into memory
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn ripgrep")?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture ripgrep stdout")?;
+    let reader = BufReader::new(stdout);
 
     let mut results = Vec::new();
-    for line in stdout.lines() {
-        if let Ok(json) = serde_json::from_str::<RipgrepJson>(line)
-            && let RipgrepMessageType::Match = json.r#type
-            && let (Some(path_text), Some(lines_text), Some(line_number)) =
-                (json.data.path, json.data.lines, json.data.line_number)
-        {
-            results.push((
-                PathBuf::from(path_text.text),
-                line_number,
-                lines_text.text.trim().to_string(),
-            ));
+    let mut bytes_read: usize = 0;
+
+    const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MiB
+
+    for line_res in reader.lines() {
+        let line = line_res.context("failed to read ripgrep output")?;
+        // Track bytes read from ripgrep and stop if exceeding the limit
+        bytes_read = bytes_read.saturating_add(line.len());
+        if bytes_read > MAX_OUTPUT_BYTES {
+            // try to terminate the child process
+            let _ = child.kill();
+            break;
         }
+
+        if let Ok(parsed) = serde_json::from_str::<RipgrepJson>(&line)
+            && let RipgrepMessageType::Match = parsed.r#type
+                && let (Some(path_text), Some(lines_text), Some(line_number)) =
+                    (parsed.data.path, parsed.data.lines, parsed.data.line_number)
+                {
+                    results.push((
+                        PathBuf::from(path_text.text),
+                        line_number,
+                        lines_text.text.trim().to_string(),
+                    ));
+                }
     }
+
+    // Ensure child process has exited
+    let _ = child.wait();
 
     Ok(results)
 }
