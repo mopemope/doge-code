@@ -115,15 +115,15 @@ pub fn search_text(
 
         if let Ok(parsed) = serde_json::from_str::<RipgrepJson>(&line)
             && let RipgrepMessageType::Match = parsed.r#type
-                && let (Some(path_text), Some(lines_text), Some(line_number)) =
-                    (parsed.data.path, parsed.data.lines, parsed.data.line_number)
-                {
-                    results.push((
-                        PathBuf::from(path_text.text),
-                        line_number,
-                        lines_text.text.trim().to_string(),
-                    ));
-                }
+            && let (Some(path_text), Some(lines_text), Some(line_number)) =
+                (parsed.data.path, parsed.data.lines, parsed.data.line_number)
+        {
+            results.push((
+                PathBuf::from(path_text.text),
+                line_number,
+                lines_text.text.trim().to_string(),
+            ));
+        }
     }
 
     // Ensure child process has exited

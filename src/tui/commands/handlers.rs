@@ -457,11 +457,11 @@ impl CommandHandler for TuiExecutor {
                                 // Get token usage after the agent loop completes
                                 let tokens_used = c.get_tokens_used();
                                 match res {
-                                    Ok((updated_messages, final_msg)) => {
+                                    Ok((updated_messages, _final_msg)) => {
                                         if let Some(tx) = tx {
-                                            let _ = tx.send(final_msg.content.clone());
-                                            let _ = tx.send("::status:done".into());
-                                            // Send token usage update
+                                            // run_agent_loop already sends the final assistant content as a
+                                            // "::status:done:<content>" message. Avoid duplicating it here.
+                                            // Only send token usage update.
                                             let _ = tx.send(format!("::tokens:{}", tokens_used));
                                         }
                                         // Update conversation history (save all messages except system messages)
