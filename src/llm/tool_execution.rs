@@ -457,13 +457,7 @@ pub async fn dispatch_tool_call(
                 Err(e) => Err(anyhow!("{e}")),
             }
         }
-        "get_file_sha256" => {
-            let params = serde_json::from_value(args_val.clone())?;
-            match crate::tools::get_file_sha256::get_file_sha256(params).await {
-                Ok(res) => Ok(serde_json::to_value(res)?),
-                Err(e) => Err(anyhow!("{e}")),
-            }
-        }
+
         "edit" => {
             let params = serde_json::from_value(args_val.clone())?;
             match crate::tools::edit::edit(params).await {

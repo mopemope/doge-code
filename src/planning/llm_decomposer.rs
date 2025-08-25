@@ -588,7 +588,6 @@ Respond in JSON format.
             "create_patch",
             "apply_patch",
             "fs_list",
-            "get_file_sha256",
         ];
 
         tools

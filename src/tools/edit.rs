@@ -2,7 +2,6 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs;
 
@@ -11,17 +10,16 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "edit".to_string(),
-            description: "Edit a single, unique block of text within a file with a new block of text. It ensures file integrity by verifying the SHA256 hash of the file content, preventing accidental overwrites if the file has changed since it was last read. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
+            description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file."},
                     "target_block": {"type": "string", "description": "The exact, unique text block to be replaced."},
                     "new_block": {"type": "string", "description": "The new text block to replace the target."},
-                    "file_hash_sha256": {"type": "string", "description": "The SHA256 hash of the original file content to prevent race conditions."},
                     "dry_run": {"type": "boolean", "description": "If true, returns the diff of the proposed change without modifying the file."}
                 },
-                "required": ["file_path", "target_block", "new_block", "file_hash_sha256"]
+                "required": ["file_path", "target_block", "new_block"]
             }),
         },
     }
@@ -32,7 +30,6 @@ pub struct EditParams {
     pub file_path: String,
     pub target_block: String,
     pub new_block: String,
-    pub file_hash_sha256: Option<String>,
     pub dry_run: Option<bool>,
 }
 
@@ -47,7 +44,6 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
     let file_path = &params.file_path;
     let target_block = &params.target_block;
     let new_block = &params.new_block;
-    let expected_hash = params.file_hash_sha256.as_deref();
     let dry_run = params.dry_run.unwrap_or(false);
 
     // Ensure the path is absolute
@@ -61,23 +57,7 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
         .await
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
-    // 2. Verify file hash if provided
-    if let Some(expected) = expected_hash {
-        let mut hasher = Sha256::new();
-        hasher.update(original_content.as_bytes());
-        let actual_hash = format!("{:x}", hasher.finalize());
-
-        if actual_hash != expected {
-            return Ok(EditResult {
-                success: false,
-                message: "File hash mismatch. The file content has changed since it was last read."
-                    .to_string(),
-                diff: None,
-            });
-        }
-    }
-
-    // 3. Find the target block
+    // 2. Find the target block
     let occurrences = original_content.matches(target_block).count();
     if occurrences == 0 {
         return Ok(EditResult {
@@ -94,10 +74,10 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
         });
     }
 
-    // 4. Perform the replacement
+    // 3. Perform the replacement
     let modified_content = original_content.replace(target_block, new_block);
 
-    // 5. Generate diff for dry_run or successful operation
+    // 4. Generate diff for dry_run or successful operation
     let diff = diffy::create_patch(&original_content, &modified_content);
     let diff_text = diff.to_string();
 
@@ -127,12 +107,6 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn calculate_sha256(content: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
     #[tokio::test]
     async fn test_edit_success() {
         let original_content = "Hello, world!\nThis is a test.";
@@ -144,7 +118,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "world".to_string(),
             new_block: "Rust".to_string(),
-            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(false),
         };
 
@@ -167,7 +140,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "run".to_string(),
             new_block: "RUN".to_string(),
-            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(true),
         };
 
@@ -190,7 +162,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "mismatch".to_string(),
             new_block: "MISMATCH".to_string(),
-            file_hash_sha256: Some("invalid_hash".to_string()),
             dry_run: Some(false),
         };
 
@@ -210,7 +181,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "provided".to_string(),
             new_block: "PROVIDED".to_string(),
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
