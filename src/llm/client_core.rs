@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::LlmConfig;
@@ -68,6 +69,7 @@ impl OpenAIClient {
         &self,
         model: &str,
         messages: Vec<ChatMessage>,
+        cancel: Option<CancellationToken>,
     ) -> Result<ChoiceMessage> {
         let url = self.endpoint();
         let req = ChatRequest {
@@ -91,10 +93,19 @@ impl OpenAIClient {
         let max_attempts = self.llm_cfg.max_retries.saturating_add(1);
         let mut last_err: Option<anyhow::Error> = None;
 
+        let cancel_token = cancel.unwrap_or_default();
+
         for attempt in 1..=max_attempts {
             let req_builder = self.inner.post(&url).headers(headers.clone()).json(&req);
 
-            let resp_res = req_builder.send().await;
+            let resp_res = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    info!("chat_once cancelled before send");
+                    return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                }
+                res = req_builder.send() => res,
+            };
 
             match resp_res {
                 Err(e) => {
@@ -109,21 +120,44 @@ impl OpenAIClient {
                             .get(RETRY_AFTER)
                             .and_then(|h| h.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
-                        let text = resp.text().await.unwrap_or_default();
+
+                        let text = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                info!("chat_once cancelled during error body read");
+                                return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                            }
+                            res = resp.text() => res.unwrap_or_default(),
+                        };
+
                         error!(attempt, status=%status.as_u16(), body=%text, "llm chat_once non-success status");
                         let e = anyhow::anyhow!("chat error: {} - {}", status, text);
                         let kind = crate::llm::classify_error(Some(status), &e);
                         if self.should_retry(kind.clone()) && attempt < max_attempts {
                             let wait = self.backoff_delay(attempt, retry_after);
                             info!(attempt, kind=?kind, wait_ms=%wait.as_millis(), "retrying chat_once");
-                            tokio::time::sleep(wait).await;
+                            tokio::select! {
+                                biased;
+                                _ = cancel_token.cancelled() => {
+                                    info!("chat_once cancelled during retry sleep");
+                                    return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                                }
+                                _ = tokio::time::sleep(wait) => {}
+                            }
                             continue;
                         } else {
                             return Err(e);
                         }
                     }
 
-                    let response_text = match resp.text().await {
+                    let response_text = match tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            info!("chat_once cancelled during body read");
+                            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                        }
+                        res = resp.text() => res
+                    } {
                         Ok(text) => text,
                         Err(e) => {
                             error!(attempt, err=%e, "llm chat_once read body error");
@@ -133,7 +167,14 @@ impl OpenAIClient {
                             if self.should_retry(kind.clone()) && attempt < max_attempts {
                                 let wait = self.backoff_delay(attempt, None);
                                 warn!(attempt, kind=?kind, "retrying after body read error");
-                                tokio::time::sleep(wait).await;
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel_token.cancelled() => {
+                                        info!("chat_once cancelled during retry sleep");
+                                        return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                                    }
+                                    _ = tokio::time::sleep(wait) => {}
+                                }
                                 continue;
                             } else {
                                 return Err(last_err.unwrap());
@@ -164,7 +205,14 @@ impl OpenAIClient {
                             if self.should_retry(kind.clone()) && attempt < max_attempts {
                                 let wait = self.backoff_delay(attempt, None);
                                 warn!(attempt, kind=?kind, "retrying after deserialize error");
-                                tokio::time::sleep(wait).await;
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel_token.cancelled() => {
+                                        info!("chat_once cancelled during retry sleep");
+                                        return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                                    }
+                                    _ = tokio::time::sleep(wait) => {}
+                                }
                                 last_err =
                                     Some(anyhow::Error::new(e).context("parse chat response"));
                                 continue;
@@ -181,7 +229,14 @@ impl OpenAIClient {
                 if self.should_retry(kind.clone()) {
                     let wait = self.backoff_delay(attempt, None);
                     info!(attempt, kind=?kind, wait_ms=%wait.as_millis(), "retrying chat_once");
-                    tokio::time::sleep(wait).await;
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            info!("chat_once cancelled during retry sleep");
+                            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                        }
+                        _ = tokio::time::sleep(wait) => {}
+                    }
                     continue;
                 }
             }
@@ -249,6 +304,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                 }],
+                None,
             )
             .await
             .unwrap();
@@ -288,6 +344,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                 }],
+                None,
             )
             .await
             .unwrap_err();
@@ -323,6 +380,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                 }],
+                None,
             )
             .await
             .unwrap();
@@ -356,6 +414,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                 }],
+                None,
             )
             .await
             .unwrap_err();

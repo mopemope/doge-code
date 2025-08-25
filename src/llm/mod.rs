@@ -18,19 +18,31 @@ pub use types::*;
 
 pub use tool_execution::{run_agent_loop, run_agent_streaming_once};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LlmErrorKind {
+    #[error("rate limited")]
     RateLimited,
+    #[error("server error")]
     Server,
+    #[error("network error")]
     Network,
+    #[error("timeout")]
     Timeout,
+    #[error("client error")]
     Client,
+    #[error("deserialization error")]
     Deserialize,
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("unknown error")]
     Unknown,
 }
 
 #[allow(dead_code)]
 pub fn classify_error(status: Option<StatusCode>, err: &anyhow::Error) -> LlmErrorKind {
+    if let Some(e) = err.downcast_ref::<LlmErrorKind>() {
+        return e.clone();
+    }
     if let Some(st) = status {
         if st == StatusCode::TOO_MANY_REQUESTS {
             return LlmErrorKind::RateLimited;
