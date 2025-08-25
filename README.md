@@ -148,7 +148,7 @@ The LLM has access to comprehensive tools for autonomous operation:
 ### Code Analysis Tools
 - `get_symbol_info` - Query repository map for functions, classes, and symbols
 - `search_repomap` - Search analyzed code symbols with filtering
-- `get_file_sha256` - Get file checksums for integrity verification
+
 
 ### Development Tools
 - `execute_bash` - Execute shell commands safely

@@ -4,7 +4,6 @@ pub mod create_patch;
 pub mod edit;
 pub mod execute;
 pub mod find_file;
-pub mod get_file_sha256;
 pub mod list;
 pub mod read;
 pub mod read_many;

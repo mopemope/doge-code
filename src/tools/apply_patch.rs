@@ -2,7 +2,6 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs;
 
@@ -14,7 +13,7 @@ pub fn tool_def() -> ToolDef {
             description: "Atomically applies a patch to a file in the unified diff format. This is a powerful and safe way to perform complex, multi-location edits.
 
 This tool is typically used in a sequence:
-1. Read the original file content and its hash using `fs_read` and `get_file_sha256`.
+1. Read the original file content and its hash using `fs_read`.
 2. Generate the desired `modified_content`.
 3. Generate the `patch_content` using `create_patch(original_content, modified_content)`.
 4. Call this tool, `apply_patch`, with the `patch_content` and the original hash to safely modify the file.
@@ -31,7 +30,6 @@ Arguments:
   +line 2 to be added
    line 3
   ```
-- `file_hash_sha256` (string, optional): The SHA256 hash of the original file's content. If provided, the tool will abort if the file's current hash does not match, preventing conflicts with external changes.
 - `dry_run` (boolean, optional): If `true`, the tool will check if the patch can be applied cleanly and show the potential result without actually modifying the file. Defaults to `false`.
 
 Returns a detailed result object, indicating success or failure with a descriptive message.".to_string(),
@@ -40,7 +38,6 @@ Returns a detailed result object, indicating success or failure with a descripti
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file."},
                     "patch_content": {"type": "string", "description": "The patch content in the unified diff format."},
-                    "file_hash_sha256": {"type": "string", "description": "The SHA256 hash of the original file content."},
                     "dry_run": {"type": "boolean", "description": "If true, checks if the patch can be applied cleanly without modifying the file."}
                 },
                 "required": ["file_path", "patch_content"]
@@ -53,7 +50,6 @@ Returns a detailed result object, indicating success or failure with a descripti
 pub struct ApplyPatchParams {
     pub file_path: String,
     pub patch_content: String,
-    pub file_hash_sha256: Option<String>,
     pub dry_run: Option<bool>,
 }
 
@@ -97,22 +93,6 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
 
     let has_crlf = original_content_raw.contains("\r\n");
     let original_content = original_content_raw.replace("\r\n", "\n");
-
-    if let Some(expected_hash) = &params.file_hash_sha256 {
-        let mut hasher = Sha256::new();
-        hasher.update(original_content_raw.as_bytes());
-        let actual_hash = format!("{:x}", hasher.finalize());
-
-        if &actual_hash != expected_hash {
-            return Ok(ApplyPatchResult {
-                success: false,
-                message: "File hash mismatch. The file content has changed since it was last read."
-                    .to_string(),
-                original_content: Some(original_content_raw),
-                modified_content: None,
-            });
-        }
-    }
 
     let patch = match diffy::Patch::from_str(patch_content) {
         Ok(patch) => patch,
@@ -183,12 +163,6 @@ mod tests {
         patch.to_string()
     }
 
-    fn calculate_sha256(content: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
     #[tokio::test]
     async fn test_apply_patch_success() {
         let original_content = "Hello, world!\nThis is the original file.\n";
@@ -199,12 +173,10 @@ mod tests {
         let file_path = temp_file.path().to_str().unwrap().to_string();
 
         let patch_content = create_patch_content(original_content, modified_content);
-        let file_hash = calculate_sha256(original_content);
 
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: Some(file_hash),
             dry_run: Some(false),
         };
 
@@ -230,7 +202,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: None,
             dry_run: Some(true),
         };
 
@@ -258,7 +229,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path,
             patch_content: "".to_string(),
-            file_hash_sha256: Some("wrong_hash".to_string()),
             dry_run: Some(false),
         };
 
@@ -286,7 +256,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
@@ -318,7 +287,6 @@ mod tests {
             file_path: file_path.clone(),
             patch_content,
             // Note: We use the hash of the *actual* content for the check to pass
-            file_hash_sha256: Some(calculate_sha256(actual_content_in_file)),
             dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
@@ -337,7 +305,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: "relative/path/to/file.txt".to_string(),
             patch_content: "any patch".to_string(),
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -369,7 +336,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(false),
         };
 
@@ -398,7 +364,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: Some(calculate_sha256(original_content)),
             dry_run: Some(false),
         };
 
@@ -425,7 +390,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: Some(calculate_sha256(&original_content)),
             dry_run: Some(false),
         };
 
@@ -443,7 +407,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -459,7 +422,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: dir.path().to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -485,7 +447,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.to_str().unwrap().to_string(),
             patch_content,
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -510,7 +471,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path,
             patch_content: "this is not a valid patch".to_string(),
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -536,7 +496,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
@@ -560,7 +519,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            file_hash_sha256: None,
             dry_run: Some(false),
         };
 
