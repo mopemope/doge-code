@@ -92,7 +92,10 @@ mod tests {
         // diffy::create_patch returns a header even if there are no changes.
         // A patch with no actual changes will have no "hunks".
         let patch = diffy::Patch::from_str(&result.patch_content).unwrap();
-        assert!(patch.hunks().is_empty(), "Patch should have no hunks for content that is identical after normalization.");
+        assert!(
+            patch.hunks().is_empty(),
+            "Patch should have no hunks for content that is identical after normalization."
+        );
     }
 
     #[tokio::test]
