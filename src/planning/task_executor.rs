@@ -124,7 +124,7 @@ impl TaskExecutor {
                         step_id: step.id.clone(),
                         success: true,
                         output: result,
-                        artifacts: vec![], // TODO: 実際のアーティファクトを収集
+                        artifacts: vec![], // TODO: Collect actual artifacts
                         duration,
                         error_message: None,
                     };
@@ -351,28 +351,28 @@ impl TaskExecutor {
     /// Build analysis prompt
     fn build_analysis_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
-            r#"# 分析タスク実行
+            r#"# Analysis Task Execution
 
-## ステップ情報
+## Step Information
 - **ID**: {}
-- **説明**: {}
-- **タイプ**: 分析
+- **Description**: {}
+- **Type**: Analysis
 
-## 実行指示
+## Execution Instructions
 {}
 
-## 利用可能なツール
+## Available Tools
 {}
 
-## 前提条件
-- プロジェクトのコードベースを詳細に分析してください
-- 必要に応じて関連ファイルを読み込んでください
-- 分析結果は具体的で実用的な情報を含めてください
+## Prerequisites
+- Analyze the project codebase in detail
+- Read relevant files as needed
+- Include specific and practical information in the analysis results
 
-## 完了条件
+## Completion Criteria
 {}
 
-分析を実行し、結果を詳細に報告してください。
+Execute the analysis and report the results in detail.
 "#,
             step.id,
             step.description,
@@ -383,7 +383,7 @@ impl TaskExecutor {
 
         // Include results from previous steps
         if !context.completed_steps.is_empty() {
-            prompt.push_str("\n## 前のステップの結果\n");
+            prompt.push_str("\n## Previous Step Results\n");
             for (i, result) in context.completed_steps().iter().enumerate() {
                 if result.success {
                     prompt.push_str(&format!(
@@ -402,28 +402,28 @@ impl TaskExecutor {
     /// Build planning prompt
     fn build_planning_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
-            r#"# 計画タスク実行
+            r#"# Planning Task Execution
 
-## ステップ情報
+## Step Information
 - **ID**: {}
-- **説明**: {}
-- **タイプ**: 計画
+- **Description**: {}
+- **Type**: Planning
 
-## 実行指示
+## Execution Instructions
 {}
 
-## 利用可能なツール
+## Available Tools
 {}
 
-## 前提条件
-- 分析結果に基づいて詳細な実行計画を作成してください
-- 実装の順序と依存関係を明確にしてください
-- リスクと対策を含めてください
+## Prerequisites
+- Create a detailed execution plan based on the analysis results
+- Clarify the implementation order and dependencies
+- Include risks and countermeasures
 
-## 完了条件
+## Completion Criteria
 {}
 
-詳細な実行計画を作成してください。
+Create a detailed execution plan.
 "#,
             step.id,
             step.description,
@@ -434,7 +434,7 @@ impl TaskExecutor {
 
         // Include analysis results
         if !context.completed_steps.is_empty() {
-            prompt.push_str("\n## 分析結果\n");
+            prompt.push_str("\n## Analysis Results\n");
             for result in context.completed_steps() {
                 if result.success && result.step_id.contains("analysis") {
                     prompt.push_str(&format!("- {}: {}\n", result.step_id, result.output));
@@ -448,29 +448,29 @@ impl TaskExecutor {
     /// Build implementation prompt
     fn build_implementation_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
-            r#"# 実装タスク実行
+            r#"# Implementation Task Execution
 
-## ステップ情報
+## Step Information
 - **ID**: {}
-- **説明**: {}
-- **タイプ**: 実装
+- **Description**: {}
+- **Type**: Implementation
 
-## 実行指示
+## Execution Instructions
 {}
 
-## 利用可能なツール
+## Available Tools
 {}
 
-## 重要な注意事項
-- ファイルを変更する前に必ず現在の内容を確認してください
-- 段階的に実装し、各段階でコンパイル/テストを実行してください
-- エラーが発生した場合は適切に修正してください
-- 変更内容は明確にドキュメント化してください
+## Important Notes
+- Always check the current content before modifying files
+- Implement in stages, running compilation/tests at each stage
+- Appropriately fix any errors that occur
+- Clearly document changes made
 
-## 完了条件
+## Completion Criteria
 {}
 
-実装を実行してください。必ずコンパイルが通ることを確認してください。
+Execute the implementation. Make sure compilation succeeds.
 "#,
             step.id,
             step.description,
@@ -481,7 +481,7 @@ impl TaskExecutor {
 
         // Include planning results
         if !context.completed_steps.is_empty() {
-            prompt.push_str("\n## 実行計画\n");
+            prompt.push_str("\n## Execution Plan\n");
             for result in context.completed_steps() {
                 if result.success
                     && (result.step_id.contains("planning") || result.step_id.contains("analysis"))
@@ -497,29 +497,29 @@ impl TaskExecutor {
     /// Build validation prompt
     fn build_validation_prompt(&self, step: &TaskStep, context: &ExecutionContext) -> String {
         let mut prompt = format!(
-            r#"# 検証タスク実行
+            r#"# Validation Task Execution
 
-## ステップ情報
+## Step Information
 - **ID**: {}
-- **説明**: {}
-- **タイプ**: 検証
+- **Description**: {}
+- **Type**: Validation
 
-## 実行指示
+## Execution Instructions
 {}
 
-## 利用可能なツール
+## Available Tools
 {}
 
-## 検証項目
-- 実装が正しく動作することを確認してください
-- コンパイルエラーがないことを確認してください
-- テストが通ることを確認してください
-- 期待される動作を満たしていることを確認してください
+## Validation Items
+- Verify that the implementation works correctly
+- Confirm there are no compilation errors
+- Ensure tests pass
+- Verify that expected behavior is met
 
-## 完了条件
+## Completion Criteria
 {}
 
-包括的な検証を実行し、結果を報告してください。
+Execute comprehensive validation and report the results.
 "#,
             step.id,
             step.description,
@@ -530,7 +530,7 @@ impl TaskExecutor {
 
         // Include implementation results
         if !context.completed_steps.is_empty() {
-            prompt.push_str("\n## 実装結果\n");
+            prompt.push_str("\n## Implementation Results\n");
             for result in context.completed_steps() {
                 if result.success && result.step_id.contains("implementation") {
                     prompt.push_str(&format!("- {}: {}\n", result.step_id, result.output));
@@ -541,33 +541,32 @@ impl TaskExecutor {
         prompt
     }
 
-    /// クリーンアップ プロンプトを構築
     /// Build cleanup prompt
     fn build_cleanup_prompt(&self, step: &TaskStep, _context: &ExecutionContext) -> String {
         format!(
-            r#"# クリーンアップタスク実行
+            r#"# Cleanup Task Execution
 
-## ステップ情報
+## Step Information
 - **ID**: {}
-- **説明**: {}
-- **タイプ**: クリーンアップ
+- **Description**: {}
+- **Type**: Cleanup
 
-## 実行指示
+## Execution Instructions
 {}
 
-## 利用可能なツール
+## Available Tools
 {}
 
-## クリーンアップ項目
-- 不要なファイルやコメントを削除してください
-- コードフォーマットを整えてください
-- ドキュメントを更新してください
-- 最終的な動作確認を行ってください
+## Cleanup Items
+- Remove unnecessary files and comments
+- Format the code properly
+- Update documentation
+- Perform final operation verification
 
-## 完了条件
+## Completion Criteria
 {}
 
-クリーンアップを実行し、プロジェクトを整理してください。
+Execute cleanup and organize the project.
 "#,
             step.id,
             step.description,
@@ -581,19 +580,19 @@ impl TaskExecutor {
     async fn validate_step_criteria(&self, step: &TaskStep, result: &str) -> Result<()> {
         for criteria in &step.validation_criteria {
             match criteria.as_str() {
-                "コンパイル成功" | "構文エラーなし" => {
+                "Compilation Success" | "No Syntax Errors" => {
                     // Run cargo check
                     if let Err(e) = self.fs_tools.execute_bash("cargo check").await {
                         return Err(anyhow!("Compilation failed: {}", e));
                     }
                 }
-                "テストが通る" => {
+                "Tests Pass" => {
                     // Run cargo test
                     if let Err(e) = self.fs_tools.execute_bash("cargo test").await {
                         return Err(anyhow!("Tests failed: {}", e));
                     }
                 }
-                "ファイルが存在する" => {
+                "File Exists" => {
                     // Extract file paths from results and check existence
                     // Simple implementation: Improve later
                     debug!("File existence check: {}", result);
@@ -718,14 +717,14 @@ mod tests {
             StepType::Analysis,
             vec!["fs_read".to_string(), "get_symbol_info".to_string()],
         )
-        .with_validation(vec!["コードの構造を理解する".to_string()]);
+        .with_validation(vec!["Understand code structure".to_string()]);
 
         let prompt = executor.build_analysis_prompt(&step, &context);
 
         assert!(prompt.contains("analysis_1"));
         assert!(prompt.contains("Analyze the code structure"));
         assert!(prompt.contains("fs_read, get_symbol_info"));
-        assert!(prompt.contains("コードの構造を理解する"));
+        assert!(prompt.contains("Understand code structure"));
     }
 
     #[test]
