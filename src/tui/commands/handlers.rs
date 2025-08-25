@@ -213,8 +213,9 @@ impl CommandHandler for TuiExecutor {
                 // Handle /tokens command to show token usage
                 if line == "/tokens" {
                     if let Some(client) = &self.client {
-                        let tokens_used = client.get_tokens_used();
-                        ui.push_log(format!("Total tokens used: {}", tokens_used));
+                        // Show prompt tokens cumulative (header should display prompt token total)
+                        let tokens_used = client.get_prompt_tokens_used();
+                        ui.push_log(format!("Total prompt tokens used: {}", tokens_used));
                     } else {
                         ui.push_log("No LLM client available.");
                     }
@@ -455,7 +456,7 @@ impl CommandHandler for TuiExecutor {
                                 )
                                 .await;
                                 // Get token usage after the agent loop completes
-                                let tokens_used = c.get_tokens_used();
+                                let tokens_used = c.get_prompt_tokens_used();
                                 match res {
                                     Ok((updated_messages, _final_msg)) => {
                                         if let Some(tx) = tx {

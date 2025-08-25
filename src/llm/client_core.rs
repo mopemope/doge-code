@@ -18,6 +18,8 @@ pub struct OpenAIClient {
     pub llm_cfg: LlmConfig,
     /// Tracks total tokens used by this client
     pub tokens_used: Arc<AtomicU32>,
+    /// Tracks prompt tokens used by this client (for header display)
+    pub prompt_tokens_used: Arc<AtomicU32>,
 }
 
 impl OpenAIClient {
@@ -29,6 +31,7 @@ impl OpenAIClient {
             inner,
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
+            prompt_tokens_used: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -62,6 +65,16 @@ impl OpenAIClient {
     /// Add tokens to the total count
     pub fn add_tokens(&self, tokens: u32) {
         self.tokens_used.fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    /// Get the total number of prompt tokens used by this client
+    pub fn get_prompt_tokens_used(&self) -> u32 {
+        self.prompt_tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Add prompt tokens to the prompt count
+    pub fn add_prompt_tokens(&self, tokens: u32) {
+        self.prompt_tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -429,6 +442,7 @@ mod tests {
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
+            prompt_tokens_used: Arc::new(AtomicU32::new(0)),
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -437,6 +451,7 @@ mod tests {
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
+            prompt_tokens_used: Arc::new(AtomicU32::new(0)),
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }
