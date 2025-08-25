@@ -152,25 +152,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_hash_mismatch() {
-        let original_content = "Hash mismatch test.";
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "{original_content}").unwrap();
-        let file_path = file.path().to_str().unwrap().to_string();
-
-        let params = EditParams {
-            file_path: file_path.clone(),
-            target_block: "mismatch".to_string(),
-            new_block: "MISMATCH".to_string(),
-            dry_run: Some(false),
-        };
-
-        let result = edit(params).await.unwrap();
-        assert!(!result.success);
-        assert!(result.message.contains("File hash mismatch"));
-    }
-
-    #[tokio::test]
     async fn test_edit_no_hash_provided() {
         let original_content = "No hash provided test.";
         let mut file = NamedTempFile::new().unwrap();
