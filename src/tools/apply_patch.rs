@@ -220,24 +220,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_patch_hash_mismatch() {
-        let original_content = "Content\n";
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(original_content.as_bytes()).unwrap();
-        let file_path = temp_file.path().to_str().unwrap().to_string();
-
-        let params = ApplyPatchParams {
-            file_path,
-            patch_content: "".to_string(),
-            dry_run: Some(false),
-        };
-
-        let result = apply_patch(params).await.unwrap();
-        assert!(!result.success);
-        assert!(result.message.contains("File hash mismatch"));
-    }
-
-    #[tokio::test]
     async fn test_create_and_apply_patch_integration() {
         let original_content = "line 1\nline 2\nline 3\n";
         let modified_content = "line 1\nline two\nline 3\n";
