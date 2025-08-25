@@ -96,16 +96,19 @@ Run without flags to launch the TUI:
 
 ### TUI Commands
 
-- **Plain prompts** (no leading slash) - Talk to the LLM with full tool access
-- `/help` - List all available commands
-- `/map` - Show repository analysis (functions, classes, etc.)
-- `/tools` - List available tools
-- `/clear` - Clear the log area
-- `/open <path>` - Open a file in your editor (respects $EDITOR, $VISUAL, or defaults to vi)
-- `/theme <name>` - Switch theme (dark/light)
-- `/retry` - Resend your previous non-command input to the LLM
-- `/cancel` - Cancel ongoing LLM streaming
-- `/quit` - Exit TUI
+- **Plain prompts** (no leading slash) - Talk to the LLM.
+- **`! <command>` or `/shell <command>`** - Execute a shell command directly in the project root.
+- `/help` - List all available commands.
+- `/map` - Show repository analysis (functions, classes, etc.).
+- `/tools` - List available tools.
+- `/session` - Manage sessions (e.g., `/session list`, `/session new <title>`, `/session load <id>`).
+- `/log` - Display recent application logs.
+- `/clear` - Clear the log area.
+- `/open <path>` - Open a file in your editor (respects `$EDITOR`, `$VISUAL`).
+- `/theme <name>` - Switch theme (dark/light).
+- `/retry` - Resend your previous non-command input to the LLM.
+- `/cancel` - Cancel ongoing LLM streaming.
+- `/quit` - Exit TUI.
 
 ### Key Bindings
 
