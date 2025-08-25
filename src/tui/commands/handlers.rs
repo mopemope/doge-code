@@ -4,6 +4,7 @@ use crate::tui::commands::core::{CommandHandler, TuiExecutor};
 use crate::tui::theme::Theme;
 use crate::tui::view::TuiApp;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 impl CommandHandler for TuiExecutor {
@@ -393,8 +394,19 @@ impl CommandHandler for TuiExecutor {
                             let tx = self.ui_tx.clone();
                             // Prepare a fresh line for the final output
                             ui.push_log(String::new());
-                            let (cancel_tx, cancel_rx) = watch::channel(false);
+                            let (cancel_tx, mut cancel_rx) = watch::channel(false);
                             self.cancel_tx = Some(cancel_tx);
+
+                            let cancel_token = CancellationToken::new();
+                            let child_token = cancel_token.clone();
+
+                            // Bridge from watch::Receiver to CancellationToken
+                            tokio::spawn(async move {
+                                if cancel_rx.changed().await.is_ok() && *cancel_rx.borrow() {
+                                    info!("Cancellation signal received, cancelling token.");
+                                    child_token.cancel();
+                                }
+                            });
 
                             // Notify that LLM request preparation has started
                             if let Some(tx) = &self.ui_tx {
@@ -428,22 +440,20 @@ impl CommandHandler for TuiExecutor {
                             let conversation_history = self.conversation_history.clone();
                             let session_manager = self.session_manager.clone();
                             rt.spawn(async move {
-                                if *cancel_rx.borrow() {
-                                    if let Some(tx) = tx {
-                                        let _ = tx.send("::status:cancelled".into());
-                                        let _ = tx.send("[Cancelled]".into());
-                                    }
-                                    return;
-                                }
-
                                 // Notify that request sending has started
                                 if let Some(tx) = &tx {
                                     let _ = tx.send("::status:sending".into());
                                 }
 
-                                let res =
-                                    crate::llm::run_agent_loop(&c, &model, &fs, msgs, tx.clone())
-                                        .await;
+                                let res = crate::llm::run_agent_loop(
+                                    &c,
+                                    &model,
+                                    &fs,
+                                    msgs,
+                                    tx.clone(),
+                                    Some(cancel_token),
+                                )
+                                .await;
                                 // Get token usage after the agent loop completes
                                 let tokens_used = c.get_tokens_used();
                                 match res {

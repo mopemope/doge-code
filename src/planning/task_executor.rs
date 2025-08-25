@@ -320,6 +320,7 @@ impl TaskExecutor {
             &self.fs_tools,
             messages,
             ui_tx.clone(),
+            None,
         )
         .await
         {

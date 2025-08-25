@@ -1,3 +1,4 @@
+use crate::llm::LlmErrorKind;
 use crate::llm::chat_with_tools::{
     ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
 };
@@ -7,6 +8,7 @@ use crate::llm::types::{ChatMessage, ChoiceMessage, ToolCall, ToolDef};
 use crate::tools::FsTools;
 use anyhow::{Result, anyhow};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 pub async fn chat_tools_once(
@@ -14,6 +16,7 @@ pub async fn chat_tools_once(
     model: &str,
     messages: Vec<ChatMessage>,
     tools: &[ToolDef],
+    cancel: Option<CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
@@ -41,20 +44,34 @@ pub async fn chat_tools_once(
         );
     }
 
-    let resp = client
-        .inner
-        .post(&url)
-        .headers(headers)
-        .json(&req)
-        .send()
-        .await?;
+    let cancel_token = cancel.unwrap_or_default();
+    let req_builder = client.inner.post(&url).headers(headers).json(&req);
+
+    let resp = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            warn!("chat_tools_once cancelled before send");
+            return Err(anyhow!(LlmErrorKind::Cancelled));
+        }
+        res = req_builder.send() => res?,
+    };
+
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
-    let response_text: String = resp.text().await?;
+
+    let response_text: String = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            warn!("chat_tools_once cancelled during body read");
+            return Err(anyhow!(LlmErrorKind::Cancelled));
+        }
+        res = resp.text() => res?,
+    };
+
     debug!(
         response_body=%response_text,
         "llm chat_tools_once response"
@@ -79,55 +96,83 @@ pub async fn run_agent_streaming_once(
     model: &str,
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
+    cancel: Option<CancellationToken>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
     use crate::llm::stream_tools::{ToolDeltaBuffer, execute_tool_call};
     use futures::StreamExt;
 
+    let cancel_token = cancel.unwrap_or_default();
+
     // Start stream
-    let mut stream = client.chat_stream(model, messages.clone()).await?;
+    let mut stream = client
+        .chat_stream(model, messages.clone(), Some(cancel_token.clone()))
+        .await?;
     let runtime = ToolRuntime::new(fs);
     let mut buf = ToolDeltaBuffer::new();
     let mut acc_text = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let delta = chunk?;
-        if delta.is_empty() {
-            break;
-        }
-        if let Some(rest) = delta.strip_prefix("__TOOL_CALLS_DELTA__:") {
-            // Parse synthetic tool_calls marker and feed into buffer.
-            if let Ok(deltas) = serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest)
-            {
-                for d in deltas {
-                    let idx = d.index.unwrap_or(0);
-                    let (name_delta, args_delta) = if let Some(f) = d.function {
-                        (Some(f.name), Some(f.arguments))
-                    } else {
-                        (None, None)
-                    };
-                    buf.push_delta(idx, name_delta.as_deref(), args_delta.as_deref(), None);
-                    // Try finalize and execute immediately when JSON becomes valid
-                    if buf.finalize_sync_call(idx).is_ok() {
-                        let exec = execute_tool_call(&runtime, idx, &buf).await;
-                        if let Ok(val) = exec {
-                            messages.push(ChatMessage {
-                                role: "tool".into(),
-                                content: Some(
-                                    serde_json::to_string(&val)
-                                        .unwrap_or_else(|_| "{\"ok\":false}".to_string()),
-                                ),
-                                tool_calls: vec![],
-                                tool_call_id: None,
-                            });
-                            // One tool exec per streaming round (minimal policy)
-                            return Ok((messages, None));
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                warn!("run_agent_streaming_once cancelled");
+                return Err(anyhow!(LlmErrorKind::Cancelled));
+            }
+            chunk = stream.next() => chunk,
+        };
+
+        match chunk {
+            Some(Ok(delta)) => {
+                if delta.is_empty() {
+                    break;
+                }
+                if let Some(rest) = delta.strip_prefix("__TOOL_CALLS_DELTA__:") {
+                    // Parse synthetic tool_calls marker and feed into buffer.
+                    if let Ok(deltas) =
+                        serde_json::from_str::<Vec<crate::llm::stream::ToolCallDelta>>(rest)
+                    {
+                        for d in deltas {
+                            let idx = d.index.unwrap_or(0);
+                            let (name_delta, args_delta) = if let Some(f) = d.function {
+                                (Some(f.name), Some(f.arguments))
+                            } else {
+                                (None, None)
+                            };
+                            buf.push_delta(idx, name_delta.as_deref(), args_delta.as_deref(), None);
+                            // Try finalize and execute immediately when JSON becomes valid
+                            if buf.finalize_sync_call(idx).is_ok() {
+                                let exec = execute_tool_call(&runtime, idx, &buf).await;
+                                if let Ok(val) = exec {
+                                    messages.push(ChatMessage {
+                                        role: "tool".into(),
+                                        content: Some(
+                                            serde_json::to_string(&val)
+                                                .unwrap_or_else(|_| "{\"ok\":false}".to_string()),
+                                        ),
+                                        tool_calls: vec![],
+                                        tool_call_id: None,
+                                    });
+                                    // One tool exec per streaming round (minimal policy)
+                                    return Ok((messages, None));
+                                }
+                            }
                         }
                     }
+                } else {
+                    // Accumulate plain text
+                    acc_text.push_str(&delta);
                 }
             }
-        } else {
-            // Accumulate plain text
-            acc_text.push_str(&delta);
+            Some(Err(e)) => {
+                if let Some(kind) = e.downcast_ref::<LlmErrorKind>()
+                    && kind == &LlmErrorKind::Cancelled
+                {
+                    warn!("run_agent_streaming_once stream cancelled");
+                    return Err(anyhow!(LlmErrorKind::Cancelled));
+                }
+                return Err(e);
+            }
+            None => break, // End of stream
         }
     }
 
@@ -158,10 +203,13 @@ pub async fn run_agent_loop(
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
+    cancel: Option<CancellationToken>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
     let runtime = ToolRuntime::new(fs);
     let mut iters = 0usize;
+    let cancel_token = cancel.unwrap_or_default();
+
     loop {
         iters += 1;
         debug!(iteration = iters, messages = ?messages, "agent loop iteration");
@@ -169,15 +217,15 @@ pub async fn run_agent_loop(
             warn!(iters, "max tool iterations reached");
             return Err(anyhow!("max tool iterations reached"));
         }
-        let msg = tokio::time::timeout(
-            runtime.request_timeout,
-            chat_tools_once(client, model, messages.clone(), &runtime.tools),
-        )
-        .await
-        .map_err(|_| {
-            error!("llm chat_tools_once timed out");
-            anyhow!("chat tools request timed out")
-        })??;
+
+        let msg = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                warn!("run_agent_loop cancelled before chat_tools_once");
+                return Err(anyhow!(LlmErrorKind::Cancelled));
+            }
+            res = chat_tools_once(client, model, messages.clone(), &runtime.tools, Some(cancel_token.clone())) => res?,
+        };
 
         // If assistant returned final content without tool calls, we are done.
         if !msg.tool_calls.is_empty() {
@@ -254,15 +302,15 @@ pub async fn run_agent_loop(
                     let log_message = format!("[tool] {}({})", tc.function.name, args_str);
                     let _ = tx.send(log_message);
                 }
-                let res = tokio::time::timeout(
-                    runtime.tool_timeout,
-                    dispatch_tool_call(&runtime, tc.clone()),
-                )
-                .await
-                .map_err(|_| {
-                    error!("tool execution timed out");
-                    anyhow!("tool execution timed out")
-                })?;
+
+                let res = tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        warn!("run_agent_loop cancelled before dispatch_tool_call");
+                        return Err(anyhow!(LlmErrorKind::Cancelled));
+                    }
+                    res = dispatch_tool_call(&runtime, tc.clone()) => res,
+                };
 
                 let tool_message_content = match res {
                     Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_e| {

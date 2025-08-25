@@ -183,7 +183,16 @@ impl LlmTaskDecomposer {
             tool_call_id: None,
         }];
 
-        match run_agent_loop(&self.client, &self.model, &self.fs_tools, messages, None).await {
+        match run_agent_loop(
+            &self.client,
+            &self.model,
+            &self.fs_tools,
+            messages,
+            None,
+            None,
+        )
+        .await
+        {
             Ok((_, choice_message)) => {
                 // Parse LLM response
                 self.parse_llm_response(&choice_message.content).await
