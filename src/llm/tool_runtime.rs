@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::llm::types::ToolDef;
 use crate::tools::FsTools;
 
@@ -10,8 +8,6 @@ pub struct ToolRuntime<'a> {
     pub fs: &'a FsTools,
     // repomap is delegated to FsTools, removed here
     pub max_iters: usize,
-    pub request_timeout: Duration,
-    pub tool_timeout: Duration,
 }
 
 impl<'a> ToolRuntime<'a> {
@@ -21,8 +17,6 @@ impl<'a> ToolRuntime<'a> {
             tools: crate::llm::tool_def::default_tools_def(),
             fs,
             max_iters: MAX_ITERS,
-            request_timeout: Duration::from_secs(60 * 5),
-            tool_timeout: Duration::from_secs(10 * 60),
         }
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::{Stream, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
