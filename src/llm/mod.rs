@@ -14,8 +14,9 @@ pub use chat_with_tools::*;
 pub use client_core::*;
 pub use history::*;
 pub use tool_def::*;
-pub use tool_execution::*;
 pub use types::*;
+
+pub use tool_execution::{run_agent_loop, run_agent_streaming_once};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmErrorKind {

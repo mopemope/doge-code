@@ -15,16 +15,6 @@ pub struct ToolRuntime<'a> {
 }
 
 impl<'a> ToolRuntime<'a> {
-    pub fn default_with(fs: &'a FsTools) -> Self {
-        Self {
-            tools: crate::llm::tool_def::default_tools_def(),
-            fs,
-            max_iters: MAX_ITERS,
-            request_timeout: Duration::from_secs(60 * 5),
-            tool_timeout: Duration::from_secs(10 * 60),
-        }
-    }
-
     pub fn new(fs: &'a FsTools) -> Self {
         // repomap parameter removed
         Self {

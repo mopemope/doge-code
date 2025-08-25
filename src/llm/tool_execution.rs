@@ -254,38 +254,32 @@ pub async fn run_agent_loop(
                     let log_message = format!("[tool] {}({})", tc.function.name, args_str);
                     let _ = tx.send(log_message);
                 }
-                let mut retry_count = 0;
-                let max_retries = 3;
-                let res = loop {
-                    let result = tokio::time::timeout(runtime.tool_timeout, async {
-                        dispatch_tool_call(&runtime, tc.clone()).await
-                    })
-                    .await
-                    .map_err(|_| {
-                        error!("tool execution timed out");
-                        anyhow!("tool execution timed out")
-                    })?;
+                let res = tokio::time::timeout(
+                    runtime.tool_timeout,
+                    dispatch_tool_call(&runtime, tc.clone()),
+                )
+                .await
+                .map_err(|_| {
+                    error!("tool execution timed out");
+                    anyhow!("tool execution timed out")
+                })?;
 
-                    match result {
-                        Ok(value) => break value,
-                        Err(e) => {
-                            retry_count += 1;
-                            if retry_count > max_retries {
-                                error!(error = %e, "tool execution failed after {} retries", max_retries);
-                                return Err(e);
-                            } else {
-                                warn!(error = %e, "tool execution failed, retrying... ({}/{})", retry_count, max_retries);
-                                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                            }
-                        }
+                let tool_message_content = match res {
+                    Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_e| {
+                        "{\"error\":\"failed to serialize tool result\"}".to_string()
+                    }),
+                    Err(e) => {
+                        warn!(error = %e, "tool execution failed");
+                        serde_json::to_string(&json!({ "error": e.to_string() })).unwrap_or_else(
+                            |_e| "{\"error\":\"failed to serialize error\"}".to_string(),
+                        )
                     }
                 };
+
                 // tool message to feed back
                 messages.push(ChatMessage {
                     role: "tool".into(),
-                    content: Some(serde_json::to_string(&res).unwrap_or_else(|e| {
-                        format!("{{\"error\":\"failed to serialize tool result: {e}\"}}")
-                    })),
+                    content: Some(tool_message_content),
                     tool_calls: vec![],
                     tool_call_id: tc.id,
                 });
@@ -318,187 +312,164 @@ pub async fn dispatch_tool_call(
 ) -> Result<serde_json::Value> {
     debug!(target: "llm", tool_call = ?call, "dispatching tool call");
     if call.r#type != "function" {
-        return Ok(json!({ "error": format!("unsupported tool type: {}", call.r#type) }));
+        return Err(anyhow!("unsupported tool type: {}", call.r#type));
     }
     let name = call.function.name.as_str();
-    let args_val: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
-        Ok(v) => v,
-        Err(e) => return Ok(json!({ "error": format!("invalid tool args: {e}") })),
-    };
+    let args_val: serde_json::Value = serde_json::from_str(&call.function.arguments)
+        .map_err(|e| anyhow!("invalid tool args: {e}"))?;
 
-    let mut retry_count = 0;
-    let max_retries = 3;
-    let result = loop {
-        let result = match name {
-            "fs_list" => {
-                let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let max_depth = args_val
-                    .get("max_depth")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                let pattern = args_val.get("pattern").and_then(|v| v.as_str());
-                match runtime.fs.fs_list(path, max_depth, pattern) {
-                    Ok(files) => Ok(json!({ "ok": true, "files": files })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "fs_read" => {
-                let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let offset = args_val
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                let limit = args_val
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                match runtime.fs.fs_read(path, offset, limit) {
-                    Ok(text) => Ok(json!({ "ok": true, "path": path, "content": text })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "search_text" => {
-                let search_pattern = args_val
-                    .get("search_pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let file_glob = args_val.get("file_glob").and_then(|v| v.as_str());
-                match runtime.fs.search_text(search_pattern, file_glob) {
-                    Ok(rows) => {
-                        let items: Vec<_> = rows
-                            .into_iter()
-                            .map(|(p, ln, text)| {
-                                json!({
-                                    "path": p.display().to_string(),
-                                    "line": ln,
-                                    "text": text,
-                                })
-                            })
-                            .collect();
-                        Ok(json!({ "ok": true, "results": items }))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "fs_write" => {
-                let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let content = args_val
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match runtime.fs.fs_write(path, content) {
-                    Ok(()) => {
-                        Ok(json!({ "ok": true, "path": path, "bytesWritten": content.len() }))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "get_symbol_info" => {
-                let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let include = args_val.get("include").and_then(|v| v.as_str());
-                let kind = args_val.get("kind").and_then(|v| v.as_str());
-
-                match runtime.fs.get_symbol_info(query, include, kind).await {
-                    Ok(items) => Ok(json!({ "ok": true, "symbols": items })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "search_repomap" => {
-                let args = serde_json::from_value::<crate::tools::search_repomap::SearchRepomapArgs>(
-                    args_val.clone(),
-                )?;
-                match runtime.fs.search_repomap(args).await {
-                    Ok(results) => Ok(json!({ "ok": true, "results": results })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "execute_bash" => {
-                let command = args_val
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match runtime.fs.execute_bash(command).await {
-                    Ok(output) => Ok(json!({ "ok": true, "stdout": output })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "get_file_sha256" => {
-                let params = serde_json::from_value(args_val.clone())?;
-                match crate::tools::get_file_sha256::get_file_sha256(params).await {
-                    Ok(res) => Ok(serde_json::to_value(res)?),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "edit" => {
-                let params = serde_json::from_value(args_val.clone())?;
-                match crate::tools::edit::edit(params).await {
-                    Ok(res) => Ok(serde_json::to_value(res)?),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "create_patch" => {
-                let params = serde_json::from_value(args_val.clone())?;
-                match crate::tools::create_patch::create_patch(params).await {
-                    Ok(res) => Ok(serde_json::to_value(res)?),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "apply_patch" => {
-                let params = serde_json::from_value(args_val.clone())?;
-                match crate::tools::apply_patch::apply_patch(params).await {
-                    Ok(res) => Ok(serde_json::to_value(res)?),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "find_file" => {
-                let args = serde_json::from_value::<crate::tools::find_file::FindFileArgs>(
-                    args_val.clone(),
-                )?;
-                match runtime.fs.find_file(&args.filename).await {
-                    Ok(res) => Ok(serde_json::to_value(res)?),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            "fs_read_many_files" => {
-                let paths = args_val
-                    .get("paths")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let exclude = args_val
-                    .get("exclude")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    });
-                let recursive = args_val.get("recursive").and_then(|v| v.as_bool());
-                match runtime.fs.fs_read_many_files(paths, exclude, recursive) {
-                    Ok(content) => Ok(json!({ "ok": true, "content": content })),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
-            }
-            other => Ok(json!({ "error": format!("unknown tool: {other}") })),
-        };
-
-        match result {
-            Ok(value) => break Ok(value),
-            Err(e) => {
-                retry_count += 1;
-                if retry_count > max_retries {
-                    error!(error = %e, "tool execution failed after {} retries", max_retries);
-                    return Ok(json!({ "ok": false, "error": format!("{e}") }));
-                } else {
-                    warn!(error = %e, "tool execution failed, retrying... ({}/{})", retry_count, max_retries);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                }
+    let result = match name {
+        "fs_list" => {
+            let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let max_depth = args_val
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let pattern = args_val.get("pattern").and_then(|v| v.as_str());
+            match runtime.fs.fs_list(path, max_depth, pattern) {
+                Ok(files) => Ok(json!({ "ok": true, "files": files })),
+                Err(e) => Err(anyhow!("{e}")),
             }
         }
+        "fs_read" => {
+            let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let offset = args_val
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let limit = args_val
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            match runtime.fs.fs_read(path, offset, limit) {
+                Ok(text) => Ok(json!({ "ok": true, "path": path, "content": text })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "search_text" => {
+            let search_pattern = args_val
+                .get("search_pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let file_glob = args_val.get("file_glob").and_then(|v| v.as_str());
+            match runtime.fs.search_text(search_pattern, file_glob) {
+                Ok(rows) => {
+                    let items: Vec<_> = rows
+                        .into_iter()
+                        .map(|(p, ln, text)| {
+                            json!({
+                                "path": p.display().to_string(),
+                                "line": ln,
+                                "text": text,
+                            })
+                        })
+                        .collect();
+                    Ok(json!({ "ok": true, "results": items }))
+                }
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "fs_write" => {
+            let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = args_val
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match runtime.fs.fs_write(path, content) {
+                Ok(()) => Ok(json!({ "ok": true, "path": path, "bytesWritten": content.len() })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "get_symbol_info" => {
+            let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let include = args_val.get("include").and_then(|v| v.as_str());
+            let kind = args_val.get("kind").and_then(|v| v.as_str());
+
+            match runtime.fs.get_symbol_info(query, include, kind).await {
+                Ok(items) => Ok(json!({ "ok": true, "symbols": items })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "search_repomap" => {
+            let args = serde_json::from_value::<crate::tools::search_repomap::SearchRepomapArgs>(
+                args_val.clone(),
+            )?;
+            match runtime.fs.search_repomap(args).await {
+                Ok(results) => Ok(json!({ "ok": true, "results": results })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "execute_bash" => {
+            let command = args_val
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match runtime.fs.execute_bash(command).await {
+                Ok(output) => Ok(json!({ "ok": true, "stdout": output })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "get_file_sha256" => {
+            let params = serde_json::from_value(args_val.clone())?;
+            match crate::tools::get_file_sha256::get_file_sha256(params).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "edit" => {
+            let params = serde_json::from_value(args_val.clone())?;
+            match crate::tools::edit::edit(params).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "create_patch" => {
+            let params = serde_json::from_value(args_val.clone())?;
+            match crate::tools::create_patch::create_patch(params).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "apply_patch" => {
+            let params = serde_json::from_value(args_val.clone())?;
+            match crate::tools::apply_patch::apply_patch(params).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "find_file" => {
+            let args =
+                serde_json::from_value::<crate::tools::find_file::FindFileArgs>(args_val.clone())?;
+            match runtime.fs.find_file(&args.filename).await {
+                Ok(res) => Ok(serde_json::to_value(res)?),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        "fs_read_many_files" => {
+            let paths = args_val
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let exclude = args_val
+                .get("exclude")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                });
+            let recursive = args_val.get("recursive").and_then(|v| v.as_bool());
+            match runtime.fs.fs_read_many_files(paths, exclude, recursive) {
+                Ok(content) => Ok(json!({ "ok": true, "content": content })),
+                Err(e) => Err(anyhow!("{e}")),
+            }
+        }
+        other => Err(anyhow!("unknown tool: {other}")),
     };
 
     debug!(target: "llm", tool_result = ?result, "tool call result");
