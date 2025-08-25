@@ -24,10 +24,10 @@ pub enum SessionError {
 
 impl From<std::io::Error> for SessionError {
     fn from(error: std::io::Error) -> Self {
-        // ここでエラーの種類を判別して、適切なバリアントに変換する
-        // ただし、今回は簡単のため、すべてを`ReadError`として扱う
-        // 実際の実装では、エラーのコンテキストに応じて適切なバリアントを選択する必要がある
-        // 例：error.kind() == std::io::ErrorKind::NotFound ならファイルが見つからないエラー
+        // Here, we determine the type of error and convert it to the appropriate variant
+        // For simplicity, we'll treat all errors as `ReadError`
+        // In a real implementation, we would need to select the appropriate variant based on the error context
+        // For example: error.kind() == std::io::ErrorKind::NotFound would be a file not found error
         SessionError::ReadError(error)
     }
 }

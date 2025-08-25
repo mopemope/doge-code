@@ -196,7 +196,7 @@ pub async fn run_agent_loop(
             });
             for tc in msg.tool_calls {
                 if let Some(tx) = &ui_tx {
-                    // ツール実行開始を通知
+                    // Notify tool execution start
                     let _ = tx.send("::status:processing".into());
 
                     let mut args_str = tc.function.arguments.clone();

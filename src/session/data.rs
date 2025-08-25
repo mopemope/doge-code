@@ -15,7 +15,7 @@ pub struct SessionData {
 }
 
 impl SessionData {
-    /// 新しいSessionDataを作成します。
+    /// Create a new SessionData.
     pub fn new(title: impl Into<String>) -> Self {
         let id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp();
@@ -30,12 +30,12 @@ impl SessionData {
         }
     }
 
-    /// 会話履歴に新しいエントリを追加します。
+    /// Add a new entry to the conversation history.
     pub fn add_to_history(&mut self, entry: impl Into<String>) {
         self.history.push(entry.into());
     }
 
-    /// 会話履歴をクリアします。
+    /// Clear the conversation history.
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
