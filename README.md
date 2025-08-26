@@ -1,25 +1,31 @@
 # doge-code
 
-An interactive TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to autonomously read, analyze, search, and edit code across multiple programming languages, providing a fast, minimal TUI with streaming output and comprehensive repository analysis.
+An interactive TUI coding agent written in Rust (Edition 2024). It leverages OpenAI-compatible LLMs to autonomously read, analyze, search, and edit code across multiple programming languages. It features a fast, minimal TUI with streaming output, comprehensive repository analysis, and autonomous task execution capabilities.
 
 ## Features
 
 ### Core Capabilities
+
 - **Interactive TUI Interface** - Real-time streaming output with status indicators and cancellation support
 - **Multi-language Repository Analysis** - Static analysis using tree-sitter for Rust, TypeScript, JavaScript, Python, Go, and Java
-- **Autonomous Agent Loop** - LLM function calling with comprehensive tool execution and feedback loops
+- **Autonomous Agent Loop** - Advanced agent capabilities with function calling, tool execution, and feedback loops.
+- **Task Planning & Execution** - Decomposes complex tasks, creates execution plans, and carries them out autonomously.
 - **OpenAI-compatible API Integration** - Streaming chat completions with tool use support
 - **Comprehensive Tool System** - 15+ built-in tools for filesystem operations, code analysis, and execution
 
 ### Advanced Features
+
 - **Session Management** - Persistent conversation history with session creation, loading, and management
 - **Smart Configuration** - TOML config files, CLI arguments, and environment variables with XDG Base Directory compliance
 - **Theme System** - Dark/light themes with runtime switching via `/theme` command
 - **File Completion** - @-file completion for project files with intelligent path resolution
 - **Editor Integration** - `/open <path>` command launches your preferred editor and safely returns to TUI
 - **Project Instructions** - Automatic loading of project-specific instructions from AGENTS.md, QWEN.md, or GEMINI.md
+- **Shell Mode** - Execute shell commands directly within the TUI using `!` or `/shell`.
+- **File Watch Mode** - Run in a non-interactive mode to watch for file changes and execute predefined tasks.
 
 ### TUI Experience
+
 - Real-time streaming output with status indicator (Idle/Streaming/Cancelled/Done/Error)
 - Esc to cancel ongoing streaming operations
 - Automatic log truncation with configurable limits
@@ -61,12 +67,10 @@ You can configure via TOML config file, CLI flags, or environment variables (dot
 ```toml
 # ~/.config/doge-code/config.toml
 base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
+model = "gpt-5-mini"
 api_key = "sk-..."
 log_level = "info"
 theme = "dark"
-# Optional project root override (absolute path)
-# project_root = "/path/to/project"
 ```
 
 ### Environment Variables and CLI Options
@@ -79,7 +83,7 @@ theme = "dark"
 Example:
 
 ```bash
-OPENAI_API_KEY=sk-... \
+OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1 \
 OPENAI_MODEL=gpt-4o-mini \
 DOGE_LOG=debug \
@@ -90,8 +94,12 @@ DOGE_LOG=debug \
 
 Run without flags to launch the TUI:
 
+You can also start in watch mode to react to file system changes:
+`./target/release/doge-code --watch`
 ```bash
 ./target/release/doge-code
+```
+
 ```
 
 ### TUI Commands
