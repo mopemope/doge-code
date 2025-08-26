@@ -266,7 +266,9 @@ pub async fn run_agent_loop(
                                     {
                                         *value = file_name.to_string().into();
                                     }
-                                } else if value.is_array() && let Some(arr) = value.as_array_mut() {
+                                } else if value.is_array()
+                                    && let Some(arr) = value.as_array_mut()
+                                {
                                     for item in arr.iter_mut() {
                                         if let Some(path_str) = item.as_str()
                                             && let Some(file_name) = std::path::Path::new(path_str)
@@ -319,7 +321,10 @@ pub async fn run_agent_loop(
                 let mut result_summary = tool_message_content.clone();
                 const MAX_RESULT_LEN: usize = 200;
                 if result_summary.len() > MAX_RESULT_LEN {
-                    let mut t = result_summary.chars().take(MAX_RESULT_LEN - 3).collect::<String>();
+                    let mut t = result_summary
+                        .chars()
+                        .take(MAX_RESULT_LEN - 3)
+                        .collect::<String>();
                     t.push_str("...");
                     result_summary = t;
                 }
@@ -328,13 +333,16 @@ pub async fn run_agent_loop(
                 if let Some(tx) = &ui_tx {
                     let success = res.is_ok();
                     let status = if success { "OK" } else { "ERR" };
-                    let combined = format!("[tool] {}({}) => {}", tc.function.name, args_str, status);
+                    let combined =
+                        format!("[tool] {}({}) => {}", tc.function.name, args_str, status);
                     let _ = tx.send(combined);
                 }
 
                 // Also emit structured debug/warn logs (include truncated result summary for debugging)
                 match &res {
-                    Ok(_) => debug!(target: "llm", "[tool] {} succeeded: {}", tc.function.name, result_summary),
+                    Ok(_) => {
+                        debug!(target: "llm", "[tool] {} succeeded: {}", tc.function.name, result_summary)
+                    }
                     Err(e) => warn!(target: "llm", "[tool] {} failed: {}", tc.function.name, e),
                 }
 
