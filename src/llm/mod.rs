@@ -1,5 +1,5 @@
 mod chat_with_tools;
-mod client_core;
+pub mod client_core;
 mod history;
 mod stream;
 mod stream_tools;
