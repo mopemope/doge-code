@@ -1030,6 +1030,7 @@ dependencies = [
  "notify",
  "notify-rust",
  "num_cpus",
+ "rand 0.8.5",
  "ratatui",
  "regex",
  "reqwest",
