@@ -7,6 +7,7 @@ pub mod planning;
 pub mod session;
 pub mod tools;
 mod tui;
+pub mod watch;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,6 +17,7 @@ use tracing::info;
 use crate::config::AppConfig;
 use crate::tui::commands::TuiExecutor;
 use crate::tui::state::TuiApp;
+use crate::watch::run_watch_mode;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -39,6 +41,10 @@ pub struct Cli {
     /// Disable repomap creation at startup
     #[arg(long, default_value_t = false)]
     pub no_repomap: bool,
+
+    /// Watch for file changes and execute tasks
+    #[arg(long, default_value_t = false)]
+    pub watch: bool,
 }
 
 #[tokio::main]
@@ -47,10 +53,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     logging::init_logging()?;
 
-    let cfg = AppConfig::from_cli(cli)?;
+    let cfg = AppConfig::from_cli(cli.clone())?;
     info!(?cfg, "app config");
 
-    run_tui(cfg).await
+    if cli.watch {
+        run_watch_mode(cfg).await
+    } else {
+        run_tui(cfg).await
+    }
 }
 
 async fn run_tui(cfg: AppConfig) -> Result<()> {
