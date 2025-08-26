@@ -35,6 +35,10 @@ pub struct Cli {
     /// API key (set via env OPENAI_API_KEY recommended)
     #[arg(long)]
     pub api_key: Option<String>,
+
+    /// Disable repomap creation at startup
+    #[arg(long, default_value_t = false)]
+    pub no_repomap: bool,
 }
 
 #[tokio::main]

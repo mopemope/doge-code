@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub enable_stream_tools: bool,
     pub theme: String,                     // newly added
     pub project_instructions_file: String, // newly added
+    pub no_repomap: bool,                  // newly added
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +51,7 @@ pub struct FileConfig {
     pub enable_stream_tools: Option<bool>,
     pub theme: Option<String>,                     // newly added
     pub project_instructions_file: Option<String>, // newly added
+    pub no_repomap: Option<bool>,                  // newly added
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -132,6 +134,7 @@ impl AppConfig {
                 .unwrap_or(false),
             theme,                     // newly added
             project_instructions_file, // newly added
+            no_repomap: cli.no_repomap || file_cfg.no_repomap.unwrap_or(false),
         })
     }
 }

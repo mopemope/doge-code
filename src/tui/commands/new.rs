@@ -14,40 +14,46 @@ impl TuiExecutor {
         info!("Initializing TuiExecutor");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
         let tools = FsTools::new(repomap.clone());
-        let repomap_clone = repomap.clone();
-        let project_root = cfg.project_root.clone();
 
-        // Spawn an asynchronous task
-        tokio::spawn(async move {
-            info!(
-                "Starting background repomap generation for project at {:?}",
-                project_root
-            );
-            let start_time = std::time::Instant::now();
-            let mut analyzer = match Analyzer::new(&project_root).await {
-                Ok(analyzer) => analyzer,
-                Err(e) => {
-                    error!("Failed to create Analyzer: {:?}", e);
-                    return;
-                }
-            };
+        // Only initialize repomap if not disabled
+        if !cfg.no_repomap {
+            let repomap_clone = repomap.clone();
+            let project_root = cfg.project_root.clone();
 
-            match analyzer.build().await {
-                Ok(map) => {
-                    let duration = start_time.elapsed();
-                    let symbol_count = map.symbols.len();
-                    *repomap_clone.write().await = Some(map);
-                    tracing::debug!(
-                        "Background repomap generation completed in {:?} with {} symbols",
-                        duration,
-                        symbol_count
-                    );
+            // Spawn an asynchronous task
+            tokio::spawn(async move {
+                info!(
+                    "Starting background repomap generation for project at {:?}",
+                    project_root
+                );
+                let start_time = std::time::Instant::now();
+                let mut analyzer = match Analyzer::new(&project_root).await {
+                    Ok(analyzer) => analyzer,
+                    Err(e) => {
+                        error!("Failed to create Analyzer: {:?}", e);
+                        return;
+                    }
+                };
+
+                match analyzer.build().await {
+                    Ok(map) => {
+                        let duration = start_time.elapsed();
+                        let symbol_count = map.symbols.len();
+                        *repomap_clone.write().await = Some(map);
+                        tracing::debug!(
+                            "Background repomap generation completed in {:?} with {} symbols",
+                            duration,
+                            symbol_count
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to build RepoMap: {:?}", e);
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to build RepoMap: {:?}", e);
-                }
-            }
-        });
+            });
+        } else {
+            info!("Repomap initialization skipped due to --no-repomap flag");
+        }
 
         let client = match cfg.api_key.clone() {
             Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
