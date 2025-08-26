@@ -161,9 +161,17 @@ impl TuiApp {
                     Style::default().fg(Color::Cyan),
                 )));
             } else if log_line.starts_with("[tool]") {
+                // Expect format: [tool] name({...}) => OK|ERR
+                // Color green for OK, red for ERR, yellow otherwise
+                let mut style = Style::default().fg(Color::Yellow);
+                if log_line.contains("=> ERR") {
+                    style = Style::default().fg(Color::Red);
+                } else if log_line.contains("=> OK") {
+                    style = Style::default().fg(Color::Green);
+                }
                 lines.push(Line::from(Span::styled(
                     log_line.clone(),
-                    Style::default().fg(Color::Green),
+                    style,
                 )));
             } else if log_line.starts_with("  ") {
                 // LLM response with margin - use special styling

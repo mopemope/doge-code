@@ -243,64 +243,54 @@ pub async fn run_agent_loop(
                 tool_call_id: None,
             });
             for tc in msg.tool_calls {
+                // Always send processing status to UI if available
                 if let Some(tx) = &ui_tx {
-                    // Notify tool execution start
                     let _ = tx.send("::status:processing".into());
+                }
 
-                    let mut args_str = tc.function.arguments.clone();
+                // Prepare and sanitize arguments for logging
+                let mut args_str = tc.function.arguments.clone();
+                if let Ok(mut args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
+                    if let Some(obj) = args_val.as_object_mut() {
+                        if tc.function.name == "fs_write" {
+                            obj.remove("content");
+                        }
 
-                    // Parse arguments as JSON to modify them
-                    if let Ok(mut args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
-                        if let Some(obj) = args_val.as_object_mut() {
-                            // Special handling for fs_write: remove content before logging
-                            if tc.function.name == "fs_write" {
-                                obj.remove("content");
-                            }
-
-                            // Shorten paths for common path keys
-                            for key in ["path", "paths", "file_path", "filename"].iter() {
-                                if let Some(value) = obj.get_mut(*key) {
-                                    if value.is_string() {
-                                        if let Some(path_str) = value.as_str()
+                        for key in ["path", "paths", "file_path", "filename"].iter() {
+                            if let Some(value) = obj.get_mut(*key) {
+                                if value.is_string() {
+                                    if let Some(path_str) = value.as_str()
+                                        && let Some(file_name) = std::path::Path::new(path_str)
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                    {
+                                        *value = file_name.to_string().into();
+                                    }
+                                } else if value.is_array() && let Some(arr) = value.as_array_mut() {
+                                    for item in arr.iter_mut() {
+                                        if let Some(path_str) = item.as_str()
                                             && let Some(file_name) = std::path::Path::new(path_str)
                                                 .file_name()
                                                 .and_then(|s| s.to_str())
                                         {
-                                            *value = file_name.to_string().into();
-                                        }
-                                    } else if value.is_array()
-                                        && let Some(arr) = value.as_array_mut()
-                                    {
-                                        for item in arr.iter_mut() {
-                                            if let Some(path_str) = item.as_str()
-                                                && let Some(file_name) =
-                                                    std::path::Path::new(path_str)
-                                                        .file_name()
-                                                        .and_then(|s| s.to_str())
-                                            {
-                                                *item = file_name.to_string().into();
-                                            }
+                                            *item = file_name.to_string().into();
                                         }
                                     }
                                 }
                             }
                         }
-
-                        if let Ok(modified_args_str) = serde_json::to_string(&args_val) {
-                            args_str = modified_args_str;
-                        }
                     }
 
-                    const MAX_LEN: usize = 120;
-                    if args_str.len() > MAX_LEN {
-                        // Truncate and add ellipsis
-                        let mut truncated = args_str.chars().take(MAX_LEN - 3).collect::<String>();
-                        truncated.push_str("...");
-                        args_str = truncated;
+                    if let Ok(modified_args_str) = serde_json::to_string(&args_val) {
+                        args_str = modified_args_str;
                     }
+                }
 
-                    let log_message = format!("[tool] {}({})", tc.function.name, args_str);
-                    let _ = tx.send(log_message);
+                const MAX_ARG_LEN: usize = 120;
+                if args_str.len() > MAX_ARG_LEN {
+                    let mut truncated = args_str.chars().take(MAX_ARG_LEN - 3).collect::<String>();
+                    truncated.push_str("...");
+                    args_str = truncated;
                 }
 
                 let res = tokio::select! {
@@ -312,8 +302,9 @@ pub async fn run_agent_loop(
                     res = dispatch_tool_call(&runtime, tc.clone()) => res,
                 };
 
-                let tool_message_content = match res {
-                    Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_e| {
+                // Build tool message content (full JSON) for feeding back to the LLM
+                let tool_message_content = match &res {
+                    Ok(value) => serde_json::to_string(value).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize tool result\"}".to_string()
                     }),
                     Err(e) => {
@@ -324,7 +315,30 @@ pub async fn run_agent_loop(
                     }
                 };
 
-                // tool message to feed back
+                // Prepare a short result summary for UI log and truncate if necessary
+                let mut result_summary = tool_message_content.clone();
+                const MAX_RESULT_LEN: usize = 200;
+                if result_summary.len() > MAX_RESULT_LEN {
+                    let mut t = result_summary.chars().take(MAX_RESULT_LEN - 3).collect::<String>();
+                    t.push_str("...");
+                    result_summary = t;
+                }
+
+                // Send a single combined log line: usage + success/failure marker
+                if let Some(tx) = &ui_tx {
+                    let success = res.is_ok();
+                    let status = if success { "OK" } else { "ERR" };
+                    let combined = format!("[tool] {}({}) => {}", tc.function.name, args_str, status);
+                    let _ = tx.send(combined);
+                }
+
+                // Also emit structured debug/warn logs (include truncated result summary for debugging)
+                match &res {
+                    Ok(_) => debug!(target: "llm", "[tool] {} succeeded: {}", tc.function.name, result_summary),
+                    Err(e) => warn!(target: "llm", "[tool] {} failed: {}", tc.function.name, e),
+                }
+
+                // tool message to feed back to the LLM
                 messages.push(ChatMessage {
                     role: "tool".into(),
                     content: Some(tool_message_content),
