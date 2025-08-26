@@ -169,10 +169,7 @@ impl TuiApp {
                 } else if log_line.contains("=> OK") {
                     style = Style::default().fg(Color::Green);
                 }
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    style,
-                )));
+                lines.push(Line::from(Span::styled(log_line.clone(), style)));
             } else if log_line.starts_with("  ") {
                 // LLM response with margin - use special styling
                 lines.push(Line::from(Span::styled(
