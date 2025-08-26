@@ -8,10 +8,71 @@ use crate::llm::types::{ChatMessage, ChoiceMessage, ToolCall, ToolDef};
 use crate::tools::FsTools;
 use anyhow::{Result, anyhow};
 use serde_json::json;
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+#[allow(unused_assignments)]
 pub async fn chat_tools_once(
+    client: &OpenAIClient,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tools: &[ToolDef],
+    cancel: Option<CancellationToken>,
+) -> Result<ChoiceMessageWithTools> {
+    const MAX_RETRIES: u32 = 3;
+    let mut attempt = 0;
+
+    // First attempt
+    attempt += 1;
+    match chat_tools_once_inner(client, model, messages.clone(), tools, cancel.clone()).await {
+        Ok(result) => return Ok(result),
+        Err(e) => {
+            if attempt > MAX_RETRIES {
+                return Err(e);
+            }
+            // Exponential backoff with jitter for first retry
+            let delay_ms = (2_u64.pow(attempt - 1) * 1000).min(60_000); // Max 60 seconds
+            let jitter = rand::random::<u64>() % 1000; // Add up to 1 second of jitter
+            let total_delay = Duration::from_millis(delay_ms + jitter);
+            warn!(
+                attempt = attempt,
+                delay_ms = delay_ms + jitter,
+                "Retrying chat_tools_once after error"
+            );
+            sleep(total_delay).await;
+        }
+    }
+
+    // Subsequent retries
+    let mut last_error: anyhow::Error = anyhow!("Initial error placeholder"); // This will be overwritten
+    loop {
+        attempt += 1;
+        match chat_tools_once_inner(client, model, messages.clone(), tools, cancel.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = e;
+                if attempt > MAX_RETRIES {
+                    break;
+                }
+                // Exponential backoff with jitter
+                let delay_ms = (2_u64.pow(attempt - 1) * 1000).min(60_000); // Max 60 seconds
+                let jitter = rand::random::<u64>() % 1000; // Add up to 1 second of jitter
+                let total_delay = Duration::from_millis(delay_ms + jitter);
+                warn!(
+                    attempt = attempt,
+                    delay_ms = delay_ms + jitter,
+                    "Retrying chat_tools_once after error"
+                );
+                sleep(total_delay).await;
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+async fn chat_tools_once_inner(
     client: &OpenAIClient,
     model: &str,
     messages: Vec<ChatMessage>,
