@@ -12,6 +12,14 @@ use tui_textarea::TextArea;
 use crate::tui::theme::Theme;
 
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
+pub enum CompletionType {
+    #[default]
+    None,
+    Command,
+    FilePath,
+}
+
+#[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum InputMode {
     #[default]
     Normal,
@@ -279,6 +287,7 @@ pub struct TuiApp {
     pub completion_candidates: Vec<String>,
     pub completion_index: usize,
     pub completion_active: bool,
+    pub completion_type: CompletionType,
 }
 
 impl TuiApp {
@@ -318,10 +327,12 @@ impl TuiApp {
         if candidates.is_empty() || (candidates.len() == 1 && candidates[0] == current_word) {
             self.completion_active = false;
             self.completion_candidates.clear();
+            self.completion_type = CompletionType::None;
         } else {
             self.completion_active = true;
             self.completion_candidates = candidates;
             self.completion_index = 0;
+            self.completion_type = CompletionType::Command;
         }
         self.dirty = true;
     }
@@ -331,6 +342,7 @@ impl TuiApp {
         if !input.starts_with('@') {
             self.completion_active = false;
             self.completion_candidates.clear();
+            self.completion_type = CompletionType::None;
             return;
         }
 
@@ -374,10 +386,12 @@ impl TuiApp {
         if candidates.is_empty() {
             self.completion_active = false;
             self.completion_candidates.clear();
+            self.completion_type = CompletionType::None;
         } else {
             self.completion_active = true;
             self.completion_candidates = candidates;
             self.completion_index = 0;
+            self.completion_type = CompletionType::FilePath;
         }
         self.dirty = true;
     }
@@ -421,6 +435,7 @@ impl TuiApp {
             completion_candidates: Vec::new(),
             completion_index: 0,
             completion_active: false,
+            completion_type: CompletionType::None,
         };
 
         Ok(app)
