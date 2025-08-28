@@ -26,7 +26,7 @@ mod tests {
             input_mode,
             w,
             h,
-            h.saturating_sub(3), // main_content_height
+                        h - 3, // main_content_height
             model,
             spinner_state,
             tokens_used,
@@ -63,7 +63,7 @@ mod tests {
             input_mode,
             w,
             h,
-            h.saturating_sub(3), // main_content_height
+                        h - 3, // main_content_height
             model,
             spinner_state,
             tokens_used,

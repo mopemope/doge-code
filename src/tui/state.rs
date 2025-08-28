@@ -1,6 +1,7 @@
 use anyhow::Result;
-use crossterm::{
-    cursor, execute,
+use crossterm::{ 
+    cursor,
+    execute,
     terminal::{self},
 };
 use ratatui::widgets::{Block, Borders};
@@ -129,13 +130,13 @@ pub fn build_render_plan(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
-    let model_suffix = model.map(|m| format!(" - model:{m}")).unwrap_or_default();
+    let model_suffix = model.map(|m| format!(" - model:{}", m)).unwrap_or_default();
     let tokens_suffix = if tokens_used > 0 {
         format!(" - tokens:{}", tokens_used)
     } else {
         String::new()
     };
-    let title_full = format!("{title}{model_suffix}{tokens_suffix} - [{status_str}]  {cwd}");
+    let title_full = format!("{}{}{} - [{}]  {}", title, model_suffix, tokens_suffix, status_str, cwd);
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
     let footer_lines = vec![title_trim, sep];
@@ -285,14 +286,14 @@ impl TuiApp {
             "/map".to_string(),
             "/tools".to_string(),
             "/clear".to_string(),
-            "/open <path>".to_string(),
+            "/open".to_string(),
             "/quit".to_string(),
-            "/theme <name>".to_string(),
-            "/session <cmd>".to_string(),
+            "/theme".to_string(),
+            "/session".to_string(),
             "/rebuild-repomap".to_string(),
             "/tokens".to_string(),
-            "/plan <task description>".to_string(),
-            "/execute [plan_id]".to_string(),
+            "/plan".to_string(),
+            "/execute".to_string(),
             "/plans".to_string(),
             "/cancel".to_string(),
         ]
@@ -313,6 +314,53 @@ impl TuiApp {
             .collect();
 
         if candidates.is_empty() || (candidates.len() == 1 && candidates[0] == current_word) {
+            self.completion_active = false;
+            self.completion_candidates.clear();
+        } else {
+            self.completion_active = true;
+            self.completion_candidates = candidates;
+            self.completion_index = 0;
+        }
+        self.dirty = true;
+    }
+
+    pub fn update_file_path_completion_candidates(&mut self, input: &str) {
+        if !input.starts_with('@') {
+            self.completion_active = false;
+            self.completion_candidates.clear();
+            return;
+        }
+
+        let path_part = &input[1..]; // Remove the '@'
+        let project_root =
+            match std::env::current_dir() {
+                Ok(path) => path,
+                Err(_) => {
+                    self.completion_active = false;
+                    self.completion_candidates.clear();
+                    return;
+                }
+            };
+
+        let mut candidates = Vec::new();
+        let walker = ignore::WalkBuilder::new(&project_root)
+            .git_ignore(true)
+            .build();
+
+        for result in walker {
+            if let Ok(entry) = result {
+                if let Some(relative_path) = entry.path().strip_prefix(&project_root).ok() {
+                    let path_str = relative_path.to_string_lossy();
+                    if path_str.starts_with(path_part) {
+                        candidates.push(path_str.to_string());
+                    }
+                }
+            }
+        }
+        candidates.sort();
+
+
+        if candidates.is_empty() {
             self.completion_active = false;
             self.completion_candidates.clear();
         } else {
@@ -449,7 +497,7 @@ impl TuiApp {
 
         let lines_added = self.log.len().saturating_sub(lines_before);
         debug!(
-            "push_log: added {} lines, total now {}, content: '{}'",
+            "push_log: added {} lines, total now {}, content: \"{}\"",
             lines_added,
             self.log.len(),
             content.chars().take(50).collect::<String>()
@@ -458,7 +506,7 @@ impl TuiApp {
         // Count new messages when not auto-scrolling
         if !self.scroll_state.auto_scroll {
             let new_lines = self.log.len().saturating_sub(lines_before);
-            self.scroll_state.new_messages =
+            self.scroll_state.new_messages = 
                 self.scroll_state.new_messages.saturating_add(new_lines);
             debug!("New messages count: {}", self.scroll_state.new_messages);
         }
@@ -530,7 +578,7 @@ impl TuiApp {
             self.handler = Some(handler);
             return;
         }
-        self.push_log(format!("> {line}"));
+        self.push_log(format!("> {}", line));
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -583,6 +631,6 @@ pub(crate) fn save_input_history(hist: &[String]) {
     let out: Vec<String> = slice.into_iter().rev().cloned().collect();
     let _ = std::fs::write(
         path,
-        serde_json::to_string_pretty(&out).unwrap_or("[]".into()),
+        serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".to_string()),
     );
 }
