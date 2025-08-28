@@ -463,6 +463,12 @@ impl TuiApp {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        // Temporarily disable terminal check for development environments
+        // Check if stdin and stdout are terminals
+        // if !atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout) {
+        //     return Err(anyhow::anyhow!("Standard input/output is not a terminal. Please run in a terminal environment."));
+        // }
+
         struct TuiGuard;
         impl Drop for TuiGuard {
             fn drop(&mut self) {

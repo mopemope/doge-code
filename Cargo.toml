@@ -25,6 +25,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "gzip", "brotli", "z
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "process", "full"] }
 dotenvy = "0.15"
 dirs = "5.0"
+atty = "0.2"
 
 #bincode = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
