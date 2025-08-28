@@ -3,19 +3,13 @@ use crossterm::{
     cursor, execute,
     terminal::{self},
 };
+use ratatui::widgets::{Block, Borders};
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
-use unicode_width::UnicodeWidthChar;
+use tui_textarea::TextArea;
 
-use crate::tui::completion::{AtFileIndex, CompletionState};
 use crate::tui::theme::Theme;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CurrentToken {
-    FilePath(String),
-    SlashCommand(String),
-}
 
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum InputMode {
@@ -76,15 +70,14 @@ impl Default for ScrollState {
 
 pub use crate::tui::state_render::{truncate_display, wrap_display};
 
-// Build a render plan. cursor_char_idx is the character index within `input` (not counting the "> " prompt)
+// Build a render plan.
 #[allow(clippy::too_many_arguments)]
 pub fn build_render_plan(
     title: &str,
     status: Status,
     log: &[String],
-    input: &str,
-    input_mode: InputMode,
-    cursor_char_idx: usize,
+    _textarea: &TextArea,
+    _input_mode: InputMode,
     w: u16,
     _h: u16, // Total height (not used directly, main_content_height is used instead)
     main_content_height: u16, // Add actual main content area height
@@ -213,80 +206,23 @@ pub fn build_render_plan(
         None
     };
 
-    // Prepare prompt+input as a sequence of chars with widths
-    let prompt = {
-        let mut s = match input_mode {
-            InputMode::Normal => String::from("> "),
-            InputMode::Shell => String::from("$ "),
-        };
-        s.push_str(input);
-        s
-    };
-    let chars: Vec<char> = prompt.chars().collect();
-    let widths: Vec<usize> = chars.iter().map(|ch| ch.width().unwrap_or(0)).collect();
-    // Ensure cursor position refers into prompt (offset by 2 for "> ")
-    let mut cursor_in_prompt = 2usize.saturating_add(cursor_char_idx);
-    if cursor_in_prompt > chars.len() {
-        cursor_in_prompt = chars.len();
-    }
-
-    // If total width fits, show whole prompt
-    let total_width: usize = widths.iter().sum();
-    if total_width <= w_usize {
-        // entire prompt visible
-        let input_line = prompt.clone();
-        // cursor col is width of chars[0..cursor_in_prompt]
-        let col = widths[..cursor_in_prompt].iter().sum::<usize>() as u16;
-        return RenderPlan {
-            footer_lines,
-            log_lines,
-            input_line,
-            input_cursor_col: col,
-            scroll_info,
-        };
-    }
-
-    // Otherwise, build a window around the cursor: expand leftwards then rightwards greedily
-    // Start from cursor (or last char if cursor at end)
-    if cursor_in_prompt >= chars.len() && !chars.is_empty() {
-        cursor_in_prompt = chars.len().saturating_sub(1);
-    }
-    // Start window at cursor
-    let mut start = cursor_in_prompt;
-    let mut sum = widths.get(cursor_in_prompt).cloned().unwrap_or(0);
-    // expand left while possible
-    while start > 0 && sum + widths[start - 1] <= w_usize {
-        start -= 1;
-        sum += widths[start];
-    }
-    // expand right while possible
-    let mut end = start + 1;
-    while end < chars.len() && sum + widths[end] <= w_usize {
-        sum += widths[end];
-        end += 1;
-    }
-
-    // Build visible string
-    let input_line: String = chars[start..end].iter().collect();
-    // compute cursor col as width of chars[start..cursor_in_prompt]
-    let col = if cursor_in_prompt >= start {
-        widths[start..cursor_in_prompt].iter().sum::<usize>() as u16
-    } else {
-        0u16
-    };
+    // The new `ratatui-textarea` handles its own rendering, so we don't need complex logic here.
+    // We just pass an empty string for now, as the rendering part will handle the widget.
+    let input_line = String::new();
+    let input_cursor_col = 0;
 
     RenderPlan {
         footer_lines,
         log_lines,
         input_line,
-        input_cursor_col: col,
+        input_cursor_col,
         scroll_info,
     }
 }
 
 pub struct TuiApp {
     pub title: String,
-    pub input: String,
+    pub textarea: TextArea<'static>,
     pub log: Vec<String>,
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
@@ -298,15 +234,11 @@ pub struct TuiApp {
     pub input_history: Vec<String>,
     pub history_index: usize,
     pub draft: String,
-    // completion
-    pub at_index: AtFileIndex,
-    pub compl: CompletionState,
+
     // theme
     pub theme: Theme,
     // llm parsing buffer for streaming
     pub(crate) llm_parsing_buffer: String,
-    // cursor position within input in number of chars (not bytes)
-    pub cursor: usize,
     // spinner state for "Thinking..." display
     pub spinner_state: usize,
     // Flag to prevent duplicate LLM response display
@@ -330,17 +262,19 @@ impl TuiApp {
     pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
-        let at_index = AtFileIndex::new(
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        );
+
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
             _ => Theme::dark(),
         };
 
+        let mut textarea = TextArea::default();
+        textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+        textarea.set_placeholder_text("Enter your message...");
+
         let app = Self {
             title: title.into(),
-            input: String::new(),
+            textarea,
             log: Vec::new(),
             handler: None,
             inbox_rx: Some(rx),
@@ -351,11 +285,9 @@ impl TuiApp {
             input_history,
             history_index,
             draft: String::new(),
-            at_index,
-            compl: Default::default(),
+
             theme,
             llm_parsing_buffer: String::new(),
-            cursor: 0,
             spinner_state: 0,              // Initialize spinner state
             is_llm_response_active: false, // Initialize the flag
             last_llm_response_content: None,
@@ -364,7 +296,7 @@ impl TuiApp {
             dirty: true, // initial full render
             scroll_state: ScrollState::default(),
         };
-        app.at_index.scan();
+
         Ok(app)
     }
 
@@ -435,91 +367,6 @@ impl TuiApp {
 
     pub fn sender(&self) -> Option<Sender<String>> {
         self.inbox_tx.clone()
-    }
-
-    pub fn current_at_token(&self) -> Option<CurrentToken> {
-        let s = &self.input;
-        let cursor_char = self.cursor;
-
-        // Find the start of the word under the cursor
-        let mut start_char = 0;
-        for i in (0..cursor_char).rev() {
-            if s.chars().nth(i).unwrap().is_whitespace() {
-                start_char = i + 1;
-                break;
-            }
-        }
-
-        // Find the end of the word
-        let mut end_char = s.chars().count();
-        for i in start_char..s.chars().count() {
-            if s.chars().nth(i).unwrap().is_whitespace() {
-                end_char = i;
-                break;
-            }
-        }
-
-        // If cursor is outside the word, no token
-        if cursor_char < start_char || cursor_char > end_char {
-            return None;
-        }
-
-        // If cursor is at the end of the word, it's only valid if it's also the end of the string.
-        // If there is a char at `end_char` it must be a whitespace, so cursor at `end_char` is outside.
-        if cursor_char == end_char && end_char < s.chars().count() {
-            return None;
-        }
-
-        let token: String = s
-            .chars()
-            .skip(start_char)
-            .take(end_char - start_char)
-            .collect();
-
-        if token.starts_with('@') {
-            Some(CurrentToken::FilePath(token))
-        } else if token.starts_with('/') {
-            Some(CurrentToken::SlashCommand(token))
-        } else {
-            None
-        }
-    }
-
-    pub fn update_completion(&mut self) {
-        if self.compl.suppress_once {
-            self.compl.suppress_once = false;
-            self.compl.visible = false;
-            return;
-        }
-
-        if let Some(tok) = self.current_at_token() {
-            self.compl.visible = true;
-            match tok {
-                CurrentToken::FilePath(ref token) => {
-                    self.compl.query = token.clone();
-                    self.compl.items = self.at_index.complete(token);
-                    self.compl.slash_command_items.clear();
-                    self.compl.selected = 0;
-                }
-                CurrentToken::SlashCommand(ref token) => {
-                    self.compl.query = token.clone();
-                    // Get the slash commands from the handler if it's a TuiExecutor
-                    if let Some(handler) = &self.handler
-                        && let Some(executor) = handler
-                            .as_any()
-                            .downcast_ref::<crate::tui::commands::TuiExecutor>()
-                    {
-                        self.compl.slash_command_items = self
-                            .at_index
-                            .complete_slash_command(token, &executor.slash_commands);
-                    }
-                    self.compl.items.clear();
-                    self.compl.selected = 0;
-                }
-            }
-        } else {
-            self.compl.reset();
-        }
     }
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
@@ -615,95 +462,6 @@ impl TuiApp {
         self.push_log(format!("> {line}"));
     }
 
-    pub fn apply_completion(&mut self) {
-        if !self.compl.visible {
-            return;
-        }
-        // Check if we're completing slash commands or file paths
-        if !self.compl.slash_command_items.is_empty() {
-            // Handle slash command completion
-            if let Some(item) = self
-                .compl
-                .slash_command_items
-                .get(self.compl.selected)
-                .cloned()
-                && let Some(CurrentToken::SlashCommand(ref tok)) = self.current_at_token()
-                && let Some(pos) = self.input.rfind(tok)
-            {
-                // compute char index of pos
-                let prefix = &self.input[..pos];
-                let start_char_idx = prefix.chars().count();
-                self.input.replace_range(pos..pos + tok.len(), &item);
-                // update cursor to after inserted text
-                self.cursor = start_char_idx + item.chars().count();
-            }
-        } else {
-            // Handle file path completion
-            if let Some(item) = self.compl.items.get(self.compl.selected).cloned() {
-                if let Some(CurrentToken::FilePath(ref tok)) = self.current_at_token()
-                    && let Some(pos) = self.input.rfind(tok)
-                {
-                    // compute char index of pos
-                    let prefix = &self.input[..pos];
-                    let start_char_idx = prefix.chars().count();
-                    let mut ins = format!("@{}", item.rel);
-                    if ins.contains(' ') {
-                        ins = format!("@\"{}\"", item.rel);
-                    }
-                    self.input.replace_range(pos..pos + tok.len(), &ins);
-                    // update cursor to after inserted text
-                    self.cursor = start_char_idx + ins.chars().count();
-                }
-                if let Ok(mut r) = self.at_index.recent.write() {
-                    r.touch(&item.rel);
-                }
-            }
-        }
-        self.compl.reset();
-        self.compl.suppress_once = true;
-    }
-
-    // Insert a string at current cursor position
-    pub(crate) fn insert_at_cursor(&mut self, s: &str) {
-        let byte_pos = self.char_to_byte_idx(self.cursor);
-        self.input.insert_str(byte_pos, s);
-        self.cursor += s.chars().count();
-    }
-
-    // Remove the character before the cursor (backspace). Returns whether anything changed.
-    pub(crate) fn backspace_at_cursor(&mut self) -> bool {
-        if self.cursor == 0 {
-            return false;
-        }
-        let end = self.char_to_byte_idx(self.cursor);
-        let start = self.char_to_byte_idx(self.cursor - 1);
-        self.input.replace_range(start..end, "");
-        self.cursor -= 1;
-        true
-    }
-
-    // Delete the character at the cursor (like Delete key). Returns whether anything changed.
-    pub(crate) fn delete_at_cursor(&mut self) -> bool {
-        let char_count = self.input.chars().count();
-        if self.cursor >= char_count {
-            return false;
-        }
-        let start = self.char_to_byte_idx(self.cursor);
-        let end = self.char_to_byte_idx(self.cursor + 1);
-        self.input.replace_range(start..end, "");
-        true
-    }
-
-    pub(crate) fn char_to_byte_idx(&self, char_idx: usize) -> usize {
-        if char_idx == 0 {
-            return 0;
-        }
-        match self.input.char_indices().nth(char_idx) {
-            Some((byte_idx, _)) => byte_idx,
-            None => self.input.len(),
-        }
-    }
-
     pub fn run(&mut self) -> Result<()> {
         struct TuiGuard;
         impl Drop for TuiGuard {
@@ -750,78 +508,4 @@ pub(crate) fn save_input_history(hist: &[String]) {
         path,
         serde_json::to_string_pretty(&out).unwrap_or("[]".into()),
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn create_test_app() -> TuiApp {
-        TuiApp::new("test", None, "dark").unwrap()
-    }
-
-    #[test]
-    fn test_current_at_token() {
-        let mut app = create_test_app();
-
-        // No token
-        app.input = "hello world".to_string();
-        app.cursor = 5;
-        assert_eq!(app.current_at_token(), None);
-
-        // Cursor at the beginning of a token
-        app.input = "hello @world".to_string();
-        app.cursor = 6;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::FilePath("@world".to_string()))
-        );
-
-        // Cursor in the middle of a token
-        app.input = "hello @world".to_string();
-        app.cursor = 9;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::FilePath("@world".to_string()))
-        );
-
-        // Cursor at the end of a token
-        app.input = "hello @world".to_string();
-        app.cursor = 12;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::FilePath("@world".to_string()))
-        );
-
-        // Not a token
-        app.input = "hello world@".to_string();
-        app.cursor = 12;
-        assert_eq!(app.current_at_token(), None);
-
-        // Multiple tokens
-        app.input = "hello @world1 @world2".to_string();
-        app.cursor = 9;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::FilePath("@world1".to_string()))
-        );
-        app.cursor = 18;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::FilePath("@world2".to_string()))
-        );
-
-        // Cursor on whitespace
-        app.input = "hello @world1 @world2".to_string();
-        app.cursor = 13;
-        assert_eq!(app.current_at_token(), None);
-
-        // Slash command
-        app.input = "/help".to_string();
-        app.cursor = 3;
-        assert_eq!(
-            app.current_at_token(),
-            Some(CurrentToken::SlashCommand("/help".to_string()))
-        );
-    }
 }

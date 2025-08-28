@@ -250,13 +250,15 @@ mod tests {
 
         // Test scroll calculation with small viewport
         let scroll_state = &app.scroll_state;
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
             &app.log,
-            "",
+            &textarea,
             crate::tui::state::InputMode::Normal,
-            0,
             80,
             8,
             8_u16.saturating_sub(3),
@@ -296,13 +298,15 @@ mod tests {
             let main_content_height = height.saturating_sub(3); // header(2) + footer(1)
             let scroll_state = &app.scroll_state;
 
+            let textarea = crate::tui::state::TuiApp::new("", None, "")
+                .unwrap()
+                .textarea;
             let plan = build_render_plan(
                 "Test",
                 crate::tui::state::Status::Idle,
                 &app.log,
-                "",
+                &textarea,
                 crate::tui::state::InputMode::Normal,
-                0,
                 width,
                 height,
                 main_content_height,
@@ -346,13 +350,15 @@ mod tests {
 
         // Test auto-scroll (should show latest)
         let scroll_state = &app.scroll_state;
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
             &app.log,
-            "",
+            &textarea,
             crate::tui::state::InputMode::Normal,
-            0,
             80,
             13,
             main_content_height,
@@ -379,13 +385,15 @@ mod tests {
         scroll_state.offset = 20;
         scroll_state.auto_scroll = false;
 
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
             &app.log,
-            "",
+            &textarea,
             crate::tui::state::InputMode::Normal,
-            0,
             80,
             13,
             main_content_height,
@@ -450,13 +458,15 @@ mod tests {
         let main_content_height = 15;
         let scroll_state = &app.scroll_state;
 
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
             &app.log,
-            "",
+            &textarea,
             crate::tui::state::InputMode::Normal,
-            0,
             80,
             18,
             main_content_height,
@@ -504,13 +514,15 @@ mod tests {
             println!("Testing screen {}x{}", width, total_height);
 
             let scroll_state = &app.scroll_state;
+            let textarea = crate::tui::state::TuiApp::new("", None, "")
+                .unwrap()
+                .textarea;
             let plan = build_render_plan(
                 "Test",
                 crate::tui::state::Status::Idle,
                 &app.log,
-                "",
+                &textarea,
                 crate::tui::state::InputMode::Normal,
-                0,
                 width,
                 total_height,
                 expected_main_height,
@@ -558,13 +570,15 @@ mod tests {
         let main_content_height = 5;
         let scroll_state = &app.scroll_state;
 
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
             &app.log,
-            "",
+            &textarea,
             crate::tui::state::InputMode::Normal,
-            0,
             80,
             8,
             main_content_height,
@@ -619,9 +633,8 @@ mod tests {
             "line4".to_string(),
             "line5".to_string(),
         ];
-        let input = "";
+
         let input_mode = InputMode::Normal;
-        let cursor_char_idx = 0;
         let w = 80;
         let h = 6; // Small height to force scrolling
         let model = None;
@@ -630,13 +643,15 @@ mod tests {
 
         // Test auto-scroll (show latest)
         let scroll_state = ScrollState::default();
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             title,
             status,
             &log,
-            input,
+            &textarea,
             input_mode,
-            cursor_char_idx,
             w,
             h,
             h.saturating_sub(3),
@@ -654,13 +669,15 @@ mod tests {
         scroll_state.offset = 2;
         scroll_state.auto_scroll = false;
 
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
         let plan = build_render_plan(
             title,
             status,
             &log,
-            input,
+            &textarea,
             input_mode,
-            cursor_char_idx,
             w,
             h,
             h.saturating_sub(3),

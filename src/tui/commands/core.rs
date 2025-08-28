@@ -9,7 +9,6 @@ use tokio::sync::{RwLock, watch};
 
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
-    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 pub struct TuiExecutor {
@@ -26,8 +25,7 @@ pub struct TuiExecutor {
     pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
     // Session management
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
-    // Available slash commands
-    pub(crate) slash_commands: Vec<String>,
+
     // Task analyzer for planning
     pub(crate) task_analyzer: TaskAnalyzer,
     // Plan manager for execution

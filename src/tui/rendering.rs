@@ -2,29 +2,28 @@ use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, ListItem, Paragraph},
+    widgets::{Block, Paragraph},
 };
 use tracing::debug;
 
 impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
-        let theme = &self.theme;
         let size = f.area();
 
         debug!(target: "tui_render", "Screen size: {}x{}", size.width, size.height);
 
-        // Calculate layout first to get actual main content area height
+        // Adjust layout for multi-line input area
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // Header
                 Constraint::Min(1),    // Main content
-                Constraint::Length(1), // Footer
+                Constraint::Length(5), // Footer (increased height for textarea)
             ])
             .split(size);
 
         let main_content_height = chunks[1].height;
-        debug!(target: "tui_render", "Layout chunks: header={}x{}, main={}x{}, footer={}x{}", 
+        debug!(target: "tui_render", "Layout chunks: header={}x{}, main={}x{}, footer={}x{}",
             chunks[0].width, chunks[0].height,
             chunks[1].width, chunks[1].height,
             chunks[2].width, chunks[2].height);
@@ -35,9 +34,8 @@ impl TuiApp {
             &self.title,
             self.status,
             &self.log,
-            &self.input,
+            &self.textarea, // Pass textarea
             self.input_mode,
-            self.cursor,
             size.width,
             size.height,
             main_content_height,
@@ -47,16 +45,15 @@ impl TuiApp {
             &self.scroll_state,
         );
 
-        debug!(target: "tui_render", "Render plan: log_lines={}, scroll_info={:?}", 
+        debug!(target: "tui_render", "Render plan: log_lines={}, scroll_info={:?}",
             plan.log_lines.len(), plan.scroll_info);
 
-        self.render_header(f, chunks[0], &plan, theme);
-        self.render_main_content(f, chunks[1], &plan, theme);
-        self.render_footer(f, chunks[2], &plan, theme);
+        self.render_header(f, chunks[0], &plan, &self.theme);
+        self.render_main_content(f, chunks[1], &plan, &self.theme);
 
-        self.render_completion(f, chunks[1], theme); // Render completion over main content
+        self.render_footer(f, chunks[2]);
 
-        f.set_cursor_position((plan.input_cursor_col, chunks[2].y));
+        // The cursor is now handled by the TextArea widget, so no need to set it manually.
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
@@ -104,12 +101,12 @@ impl TuiApp {
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        debug!(target: "tui_render", "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}", 
+        debug!(target: "tui_render", "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}",
             area.width, area.height, area.x, area.y, plan.log_lines.len());
 
         // Check if we have more lines than the area can display
         if plan.log_lines.len() > area.height as usize {
-            debug!(target: "tui_render", "WARNING: More lines ({}) than area height ({})", 
+            debug!(target: "tui_render", "WARNING: More lines ({}) than area height ({})",
                 plan.log_lines.len(), area.height);
         }
 
@@ -120,12 +117,12 @@ impl TuiApp {
         let max_displayable = area.height as usize;
         let lines_to_render = plan.log_lines.len().min(max_displayable);
 
-        debug!(target: "tui_render", "Rendering {} lines (max displayable: {})", 
+        debug!(target: "tui_render", "Rendering {} lines (max displayable: {})",
             lines_to_render, max_displayable);
 
         for (i, log_line) in plan.log_lines.iter().take(lines_to_render).enumerate() {
             if i < 5 || i >= lines_to_render.saturating_sub(5) {
-                debug!(target: "tui_render", "Line {}: '{}'", i, 
+                debug!(target: "tui_render", "Line {}: '{}'", i,
                     log_line.chars().take(50).collect::<String>());
             }
 
@@ -188,96 +185,23 @@ impl TuiApp {
             .block(Block::default()); // Add block to ensure proper boundaries
         f.render_widget(paragraph, area);
 
-        debug!(target: "tui_render", "Paragraph widget rendered {} lines in area {}x{}", 
+        debug!(target: "tui_render", "Paragraph widget rendered {} lines in area {}x{}",
             lines_to_render, area.width, area.height);
     }
 
-    fn render_footer(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        let mut input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
-            theme.shell_input_style
+    fn render_footer(&mut self, f: &mut Frame, area: Rect) {
+        let input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
+            self.theme.shell_input_style
         } else {
-            theme.input_style
+            self.theme.input_style
         };
+
+        self.textarea.set_style(input_style);
 
         if self.status == crate::tui::state::Status::ShellCommandRunning {
-            input_style = input_style.fg(Color::DarkGray);
+            self.textarea.set_style(input_style.fg(Color::DarkGray));
         }
 
-        let input = Paragraph::new(plan.input_line.as_str())
-            .style(input_style)
-            .block(Block::default());
-        f.render_widget(input, area);
-    }
-
-    fn render_completion(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        if !self.compl.visible {
-            return;
-        }
-
-        // Determine if we're showing file paths or slash commands
-        let is_slash_command = !self.compl.slash_command_items.is_empty();
-
-        let max_items = 10;
-        let items_to_show: Vec<String> = if is_slash_command {
-            self.compl
-                .slash_command_items
-                .iter()
-                .take(max_items)
-                .cloned()
-                .collect()
-        } else {
-            self.compl
-                .items
-                .iter()
-                .take(max_items)
-                .map(|item| item.rel.clone())
-                .collect()
-        };
-
-        let list_height = items_to_show.len() as u16;
-        let list_width = items_to_show
-            .iter()
-            .map(|item| item.chars().count())
-            .max()
-            .unwrap_or(20) as u16
-            + 4;
-
-        if area.height < list_height + 2 || area.width < list_width + 2 {
-            return;
-        }
-
-        let completion_area = Rect {
-            x: area.x + 1,
-            y: area.y + area.height.saturating_sub(list_height + 2),
-            width: list_width,
-            height: list_height + 2,
-        };
-
-        let list_items: Vec<ListItem> = items_to_show
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let style = if i == self.compl.selected {
-                    theme.completion_selected_style
-                } else {
-                    theme.completion_style
-                };
-                ListItem::new(item.as_str()).style(style)
-            })
-            .collect();
-
-        let list = ratatui::widgets::List::new(list_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(if is_slash_command {
-                        "Slash Commands"
-                    } else {
-                        "Completion"
-                    }),
-            )
-            .style(theme.completion_style);
-
-        f.render_widget(list, completion_area);
+        f.render_widget(&self.textarea, area);
     }
 }

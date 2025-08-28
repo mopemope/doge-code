@@ -1,5 +1,10 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use ratatui::{
+    crossterm::event::{self, Event, KeyCode, KeyModifiers},
+    widgets::{Block, Borders},
+};
+use tui_textarea::{Input, TextArea};
+
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::debug;
@@ -11,9 +16,6 @@ impl TuiApp {
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
-        if self.history_index > self.input_history.len() {
-            self.history_index = self.input_history.len();
-        }
         let mut last_ctrl_c_at: Option<Instant> = None;
 
         let mut is_streaming = false; // track streaming state
@@ -190,89 +192,126 @@ impl TuiApp {
 
                 // Mode-specific key handlers
                 match self.input_mode {
-                    InputMode::Normal => match k.code {
-                        KeyCode::Char('!') if self.input.is_empty() => {
-                            self.input_mode = InputMode::Shell;
-                            self.dirty = true;
-                        }
-                        KeyCode::Esc => {
-                            self.dispatch("/cancel");
-                            self.dirty = true;
-                        }
-                        KeyCode::PageUp => {
-                            let visible_lines = terminal
-                                .size()
-                                .map(|s| {
-                                    // Calculate actual main content height: total - header(2) - footer(1)
-                                    s.height.saturating_sub(3) as usize
-                                })
-                                .unwrap_or(20);
-                            self.page_up(visible_lines);
-                        }
-                        KeyCode::PageDown => {
-                            let visible_lines = terminal
-                                .size()
-                                .map(|s| {
-                                    // Calculate actual main content height: total - header(2) - footer(1)
-                                    s.height.saturating_sub(3) as usize
-                                })
-                                .unwrap_or(20);
-                            self.page_down(visible_lines);
-                        }
-                        KeyCode::Home if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.scroll_to_top();
-                        }
-                        KeyCode::End if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.scroll_to_bottom();
-                        }
-                        KeyCode::Up if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.scroll_up(1);
-                        }
-                        KeyCode::Down if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.scroll_down(1);
-                        }
-                        KeyCode::Char('l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.scroll_to_bottom();
-                        }
-                        KeyCode::Enter => {
-                            if self.compl.visible {
-                                self.apply_completion();
+                    InputMode::Normal => {
+                        match k {
+                            event::KeyEvent {
+                                code: KeyCode::Enter,
+                                modifiers: KeyModifiers::ALT,
+                                ..
+                            } => {
+                                self.textarea.insert_newline();
                                 self.dirty = true;
-                                continue;
                             }
-                            let line = std::mem::take(&mut self.input);
-                            if !line.trim().is_empty() {
-                                if self.input_history.last().map(|s| s.as_str())
-                                    != Some(line.as_str())
-                                {
-                                    self.input_history.push(line.clone());
-                                    save_input_history(&self.input_history);
+                            // Submit message
+                            event::KeyEvent { code: KeyCode::Enter, .. } => {
+                                let line = self.textarea.lines().join("\n");
+                                if !line.trim().is_empty() {
+                                    if self.input_history.last().map(|s| s.as_str())
+                                        != Some(line.as_str())
+                                    {
+                                        self.input_history.push(line.clone());
+                                        save_input_history(&self.input_history);
+                                    }
+                                    self.history_index = self.input_history.len();
+                                    self.draft.clear();
                                 }
-                                self.history_index = self.input_history.len();
-                                self.draft.clear();
+                                if line.trim() == "/quit" {
+                                    return Ok(())
+                                }
+                                self.dispatch(&line);
+                                // Clear the textarea by reinitializing it
+                                self.textarea = TextArea::default();
+                                self.textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+                                self.textarea.set_placeholder_text("Enter your message...");
+                                self.dirty = true;
+                                self.spinner_state = 0;
                             }
-                            if line.trim() == "/quit" {
-                                return Ok(());
+                            // Other global controls
+                            event::KeyEvent {
+                                code: KeyCode::Char('!'),
+                                ..
+                            } if self.textarea.is_empty() => {
+                                self.input_mode = InputMode::Shell;
+                                self.dirty = true;
                             }
-                            self.dispatch(&line);
-                            self.dirty = true;
-                            self.cursor = 0;
-                            self.spinner_state = 0;
+                            event::KeyEvent {
+                                code: KeyCode::Esc, ..
+                            } => {
+                                self.dispatch("/cancel");
+                                self.dirty = true;
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::PageUp,
+                                ..
+                            } => {
+                                let visible_lines = terminal
+                                    .size()
+                                    .map(|s| s.height.saturating_sub(3) as usize)
+                                    .unwrap_or(20);
+                                self.page_up(visible_lines);
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::PageDown,
+                                ..
+                            } => {
+                                let visible_lines = terminal
+                                    .size()
+                                    .map(|s| s.height.saturating_sub(3) as usize)
+                                    .unwrap_or(20);
+                                self.page_down(visible_lines);
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Home,
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                self.scroll_to_top();
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::End,
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                self.scroll_to_bottom();
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Up,
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                self.scroll_up(1);
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Down,
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                self.scroll_down(1);
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Char('l'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                self.scroll_to_bottom();
+                            }
+                            // Pass all other key events to the text area
+                            _ => {
+                                if self.textarea.input(Input::from(k)) {
+                                    self.dirty = true;
+                                }
+                            }
                         }
-                        _ => {
-                            self.handle_common_input_keys(k);
-                            self.dirty = true;
-                        }
-                    },
+                    }
                     InputMode::Shell => match k.code {
                         KeyCode::Esc => {
                             self.input_mode = InputMode::Normal;
-                            self.input.clear();
-                            self.cursor = 0;
+                            self.textarea.delete_line_by_head();
+                            self.textarea.delete_line_by_end();
                             self.dirty = true;
                         }
                         KeyCode::Enter => {
-                            let command = std::mem::take(&mut self.input);
+                            let command = self.textarea.lines().join("\n");
                             if !command.trim().is_empty() {
                                 self.push_log(format!("[shell]$ {}", command));
                                 if self.input_history.last().map(|s| s.as_str())
@@ -315,12 +354,16 @@ impl TuiApp {
                                     }
                                 });
                             }
-                            self.cursor = 0;
+                            // Clear the textarea by reinitializing it
+                            self.textarea = TextArea::default();
+                            self.textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+                            self.textarea.set_placeholder_text("Enter your message...");
                             self.dirty = true;
                         }
                         _ => {
-                            self.handle_common_input_keys(k);
-                            self.dirty = true;
+                            if self.textarea.input(Input::from(k)) {
+                                self.dirty = true;
+                            }
                         }
                     },
                 }
@@ -331,112 +374,6 @@ impl TuiApp {
                 terminal.draw(|f| self.view(f, model.as_deref()))?;
                 self.dirty = false;
             }
-        }
-    }
-
-    // Helper function for common input key handling
-    fn handle_common_input_keys(&mut self, k: event::KeyEvent) {
-        match k.code {
-            KeyCode::Backspace => {
-                if self.compl.visible {
-                    let changed = self.backspace_at_cursor();
-                    self.compl.reset();
-                    if changed && self.history_index == self.input_history.len() {
-                        self.draft = self.input.clone();
-                    }
-                } else {
-                    let changed = self.backspace_at_cursor();
-                    if changed && self.history_index == self.input_history.len() {
-                        self.draft = self.input.clone();
-                    }
-                    self.update_completion();
-                }
-            }
-            KeyCode::Delete => {
-                let changed = self.delete_at_cursor();
-                if changed && self.history_index == self.input_history.len() {
-                    self.draft = self.input.clone();
-                }
-                self.update_completion();
-            }
-            KeyCode::Left => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                }
-            }
-            KeyCode::Right => {
-                if self.cursor < self.input.chars().count() {
-                    self.cursor += 1;
-                }
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-            }
-            KeyCode::End => {
-                self.cursor = self.input.chars().count();
-            }
-            KeyCode::Up => {
-                if self.compl.visible {
-                    // Determine the number of items based on what type of completion is active
-                    let item_count = if !self.compl.slash_command_items.is_empty() {
-                        self.compl.slash_command_items.len()
-                    } else {
-                        self.compl.items.len()
-                    };
-                    if item_count > 0 {
-                        self.compl.selected = (self.compl.selected + item_count - 1) % item_count;
-                    }
-                } else if self.history_index > 0 {
-                    if self.history_index == self.input_history.len() {
-                        self.draft = self.input.clone();
-                    }
-                    self.history_index -= 1;
-                    self.input = self.input_history[self.history_index].clone();
-                    self.cursor = self.input.chars().count();
-                }
-            }
-            KeyCode::Down => {
-                if self.compl.visible {
-                    // Determine the number of items based on what type of completion is active
-                    let item_count = if !self.compl.slash_command_items.is_empty() {
-                        self.compl.slash_command_items.len()
-                    } else {
-                        self.compl.items.len()
-                    };
-                    if item_count > 0 {
-                        self.compl.selected = (self.compl.selected + 1) % item_count;
-                    }
-                } else if self.history_index < self.input_history.len() {
-                    self.history_index += 1;
-                    if self.history_index == self.input_history.len() {
-                        self.input = self.draft.clone();
-                    } else {
-                        self.input = self.input_history[self.history_index].clone();
-                    }
-                    self.cursor = self.input.chars().count();
-                }
-            }
-            KeyCode::Tab => {
-                if self.compl.visible {
-                    self.apply_completion();
-                    self.compl.reset();
-                }
-            }
-            KeyCode::Char(c) => {
-                if c == ' ' && self.compl.visible {
-                    self.compl.reset();
-                    self.compl.suppress_once = true;
-                }
-                self.insert_at_cursor(&c.to_string());
-                if c == '@' || c == '/' {
-                    self.compl.suppress_once = false;
-                }
-                if self.history_index == self.input_history.len() {
-                    self.draft = self.input.clone();
-                }
-                self.update_completion();
-            }
-            _ => {}
         }
     }
 }
