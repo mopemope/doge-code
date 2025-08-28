@@ -155,6 +155,8 @@ async fn chat_tools_once_inner(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("no choices"))?;
+
+    debug!("llm response message {:?}", msg);
     Ok(msg.message)
 }
 
@@ -300,6 +302,7 @@ pub async fn run_agent_loop(
                 && !content.is_empty()
                 && let Some(tx) = &ui_tx
             {
+                debug!(response_content = ?content, "Sending intermediate LLM response content. ");
                 let _ = tx.send(content.clone());
             }
 

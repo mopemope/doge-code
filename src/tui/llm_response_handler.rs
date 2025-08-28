@@ -6,9 +6,6 @@ use tracing::debug; // import tracing
 impl TuiApp {
     // New: structured handling for LLM streaming tokens (immediate log addition)
     pub fn append_stream_token_structured(&mut self, s: &str) {
-        // Clear the last LLM response content as streaming has started/resumed
-        self.last_llm_response_content = None;
-
         // Sanitize incoming token to avoid terminal-control sequences that can break raw mode
         fn sanitize_for_display(input: &str) -> String {
             // Remove common ANSI CSI sequences
@@ -30,6 +27,13 @@ impl TuiApp {
         // Append received (sanitized) token to the parsing buffer for final processing
         self.llm_parsing_buffer.push_str(&clean);
         debug!(appended_content = %clean, "Appended token to llm_parsing_buffer");
+
+        // Accumulate content in last_llm_response_content for duplicate checking
+        let accumulated_content = match &self.last_llm_response_content {
+            Some(existing) => format!("{}{}", existing, clean),
+            None => clean.clone(),
+        };
+        self.last_llm_response_content = Some(accumulated_content);
 
         // For immediate display during streaming, add the sanitized token with margin
         // This will be replaced by structured content when streaming completes
@@ -74,7 +78,7 @@ impl TuiApp {
     }
 
     // Finalize LLM response (simplified - content already added during streaming)
-    pub(crate) fn finalize_and_append_llm_response(&mut self, content: &str) {
+    pub fn finalize_and_append_llm_response(&mut self, content: &str) {
         debug!("finalize_and_append_llm_response called");
 
         // Check if LLM response is already being displayed to prevent duplicates
@@ -87,15 +91,24 @@ impl TuiApp {
         self.is_llm_response_active = true;
         debug!("Set is_llm_response_active to true");
 
-        // Clear the last LLM response content as new LLM response is being processed
-        self.last_llm_response_content = None;
-
         // Clear the parsing buffer as streaming is complete
         self.llm_parsing_buffer.clear();
 
-        // If content is provided and buffer was empty (non-streaming case), add it
-        if !content.is_empty() {
-            debug!(target: "tui", provided_content = %content, "Adding non-streaming content");
+        // Check if content is already displayed (duplicate check)
+        let should_add_content = match &self.last_llm_response_content {
+            Some(existing) => {
+                // If the existing content is not the same as the new content, add it
+                // This handles both streaming and non-streaming cases
+                existing != content
+            }
+            None => {
+                // If there's no existing content, add the new content
+                !content.is_empty()
+            }
+        };
+
+        if should_add_content {
+            debug!(provided_content = %content, "Adding content");
 
             // Parse content for code blocks and add with proper formatting
             let re = Regex::new(r"(?s)```(\w*)\n(.*?)```").unwrap();
@@ -103,6 +116,7 @@ impl TuiApp {
             let mut has_code_blocks = false;
 
             for cap in re.captures_iter(content) {
+                debug!("Found codeblock cap: {:?}", cap);
                 has_code_blocks = true;
                 let whole_match = cap.get(0).unwrap();
                 let lang = cap.get(1).map_or("", |m| m.as_str());
@@ -145,13 +159,16 @@ impl TuiApp {
             if !has_code_blocks {
                 for line in content.lines() {
                     let line_with_margin = format!("  {}", line);
+                    debug!("line_with_margin: {}", line_with_margin);
                     self.push_log(line_with_margin);
                 }
             }
-        }
 
-        // Store the content to prevent duplicate printing in event_loop
-        self.last_llm_response_content = Some(content.to_string());
+            // Update last_llm_response_content to the new content
+            self.last_llm_response_content = Some(content.to_string());
+        } else {
+            debug!("Skipping content addition due to duplicate check");
+        }
 
         // Reset the flag after the response has been fully added
         self.is_llm_response_active = false;
