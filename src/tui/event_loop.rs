@@ -300,13 +300,15 @@ impl TuiApp {
                             } => {
                                 self.scroll_to_bottom();
                             }
-                            // Input history navigation
                             event::KeyEvent {
                                 code: KeyCode::Up,
                                 modifiers: KeyModifiers::NONE,
                                 ..
                             } => {
-                                if !self.input_history.is_empty() && self.history_index > 0 {
+                                if self.completion_active {
+                                    self.completion_index = self.completion_index.saturating_sub(1);
+                                    self.dirty = true;
+                                } else if !self.input_history.is_empty() && self.history_index > 0 {
                                     // Save current draft if we're at the end of history
                                     if self.history_index == self.input_history.len() {
                                         self.draft = self.textarea.lines().join("\n");
@@ -327,7 +329,10 @@ impl TuiApp {
                                 modifiers: KeyModifiers::NONE,
                                 ..
                             } => {
-                                if !self.input_history.is_empty()
+                                if self.completion_active {
+                                    self.completion_index = (self.completion_index + 1).min(self.completion_candidates.len() - 1);
+                                    self.dirty = true;
+                                } else if !self.input_history.is_empty()
                                     && self.history_index < self.input_history.len()
                                 {
                                     self.history_index += 1;
@@ -348,42 +353,13 @@ impl TuiApp {
                             }
                             // Pass all other key events to the text area
                             _ => {
-                                match k.code {
-                                    KeyCode::Left => {
-                                        self.textarea.move_cursor(tui_textarea::CursorMove::Back);
-                                        self.dirty = true;
-                                    }
-                                    KeyCode::Right => {
-                                        self.textarea
-                                            .move_cursor(tui_textarea::CursorMove::Forward);
-                                        self.dirty = true;
-                                    }
-                                    KeyCode::Home => {
-                                        self.textarea.move_cursor(tui_textarea::CursorMove::Head);
-                                        self.dirty = true;
-                                    }
-                                    KeyCode::End => {
-                                        self.textarea.move_cursor(tui_textarea::CursorMove::End);
-                                        self.dirty = true;
-                                    }
-                                    KeyCode::PageUp => {
-                                        // Only use PageUp for text area if it's a multi-line input
-                                        if self.textarea.lines().len() > 1 {
-                                            self.textarea.scroll((10, 0)); // Scroll up by 10 lines
-                                            self.dirty = true;
-                                        }
-                                    }
-                                    KeyCode::PageDown => {
-                                        // Only use PageDown for text area if it's a multi-line input
-                                        if self.textarea.lines().len() > 1 {
-                                            self.textarea.scroll((-10, 0)); // Scroll down by 10 lines
-                                            self.dirty = true;
-                                        }
-                                    }
-                                    _ => {
-                                        if self.textarea.input(Input::from(k)) {
-                                            self.dirty = true;
-                                        }
+                                if self.textarea.input(Input::from(k)) {
+                                    self.dirty = true;
+                                    let input_str = self.textarea.lines()[0].clone();
+                                    if input_str.starts_with('/') {
+                                        self.update_completion_candidates(&input_str);
+                                    } else {
+                                        self.completion_active = false;
                                     }
                                 }
                             }
