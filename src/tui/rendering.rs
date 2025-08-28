@@ -211,7 +211,8 @@ impl TuiApp {
                 .map(|s| s.len())
                 .max()
                 .unwrap_or(10) as u16;
-            let list_height = self.completion_candidates.len() as u16;
+            let max_display_items = 10; // Limit the number of displayed completion items
+            let list_height = (self.completion_candidates.len() as u16).min(max_display_items);
 
             // Position the popup above the input area
             let popup_y = area.y.saturating_sub(list_height);

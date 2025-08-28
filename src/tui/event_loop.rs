@@ -3,7 +3,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyModifiers},
     widgets::{Block, Borders},
 };
-use tui_textarea::{Input, TextArea};
+use tui_textarea::{CursorMove, Input, TextArea};
 
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -202,34 +202,64 @@ impl TuiApp {
                                 self.textarea.insert_newline();
                                 self.dirty = true;
                             }
-                            // Submit message
                             event::KeyEvent {
                                 code: KeyCode::Enter,
                                 ..
                             } => {
-                                let line = self.textarea.lines().join("\n");
-                                if !line.trim().is_empty() {
-                                    if self.input_history.last().map(|s| s.as_str())
-                                        != Some(line.as_str())
-                                    {
-                                        self.input_history.push(line.clone());
-                                        save_input_history(&self.input_history);
+                                if self.completion_active {
+                                    let completed_item =
+                                        self.completion_candidates[self.completion_index].clone();
+                                    let current_input = self.textarea.lines()[0].clone();
+
+                                    let new_input = if current_input.starts_with('/') {
+                                        // Command completion
+                                        let mut parts: Vec<&str> =
+                                            current_input.split_whitespace().collect();
+                                        if !parts.is_empty() {
+                                            parts[0] = &completed_item;
+                                        }
+                                        parts.join(" ") + " "
+                                    } else if current_input.starts_with('@') {
+                                        // File path completion
+                                        format!("@{completed_item}")
+                                    } else {
+                                        // Default to original behavior if something unexpected happens
+                                        current_input
+                                    };
+
+                                    // Clear existing content and insert new_input
+                                    self.textarea.delete_line_by_head();
+                                    self.textarea.delete_line_by_end();
+                                    self.textarea.insert_str(&new_input);
+                                    self.textarea.move_cursor(CursorMove::End); // Move cursor to the end
+                                    self.completion_active = false;
+                                    self.dirty = true;
+                                } else {
+                                    // Original submit message logic
+                                    let line = self.textarea.lines().join("\n");
+                                    if !line.trim().is_empty() {
+                                        if self.input_history.last().map(|s| s.as_str())
+                                            != Some(line.as_str())
+                                        {
+                                            self.input_history.push(line.clone());
+                                            save_input_history(&self.input_history);
+                                        }
+                                        self.history_index = self.input_history.len();
+                                        self.draft.clear();
                                     }
-                                    self.history_index = self.input_history.len();
-                                    self.draft.clear();
+                                    if line.trim() == "/quit" {
+                                        return Ok(());
+                                    }
+                                    self.dispatch(&line);
+                                    // Clear the textarea by reinitializing it
+                                    self.textarea = TextArea::default();
+                                    self.textarea.set_block(
+                                        Block::default().borders(Borders::ALL).title("Input"),
+                                    );
+                                    self.textarea.set_placeholder_text("Enter your message...");
+                                    self.dirty = true;
+                                    self.spinner_state = 0;
                                 }
-                                if line.trim() == "/quit" {
-                                    return Ok(());
-                                }
-                                self.dispatch(&line);
-                                // Clear the textarea by reinitializing it
-                                self.textarea = TextArea::default();
-                                self.textarea.set_block(
-                                    Block::default().borders(Borders::ALL).title("Input"),
-                                );
-                                self.textarea.set_placeholder_text("Enter your message...");
-                                self.dirty = true;
-                                self.spinner_state = 0;
                             }
                             // Other global controls
                             event::KeyEvent {
@@ -376,18 +406,37 @@ impl TuiApp {
                                         current_input
                                     };
 
-                                    self.textarea = TextArea::from(vec![new_input]);
-                                    self.textarea.set_block(
-                                        Block::default().borders(Borders::ALL).title("Input"),
-                                    );
-                                    self.textarea.set_placeholder_text("Enter your message...");
+                                    // Clear existing content and insert new_input
+                                    self.textarea.delete_line_by_head();
+                                    self.textarea.delete_line_by_end();
+                                    self.textarea.insert_str(&new_input);
+                                    self.textarea.move_cursor(CursorMove::End); // Move cursor to the end
                                     self.completion_active = false;
                                     self.dirty = true;
                                 }
                             }
+                            event::KeyEvent {
+                                code: KeyCode::Left,
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                self.textarea.move_cursor(CursorMove::Back);
+                                self.dirty = true;
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Right,
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                self.textarea.move_cursor(CursorMove::Forward);
+                                self.dirty = true;
+                            }
                             // Pass all other key events to the text area
                             _ => {
-                                if self.textarea.input(Input::from(k)) {
+                                debug!("Handling other key event: {:?}", k.code);
+                                let handled_by_textarea = self.textarea.input(Input::from(k));
+                                debug!("Handled by textarea: {}", handled_by_textarea);
+                                if handled_by_textarea {
                                     self.dirty = true;
                                     let input_str = self.textarea.lines()[0].clone();
                                     if input_str.starts_with('/') {
