@@ -369,7 +369,7 @@ impl TuiApp {
                 Ok(entry) => {
                     if let Ok(relative_path) = entry.path().strip_prefix(&project_root) {
                         let path_str = relative_path.to_string_lossy();
-                        if path_str.starts_with(path_part) {
+                        if path_str.to_lowercase().contains(&path_part.to_lowercase()) {
                             debug!(target: "tui", "Found candidate: {}", path_str);
                             candidates.push(path_str.to_string());
                         }
