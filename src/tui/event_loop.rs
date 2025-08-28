@@ -356,14 +356,26 @@ impl TuiApp {
                                 code: KeyCode::Tab, ..
                             } => {
                                 if self.completion_active {
-                                    let completed_command =
+                                    let completed_item =
                                         self.completion_candidates[self.completion_index].clone();
-                                    let mut parts: Vec<&str> =
-                                        self.textarea.lines()[0].split_whitespace().collect();
-                                    if !parts.is_empty() {
-                                        parts[0] = &completed_command;
-                                    }
-                                    let new_input = parts.join(" ") + " ";
+                                    let current_input = self.textarea.lines()[0].clone();
+
+                                    let new_input = if current_input.starts_with('/') {
+                                        // Command completion
+                                        let mut parts: Vec<&str> =
+                                            current_input.split_whitespace().collect();
+                                        if !parts.is_empty() {
+                                            parts[0] = &completed_item;
+                                        }
+                                        parts.join(" ") + " "
+                                    } else if current_input.starts_with('@') {
+                                        // File path completion
+                                        format!("@{completed_item}")
+                                    } else {
+                                        // Default to original behavior if something unexpected happens
+                                        current_input
+                                    };
+
                                     self.textarea = TextArea::from(vec![new_input]);
                                     self.textarea.set_block(
                                         Block::default().borders(Borders::ALL).title("Input"),
@@ -380,6 +392,11 @@ impl TuiApp {
                                     let input_str = self.textarea.lines()[0].clone();
                                     if input_str.starts_with('/') {
                                         self.update_completion_candidates(&input_str);
+                                        if !self.completion_candidates.is_empty() {
+                                            self.completion_active = true;
+                                        }
+                                    } else if input_str.starts_with('@') {
+                                        self.update_file_path_completion_candidates(&input_str);
                                         if !self.completion_candidates.is_empty() {
                                             self.completion_active = true;
                                         }
