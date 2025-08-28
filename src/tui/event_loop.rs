@@ -203,7 +203,10 @@ impl TuiApp {
                                 self.dirty = true;
                             }
                             // Submit message
-                            event::KeyEvent { code: KeyCode::Enter, .. } => {
+                            event::KeyEvent {
+                                code: KeyCode::Enter,
+                                ..
+                            } => {
                                 let line = self.textarea.lines().join("\n");
                                 if !line.trim().is_empty() {
                                     if self.input_history.last().map(|s| s.as_str())
@@ -216,12 +219,14 @@ impl TuiApp {
                                     self.draft.clear();
                                 }
                                 if line.trim() == "/quit" {
-                                    return Ok(())
+                                    return Ok(());
                                 }
                                 self.dispatch(&line);
                                 // Clear the textarea by reinitializing it
                                 self.textarea = TextArea::default();
-                                self.textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+                                self.textarea.set_block(
+                                    Block::default().borders(Borders::ALL).title("Input"),
+                                );
                                 self.textarea.set_placeholder_text("Enter your message...");
                                 self.dirty = true;
                                 self.spinner_state = 0;
@@ -295,6 +300,52 @@ impl TuiApp {
                             } => {
                                 self.scroll_to_bottom();
                             }
+                            // Input history navigation
+                            event::KeyEvent {
+                                code: KeyCode::Up,
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                if !self.input_history.is_empty() && self.history_index > 0 {
+                                    // Save current draft if we're at the end of history
+                                    if self.history_index == self.input_history.len() {
+                                        self.draft = self.textarea.lines().join("\n");
+                                    }
+                                    self.history_index -= 1;
+                                    self.textarea = TextArea::from(
+                                        self.input_history[self.history_index].lines(),
+                                    );
+                                    self.textarea.set_block(
+                                        Block::default().borders(Borders::ALL).title("Input"),
+                                    );
+                                    self.textarea.set_placeholder_text("Enter your message...");
+                                    self.dirty = true;
+                                }
+                            }
+                            event::KeyEvent {
+                                code: KeyCode::Down,
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                if !self.input_history.is_empty()
+                                    && self.history_index < self.input_history.len()
+                                {
+                                    self.history_index += 1;
+                                    if self.history_index == self.input_history.len() {
+                                        // Restore draft
+                                        self.textarea = TextArea::from(self.draft.lines());
+                                    } else {
+                                        self.textarea = TextArea::from(
+                                            self.input_history[self.history_index].lines(),
+                                        );
+                                    }
+                                    self.textarea.set_block(
+                                        Block::default().borders(Borders::ALL).title("Input"),
+                                    );
+                                    self.textarea.set_placeholder_text("Enter your message...");
+                                    self.dirty = true;
+                                }
+                            }
                             // Pass all other key events to the text area
                             _ => {
                                 if self.textarea.input(Input::from(k)) {
@@ -356,7 +407,8 @@ impl TuiApp {
                             }
                             // Clear the textarea by reinitializing it
                             self.textarea = TextArea::default();
-                            self.textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+                            self.textarea
+                                .set_block(Block::default().borders(Borders::ALL).title("Input"));
                             self.textarea.set_placeholder_text("Enter your message...");
                             self.dirty = true;
                         }
