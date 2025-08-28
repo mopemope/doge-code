@@ -82,12 +82,18 @@ async fn chat_tools_once_inner(
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
     let url = client.endpoint();
+    let reasoning_effort = if client.reason_enable {
+        Some("high".to_owned())
+    } else {
+        None
+    };
     let req = ChatRequestWithTools {
         model: model.to_string(),
         messages,
         temperature: None,
         tools: Some(tools.to_vec()),
         tool_choice: None,
+        reasoning_effort,
     };
 
     let mut headers = HeaderMap::new();
