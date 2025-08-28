@@ -12,6 +12,8 @@ pub struct ChatRequestWithTools {
     pub tools: Option<Vec<ToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>, // {"type":"auto"}
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -20,18 +20,26 @@ pub struct OpenAIClient {
     pub tokens_used: Arc<AtomicU32>,
     /// Tracks prompt tokens used by this client (for header display)
     pub prompt_tokens_used: Arc<AtomicU32>,
+    pub reason_enable: bool,
 }
 
 impl OpenAIClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
+        let url = base_url.into();
+        let mut reason_enable = false;
+        // openai
+        if url.contains("api.openai.com") {
+            reason_enable = true;
+        }
         let inner = reqwest::Client::builder().build()?;
         Ok(Self {
-            base_url: base_url.into(),
+            base_url: url,
             api_key: api_key.into(),
             inner,
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            reason_enable,
         })
     }
 
@@ -443,6 +451,7 @@ mod tests {
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            reason_enable: false,
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -452,6 +461,7 @@ mod tests {
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            reason_enable: false,
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }
