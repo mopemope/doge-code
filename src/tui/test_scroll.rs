@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::{build_render_plan, InputMode, ScrollState, Status, TuiApp};
+    use crate::tui::state::{InputMode, ScrollState, Status, TuiApp, build_render_plan};
     use tui_textarea::TextArea;
 
     fn create_test_app() -> TuiApp {
@@ -251,7 +251,7 @@ mod tests {
 
         // Test scroll calculation with small viewport
         let scroll_state = &app.scroll_state;
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
@@ -297,7 +297,7 @@ mod tests {
             let main_content_height = height.saturating_sub(3); // header(2) + footer(1)
             let scroll_state = &app.scroll_state;
 
-            let mut textarea = TextArea::default();
+            let textarea = TextArea::default();
             let plan = build_render_plan(
                 "Test",
                 crate::tui::state::Status::Idle,
@@ -347,7 +347,7 @@ mod tests {
 
         // Test auto-scroll (should show latest)
         let scroll_state = &app.scroll_state;
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
@@ -380,7 +380,7 @@ mod tests {
         scroll_state.offset = 20;
         scroll_state.auto_scroll = false;
 
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
@@ -451,7 +451,7 @@ mod tests {
         let main_content_height = 15;
         let scroll_state = &app.scroll_state;
 
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
@@ -505,7 +505,7 @@ mod tests {
             println!("Testing screen {}x{}", width, total_height);
 
             let scroll_state = &app.scroll_state;
-            let mut textarea = TextArea::default();
+            let textarea = TextArea::default();
             let plan = build_render_plan(
                 "Test",
                 crate::tui::state::Status::Idle,
@@ -559,7 +559,7 @@ mod tests {
         let main_content_height = 5;
         let scroll_state = &app.scroll_state;
 
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             "Test",
             crate::tui::state::Status::Idle,
@@ -630,7 +630,7 @@ mod tests {
 
         // Test auto-scroll (show latest)
         let scroll_state = ScrollState::default();
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             title,
             status,
@@ -654,7 +654,7 @@ mod tests {
         scroll_state.offset = 2;
         scroll_state.auto_scroll = false;
 
-        let mut textarea = TextArea::default();
+        let textarea = TextArea::default();
         let plan = build_render_plan(
             title,
             status,
