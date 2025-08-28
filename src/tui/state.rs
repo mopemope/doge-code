@@ -1,7 +1,6 @@
 use anyhow::Result;
-use crossterm::{ 
-    cursor,
-    execute,
+use crossterm::{
+    cursor, execute,
     terminal::{self},
 };
 use ratatui::widgets::{Block, Borders};
@@ -136,7 +135,10 @@ pub fn build_render_plan(
     } else {
         String::new()
     };
-    let title_full = format!("{}{}{} - [{}]  {}", title, model_suffix, tokens_suffix, status_str, cwd);
+    let title_full = format!(
+        "{}{}{} - [{}]  {}",
+        title, model_suffix, tokens_suffix, status_str, cwd
+    );
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
     let footer_lines = vec![title_trim, sep];
@@ -332,15 +334,14 @@ impl TuiApp {
         }
 
         let path_part = &input[1..]; // Remove the '@'
-        let project_root =
-            match std::env::current_dir() {
-                Ok(path) => path,
-                Err(_) => {
-                    self.completion_active = false;
-                    self.completion_candidates.clear();
-                    return;
-                }
-            };
+        let project_root = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(_) => {
+                self.completion_active = false;
+                self.completion_candidates.clear();
+                return;
+            }
+        };
 
         let mut candidates = Vec::new();
         let walker = ignore::WalkBuilder::new(&project_root)
@@ -348,17 +349,15 @@ impl TuiApp {
             .build();
 
         for result in walker {
-            if let Ok(entry) = result {
-                if let Some(relative_path) = entry.path().strip_prefix(&project_root).ok() {
+            if let Ok(entry) = result
+                && let Ok(relative_path) = entry.path().strip_prefix(&project_root) {
                     let path_str = relative_path.to_string_lossy();
                     if path_str.starts_with(path_part) {
                         candidates.push(path_str.to_string());
                     }
                 }
-            }
         }
         candidates.sort();
-
 
         if candidates.is_empty() {
             self.completion_active = false;
@@ -506,7 +505,7 @@ impl TuiApp {
         // Count new messages when not auto-scrolling
         if !self.scroll_state.auto_scroll {
             let new_lines = self.log.len().saturating_sub(lines_before);
-            self.scroll_state.new_messages = 
+            self.scroll_state.new_messages =
                 self.scroll_state.new_messages.saturating_add(new_lines);
             debug!("New messages count: {}", self.scroll_state.new_messages);
         }
