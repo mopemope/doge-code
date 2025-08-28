@@ -238,8 +238,13 @@ impl TuiApp {
                 })
                 .collect();
 
-            let list =
-                List::new(items).block(Block::default().borders(Borders::ALL).title("Commands"));
+            let title = match self.completion_type {
+                crate::tui::state::CompletionType::Command => "Commands",
+                crate::tui::state::CompletionType::FilePath => "Files",
+                _ => "Completion", // Fallback, should not happen if completion_active is true
+            };
+
+            let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
 
             f.render_widget(Clear, completion_area); // Clear the area behind the popup
             f.render_widget(list, completion_area);
