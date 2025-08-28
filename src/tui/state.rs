@@ -272,9 +272,57 @@ pub struct TuiApp {
     pub dirty: bool,
     // scroll state
     pub scroll_state: ScrollState,
+    // completion state
+    pub completion_candidates: Vec<String>,
+    pub completion_index: usize,
+    pub completion_active: bool,
 }
 
 impl TuiApp {
+    pub fn get_all_commands(&self) -> Vec<String> {
+        vec![
+            "/help".to_string(),
+            "/map".to_string(),
+            "/tools".to_string(),
+            "/clear".to_string(),
+            "/open".to_string(),
+            "/quit".to_string(),
+            "/theme".to_string(),
+            "/session".to_string(),
+            "/rebuild-repomap".to_string(),
+            "/tokens".to_string(),
+            "/plan".to_string(),
+            "/execute".to_string(),
+            "/plans".to_string(),
+            "/cancel".to_string(),
+        ]
+    }
+
+    pub fn update_completion_candidates(&mut self, input: &str) {
+        if !input.starts_with('/') {
+            self.completion_active = false;
+            self.completion_candidates.clear();
+            return;
+        }
+
+        let current_word = input.split_whitespace().next().unwrap_or("");
+        let candidates: Vec<String> = self
+            .get_all_commands()
+            .into_iter()
+            .filter(|cmd| cmd.starts_with(current_word))
+            .collect();
+
+        if candidates.is_empty() || (candidates.len() == 1 && candidates[0] == current_word) {
+            self.completion_active = false;
+            self.completion_candidates.clear();
+        } else {
+            self.completion_active = true;
+            self.completion_candidates = candidates;
+            self.completion_index = 0;
+        }
+        self.dirty = true;
+    }
+
     pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
@@ -311,6 +359,9 @@ impl TuiApp {
             tokens_used: 0,
             dirty: true, // initial full render
             scroll_state: ScrollState::default(),
+            completion_candidates: Vec::new(),
+            completion_index: 0,
+            completion_active: false,
         };
 
         Ok(app)
