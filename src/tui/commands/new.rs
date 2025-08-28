@@ -70,23 +70,6 @@ impl TuiExecutor {
         // Initialize plan manager
         let plan_manager = Arc::new(Mutex::new(crate::planning::PlanManager::new()?));
 
-        // Initialize slash commands
-        let slash_commands = vec![
-            "/help".to_string(),
-            "/map".to_string(),
-            "/tools".to_string(),
-            "/clear".to_string(),
-            "/open".to_string(),
-            "/quit".to_string(),
-            "/theme".to_string(),
-            "/session".to_string(),
-            "/rebuild-repomap".to_string(),
-            "/tokens".to_string(),
-            "/plan".to_string(),
-            "/execute".to_string(),
-            "/plans".to_string(),
-        ];
-
         // Initialize task analyzer
         let task_analyzer = if let Some(client) = &client {
             crate::planning::TaskAnalyzer::new().with_llm_decomposer(
@@ -110,7 +93,7 @@ impl TuiExecutor {
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history
             session_manager,
-            slash_commands,
+
             task_analyzer,
             plan_manager,
         })

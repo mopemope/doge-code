@@ -8,22 +8,22 @@ mod tests {
         let title = "Test Title";
         let status = Status::Idle;
         let log = vec![];
-        let input = "";
         let input_mode = InputMode::Normal;
-        let cursor_char_idx = 0;
         let w = 80;
         let h = 24;
         let model = Some("test-model");
         let spinner_state = 0;
         let tokens_used = 1234;
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
 
         let plan = build_render_plan(
             title,
             status,
             &log,
-            input,
+            &textarea,
             input_mode,
-            cursor_char_idx,
             w,
             h,
             h.saturating_sub(3), // main_content_height
@@ -45,22 +45,22 @@ mod tests {
         let title = "Test Title";
         let status = Status::Idle;
         let log = vec![];
-        let input = "";
         let input_mode = InputMode::Normal;
-        let cursor_char_idx = 0;
         let w = 80;
         let h = 24;
         let model = Some("test-model");
         let spinner_state = 0;
         let tokens_used = 0;
+        let textarea = crate::tui::state::TuiApp::new("", None, "")
+            .unwrap()
+            .textarea;
 
         let plan = build_render_plan(
             title,
             status,
             &log,
-            input,
+            &textarea,
             input_mode,
-            cursor_char_idx,
             w,
             h,
             h.saturating_sub(3), // main_content_height
