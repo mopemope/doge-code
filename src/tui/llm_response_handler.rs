@@ -113,18 +113,40 @@ impl TuiApp {
             // Parse content for code blocks and add with proper formatting
             let re = Regex::new(r"(?s)```(\w*)\n(.*?)```").unwrap();
             let mut last_end = 0;
-            let mut has_code_blocks = false;
+            let captures: Vec<_> = re.captures_iter(content).collect();
 
-            for cap in re.captures_iter(content) {
-                debug!("Found codeblock cap: {:?}", cap);
-                has_code_blocks = true;
-                let whole_match = cap.get(0).unwrap();
-                let lang = cap.get(1).map_or("", |m| m.as_str());
-                let code_content = cap.get(2).map_or("", |m| m.as_str());
+            if !captures.is_empty() {
+                for cap in captures {
+                    debug!("Found codeblock cap: {:?}", cap);
+                    let whole_match = cap.get(0).unwrap();
+                    let lang = cap.get(1).map_or("", |m| m.as_str());
+                    let code_content = cap.get(2).map_or("", |m| m.as_str());
 
-                // Add text before the code block
-                if whole_match.start() > last_end {
-                    let text_content = &content[last_end..whole_match.start()];
+                    // Add text before the code block
+                    if whole_match.start() > last_end {
+                        let text_content = &content[last_end..whole_match.start()];
+                        if !text_content.is_empty() {
+                            for line in text_content.lines() {
+                                let line_with_margin = format!("  {}", line);
+                                self.push_log(line_with_margin);
+                            }
+                        }
+                    }
+
+                    // Add the code block
+                    self.push_log(format!("  ```{}", lang));
+                    for line in code_content.lines() {
+                        let line_with_margin = format!("    {}", line);
+                        self.push_log(line_with_margin);
+                    }
+                    self.push_log("  ```".to_string());
+
+                    last_end = whole_match.end();
+                }
+
+                // Add any text after the last code block
+                if last_end < content.len() {
+                    let text_content = &content[last_end..];
                     if !text_content.is_empty() {
                         for line in text_content.lines() {
                             let line_with_margin = format!("  {}", line);
@@ -132,31 +154,8 @@ impl TuiApp {
                         }
                     }
                 }
-
-                // Add the code block
-                self.push_log(format!("  ```{}", lang));
-                for line in code_content.lines() {
-                    let line_with_margin = format!("    {}", line);
-                    self.push_log(line_with_margin);
-                }
-                self.push_log("  ```".to_string());
-
-                last_end = whole_match.end();
-            }
-
-            // Add any text after the last code block
-            if last_end < content.len() {
-                let text_content = &content[last_end..];
-                if !text_content.is_empty() {
-                    for line in text_content.lines() {
-                        let line_with_margin = format!("  {}", line);
-                        self.push_log(line_with_margin);
-                    }
-                }
-            }
-
-            // If no code blocks, treat as plain text
-            if !has_code_blocks {
+            } else {
+                // If no code blocks, treat as plain text
                 for line in content.lines() {
                     let line_with_margin = format!("  {}", line);
                     debug!("line_with_margin: {}", line_with_margin);
