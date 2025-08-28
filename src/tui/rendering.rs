@@ -2,7 +2,7 @@ use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Clear, List, ListItem},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use tracing::debug;
 
@@ -205,7 +205,12 @@ impl TuiApp {
         f.render_widget(&self.textarea, area);
 
         if self.completion_active && !self.completion_candidates.is_empty() {
-            let max_width = self.completion_candidates.iter().map(|s| s.len()).max().unwrap_or(10) as u16;
+            let max_width = self
+                .completion_candidates
+                .iter()
+                .map(|s| s.len())
+                .max()
+                .unwrap_or(10) as u16;
             let list_height = self.completion_candidates.len() as u16;
 
             // Position the popup above the input area
@@ -218,7 +223,8 @@ impl TuiApp {
                 height: list_height,
             };
 
-            let items: Vec<ListItem> = self.completion_candidates
+            let items: Vec<ListItem> = self
+                .completion_candidates
                 .iter()
                 .enumerate()
                 .map(|(i, candidate)| {
@@ -231,8 +237,8 @@ impl TuiApp {
                 })
                 .collect();
 
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Commands"));
+            let list =
+                List::new(items).block(Block::default().borders(Borders::ALL).title("Commands"));
 
             f.render_widget(Clear, completion_area); // Clear the area behind the popup
             f.render_widget(list, completion_area);

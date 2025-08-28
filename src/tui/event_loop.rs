@@ -330,7 +330,8 @@ impl TuiApp {
                                 ..
                             } => {
                                 if self.completion_active {
-                                    self.completion_index = (self.completion_index + 1).min(self.completion_candidates.len() - 1);
+                                    self.completion_index = (self.completion_index + 1)
+                                        .min(self.completion_candidates.len() - 1);
                                     self.dirty = true;
                                 } else if !self.input_history.is_empty()
                                     && self.history_index < self.input_history.len()
@@ -351,6 +352,27 @@ impl TuiApp {
                                     self.dirty = true;
                                 }
                             }
+                            event::KeyEvent {
+                                code: KeyCode::Tab, ..
+                            } => {
+                                if self.completion_active {
+                                    let completed_command =
+                                        self.completion_candidates[self.completion_index].clone();
+                                    let mut parts: Vec<&str> =
+                                        self.textarea.lines()[0].split_whitespace().collect();
+                                    if !parts.is_empty() {
+                                        parts[0] = &completed_command;
+                                    }
+                                    let new_input = parts.join(" ") + " ";
+                                    self.textarea = TextArea::from(vec![new_input]);
+                                    self.textarea.set_block(
+                                        Block::default().borders(Borders::ALL).title("Input"),
+                                    );
+                                    self.textarea.set_placeholder_text("Enter your message...");
+                                    self.completion_active = false;
+                                    self.dirty = true;
+                                }
+                            }
                             // Pass all other key events to the text area
                             _ => {
                                 if self.textarea.input(Input::from(k)) {
@@ -358,6 +380,9 @@ impl TuiApp {
                                     let input_str = self.textarea.lines()[0].clone();
                                     if input_str.starts_with('/') {
                                         self.update_completion_candidates(&input_str);
+                                        if !self.completion_candidates.is_empty() {
+                                            self.completion_active = true;
+                                        }
                                     } else {
                                         self.completion_active = false;
                                     }
