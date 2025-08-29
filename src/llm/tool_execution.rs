@@ -411,9 +411,9 @@ pub async fn run_agent_loop(
                 // Also emit structured debug/warn logs (include truncated result summary for debugging)
                 match &res {
                     Ok(_) => {
-                        debug!(target: "llm", "[tool] {} succeeded: {}", tc.function.name, result_summary)
+                        debug!("[tool] {} succeeded: {}", tc.function.name, result_summary)
                     }
-                    Err(e) => warn!(target: "llm", "[tool] {} failed: {}", tc.function.name, e),
+                    Err(e) => warn!("[tool] {} failed: {}", tc.function.name, e),
                 }
 
                 // tool message to feed back to the LLM
@@ -426,10 +426,16 @@ pub async fn run_agent_loop(
             }
             continue;
         } else {
-            debug!(target: "llm", message_content = ?msg.content, "Final assistant message. Content: {:?}", msg.content.as_deref());
+            debug!(
+                "Final assistant message. Content: {:?}",
+                msg.content.as_deref()
+            );
             // Final assistant message
             if let Some(tx) = ui_tx {
-                debug!(target: "llm", response_content = ?msg.content, "Sending LLM response content. Content: {:?}", msg.content.as_deref());
+                debug!(
+                    "Sending LLM response content. Content: {:?}",
+                    msg.content.as_deref()
+                );
                 let _ = tx.send(format!(
                     "::status:done:{}",
                     msg.content.clone().unwrap_or_default()
@@ -450,7 +456,7 @@ pub async fn dispatch_tool_call(
     runtime: &ToolRuntime<'_>,
     call: ToolCall,
 ) -> Result<serde_json::Value> {
-    debug!(target: "llm", tool_call = ?call, "dispatching tool call");
+    debug!("dispatching tool call");
     if call.r#type != "function" {
         return Err(anyhow!("unsupported tool type: {}", call.r#type));
     }
@@ -606,6 +612,6 @@ pub async fn dispatch_tool_call(
         other => Err(anyhow!("unknown tool: {other}")),
     };
 
-    debug!(target: "llm", tool_result = ?result, "tool call result");
+    debug!("tool call result");
     result
 }

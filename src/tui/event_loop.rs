@@ -121,7 +121,10 @@ impl TuiApp {
                         }
                         _ if msg.starts_with("::status:done:") => {
                             let content = &msg["::status:done:".len()..];
-                            debug!(target: "tui", status_done_content = %content, "Received ::status:done: message. Content is empty: {}", content.is_empty());
+                            debug!(
+                                "Received ::status:done: message. Content is empty: {}",
+                                content.is_empty()
+                            );
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Done;
@@ -143,7 +146,7 @@ impl TuiApp {
                         }
                         _ => {
                             if msg.starts_with("::status:") {
-                                debug!(target: "tui", filtered_status_msg = %msg, "Filtered out status message from log display");
+                                debug!("Filtered out status message from log display");
                                 continue;
                             }
 
@@ -161,7 +164,7 @@ impl TuiApp {
                                 .as_ref()
                                 .is_some_and(|last_content| msg == *last_content)
                             {
-                                debug!(target: "tui", "Skipping duplicate LLM response message: {}", msg);
+                                debug!("Skipping duplicate LLM response message: {}", msg);
                                 self.last_llm_response_content = None;
                             } else {
                                 self.push_log(msg);
