@@ -674,7 +674,8 @@ impl TuiExecutor {
         let plan = plan_execution.plan;
 
         rt.spawn(async move {
-            let executor = crate::planning::TaskExecutor::new(client, model, fs_tools);
+            let executor =
+                crate::planning::step_executor::TaskExecutor::new(client, model, fs_tools);
 
             match executor.execute_plan(plan, ui_tx.clone()).await {
                 Ok(result) => {
