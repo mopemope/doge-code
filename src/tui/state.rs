@@ -317,14 +317,18 @@ impl TuiApp {
             return;
         }
 
-        let current_word = input.split_whitespace().next().unwrap_or("");
+        let command_part = &input[1..]; // Remove the leading '/'
         let candidates: Vec<String> = self
             .get_all_commands()
             .into_iter()
-            .filter(|cmd| cmd.starts_with(current_word))
+            .filter(|cmd| {
+                cmd[1..]
+                    .to_lowercase()
+                    .contains(&command_part.to_lowercase())
+            })
             .collect();
 
-        if candidates.is_empty() || (candidates.len() == 1 && candidates[0] == current_word) {
+        if candidates.is_empty() || command_part.is_empty() {
             self.completion_active = false;
             self.completion_candidates.clear();
             self.completion_type = CompletionType::None;
