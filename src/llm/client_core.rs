@@ -203,7 +203,7 @@ impl OpenAIClient {
                         }
                     };
 
-                    debug!(target: "llm", response_body=%response_text, "llm chat_once response");
+                    debug!("llm chat_once response");
 
                     let body: Result<ChatResponse, _> = serde_json::from_str(&response_text);
                     match body {
