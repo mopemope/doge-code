@@ -144,7 +144,7 @@ pub fn build_render_plan(
         String::new()
     };
     let title_full = format!(
-        "{}{}{} - [{}]  {}",
+        "{}{} - [{}]  {} - {}",
         title, model_suffix, tokens_suffix, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
@@ -328,7 +328,7 @@ impl TuiApp {
             })
             .collect();
 
-        if candidates.is_empty() || command_part.is_empty() {
+        if candidates.is_empty() {
             self.completion_active = false;
             self.completion_candidates.clear();
             self.completion_type = CompletionType::None;
