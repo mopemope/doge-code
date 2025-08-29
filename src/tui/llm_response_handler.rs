@@ -16,6 +16,9 @@ impl TuiApp {
             let mut s = csi_re.replace_all(input, "").to_string();
             s = osc_re.replace_all(&s, "").to_string();
 
+            // Handle carriage returns - convert \r\n to \n and remove standalone \r
+            let s = s.replace("\r\n", "\n").replace('\r', "");
+
             // Remove other control chars except newline and tab
             s.chars()
                 .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
@@ -38,9 +41,16 @@ impl TuiApp {
         // For immediate display during streaming, add the sanitized token with margin
         // This will be replaced by structured content when streaming completes
         if !clean.trim().is_empty() {
-            for line in clean.lines() {
-                let line_with_margin = format!("  {}", line); // 2-space margin for streaming content
+            // Handle content with newlines by preserving the exact structure
+            // But use split('\n') instead of lines() to preserve trailing newlines
+            let parts: Vec<&str> = clean.split('\n').collect();
+            for (i, part) in parts.iter().enumerate() {
+                let line_with_margin = format!("  {}", part); // 2-space margin for streaming content
                 self.push_log(line_with_margin);
+                // Add empty line for all but the last part
+                if i < parts.len() - 1 {
+                    self.push_log("  ".to_string()); // Empty line with margin
+                }
             }
         }
     }
