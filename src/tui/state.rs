@@ -1,3 +1,4 @@
+use crate::tui::theme::Theme;
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -8,8 +9,6 @@ use std::io;
 use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
 use tui_textarea::TextArea;
-
-use crate::tui::theme::Theme;
 
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum CompletionType {
@@ -155,66 +154,66 @@ pub fn build_render_plan(
     let max_log_rows = main_content_height as usize;
     let mut all_phys_lines: Vec<String> = Vec::new();
 
-    debug!(
-        "build_render_plan: max_log_rows={}, input_log_lines={}",
-        max_log_rows,
-        log.len()
-    );
+    // debug!(
+    //     "build_render_plan: max_log_rows={}, input_log_lines={}",
+    //     max_log_rows,
+    //     log.len()
+    // );
 
     // Build all physical lines first
     for (i, line) in log.iter().enumerate() {
         let line = line.trim_end_matches('\n');
         let parts = wrap_display(line, w_usize);
-        debug!(
-            "Log line {}: '{}' -> {} wrapped parts",
-            i,
-            line,
-            parts.len()
-        );
+        // debug!(
+        //     "Log line {}: '{}' -> {} wrapped parts",
+        //     i,
+        //     line,
+        //     parts.len()
+        // );
         all_phys_lines.extend(parts);
     }
 
     let total_lines = all_phys_lines.len();
-    debug!("Total physical lines after wrapping: {}", total_lines);
+    // debug!("Total physical lines after wrapping: {}", total_lines);
 
     // Apply scroll offset
     let log_lines = if scroll_state.auto_scroll || scroll_state.offset == 0 {
         // Show the most recent lines (bottom of log)
         let start_idx = total_lines.saturating_sub(max_log_rows);
-        debug!(
-            "Auto-scroll: showing lines {}..{} (total={})",
-            start_idx, total_lines, total_lines
-        );
+        // debug!(
+        //     "Auto-scroll: showing lines {}..{} (total={})",
+        //     start_idx, total_lines, total_lines
+        // );
         let mut lines = all_phys_lines[start_idx..].to_vec();
         // Ensure we don't exceed the display area
         if lines.len() > max_log_rows {
             lines.truncate(max_log_rows);
-            debug!("Truncated to {} lines to fit display area", max_log_rows);
+            // debug!("Truncated to {} lines to fit display area", max_log_rows);
         }
         lines
     } else {
         // Show lines based on scroll offset (offset 0 = most recent, higher = older)
         let end_idx = total_lines.saturating_sub(scroll_state.offset);
         let start_idx = end_idx.saturating_sub(max_log_rows);
-        debug!(
-            "Manual scroll: offset={}, showing lines {}..{} (total={})",
-            scroll_state.offset, start_idx, end_idx, total_lines
-        );
+        // debug!(
+        //     "Manual scroll: offset={}, showing lines {}..{} (total={})",
+        //     scroll_state.offset, start_idx, end_idx, total_lines
+        // );
         let mut lines = all_phys_lines[start_idx..end_idx].to_vec();
         // Ensure we don't exceed the display area
         if lines.len() > max_log_rows {
             lines.truncate(max_log_rows);
-            debug!("Truncated to {} lines to fit display area", max_log_rows);
+            //            debug!("Truncated to {} lines to fit display area", max_log_rows);
         }
         lines
     };
 
-    debug!(
-        "Final log_lines count: {} (max_log_rows={}, area_allows={})",
-        log_lines.len(),
-        max_log_rows,
-        max_log_rows
-    );
+    // debug!(
+    //     "Final log_lines count: {} (max_log_rows={}, area_allows={})",
+    //     log_lines.len(),
+    //     max_log_rows,
+    //     max_log_rows
+    // );
 
     // Create scroll info
     let scroll_info = if total_lines > max_log_rows {
@@ -351,17 +350,17 @@ impl TuiApp {
         }
 
         let path_part = &input[1..]; // Remove the '@'
-        debug!("Path part: {}", path_part);
+        // debug!("Path part: {}", path_part);
         let project_root = match std::env::current_dir() {
             Ok(path) => path,
             Err(e) => {
-                debug!("Error getting current dir: {}", e);
+                // debug!("Error getting current dir: {}", e);
                 self.completion_active = false;
                 self.completion_candidates.clear();
                 return;
             }
         };
-        debug!("Project root: {:?}", project_root);
+        // debug!("Project root: {:?}", project_root);
 
         let mut candidates = Vec::new();
         let walker = ignore::WalkBuilder::new(&project_root)
@@ -380,12 +379,12 @@ impl TuiApp {
                     }
                 }
                 Err(e) => {
-                    debug!("Error walking directory: {}", e);
+                    //debug!("Error walking directory: {}", e);
                 }
             }
         }
         candidates.sort();
-        debug!("Found {} candidates", candidates.len());
+        // debug!("Found {} candidates", candidates.len());
 
         if candidates.is_empty() {
             self.completion_active = false;
@@ -526,12 +525,12 @@ impl TuiApp {
         }
 
         let lines_added = self.log.len().saturating_sub(lines_before);
-        debug!(
-            "push_log: added {} lines, total now {}, content: \"{}\"",
-            lines_added,
-            self.log.len(),
-            content.chars().take(50).collect::<String>()
-        );
+        // debug!(
+        //     "push_log: added {} lines, total now {}, content: \"{}\"",
+        //     lines_added,
+        //     self.log.len(),
+        //     content.chars().take(50).collect::<String>()
+        // );
 
         // Count new messages when not auto-scrolling
         if !self.scroll_state.auto_scroll {

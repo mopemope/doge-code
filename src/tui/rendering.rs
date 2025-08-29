@@ -4,13 +4,13 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
-use tracing::debug;
+// use tracing::debug;
 
 impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
 
-        debug!("Screen size: {}x{}", size.width, size.height);
+        //debug!("Screen size: {}x{}", size.width, size.height);
 
         // Adjust layout for multi-line input area
         let chunks = Layout::default()
@@ -23,17 +23,17 @@ impl TuiApp {
             .split(size);
 
         let main_content_height = chunks[1].height;
-        debug!(
-            "Layout chunks: header={}x{}, main={}x{}, footer={}x{}",
-            chunks[0].width,
-            chunks[0].height,
-            chunks[1].width,
-            chunks[1].height,
-            chunks[2].width,
-            chunks[2].height
-        );
-        debug!("Main content area height: {}", main_content_height);
-        debug!("Total log lines: {}", self.log.len());
+        // debug!(
+        //     "Layout chunks: header={}x{}, main={}x{}, footer={}x{}",
+        //     chunks[0].width,
+        //     chunks[0].height,
+        //     chunks[1].width,
+        //     chunks[1].height,
+        //     chunks[2].width,
+        //     chunks[2].height
+        // );
+        // debug!("Main content area height: {}", main_content_height);
+        // debug!("Total log lines: {}", self.log.len());
 
         let plan = build_render_plan(
             &self.title,
@@ -50,11 +50,11 @@ impl TuiApp {
             &self.scroll_state,
         );
 
-        debug!(
-            "Render plan: log_lines={}, scroll_info={:?}",
-            plan.log_lines.len(),
-            plan.scroll_info
-        );
+        // debug!(
+        //     "Render plan: log_lines={}, scroll_info={:?}",
+        //     plan.log_lines.len(),
+        //     plan.scroll_info
+        // );
 
         self.render_header(f, chunks[0], &plan, &self.theme);
         self.render_main_content(f, chunks[1], &plan, &self.theme);
@@ -109,22 +109,22 @@ impl TuiApp {
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        debug!(
-            "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}",
-            area.width,
-            area.height,
-            area.x,
-            area.y,
-            plan.log_lines.len()
-        );
+        // debug!(
+        //     "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}",
+        //     area.width,
+        //     area.height,
+        //     area.x,
+        //     area.y,
+        //     plan.log_lines.len()
+        // );
 
         // Check if we have more lines than the area can display
         if plan.log_lines.len() > area.height as usize {
-            debug!(
-                "WARNING: More lines ({}) than area height ({})",
-                plan.log_lines.len(),
-                area.height
-            );
+            // debug!(
+            //     "WARNING: More lines ({}) than area height ({})",
+            //     plan.log_lines.len(),
+            //     area.height
+            // );
         }
 
         let mut lines: Vec<Line> = Vec::new();
@@ -134,18 +134,18 @@ impl TuiApp {
         let max_displayable = area.height as usize;
         let lines_to_render = plan.log_lines.len().min(max_displayable);
 
-        debug!(
-            "Rendering {} lines (max displayable: {})",
-            lines_to_render, max_displayable
-        );
+        // debug!(
+        //     "Rendering {} lines (max displayable: {})",
+        //     lines_to_render, max_displayable
+        // );
 
         for (i, log_line) in plan.log_lines.iter().take(lines_to_render).enumerate() {
             if i < 5 || i >= lines_to_render.saturating_sub(5) {
-                debug!(
-                    "Line {}: '{}'",
-                    i,
-                    log_line.chars().take(50).collect::<String>()
-                );
+                // debug!(
+                //     "Line {}: '{}'",
+                //     i,
+                //     log_line.chars().take(50).collect::<String>()
+                // );
             }
 
             if log_line.starts_with("```") || log_line.trim_start().starts_with("```") {
@@ -200,17 +200,17 @@ impl TuiApp {
             }
         }
 
-        debug!("Created {} lines for Paragraph widget", lines.len());
+        // debug!("Created {} lines for Paragraph widget", lines.len());
 
         let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
             .block(Block::default()); // Add block to ensure proper boundaries
         f.render_widget(paragraph, area);
 
-        debug!(
-            "Paragraph widget rendered {} lines in area {}x{}",
-            lines_to_render, area.width, area.height
-        );
+        // debug!(
+        //     "Paragraph widget rendered {} lines in area {}x{}",
+        //     lines_to_render, area.width, area.height
+        // );
     }
 
     fn render_footer(&mut self, f: &mut Frame, area: Rect) {
