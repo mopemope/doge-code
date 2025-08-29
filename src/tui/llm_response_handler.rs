@@ -76,13 +76,13 @@ impl TuiApp {
         }
 
         // Add the first part as a new line (with margin)
-        let first_line_with_margin = format!("{margin_str}{}", parts[0]);
+        let first_line_with_margin = format!("{}{}", margin_str, parts[0]);
         self.log.push(first_line_with_margin);
 
         // Parts from the second onward are added as new lines (with margin)
         for seg in parts.iter().skip(1) {
             // Adjust condition if you want to skip empty lines; here we keep margin even for empty lines
-            let line_with_margin = format!("{margin_str}{seg}");
+            let line_with_margin = format!("{}{}", margin_str, seg);
             self.log.push(line_with_margin);
         }
     }
