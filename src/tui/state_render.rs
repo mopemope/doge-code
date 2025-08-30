@@ -68,6 +68,7 @@ pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
 
 /// Build a render plan. This function was moved from `state.rs` to avoid a very large
 /// `state.rs` file. It references the UI state types defined in `state.rs`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_render_plan(
     title: &str,
     status: crate::tui::state::Status,
@@ -144,7 +145,7 @@ pub fn build_render_plan(
     let mut all_phys_lines: Vec<String> = Vec::new();
 
     // Build all physical lines first
-    for (i, line) in log.iter().enumerate() {
+    for line in log.iter() {
         let line = line.trim_end_matches('\n');
         let parts = wrap_display(line, w_usize);
         all_phys_lines.extend(parts);

@@ -73,7 +73,7 @@ pub fn handle_normal_mode_key(
                     return Ok(true);
                 }
 
-                app.dispatch(&line);
+                app.pending_instructions.push_back(line);
 
                 // Clear the textarea
                 app.textarea = TextArea::default();

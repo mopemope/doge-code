@@ -17,6 +17,15 @@ impl TuiApp {
         let mut is_streaming = false; // track streaming state
         let mut last_spinner_update = Instant::now(); // Track last spinner update time
         loop {
+            // Process instruction queue if idle
+            let is_idle = matches!(
+                self.status,
+                Status::Idle | Status::Done | Status::Cancelled | Status::Error
+            );
+            if is_idle && let Some(instruction) = self.pending_instructions.pop_front() {
+                self.dispatch(&instruction);
+            }
+
             // Update spinner state for active statuses and enough time has passed
             let should_update_spinner = matches!(
                 self.status,

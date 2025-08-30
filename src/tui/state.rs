@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{self},
 };
 use ratatui::widgets::{Block, Borders};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
@@ -120,6 +121,7 @@ pub struct TuiApp {
     pub completion_index: usize,
     pub completion_active: bool,
     pub completion_type: CompletionType,
+    pub pending_instructions: VecDeque<String>,
 }
 
 impl TuiApp {
@@ -186,7 +188,7 @@ impl TuiApp {
         // debug!("Path part: {}", path_part);
         let project_root = match std::env::current_dir() {
             Ok(path) => path,
-            Err(e) => {
+            Err(_e) => {
                 // debug!("Error getting current dir: {}", e);
                 self.completion_active = false;
                 self.completion_candidates.clear();
@@ -211,7 +213,7 @@ impl TuiApp {
                         }
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     //debug!("Error walking directory: {}", e);
                 }
             }
@@ -272,6 +274,7 @@ impl TuiApp {
             completion_index: 0,
             completion_active: false,
             completion_type: CompletionType::None,
+            pending_instructions: VecDeque::new(),
         };
 
         Ok(app)
@@ -357,7 +360,7 @@ impl TuiApp {
             self.log.drain(0..overflow);
         }
 
-        let lines_added = self.log.len().saturating_sub(lines_before);
+        let _lines_added = self.log.len().saturating_sub(lines_before);
         // debug!(
         //     "push_log: added {} lines, total now {}, content: \"{}\"",
         //     lines_added,
