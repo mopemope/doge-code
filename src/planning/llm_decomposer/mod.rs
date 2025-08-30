@@ -327,8 +327,6 @@ mod inner {
             })
         }
 
-        
-
         /// Convert LLM steps to internal format
         fn convert_llm_steps_to_task_steps(
             &self,
@@ -521,16 +519,29 @@ mod inner {
             )
             .unwrap();
 
-            let _decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+            let _decomposer =
+                LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
 
-            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("コードを分析する"), "analysis");
-            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("計画を作成する"), "planning");
+            assert_eq!(
+                crate::planning::llm_decomposer::infer::infer_step_type("コードを分析する"),
+                "analysis"
+            );
+            assert_eq!(
+                crate::planning::llm_decomposer::infer::infer_step_type("計画を作成する"),
+                "planning"
+            );
             assert_eq!(
                 crate::planning::llm_decomposer::infer::infer_step_type("機能を実装する"),
                 "implementation"
             );
-            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("テストを実行する"), "validation");
-            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("ファイルを整理する"), "cleanup");
+            assert_eq!(
+                crate::planning::llm_decomposer::infer::infer_step_type("テストを実行する"),
+                "validation"
+            );
+            assert_eq!(
+                crate::planning::llm_decomposer::infer::infer_step_type("ファイルを整理する"),
+                "cleanup"
+            );
         }
 
         #[test]
@@ -543,16 +554,21 @@ mod inner {
             )
             .unwrap();
 
-            let _decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+            let _decomposer =
+                LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
 
-            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("ファイルを読んで編集する");
+            let tools = crate::planning::llm_decomposer::infer::infer_required_tools(
+                "ファイルを読んで編集する",
+            );
             assert!(tools.contains(&"fs_read".to_string()));
             assert!(tools.contains(&"edit".to_string()));
 
-            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("コードを検索する");
+            let tools =
+                crate::planning::llm_decomposer::infer::infer_required_tools("コードを検索する");
             assert!(tools.contains(&"search_text".to_string()));
 
-            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("コマンドを実行する");
+            let tools =
+                crate::planning::llm_decomposer::infer::infer_required_tools("コマンドを実行する");
             assert!(tools.contains(&"execute_bash".to_string()));
         }
 
