@@ -50,7 +50,7 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
     // Compute and print diff
     let patch = create_patch(&old_content, content);
     if !patch.hunks().is_empty() {
-        println!("Diff for {path}:\n{patch}");
+        // println!("Diff for {path}:\n{patch}");
     }
 
     fs::write(p, content).with_context(|| format!("write {}", p.display()))
