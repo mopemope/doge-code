@@ -14,7 +14,7 @@ pub async fn execute_bash(
 }
 
 pub async fn edit(
-    runtime: &ToolRuntime<'_>,
+    _runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;
@@ -25,7 +25,7 @@ pub async fn edit(
 }
 
 pub async fn create_patch(
-    runtime: &ToolRuntime<'_>,
+    _runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;
@@ -36,7 +36,7 @@ pub async fn create_patch(
 }
 
 pub async fn apply_patch(
-    runtime: &ToolRuntime<'_>,
+    _runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;

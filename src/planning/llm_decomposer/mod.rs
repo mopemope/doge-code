@@ -327,69 +327,7 @@ mod inner {
             })
         }
 
-        /// Infer step type
-        fn infer_step_type(&self, description: &str) -> String {
-            let desc_lower = description.to_lowercase();
-
-            if desc_lower.contains("分析")
-                || desc_lower.contains("調査")
-                || desc_lower.contains("確認")
-            {
-                "analysis".to_string()
-            } else if desc_lower.contains("計画")
-                || desc_lower.contains("設計")
-                || desc_lower.contains("検討")
-            {
-                "planning".to_string()
-            } else if desc_lower.contains("実装")
-                || desc_lower.contains("作成")
-                || desc_lower.contains("変更")
-                || desc_lower.contains("追加")
-            {
-                "implementation".to_string()
-            } else if desc_lower.contains("テスト")
-                || desc_lower.contains("検証")
-                || desc_lower.contains("確認")
-            {
-                "validation".to_string()
-            } else if desc_lower.contains("クリーンアップ") || desc_lower.contains("整理")
-            {
-                "cleanup".to_string()
-            } else {
-                "implementation".to_string() // Default
-            }
-        }
-
-        /// Infer required tools
-        fn infer_required_tools(&self, description: &str) -> Vec<String> {
-            let desc_lower = description.to_lowercase();
-            let mut tools = Vec::new();
-
-            if desc_lower.contains("読") || desc_lower.contains("確認") {
-                tools.push("fs_read".to_string());
-            }
-            if desc_lower.contains("書") || desc_lower.contains("作成") {
-                tools.push("fs_write".to_string());
-            }
-            if desc_lower.contains("編集") || desc_lower.contains("変更") {
-                tools.push("edit".to_string());
-            }
-            if desc_lower.contains("検索") || desc_lower.contains("探") {
-                tools.push("search_text".to_string());
-            }
-            if desc_lower.contains("実行") || desc_lower.contains("コマンド") {
-                tools.push("execute_bash".to_string());
-            }
-            if desc_lower.contains("シンボル") || desc_lower.contains("関数") {
-                tools.push("get_symbol_info".to_string());
-            }
-
-            if tools.is_empty() {
-                tools.push("fs_read".to_string()); // Default
-            }
-
-            tools
-        }
+        
 
         /// Convert LLM steps to internal format
         fn convert_llm_steps_to_task_steps(
@@ -583,16 +521,16 @@ mod inner {
             )
             .unwrap();
 
-            let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+            let _decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
 
-            assert_eq!(decomposer.infer_step_type("コードを分析する"), "analysis");
-            assert_eq!(decomposer.infer_step_type("計画を作成する"), "planning");
+            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("コードを分析する"), "analysis");
+            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("計画を作成する"), "planning");
             assert_eq!(
-                decomposer.infer_step_type("機能を実装する"),
+                crate::planning::llm_decomposer::infer::infer_step_type("機能を実装する"),
                 "implementation"
             );
-            assert_eq!(decomposer.infer_step_type("テストを実行する"), "validation");
-            assert_eq!(decomposer.infer_step_type("ファイルを整理する"), "cleanup");
+            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("テストを実行する"), "validation");
+            assert_eq!(crate::planning::llm_decomposer::infer::infer_step_type("ファイルを整理する"), "cleanup");
         }
 
         #[test]
@@ -605,16 +543,16 @@ mod inner {
             )
             .unwrap();
 
-            let decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
+            let _decomposer = LlmTaskDecomposer::new(client, "gpt-4".to_string(), fs_tools, repomap);
 
-            let tools = decomposer.infer_required_tools("ファイルを読んで編集する");
+            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("ファイルを読んで編集する");
             assert!(tools.contains(&"fs_read".to_string()));
             assert!(tools.contains(&"edit".to_string()));
 
-            let tools = decomposer.infer_required_tools("コードを検索する");
+            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("コードを検索する");
             assert!(tools.contains(&"search_text".to_string()));
 
-            let tools = decomposer.infer_required_tools("コマンドを実行する");
+            let tools = crate::planning::llm_decomposer::infer::infer_required_tools("コマンドを実行する");
             assert!(tools.contains(&"execute_bash".to_string()));
         }
 
