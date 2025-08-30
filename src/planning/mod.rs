@@ -10,6 +10,8 @@ pub mod validator;
 
 pub use execution_context::*;
 pub use llm_decomposer::*;
+// Re-export infer helpers for backward compatibility
+pub use crate::planning::llm_decomposer::infer::{infer_required_tools, infer_step_type};
 pub use plan_manager::*;
 pub use step_executor::*;
 pub use task_analyzer::*;
