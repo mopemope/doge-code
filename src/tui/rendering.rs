@@ -238,14 +238,20 @@ impl TuiApp {
             let max_display_items = 10; // Limit the number of displayed completion items
             let list_height = (self.completion_candidates.len() as u16).min(max_display_items);
 
-            // Position the popup above the input area
-            let popup_y = area.y.saturating_sub(list_height);
+            // Calculate the height of the list block including borders and title
+            // Borders: top (1) + bottom (1) = 2
+            // Title: 1 line
+            let block_height = 2 + 1; // 3 lines
+            let total_height = list_height + block_height;
+
+            // Position the popup above the input area, considering the full height of the block
+            let popup_y = area.y.saturating_sub(total_height);
 
             let completion_area = Rect {
                 x: area.x,
                 y: popup_y,
                 width: max_width + 2, // +2 for padding
-                height: list_height,
+                height: total_height,
             };
 
             let items: Vec<ListItem> = self
