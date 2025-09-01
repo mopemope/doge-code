@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod assets;
 pub mod config;
+pub mod exec;
 pub mod llm;
 pub mod logging;
 pub mod planning;
@@ -10,7 +11,7 @@ mod tui;
 pub mod watch;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use tracing::info;
 
@@ -42,9 +43,26 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_repomap: bool,
 
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Commands {
+    /// Run in TUI mode (default if no subcommand is provided)
+    #[command()]
+    Tui,
+
     /// Watch for file changes and execute tasks
-    #[arg(long, default_value_t = false)]
-    pub watch: bool,
+    #[command()]
+    Watch,
+
+    /// Execute a command from arguments and exit
+    #[command()]
+    Exec {
+        /// The instruction to execute
+        instruction: String,
+    },
 }
 
 #[tokio::main]
@@ -56,10 +74,10 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::from_cli(cli.clone())?;
     info!(?cfg, "app config");
 
-    if cli.watch {
-        run_watch_mode(cfg).await
-    } else {
-        run_tui(cfg).await
+    match &cli.command {
+        Some(Commands::Watch) => run_watch_mode(cfg).await,
+        Some(Commands::Exec { instruction }) => run_exec(cfg, instruction).await,
+        Some(Commands::Tui) | None => run_tui(cfg).await,
     }
 }
 
@@ -87,4 +105,11 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
     Ok(())
+}
+
+/// Runs the `exec` subcommand.
+/// Initializes the executor and runs the provided instruction.
+async fn run_exec(cfg: crate::config::AppConfig, instruction: &str) -> anyhow::Result<()> {
+    let mut executor = crate::exec::Executor::new(cfg)?;
+    executor.run(instruction).await
 }
