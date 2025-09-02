@@ -1,20 +1,25 @@
 use crate::tui::commands::core::TuiExecutor;
+use crate::tui::state::Status;
 use crate::tui::view::TuiApp;
 
 impl TuiExecutor {
     /// Handle /compact command to summarize conversation history
+    ///
+    /// This version runs the compaction asynchronously on the tokio runtime and
+    /// reports progress via the UI channel so the TUI remains responsive. The
+    /// UI status is set to Processing to prevent dispatching further instructions
+    /// until compaction completes.
     pub fn handle_compact_command(&mut self, ui: &mut TuiApp) {
-        // Check if we have an LLM client
+        // Ensure we have an LLM client
         if self.client.is_none() {
             ui.push_log("[ERROR] LLM client is not configured. Cannot compact conversation.");
             return;
         }
 
         // Get conversation history
-        let history = {
-            if let Ok(history) = self.conversation_history.lock() {
-                history.clone()
-            } else {
+        let history = match self.conversation_history.lock() {
+            Ok(h) => h.clone(),
+            Err(_) => {
                 ui.push_log("[ERROR] Failed to access conversation history.");
                 return;
             }
@@ -26,28 +31,38 @@ impl TuiExecutor {
             return;
         }
 
+        // Update UI and status to indicate work has started
         ui.push_log("[INFO] Compacting conversation history...");
+        ui.status = Status::Processing;
 
-        // Get client and model info
+        // Ensure ui_tx is set so background task can report back
+        if self.ui_tx.is_none() {
+            self.ui_tx = ui.sender();
+        }
+
+        // Prepare parameters and clones for the async task
         let client = self.client.as_ref().unwrap().clone();
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
-        let ui_tx = self.ui_tx.clone();
+        let params = crate::llm::CompactParams {
+            client,
+            model,
+            fs_tools,
+            history,
+        };
+
         let conversation_history = self.conversation_history.clone();
         let session_manager = self.session_manager.clone();
+        let ui_tx = self.ui_tx.clone();
 
-        // Spawn async task to perform the summarization
+        // Spawn an async task to perform compaction and report results via ui_tx
         let rt = tokio::runtime::Handle::current();
         rt.spawn(async move {
-            // Prepare parameters for compacting
-            let params = crate::llm::CompactParams {
-                client,
-                model,
-                fs_tools,
-                history,
-            };
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send("::status:preparing".to_string());
+            }
 
-            // Compact the conversation history
+            // Run compaction
             match crate::llm::compact_conversation_history(params).await {
                 Ok(result) => {
                     if result.metadata.success {
@@ -57,35 +72,36 @@ impl TuiExecutor {
                             history.push(result.compacted_message.clone());
 
                             // Also save conversation history to session
-                            let mut sm = session_manager.lock().unwrap();
-                            let _ = sm.update_current_session_with_history(&history);
+                            if let Ok(mut sm) = session_manager.lock() {
+                                let _ = sm.update_current_session_with_history(&history);
+                            }
                         }
 
-                        // Notify UI of success
-                        if let Some(tx) = ui_tx {
+                        if let Some(tx) = &ui_tx {
                             let _ = tx.send(
                                 "[SUCCESS] Conversation history has been compacted.".to_string(),
                             );
                         }
-                    } else {
-                        // Handle case where compaction failed
-                        if let Some(tx) = ui_tx {
-                            let _ = tx.send(format!(
-                                "[ERROR] Failed to compact conversation: {}",
-                                result
-                                    .metadata
-                                    .error_message
-                                    .unwrap_or_else(|| "Unknown error".to_string())
-                            ));
-                        }
+                    } else if let Some(tx) = &ui_tx {
+                        let _ = tx.send(format!(
+                            "[ERROR] Failed to compact conversation: {}",
+                            result
+                                .metadata
+                                .error_message
+                                .unwrap_or_else(|| "Unknown error".to_string())
+                        ));
                     }
                 }
                 Err(e) => {
-                    // Handle error
-                    if let Some(tx) = ui_tx {
+                    if let Some(tx) = &ui_tx {
                         let _ = tx.send(format!("[ERROR] Failed to compact conversation: {}", e));
                     }
                 }
+            }
+
+            // Signal completion to the UI loop
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send("::status:done".to_string());
             }
         });
     }
