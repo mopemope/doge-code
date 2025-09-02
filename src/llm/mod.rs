@@ -1,5 +1,6 @@
 mod chat_with_tools;
 pub mod client_core;
+mod compact_history;
 mod history;
 mod stream;
 mod stream_tools;
@@ -17,6 +18,11 @@ pub use tool_def::*;
 pub use types::*;
 
 pub use tool_execution::{run_agent_loop, run_agent_streaming_once};
+
+// Re-export the compact_history module components
+pub use compact_history::{
+    CompactMetadata, CompactParams, CompactResult, compact_conversation_history,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LlmErrorKind {
