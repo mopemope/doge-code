@@ -208,6 +208,13 @@ impl TuiExecutor {
             return;
         }
 
+        // Handle /compact command to summarize conversation history
+        if line == "/compact" {
+            ui.push_log("> /compact");
+            self.handle_compact_command(ui);
+            return;
+        }
+
         if !line.starts_with('/') {
             let rest = line;
             self.last_user_prompt = Some(rest.to_string());
