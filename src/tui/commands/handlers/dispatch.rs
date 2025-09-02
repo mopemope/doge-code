@@ -30,6 +30,7 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
                 ui.push_log("  /tokens - Show token usage");
                 ui.push_log("  /plan - Analyze task and planning");
+                ui.push_log("  /compact - Compact conversation history to reduce token usage");
                 ui.push_log("");
                 ui.push_log("Scroll controls:");
                 ui.push_log("  Page Up/Down - Scroll by page");
@@ -114,6 +115,10 @@ impl CommandHandler for TuiExecutor {
                 } else {
                     ui.push_log("[no running task]");
                 }
+            }
+
+            "/compact" => {
+                self.handle_compact_command(ui);
             }
 
             "/map" => {
