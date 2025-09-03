@@ -32,7 +32,7 @@ impl TuiExecutor {
         }
 
         // Update UI and status to indicate work has started
-        ui.push_log("[INFO] Compacting conversation history...");
+        ui.push_log("[Command] Compacting conversation history...");
         ui.status = Status::Processing;
 
         // Ensure ui_tx is set so background task can report back
