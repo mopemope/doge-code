@@ -317,8 +317,12 @@ impl TuiExecutor {
                                 if let Some(tx) = tx {
                                     // run_agent_loop already sends the final assistant content as a
                                     // "::status:done:<content>" message. Avoid duplicating it here.
-                                    // Only send token usage update.
-                                    let _ = tx.send(format!("::tokens:{}", tokens_used));
+                                    // Only send token usage update (prompt + total)
+                                    let _ = tx.send(format!(
+                                        "::tokens:prompt:{},total:{}",
+                                        tokens_used,
+                                        c.get_tokens_used()
+                                    ));
                                 }
                                 // Update conversation history (save all messages except system messages)
                                 if let Ok(mut history) = conversation_history.lock() {
@@ -342,7 +346,11 @@ impl TuiExecutor {
                                     let _ = tx.send(format!("LLM error: {e}"));
                                     let _ = tx.send("::status:error".into());
                                     // Send token usage update even on error
-                                    let _ = tx.send(format!("::tokens:{}", tokens_used));
+                                    let _ = tx.send(format!(
+                                        "::tokens:prompt:{},total:{}",
+                                        tokens_used,
+                                        c.get_tokens_used()
+                                    ));
                                 }
                                 // Update conversation history on error (only user input)
                                 if let Ok(mut history) = conversation_history.lock() {

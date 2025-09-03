@@ -46,7 +46,8 @@ impl TuiApp {
             main_content_height,
             model,
             self.spinner_state,
-            self.tokens_used,
+            self.tokens_prompt_used,
+            self.tokens_total_used,
             &self.scroll_state,
         );
 

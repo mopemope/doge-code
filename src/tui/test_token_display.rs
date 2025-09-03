@@ -30,6 +30,7 @@ mod tests {
             model,
             spinner_state,
             tokens_used,
+            None,
             &crate::tui::state::ScrollState::default(),
         );
 
@@ -67,6 +68,7 @@ mod tests {
             model,
             spinner_state,
             tokens_used,
+            None,
             &crate::tui::state::ScrollState::default(),
         );
 

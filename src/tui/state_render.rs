@@ -80,7 +80,8 @@ pub fn build_render_plan(
     main_content_height: u16, // Add actual main content area height
     model: Option<&str>,
     spinner_state: usize,                          // Add spinner_state parameter
-    tokens_used: u32,                              // Add tokens_used parameter
+    prompt_tokens: u32,                            // prompt tokens
+    total_tokens: Option<u32>,                     // total tokens (if available)
     scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
 ) -> crate::tui::state::RenderPlan {
     let w_usize = w as usize;
@@ -127,13 +128,19 @@ pub fn build_render_plan(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
     let model_suffix = model.map(|m| format!(" - model:{}", m)).unwrap_or_default();
-    let tokens_suffix = if tokens_used > 0 {
-        format!(" - tokens:{}", tokens_used)
+    // Display tokens in the form " - tokens:<prompt>" or " - tokens:<prompt>/<total>" when available.
+    // Avoid internal prefixes like `p`/`t` and extraneous brackets so the title remains clean.
+    let tokens_suffix = if prompt_tokens > 0 {
+        match total_tokens {
+            Some(total) => format!(" - tokens:{}/{}", prompt_tokens, total),
+            None => format!(" - tokens:{}", prompt_tokens),
+        }
     } else {
         String::new()
     };
+
     let title_full = format!(
-        "{}{} - [{}]  {} - {}",
+        "{}{}{} - {} - {}",
         title, model_suffix, tokens_suffix, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
