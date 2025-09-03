@@ -112,6 +112,8 @@ async fn chat_tools_once_inner(
     // Track token usage if available
     if let Some(usage) = &body.usage {
         client.add_tokens(usage.total_tokens);
+        // Also track prompt tokens for non-streaming tools path
+        client.add_prompt_tokens(usage.prompt_tokens);
     }
 
     let msg = body

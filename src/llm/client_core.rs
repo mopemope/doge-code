@@ -211,6 +211,8 @@ impl OpenAIClient {
                             // Track token usage if available
                             if let Some(usage) = &body.usage {
                                 self.add_tokens(usage.total_tokens);
+                                // Also track prompt tokens for non-streaming path so UI can display header info
+                                self.add_prompt_tokens(usage.prompt_tokens);
                             }
 
                             if let Some(msg) = body.choices.into_iter().next().map(|c| c.message) {

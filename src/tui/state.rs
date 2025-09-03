@@ -112,6 +112,10 @@ pub struct TuiApp {
     // pub session_store: SessionStore,
     // Token usage tracking
     pub tokens_used: u32,
+    // Prompt tokens (for header display)
+    pub tokens_prompt_used: u32,
+    // Total tokens (if available)
+    pub tokens_total_used: Option<u32>,
     // redraw flag
     pub dirty: bool,
     // scroll state
@@ -269,6 +273,8 @@ impl TuiApp {
             last_llm_response_content: None,
             input_mode: InputMode::default(),
             tokens_used: 0,
+            tokens_prompt_used: 0,
+            tokens_total_used: None,
             dirty: true, // initial full render
             scroll_state: ScrollState::default(),
             completion_candidates: Vec::new(),

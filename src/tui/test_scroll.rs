@@ -264,6 +264,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             scroll_state,
         );
 
@@ -310,6 +311,7 @@ mod tests {
                 None,
                 0,
                 0,
+                None,
                 scroll_state,
             );
 
@@ -360,6 +362,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             scroll_state,
         );
 
@@ -393,6 +396,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             &scroll_state,
         );
 
@@ -464,6 +468,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             scroll_state,
         );
 
@@ -518,6 +523,7 @@ mod tests {
                 None,
                 0,
                 0,
+                None,
                 scroll_state,
             );
 
@@ -572,6 +578,7 @@ mod tests {
             None,
             0,
             0,
+            None,
             scroll_state,
         );
 
@@ -643,6 +650,7 @@ mod tests {
             model,
             spinner_state,
             tokens_used,
+            None,
             &scroll_state,
         );
 
@@ -667,6 +675,7 @@ mod tests {
             model,
             spinner_state,
             tokens_used,
+            None,
             &scroll_state,
         );
 

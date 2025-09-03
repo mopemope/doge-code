@@ -137,8 +137,45 @@ impl TuiApp {
                         }
                         _ if msg.starts_with("::tokens:") => {
                             let tokens_str = &msg["::tokens:".len()..];
+                            // New format: ::tokens:prompt:{n},total:{m}
+                            if let Some(rest) = tokens_str.strip_prefix("prompt:") {
+                                // parse prompt and optionally total
+                                let mut prompt_val: Option<u32> = None;
+                                let mut total_val: Option<u32> = None;
+                                for part in rest.split(',') {
+                                    let p = part.trim();
+                                    if let Some(v) = p.strip_prefix("prompt:") {
+                                        if let Ok(n) = v.parse::<u32>() {
+                                            prompt_val = Some(n);
+                                        }
+                                    } else if let Some(v) = p.strip_prefix("total:") {
+                                        if let Ok(n) = v.parse::<u32>() {
+                                            total_val = Some(n);
+                                        }
+                                    } else if p.starts_with("total:") {
+                                        if let Some(v) = p.strip_prefix("total:")
+                                            && let Ok(n) = v.parse::<u32>()
+                                        {
+                                            total_val = Some(n);
+                                        }
+                                    } else if let Ok(n) = p.parse::<u32>() {
+                                        // legacy single number after prompt:
+                                        prompt_val = Some(n);
+                                    }
+                                }
+                                if let Some(pv) = prompt_val {
+                                    self.tokens_prompt_used = pv;
+                                }
+                                if let Some(tv) = total_val {
+                                    self.tokens_total_used = Some(tv);
+                                }
+                                self.dirty = true;
+                                continue;
+                            }
+
+                            // Legacy format: ::tokens:{n} => treat as prompt tokens
                             if let Ok(tokens) = tokens_str.parse::<u32>() {
-                                self.tokens_used = tokens;
+                                self.tokens_prompt_used = tokens;
                                 self.dirty = true;
                             }
                         }
