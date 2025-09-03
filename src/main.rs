@@ -8,6 +8,7 @@ pub mod planning;
 pub mod session;
 pub mod tools;
 mod tui;
+pub mod utils;
 pub mod watch;
 
 use anyhow::Result;
