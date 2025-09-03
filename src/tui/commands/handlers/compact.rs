@@ -41,9 +41,10 @@ impl TuiExecutor {
         }
 
         // Prepare parameters and clones for the async task
-        let client = self.client.as_ref().unwrap().clone();
+        let mut client = self.client.as_ref().unwrap().clone();
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
+        client.reason_enable = false;
         let params = crate::llm::CompactParams {
             client,
             model,
