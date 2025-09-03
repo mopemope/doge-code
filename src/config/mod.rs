@@ -44,7 +44,7 @@ impl Default for LlmConfig {
 }
 
 // Default threshold for auto-compacting conversation history
-pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 300_000;
+pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 250_000;
 
 // Threshold constant removed; use AppConfig.auto_compact_prompt_token_threshold at runtime
 
