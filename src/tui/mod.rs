@@ -14,4 +14,10 @@ pub mod view;
 mod test_token_display;
 
 #[cfg(test)]
-mod test_scroll;
+mod test_scroll_basic;
+#[cfg(test)]
+mod test_scroll_formatting;
+#[cfg(test)]
+mod test_scroll_logging;
+#[cfg(test)]
+mod test_scroll_render;
