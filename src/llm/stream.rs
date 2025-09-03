@@ -202,9 +202,9 @@ impl OpenAIClient {
 
                             if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
                                 if let Some(usage) = &json.usage {
-                                    client.add_tokens(usage.total_tokens);
+                                    client.set_tokens(usage.total_tokens);
                                     // accumulate prompt tokens separately for header display
-                                    client.add_prompt_tokens(usage.prompt_tokens);
+                                    client.set_prompt_tokens(usage.prompt_tokens);
                                 }
 
                                 for ch in json.choices {
