@@ -71,6 +71,8 @@ model = "gpt-5-mini"
 api_key = "sk-..."
 log_level = "info"
 theme = "dark"
+# Auto-compact threshold (prompt tokens). When the prompt token count reaches this number, the TUI will automatically trigger a conversation compaction (/compact).
+auto_compact_prompt_token_threshold = 300000
 ```
 
 ### Environment Variables and CLI Options

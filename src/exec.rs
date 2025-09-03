@@ -180,6 +180,8 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: "PROJECT.md".to_string(), // Add project_instructions_file
             no_repomap: true,                                    // Disable repomap for simplicity
+            auto_compact_prompt_token_threshold:
+                crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };
 
         let executor = Executor::new(cfg);
@@ -204,6 +206,8 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: "PROJECT.md".to_string(), // Add project_instructions_file
             no_repomap: true,                                    // Disable repomap for simplicity
+            auto_compact_prompt_token_threshold:
+                crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };
 
         let mut executor = Executor::new(cfg).unwrap();

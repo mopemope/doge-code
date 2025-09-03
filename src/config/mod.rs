@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub theme: String,                     // newly added
     pub project_instructions_file: String, // newly added
     pub no_repomap: bool,                  // newly added
+    // Auto-compact threshold (configurable via env or config file)
+    pub auto_compact_prompt_token_threshold: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,11 @@ impl Default for LlmConfig {
     }
 }
 
+// Default threshold for auto-compacting conversation history
+pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 300_000;
+
+// Threshold constant removed; use AppConfig.auto_compact_prompt_token_threshold at runtime
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -52,6 +59,8 @@ pub struct FileConfig {
     pub theme: Option<String>,                     // newly added
     pub project_instructions_file: Option<String>, // newly added
     pub no_repomap: Option<bool>,                  // newly added
+    // Auto-compact threshold (optional in config file)
+    pub auto_compact_prompt_token_threshold: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -121,6 +130,14 @@ impl AppConfig {
             .project_instructions_file
             .unwrap_or_else(|| "PROJECT.md".to_string());
 
+        // Determine auto-compact threshold (priority: env var -> config file -> default)
+        let auto_compact_prompt_token_threshold =
+            std::env::var("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .or(file_cfg.auto_compact_prompt_token_threshold)
+                .unwrap_or(DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD);
+
         Ok(Self {
             base_url,
             model,
@@ -135,6 +152,7 @@ impl AppConfig {
             theme,                     // newly added
             project_instructions_file, // newly added
             no_repomap: cli.no_repomap || file_cfg.no_repomap.unwrap_or(false),
+            auto_compact_prompt_token_threshold,
         })
     }
 }

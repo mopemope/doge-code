@@ -193,8 +193,7 @@ mod tests {
 
     #[test]
     fn test_compact_prompt_constant() {
-        // Ensure the compact prompt is defined and contains expected content
-        assert!(!COMPACT_PROMPT.is_empty());
+        // Ensure the compact prompt contains expected content
         assert!(
             COMPACT_PROMPT.contains("You are the component that summarizes internal chat history")
         );
