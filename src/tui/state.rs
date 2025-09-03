@@ -141,6 +141,7 @@ impl TuiApp {
             "/execute".to_string(),
             "/plans".to_string(),
             "/cancel".to_string(),
+            "/compact".to_string(),
         ]
     }
 
