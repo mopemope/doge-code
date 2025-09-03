@@ -75,6 +75,10 @@ impl OpenAIClient {
         self.tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
+    pub fn set_tokens(&self, tokens: u32) {
+        self.tokens_used.store(tokens, Ordering::Relaxed);
+    }
+
     /// Get the total number of prompt tokens used by this client
     pub fn get_prompt_tokens_used(&self) -> u32 {
         self.prompt_tokens_used.load(Ordering::Relaxed)
@@ -83,6 +87,10 @@ impl OpenAIClient {
     /// Add prompt tokens to the prompt count
     pub fn add_prompt_tokens(&self, tokens: u32) {
         self.prompt_tokens_used.fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    pub fn set_prompt_tokens(&self, tokens: u32) {
+        self.prompt_tokens_used.store(tokens, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
