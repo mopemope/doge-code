@@ -9,13 +9,13 @@ use tracing::{debug, warn};
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
     model: &str,
-    fs: &FsTools,
+    tools: &FsTools,
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
-    let runtime = ToolRuntime::new(fs);
+    let runtime = ToolRuntime::new(tools);
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
 
