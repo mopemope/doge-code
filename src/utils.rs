@@ -24,9 +24,10 @@ pub fn is_git_repository<P: AsRef<Path>>(path: P) -> bool {
         if git_config_path.is_file() {
             // If config file exists, check its contents to see if it's a Git repository
             if let Ok(content) = std::fs::read_to_string(&git_config_path)
-                && content.contains("[core]") {
-                    return true;
-                }
+                && content.contains("[core]")
+            {
+                return true;
+            }
         }
 
         // Move to parent directory
@@ -61,9 +62,10 @@ pub fn get_git_repository_root<P: AsRef<Path>>(path: P) -> Option<PathBuf> {
         if git_config_path.is_file() {
             // If config file exists, check its contents to see if it's a Git repository
             if let Ok(content) = std::fs::read_to_string(&git_config_path)
-                && content.contains("[core]") {
-                    return Some(current_path.to_path_buf());
-                }
+                && content.contains("[core]")
+            {
+                return Some(current_path.to_path_buf());
+            }
         }
 
         // Move to parent directory
