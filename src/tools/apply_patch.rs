@@ -358,10 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_patch_large_change() {
-        let original_content = std::iter::repeat("line\n").take(100).collect::<String>();
-        let modified_content = std::iter::repeat("changed line\n")
-            .take(100)
-            .collect::<String>();
+        let original_content = "line\n".repeat(100);
+        let modified_content = "changed line\n".repeat(100);
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(original_content.as_bytes()).unwrap();
@@ -438,9 +436,20 @@ mod tests {
         assert!(err.to_string().contains("Failed to write to file"));
 
         // Cleanup: make writable again to allow deletion by tempfile
-        let mut perms = fs::metadata(file_path).await.unwrap().permissions();
-        perms.set_readonly(false);
-        fs::set_permissions(file_path, perms).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(file_path).await.unwrap().permissions();
+            // Restore writable permissions for owner (rw-r--r--)
+            perms.set_mode(0o644);
+            fs::set_permissions(file_path, perms).await.unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = fs::metadata(file_path).await.unwrap().permissions();
+            perms.set_readonly(false);
+            fs::set_permissions(file_path, perms).await.unwrap();
+        }
     }
 
     #[tokio::test]

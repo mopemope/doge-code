@@ -260,7 +260,7 @@ mod tests {
             crate::tui::state::InputMode::Normal,
             80,
             8,
-            (8 as u16).saturating_sub(3),
+            8_u16.saturating_sub(3),
             None,
             0,
             0,
@@ -658,9 +658,11 @@ mod tests {
         assert!(plan.log_lines.contains(&"line5".to_string()));
 
         // Test scrolled up
-        let mut scroll_state = ScrollState::default();
-        scroll_state.offset = 2;
-        scroll_state.auto_scroll = false;
+        let scroll_state = ScrollState {
+            offset: 2,
+            auto_scroll: false,
+            ..Default::default()
+        };
 
         let textarea = TextArea::default();
         let plan = build_render_plan(

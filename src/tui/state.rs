@@ -125,6 +125,10 @@ pub struct TuiApp {
     pub completion_index: usize,
     pub completion_active: bool,
     pub completion_type: CompletionType,
+    // auto-compact threshold (can be updated by main from AppConfig)
+    pub auto_compact_prompt_token_threshold: u32,
+    // auto-compact flag to avoid duplicate triggers
+    pub auto_compact_pending: bool,
     pub pending_instructions: VecDeque<String>,
 }
 
@@ -281,6 +285,11 @@ impl TuiApp {
             completion_index: 0,
             completion_active: false,
             completion_type: CompletionType::None,
+            // auto-compact threshold default (can be overridden by main)
+            auto_compact_prompt_token_threshold:
+                crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            // auto-compact starts not pending
+            auto_compact_pending: false,
             pending_instructions: VecDeque::new(),
         };
 

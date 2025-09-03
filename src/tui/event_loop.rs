@@ -119,6 +119,14 @@ impl TuiApp {
                             self.dirty = true;
                         }
 
+                        // Clear auto-compact pending flag when compaction succeeds
+                        "[SUCCESS] Conversation history has been compacted." => {
+                            // Only clear pending flag on the specific compact success message
+                            self.auto_compact_pending = false;
+                            self.push_log(msg);
+                            self.dirty = true;
+                        }
+
                         _ if msg.starts_with("::append:") => {
                             let payload = &msg["::append:".len()..];
                             self.append_stream_token_structured(payload);
@@ -170,6 +178,22 @@ impl TuiApp {
                                     self.tokens_total_used = Some(tv);
                                 }
                                 self.dirty = true;
+
+                                // Check auto-compact threshold and trigger if necessary
+                                if self.tokens_prompt_used
+                                    >= self.auto_compact_prompt_token_threshold
+                                    && !self.auto_compact_pending
+                                {
+                                    self.auto_compact_pending = true;
+                                    // Inform user and dispatch compact command
+                                    self.push_log(format!(
+                                        "[AUTO] prompt tokens {} >= {}; triggering /compact",
+                                        self.tokens_prompt_used,
+                                        self.auto_compact_prompt_token_threshold
+                                    ));
+                                    self.dispatch("/compact");
+                                }
+
                                 continue;
                             }
 
@@ -177,6 +201,20 @@ impl TuiApp {
                             if let Ok(tokens) = tokens_str.parse::<u32>() {
                                 self.tokens_prompt_used = tokens;
                                 self.dirty = true;
+
+                                // Check auto-compact threshold and trigger if necessary (legacy format)
+                                if self.tokens_prompt_used
+                                    >= self.auto_compact_prompt_token_threshold
+                                    && !self.auto_compact_pending
+                                {
+                                    self.auto_compact_pending = true;
+                                    self.push_log(format!(
+                                        "[AUTO] prompt tokens {} >= {}; triggering /compact",
+                                        self.tokens_prompt_used,
+                                        self.auto_compact_prompt_token_threshold
+                                    ));
+                                    self.dispatch("/compact");
+                                }
                             }
                         }
                         _ if msg.starts_with("::status:error:") => {
