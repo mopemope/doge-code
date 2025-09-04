@@ -8,7 +8,7 @@ use tokio::spawn;
 use tracing::debug;
 use tui_textarea::{CursorMove, Input, TextArea};
 
-use crate::tui::state::{InputMode, TuiApp, save_input_history};
+use crate::tui::state::{CompletionType, InputMode, TuiApp, save_input_history};
 
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 
@@ -36,16 +36,21 @@ pub fn handle_normal_mode_key(
                 let completed_item = app.completion_candidates[app.completion_index].clone();
                 let current_input = app.textarea.lines()[0].clone();
 
-                let new_input = if current_input.starts_with('/') {
+                let new_input = if app.completion_type == CompletionType::Command {
                     // Command completion
                     let mut parts: Vec<&str> = current_input.split_whitespace().collect();
                     if !parts.is_empty() {
                         parts[0] = &completed_item;
                     }
                     parts.join(" ") + " "
-                } else if current_input.starts_with('@') {
+                } else if app.completion_type == CompletionType::FilePath {
                     // File path completion
-                    format!("@{completed_item}")
+                    if let Some(at_pos) = current_input.rfind('@') {
+                        let before_at = &current_input[..=at_pos];
+                        format!("{}{}", before_at, completed_item)
+                    } else {
+                        current_input // Should not happen
+                    }
                 } else {
                     current_input
                 };
@@ -219,14 +224,21 @@ pub fn handle_normal_mode_key(
                 let completed_item = app.completion_candidates[app.completion_index].clone();
                 let current_input = app.textarea.lines()[0].clone();
 
-                let new_input = if current_input.starts_with('/') {
+                let new_input = if app.completion_type == CompletionType::Command {
+                    // Command completion
                     let mut parts: Vec<&str> = current_input.split_whitespace().collect();
                     if !parts.is_empty() {
                         parts[0] = &completed_item;
                     }
                     parts.join(" ") + " "
-                } else if current_input.starts_with('@') {
-                    format!("@{completed_item}")
+                } else if app.completion_type == CompletionType::FilePath {
+                    // File path completion
+                    if let Some(at_pos) = current_input.rfind('@') {
+                        let before_at = &current_input[..=at_pos];
+                        format!("{}{}", before_at, completed_item)
+                    } else {
+                        current_input // Should not happen
+                    }
                 } else {
                     current_input
                 };
@@ -265,14 +277,8 @@ pub fn handle_normal_mode_key(
                 let input_str = app.textarea.lines()[0].clone();
                 if input_str.starts_with('/') {
                     app.update_completion_candidates(&input_str);
-                    if !app.completion_candidates.is_empty() {
-                        app.completion_active = true;
-                    }
-                } else if input_str.starts_with('@') {
+                } else if input_str.contains('@') {
                     app.update_file_path_completion_candidates(&input_str);
-                    if !app.completion_candidates.is_empty() {
-                        app.completion_active = true;
-                    }
                 } else {
                     app.completion_active = false;
                 }
