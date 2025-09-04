@@ -15,7 +15,7 @@ pub async fn chat_tools_once(
     tools: &[crate::llm::types::ToolDef],
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
-    const MAX_RETRIES: u32 = 5;
+    const MAX_RETRIES: u32 = 10;
     let mut last_error = anyhow!("Failed after {} retries", MAX_RETRIES);
 
     for attempt in 1..=MAX_RETRIES {
