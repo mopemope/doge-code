@@ -1,6 +1,11 @@
 pub mod execution_context;
 pub mod llm_decomposer;
+pub mod plan_execution;
+pub mod plan_lifecycle;
 pub mod plan_manager;
+pub mod plan_statistics;
+pub mod plan_status;
+pub mod plan_storage;
 pub mod prompt_builder;
 pub mod step_executor;
 pub mod task_analyzer;

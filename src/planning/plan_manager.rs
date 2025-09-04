@@ -1,54 +1,22 @@
+use crate::planning::plan_execution::PlanExecution;
+use crate::planning::plan_lifecycle::PlanLifecycleManager;
+use crate::planning::plan_statistics::PlanStatistics;
+use crate::planning::plan_storage::PlanStorage;
 use crate::planning::task_types::*;
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-/// Plan execution status
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlanStatus {
-    /// 作成済み、実行待ち
-    Created,
-    /// 実行中
-    Running,
-    /// 一時停止中
-    Paused,
-    /// 正常完了
-    Completed,
-    /// エラーで失敗
-    Failed,
-    /// ユーザーによりキャンセル
-    Cancelled,
-}
-
-/// Information of plan being executed
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanExecution {
-    pub plan: TaskPlan,
-    pub status: PlanStatus,
-    pub current_step_index: usize,
-    pub completed_steps: Vec<StepResult>,
-    pub start_time: Option<chrono::DateTime<chrono::Utc>>,
-    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
-    pub error_message: Option<String>,
-    pub pause_reason: Option<String>,
-}
-
 /// Plan management system
 #[derive(Debug)]
 pub struct PlanManager {
-    /// Active plans (in memory)
-    active_plans: Arc<Mutex<HashMap<String, PlanExecution>>>,
-    /// Recent plans (history)
-    recent_plans: Arc<Mutex<Vec<PlanExecution>>>,
+    /// Plan lifecycle manager
+    lifecycle_manager: Arc<Mutex<PlanLifecycleManager>>,
     /// Currently executing plan ID
     current_execution: Arc<Mutex<Option<String>>>,
-    /// Directory to save plans
-    plans_dir: PathBuf,
-    /// Maximum history retention count
-    max_history: usize,
+    /// Plan storage manager
+    storage_manager: Arc<PlanStorage>,
 }
 
 impl PlanManager {
@@ -57,12 +25,13 @@ impl PlanManager {
         let plans_dir = Self::get_plans_directory()?;
         std::fs::create_dir_all(&plans_dir)?;
 
+        let lifecycle_manager = PlanLifecycleManager::new(50);
+        let storage_manager = PlanStorage::new(plans_dir);
+
         Ok(Self {
-            active_plans: Arc::new(Mutex::new(HashMap::new())),
-            recent_plans: Arc::new(Mutex::new(Vec::new())),
+            lifecycle_manager: Arc::new(Mutex::new(lifecycle_manager)),
             current_execution: Arc::new(Mutex::new(None)),
-            plans_dir,
-            max_history: 50,
+            storage_manager: Arc::new(storage_manager),
         })
     }
 
@@ -75,27 +44,18 @@ impl PlanManager {
 
     /// Register new plan
     pub fn register_plan(&self, plan: TaskPlan) -> Result<String> {
-        let plan_id = plan.id.clone();
-
-        let execution = PlanExecution {
-            plan,
-            status: PlanStatus::Created,
-            current_step_index: 0,
-            completed_steps: Vec::new(),
-            start_time: None,
-            end_time: None,
-            error_message: None,
-            pause_reason: None,
+        let plan_id = {
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.register_plan(plan)
         };
 
-        // メモリに保存
-        {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            active_plans.insert(plan_id.clone(), execution.clone());
-        }
-
         // ディスクに永続化
-        self.save_plan_to_disk(&execution)?;
+        {
+            let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            if let Some(execution) = lifecycle_manager.get_plan(&plan_id) {
+                self.storage_manager.save_plan_to_disk(&execution)?;
+            }
+        }
 
         info!("Registered new plan: {}", plan_id);
         Ok(plan_id)
@@ -103,20 +63,20 @@ impl PlanManager {
 
     /// 計画を取得
     pub fn get_plan(&self, plan_id: &str) -> Option<PlanExecution> {
-        let active_plans = self.active_plans.lock().unwrap();
-        active_plans.get(plan_id).cloned()
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.get_plan(plan_id)
     }
 
     /// アクティブな計画一覧を取得
     pub fn list_active_plans(&self) -> Vec<PlanExecution> {
-        let active_plans = self.active_plans.lock().unwrap();
-        active_plans.values().cloned().collect()
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.list_active_plans()
     }
 
     /// Get recent plan history
     pub fn get_recent_plans(&self) -> Vec<PlanExecution> {
-        let recent_plans = self.recent_plans.lock().unwrap();
-        recent_plans.clone()
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.get_recent_plans()
     }
 
     /// Get currently executing plan ID
@@ -128,24 +88,8 @@ impl PlanManager {
     /// Start plan execution
     pub fn start_execution(&self, plan_id: &str) -> Result<()> {
         {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            if let Some(execution) = active_plans.get_mut(plan_id) {
-                if execution.status != PlanStatus::Created && execution.status != PlanStatus::Paused
-                {
-                    return Err(anyhow!(
-                        "Plan {} is not in a startable state: {:?}",
-                        plan_id,
-                        execution.status
-                    ));
-                }
-
-                execution.status = PlanStatus::Running;
-                execution.start_time = Some(chrono::Utc::now());
-                execution.error_message = None;
-                execution.pause_reason = None;
-            } else {
-                return Err(anyhow!("Plan {} not found", plan_id));
-            }
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.start_execution(plan_id)?;
         }
 
         // 現在の実行を設定
@@ -161,17 +105,8 @@ impl PlanManager {
     /// Pause plan execution
     pub fn pause_execution(&self, plan_id: &str, reason: Option<String>) -> Result<()> {
         {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            if let Some(execution) = active_plans.get_mut(plan_id) {
-                if execution.status != PlanStatus::Running {
-                    return Err(anyhow!("Plan {} is not running", plan_id));
-                }
-
-                execution.status = PlanStatus::Paused;
-                execution.pause_reason = reason;
-            } else {
-                return Err(anyhow!("Plan {} not found", plan_id));
-            }
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.pause_execution(plan_id, reason)?;
         }
 
         // 現在の実行をクリア
@@ -188,34 +123,10 @@ impl PlanManager {
 
     /// Complete plan execution
     pub fn complete_execution(&self, plan_id: &str, result: ExecutionResult) -> Result<()> {
-        let execution = {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            if let Some(mut execution) = active_plans.remove(plan_id) {
-                execution.status = if result.success {
-                    PlanStatus::Completed
-                } else {
-                    PlanStatus::Failed
-                };
-                execution.end_time = Some(chrono::Utc::now());
-                execution.completed_steps = result.completed_steps;
-                if !result.success {
-                    execution.error_message = Some(result.final_message);
-                }
-                execution
-            } else {
-                return Err(anyhow!("Plan {} not found", plan_id));
-            }
-        };
-
-        // 履歴に追加
+        let result_clone = result.clone();
         {
-            let mut recent_plans = self.recent_plans.lock().unwrap();
-            recent_plans.push(execution.clone());
-
-            // 履歴サイズ制限
-            if recent_plans.len() > self.max_history {
-                recent_plans.remove(0);
-            }
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.complete_execution(plan_id, result_clone)?;
         }
 
         // 現在の実行をクリア
@@ -227,7 +138,18 @@ impl PlanManager {
         }
 
         // ディスクに保存
-        self.save_plan_to_disk(&execution)?;
+        {
+            let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            if let Some(execution) = lifecycle_manager.get_plan(plan_id) {
+                self.storage_manager.save_plan_to_disk(&execution)?;
+            } else {
+                // If plan is no longer in active plans, it might be in recent plans
+                let recent_plans = lifecycle_manager.get_recent_plans();
+                if let Some(execution) = recent_plans.iter().find(|e| e.plan.id == plan_id) {
+                    self.storage_manager.save_plan_to_disk(execution)?;
+                }
+            }
+        }
 
         info!(
             "Completed execution of plan: {} (success: {})",
@@ -238,25 +160,9 @@ impl PlanManager {
 
     /// Cancel plan execution
     pub fn cancel_execution(&self, plan_id: &str) -> Result<()> {
-        let execution = {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            if let Some(mut execution) = active_plans.remove(plan_id) {
-                execution.status = PlanStatus::Cancelled;
-                execution.end_time = Some(chrono::Utc::now());
-                execution
-            } else {
-                return Err(anyhow!("Plan {} not found", plan_id));
-            }
-        };
-
-        // 履歴に追加
         {
-            let mut recent_plans = self.recent_plans.lock().unwrap();
-            recent_plans.push(execution.clone());
-
-            if recent_plans.len() > self.max_history {
-                recent_plans.remove(0);
-            }
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.cancel_execution(plan_id)?;
         }
 
         // 現在の実行をクリア
@@ -273,162 +179,48 @@ impl PlanManager {
 
     /// Record step completion
     pub fn record_step_completion(&self, plan_id: &str, step_result: StepResult) -> Result<()> {
-        let execution_clone = {
-            let mut active_plans = self.active_plans.lock().unwrap();
-            if let Some(execution) = active_plans.get_mut(plan_id) {
-                execution.completed_steps.push(step_result);
-                execution.current_step_index += 1;
-                execution.clone()
-            } else {
-                return Err(anyhow!("Plan {} not found", plan_id));
-            }
-        };
+        {
+            let mut lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            lifecycle_manager.record_step_completion(plan_id, step_result)?;
+        }
 
         // ディスクに保存
-        self.save_plan_to_disk(&execution_clone)?;
+        {
+            let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+            if let Some(execution) = lifecycle_manager.get_plan(plan_id) {
+                self.storage_manager.save_plan_to_disk(&execution)?;
+            }
+        }
         Ok(())
     }
 
     /// 最新の計画を取得（最後に作成された計画）
     pub fn get_latest_plan(&self) -> Option<PlanExecution> {
-        let active_plans = self.active_plans.lock().unwrap();
-
-        // 最新の作成時刻の計画を探す
-        active_plans
-            .values()
-            .max_by_key(|execution| execution.plan.created_at)
-            .cloned()
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.get_latest_plan()
     }
 
     /// Search for executable plans (keyword matching)
     pub fn find_executable_plan(&self, user_input: &str) -> Option<PlanExecution> {
-        let active_plans = self.active_plans.lock().unwrap();
-
-        // ユーザー入力に基づいて計画を検索
-        let input_lower = user_input.to_lowercase();
-
-        // 実行関連のキーワードをチェック
-        let execution_keywords = [
-            "実行",
-            "execute",
-            "run",
-            "開始",
-            "start",
-            "実施",
-            "進める",
-            "やって",
-            "計画",
-            "plan",
-            "上記",
-            "これ",
-            "それ",
-            "この計画",
-            "その計画",
-        ];
-
-        let has_execution_keyword = execution_keywords
-            .iter()
-            .any(|keyword| input_lower.contains(keyword));
-
-        if !has_execution_keyword {
-            return None;
-        }
-
-        // 最新の Created 状態の計画を返す
-        active_plans
-            .values()
-            .filter(|execution| execution.status == PlanStatus::Created)
-            .max_by_key(|execution| execution.plan.created_at)
-            .cloned()
-    }
-
-    /// 計画をディスクに保存
-    fn save_plan_to_disk(&self, execution: &PlanExecution) -> Result<()> {
-        let file_path = self.plans_dir.join(format!("{}.json", execution.plan.id));
-        let json_data = serde_json::to_string_pretty(execution)?;
-        std::fs::write(file_path, json_data)?;
-        Ok(())
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.find_executable_plan(user_input)
     }
 
     /// Load plan from disk
     pub fn load_plan_from_disk(&self, plan_id: &str) -> Result<PlanExecution> {
-        let file_path = self.plans_dir.join(format!("{}.json", plan_id));
-        let json_data = std::fs::read_to_string(file_path)?;
-        let execution: PlanExecution = serde_json::from_str(&json_data)?;
-        Ok(execution)
+        self.storage_manager.load_plan_from_disk(plan_id)
     }
 
     /// Clean up old plan files
     pub fn cleanup_old_plans(&self, days: u64) -> Result<usize> {
-        let cutoff_time = chrono::Utc::now() - chrono::Duration::days(days as i64);
-        let mut cleaned_count = 0;
-
-        if let Ok(entries) = std::fs::read_dir(&self.plans_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata()
-                    && let Ok(created) = metadata.created()
-                {
-                    let created_time = chrono::DateTime::<chrono::Utc>::from(created);
-                    if created_time < cutoff_time && std::fs::remove_file(entry.path()).is_ok() {
-                        cleaned_count += 1;
-                    }
-                }
-            }
-        }
-
-        info!("Cleaned up {} old plan files", cleaned_count);
-        Ok(cleaned_count)
+        self.storage_manager.cleanup_old_plans(days)
     }
 
     /// Get statistics
     pub fn get_statistics(&self) -> PlanStatistics {
-        let active_plans = self.active_plans.lock().unwrap();
-        let recent_plans = self.recent_plans.lock().unwrap();
-
-        let mut stats = PlanStatistics {
-            total_plans: active_plans.len() + recent_plans.len(),
-            active_plans: active_plans.len(),
-            completed_plans: 0,
-            failed_plans: 0,
-            cancelled_plans: 0,
-            average_completion_time: 0.0,
-        };
-
-        let mut total_duration = 0i64;
-        let mut completed_count = 0;
-
-        for execution in recent_plans.iter() {
-            match execution.status {
-                PlanStatus::Completed => {
-                    stats.completed_plans += 1;
-                    if let (Some(start), Some(end)) = (execution.start_time, execution.end_time) {
-                        total_duration += (end - start).num_seconds();
-                        completed_count += 1;
-                    }
-                }
-                PlanStatus::Failed => stats.failed_plans += 1,
-                PlanStatus::Cancelled => stats.cancelled_plans += 1,
-                _ => {}
-            }
-        }
-
-        if completed_count > 0 {
-            stats.average_completion_time = total_duration as f64 / completed_count as f64;
-        }
-
-        stats
+        let lifecycle_manager = self.lifecycle_manager.lock().unwrap();
+        lifecycle_manager.get_statistics()
     }
-}
-
-/// 計画統計情報
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStatistics {
-    pub total_plans: usize,
-    pub active_plans: usize,
-    pub completed_plans: usize,
-    pub failed_plans: usize,
-    pub cancelled_plans: usize,
-    pub average_completion_time: f64, // 秒
 }
 
 impl Default for PlanManager {
@@ -440,6 +232,7 @@ impl Default for PlanManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planning::plan_status::PlanStatus;
     use tempfile::TempDir;
 
     fn create_test_plan() -> TaskPlan {
@@ -480,12 +273,13 @@ mod tests {
         let plans_dir = temp_dir.path().join("plans");
         std::fs::create_dir_all(&plans_dir)?;
 
+        let lifecycle_manager = PlanLifecycleManager::new(50);
+        let storage_manager = PlanStorage::new(plans_dir);
+
         let manager = PlanManager {
-            active_plans: Arc::new(Mutex::new(HashMap::new())),
-            recent_plans: Arc::new(Mutex::new(Vec::new())),
+            lifecycle_manager: Arc::new(Mutex::new(lifecycle_manager)),
             current_execution: Arc::new(Mutex::new(None)),
-            plans_dir,
-            max_history: 50,
+            storage_manager: Arc::new(storage_manager),
         };
 
         Ok((manager, temp_dir))
