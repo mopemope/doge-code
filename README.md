@@ -120,6 +120,99 @@ You can also start in watch mode to react to file system changes:
 - `/cancel` - Cancel ongoing LLM streaming.
 - `/quit` - Exit TUI.
 
+### Custom Slash Commands
+
+Custom slash commands allow you to define frequently used prompts as Markdown files that Doge-Code can execute. Commands are organized by scope (project-specific or personal) and support directory structure for namespacing.
+
+#### Syntax
+
+```
+/<command-name> [arguments]
+```
+
+#### Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `<command-name>` | Name derived from the Markdown filename (without .md extension) |
+| `[arguments]` | Optional arguments passed to the command |
+
+#### Command Types
+
+##### Project Commands
+
+Commands stored in the repository and shared with the team.
+When listed with /help, these commands display "(project)" after their description.
+
+Location: `.doge/commands/`
+
+Example:
+```shell
+# Create a project command
+mkdir -p .doge/commands
+echo "Analyze this code for performance issues and suggest optimizations:" > .doge/commands/optimize.md
+```
+
+##### Personal Commands
+
+Commands available across all projects.
+When listed with /help, these commands display "(user)" after their description.
+
+Location: `~/.config/doge-code/commands/`
+
+Example:
+```shell
+# Create a personal command
+mkdir -p ~/.config/doge-code/commands
+echo "Review this code for security vulnerabilities:" > ~/.config/doge-code/commands/security-review.md
+```
+
+#### Features
+
+##### Namespacing
+
+Organize commands in subdirectories.
+Subdirectories are used for organization and displayed in the command description, but they don't affect the command name itself.
+The description will show which directory the command comes from (either the project directory `.doge/commands` or the user-level directory `~/.config/doge-code/commands`) along with the subdirectory name.
+
+Conflicts between user-level and project-level commands are not supported. Otherwise, multiple commands with the same base filename can coexist.
+
+For example, a file at `.doge/commands/frontend/component.md` would create a `/component` command with a description showing "(project:frontend)". Meanwhile, a file at `~/.config/doge-code/commands/component.md` would create a `/component` command with a description showing "(user)".
+
+##### Arguments
+
+Use argument placeholders to pass dynamic values to commands:
+
+`$ARGUMENTS` for all arguments
+The `$ARGUMENTS` placeholder captures all arguments passed to the command:
+
+```shell
+# Command definition
+echo 'Fix issue #$ARGUMENTS following our coding standards' > .claude/commands/fix-issue.md
+
+# Usage
+> /fix-issue 123 high-priority
+# $ARGUMENTS becomes "123 high-priority"
+```
+
+`$1`, `$2`, etc. for individual arguments
+Use positional parameters to access specific arguments individually (like shell scripts):
+
+```shell
+# Command definition  
+echo 'Review PR #$1 with priority $2 and assign to $3' > .claude/commands/review-pr.md
+
+# Usage
+> /review-pr 456 high alice
+# $1 becomes "456", $2 becomes "high", $3 becomes "alice"
+```
+
+Use positional arguments when:
+
+- You need to access arguments individually in different parts of the command
+- You want to provide defaults for missing arguments
+- You want to build more structured commands with specific parameter roles
+
 ### Key Bindings
 
 - **Esc** (or `Ctrl+C` once) - Cancel streaming
