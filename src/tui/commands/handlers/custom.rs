@@ -10,7 +10,6 @@ use tracing::info;
 /// Custom command information
 #[derive(Debug, Clone)]
 pub struct CustomCommand {
-    pub name: String,
     pub description: String,
     pub content: String,
     pub scope: crate::tui::commands::handlers::dispatch::CommandScope,
@@ -85,7 +84,6 @@ fn load_commands_from_directory(
                         commands.insert(
                             file_name.to_string(),
                             CustomCommand {
-                                name: file_name.to_string(),
                                 description,
                                 content: full_content,
                                 scope: scope.clone(),
@@ -114,11 +112,8 @@ impl TuiExecutor {
         let command_name = parts[0].trim_start_matches('/');
         let args = &parts[1..];
 
-        // Load custom commands
-        let custom_commands = load_custom_commands(&self.cfg.project_root);
-
         // Check if command exists
-        if let Some(command) = custom_commands.get(command_name) {
+        if let Some(command) = self.custom_commands.get(command_name) {
             // Process command content with arguments
             let processed_content = process_command_content(&command.content, args);
 
