@@ -197,61 +197,61 @@ impl TuiApp {
 
     pub fn update_file_path_completion_candidates(&mut self, input: &str) {
         debug!("Updating file path completion for input: {}", input);
-        if !input.starts_with('@') {
-            self.completion_active = false;
-            self.completion_candidates.clear();
-            self.completion_type = CompletionType::None;
-            return;
-        }
 
-        let path_part = &input[1..]; // Remove the '@'
-        // debug!("Path part: {}", path_part);
-        let project_root = match std::env::current_dir() {
-            Ok(path) => path,
-            Err(_e) => {
-                // debug!("Error getting current dir: {}", e);
-                self.completion_active = false;
-                self.completion_candidates.clear();
-                return;
-            }
-        };
-        // debug!("Project root: {:?}", project_root);
+        if let Some(at_pos) = input.rfind('@') {
+            let path_part = &input[at_pos + 1..];
+            // debug!("Path part: {}", path_part);
+            let project_root = match std::env::current_dir() {
+                Ok(path) => path,
+                Err(_e) => {
+                    // debug!("Error getting current dir: {}", e);
+                    self.completion_active = false;
+                    self.completion_candidates.clear();
+                    return;
+                }
+            };
+            // debug!("Project root: {:?}", project_root);
 
-        let mut candidates = Vec::new();
-        let walker = ignore::WalkBuilder::new(&project_root)
-            .ignore(false)
-            .hidden(false)
-            .add_custom_ignore_filename(IGNORE_FILE)
-            .build();
+            let mut candidates = Vec::new();
+            let walker = ignore::WalkBuilder::new(&project_root)
+                .ignore(false)
+                .hidden(false)
+                .add_custom_ignore_filename(IGNORE_FILE)
+                .build();
 
-        for result in walker {
-            match result {
-                Ok(entry) => {
-                    if let Ok(relative_path) = entry.path().strip_prefix(&project_root) {
-                        let path_str = relative_path.to_string_lossy();
-                        if path_str.to_lowercase().contains(&path_part.to_lowercase()) {
-                            debug!("Found candidate: {}", path_str);
-                            candidates.push(path_str.to_string());
+            for result in walker {
+                match result {
+                    Ok(entry) => {
+                        if let Ok(relative_path) = entry.path().strip_prefix(&project_root) {
+                            let path_str = relative_path.to_string_lossy();
+                            if path_str.to_lowercase().contains(&path_part.to_lowercase()) {
+                                debug!("Found candidate: {}", path_str);
+                                candidates.push(path_str.to_string());
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    debug!("Error walking directory: {}", e);
+                    Err(e) => {
+                        debug!("Error walking directory: {}", e);
+                    }
                 }
             }
-        }
-        candidates.sort();
-        // debug!("Found {} candidates", candidates.len());
+            candidates.sort();
+            // debug!("Found {} candidates", candidates.len());
 
-        if candidates.is_empty() {
+            if candidates.is_empty() {
+                self.completion_active = false;
+                self.completion_candidates.clear();
+                self.completion_type = CompletionType::None;
+            } else {
+                self.completion_active = true;
+                self.completion_candidates = candidates;
+                self.completion_index = 0;
+                self.completion_type = CompletionType::FilePath;
+            }
+        } else {
             self.completion_active = false;
             self.completion_candidates.clear();
             self.completion_type = CompletionType::None;
-        } else {
-            self.completion_active = true;
-            self.completion_candidates = candidates;
-            self.completion_index = 0;
-            self.completion_type = CompletionType::FilePath;
         }
         self.dirty = true;
     }
