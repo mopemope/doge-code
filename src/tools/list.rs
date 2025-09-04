@@ -1,8 +1,12 @@
-use crate::llm::types::{ToolDef, ToolFunctionDef};
+use crate::{
+    config::IGNORE_FILE,
+    llm::types::{ToolDef, ToolFunctionDef},
+    utils::get_git_repository_root,
+};
 use anyhow::Result;
-use globwalk::GlobWalkerBuilder;
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::debug;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -42,14 +46,36 @@ pub fn fs_list(path: &str, max_depth: Option<usize>, pattern: Option<&str>) -> R
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
-    let walker = GlobWalkerBuilder::new(full_path, pattern.unwrap_or("**/*"))
-        .max_depth(max_depth.unwrap_or(1))
-        .build()?;
+    let git_root = get_git_repository_root(path).unwrap_or(PathBuf::from(path));
 
-    let files = walker
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().to_string_lossy().to_string())
-        .collect();
+    let mut files = Vec::new();
+    let mut binding = ignore::WalkBuilder::new(path);
+    let mut walker = binding.ignore(false).hidden(false);
+    if pattern.is_some() {
+        walker = walker.overrides(
+            ignore::overrides::OverrideBuilder::new(path)
+                .add(pattern.unwrap_or("*"))?
+                .build()?,
+        )
+    }
+
+    let walker = walker
+        .max_depth(Some(max_depth.unwrap_or(1)))
+        .add_custom_ignore_filename(git_root.join(IGNORE_FILE))
+        .build();
+
+    for result in walker {
+        match result {
+            Ok(entry) => {
+                let path = entry.path();
+                debug!("Found entry: {}", path.display());
+                files.push(path.to_string_lossy().to_string());
+            }
+            Err(e) => {
+                debug!("Error walking directory: {}", e);
+            }
+        }
+    }
 
     Ok(files)
 }
@@ -71,7 +97,11 @@ mod tests {
         let root_str = root.to_str().unwrap();
         // With max_depth=1, we should only see direct children of the root.
         let result = fs_list(root_str, Some(1), None).unwrap();
-        let mut expected = vec![format!("{}/a", root_str), format!("{}/c.txt", root_str)];
+        let mut expected = vec![
+            format!("{}", root_str),
+            format!("{}/a", root_str),
+            format!("{}/c.txt", root_str),
+        ];
         expected.sort();
         let mut sorted_result = result;
         sorted_result.sort();
@@ -87,8 +117,16 @@ mod tests {
         fs::write(root.join("a/b/c.txt"), "").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let result = fs_list(&format!("{root_str}/a"), Some(1), None).unwrap();
-        assert_eq!(result, vec![format!("{root_str}/a/b")]);
+        let result = fs_list(&format!("{root_str}"), Some(3), None).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                format!("{root_str}"),
+                format!("{root_str}/a"),
+                format!("{root_str}/a/b"),
+                format!("{root_str}/a/b/c.txt")
+            ]
+        );
     }
 
     #[test]
@@ -100,6 +138,9 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let result = fs_list(root_str, None, Some("*.txt")).unwrap();
-        assert_eq!(result, vec![format!("{root_str}/a.txt")]);
+        assert_eq!(
+            result,
+            vec![format!("{root_str}"), format!("{root_str}/a.txt"),]
+        );
     }
 }
