@@ -227,6 +227,16 @@ impl TuiApp {
             self.textarea.set_style(input_style.fg(Color::DarkGray));
         }
 
+        // Set the block title based on the input mode
+        let block_title = if self.input_mode == crate::tui::state::InputMode::Shell {
+            "Input (Shell Mode - Press ESC to exit)"
+        } else {
+            "Input"
+        };
+
+        self.textarea
+            .set_block(Block::default().borders(Borders::ALL).title(block_title));
+
         f.render_widget(&self.textarea, area);
 
         if self.completion_active && !self.completion_candidates.is_empty() {

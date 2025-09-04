@@ -91,6 +91,11 @@ pub fn handle_normal_mode_key(
             ..
         } if app.textarea.is_empty() => {
             app.input_mode = InputMode::Shell;
+            app.textarea.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Input (Shell Mode - Press ESC to exit)"),
+            );
             app.dirty = true;
         }
 
@@ -285,6 +290,8 @@ pub fn handle_shell_mode_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {
             app.input_mode = InputMode::Normal;
             app.textarea.delete_line_by_head();
             app.textarea.delete_line_by_end();
+            app.textarea
+                .set_block(Block::default().borders(Borders::ALL).title("Input"));
             app.dirty = true;
         }
         KeyCode::Enter => {
@@ -327,8 +334,11 @@ pub fn handle_shell_mode_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {
 
             // Clear the textarea
             app.textarea = TextArea::default();
-            app.textarea
-                .set_block(Block::default().borders(Borders::ALL).title("Input"));
+            app.textarea.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Input (Shell Mode - Press ESC to exit)"),
+            );
             app.textarea.set_placeholder_text("Enter your message...");
             app.dirty = true;
         }
