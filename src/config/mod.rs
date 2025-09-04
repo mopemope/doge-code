@@ -1,3 +1,4 @@
+use crate::utils::get_git_repository_root;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ pub struct AppConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub project_root: PathBuf,
+    pub git_root: Option<PathBuf>,
     pub llm: LlmConfig,
     pub enable_stream_tools: bool,
     pub theme: String,                     // newly added
@@ -77,6 +79,8 @@ pub struct PartialLlmConfig {
 impl AppConfig {
     pub fn from_cli(cli: crate::Cli) -> Result<Self> {
         let project_root = std::env::current_dir().context("resolve current dir")?;
+        let git_root = get_git_repository_root(&project_root);
+
         let file_cfg = load_file_config().unwrap_or_default();
         let api_key = cli
             .api_key
@@ -143,6 +147,7 @@ impl AppConfig {
             model,
             api_key,
             project_root,
+            git_root,
             llm,
             enable_stream_tools: std::env::var("DOGE_STREAM_TOOLS")
                 .ok()
