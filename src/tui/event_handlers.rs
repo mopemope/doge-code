@@ -180,6 +180,12 @@ pub fn handle_normal_mode_key(
         } => {
             if app.completion_active {
                 app.completion_index = app.completion_index.saturating_sub(1);
+
+                // Scroll up if necessary
+                if app.completion_index < app.completion_scroll {
+                    app.completion_scroll = app.completion_index;
+                }
+
                 app.dirty = true;
             } else if !app.input_history.is_empty() && app.history_index > 0 {
                 if app.history_index == app.input_history.len() {
@@ -202,6 +208,13 @@ pub fn handle_normal_mode_key(
             if app.completion_active {
                 app.completion_index =
                     (app.completion_index + 1).min(app.completion_candidates.len() - 1);
+
+                // Scroll down if necessary
+                let max_display_items = 20;
+                if app.completion_index >= app.completion_scroll + max_display_items {
+                    app.completion_scroll = app.completion_index - max_display_items + 1;
+                }
+
                 app.dirty = true;
             } else if !app.input_history.is_empty() && app.history_index < app.input_history.len() {
                 app.history_index += 1;
