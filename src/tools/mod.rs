@@ -1,4 +1,5 @@
 pub mod apply_patch;
+pub mod apply_patch_impl;
 mod common;
 pub mod create_patch;
 pub mod edit;
