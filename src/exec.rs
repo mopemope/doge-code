@@ -175,6 +175,7 @@ mod tests {
             model: "test-model".to_string(),
             api_key: None, // No API key
             project_root: project_root.clone(),
+            git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
@@ -201,6 +202,7 @@ mod tests {
             model: "test-model".to_string(),
             api_key: None, // No API key
             project_root: project_root.clone(),
+            git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
