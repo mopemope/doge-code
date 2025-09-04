@@ -198,7 +198,7 @@ The `$ARGUMENTS` placeholder captures all arguments passed to the command:
 
 ```shell
 # Command definition
-echo 'Fix issue #$ARGUMENTS following our coding standards' > .claude/commands/fix-issue.md
+echo 'Fix issue #$ARGUMENTS following our coding standards' > .doge/commands/fix-issue.md
 
 # Usage
 > /fix-issue 123 high-priority
@@ -210,7 +210,7 @@ Use positional parameters to access specific arguments individually (like shell 
 
 ```shell
 # Command definition  
-echo 'Review PR #$1 with priority $2 and assign to $3' > .claude/commands/review-pr.md
+echo 'Review PR #$1 with priority $2 and assign to $3' > .doge/commands/review-pr.md
 
 # Usage
 > /review-pr 456 high alice
