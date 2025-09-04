@@ -246,7 +246,7 @@ impl TuiApp {
                 .map(|s| s.len())
                 .max()
                 .unwrap_or(10) as u16;
-            let max_display_items = 10; // Limit the number of displayed completion items
+            let max_display_items = 20; // Limit the number of displayed completion items
             let list_height = (self.completion_candidates.len() as u16).min(max_display_items);
 
             // Calculate the height of the list block including borders and title
