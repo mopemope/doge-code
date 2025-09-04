@@ -40,10 +40,17 @@ pub struct TuiExecutor {
 
 impl TuiExecutor {
     /// Get custom commands
+    #[allow(dead_code)]
     pub fn get_custom_commands(&self) -> Vec<String> {
         self.custom_commands
             .keys()
             .map(|name| format!("/{}", name))
             .collect()
+    }
+
+    /// Get a custom command by name
+    #[allow(dead_code)]
+    pub fn get_custom_command(&self, name: &str) -> Option<&CustomCommand> {
+        self.custom_commands.get(name)
     }
 }
