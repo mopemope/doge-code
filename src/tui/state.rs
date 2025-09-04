@@ -129,6 +129,7 @@ pub struct TuiApp {
     pub completion_index: usize,
     pub completion_active: bool,
     pub completion_type: CompletionType,
+    pub completion_scroll: usize,
     // auto-compact threshold (can be updated by main from AppConfig)
     pub auto_compact_prompt_token_threshold: u32,
     // auto-compact flag to avoid duplicate triggers
@@ -190,6 +191,7 @@ impl TuiApp {
             self.completion_active = true;
             self.completion_candidates = candidates;
             self.completion_index = 0;
+            self.completion_scroll = 0; // Reset scroll
             self.completion_type = CompletionType::Command;
         }
         self.dirty = true;
@@ -246,6 +248,7 @@ impl TuiApp {
                 self.completion_active = true;
                 self.completion_candidates = candidates;
                 self.completion_index = 0;
+                self.completion_scroll = 0; // Reset scroll
                 self.completion_type = CompletionType::FilePath;
             }
         } else {
@@ -298,6 +301,7 @@ impl TuiApp {
             completion_index: 0,
             completion_active: false,
             completion_type: CompletionType::None,
+            completion_scroll: 0,
             // auto-compact threshold default (can be overridden by main)
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,

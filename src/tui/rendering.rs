@@ -268,9 +268,11 @@ impl TuiApp {
             let items: Vec<ListItem> = self
                 .completion_candidates
                 .iter()
+                .skip(self.completion_scroll)
+                .take(max_display_items as usize)
                 .enumerate()
                 .map(|(i, candidate)| {
-                    let style = if i == self.completion_index {
+                    let style = if (i + self.completion_scroll) == self.completion_index {
                         self.theme.completion_selected_style
                     } else {
                         self.theme.completion_style
