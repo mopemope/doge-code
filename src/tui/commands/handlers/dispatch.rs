@@ -174,6 +174,14 @@ impl CommandHandler for TuiExecutor {
             }
         }
     }
+
+    fn get_custom_commands(&self) -> Vec<String> {
+        let custom_commands = load_custom_commands(&self.cfg.project_root);
+        custom_commands
+            .keys()
+            .map(|name| format!("/{}", name))
+            .collect()
+    }
 }
 
 impl TuiExecutor {

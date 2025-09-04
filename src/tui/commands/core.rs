@@ -2,13 +2,16 @@ use crate::analysis::RepoMap;
 use crate::llm::OpenAIClient;
 use crate::planning::{PlanManager, TaskAnalyzer};
 use crate::tools::FsTools;
+use crate::tui::commands::handlers::custom::CustomCommand;
 use crate::tui::commands_sessions::SessionManager;
 use crate::tui::view::TuiApp;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, watch};
 
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
+    fn get_custom_commands(&self) -> Vec<String>;
 }
 
 pub struct TuiExecutor {
@@ -30,4 +33,17 @@ pub struct TuiExecutor {
     pub(crate) task_analyzer: TaskAnalyzer,
     // Plan manager for execution
     pub(crate) plan_manager: Arc<Mutex<PlanManager>>,
+
+    // Custom commands
+    pub(crate) custom_commands: HashMap<String, CustomCommand>,
+}
+
+impl TuiExecutor {
+    /// Get custom commands
+    pub fn get_custom_commands(&self) -> Vec<String> {
+        self.custom_commands
+            .keys()
+            .map(|name| format!("/{}", name))
+            .collect()
+    }
 }

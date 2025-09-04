@@ -80,6 +80,10 @@ pub use crate::tui::state_render::build_render_plan;
 
 /* build_render_plan moved to src/tui/state_render.rs; use the re-exported function via `pub use crate::tui::state_render::build_render_plan` above */
 
+#[cfg(test)]
+#[path = "state_test.rs"]
+mod tests;
+
 pub struct TuiApp {
     pub title: String,
     pub textarea: TextArea<'static>,
@@ -134,7 +138,7 @@ pub struct TuiApp {
 
 impl TuiApp {
     pub fn get_all_commands(&self) -> Vec<String> {
-        vec![
+        let mut commands = vec![
             "/help".to_string(),
             "/map".to_string(),
             "/tools".to_string(),
@@ -150,7 +154,14 @@ impl TuiApp {
             "/plans".to_string(),
             "/cancel".to_string(),
             "/compact".to_string(),
-        ]
+        ];
+
+        // カスタムコマンドを取得
+        if let Some(handler) = &self.handler {
+            commands.extend(handler.get_custom_commands());
+        }
+
+        commands
     }
 
     pub fn update_completion_candidates(&mut self, input: &str) {
