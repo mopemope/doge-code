@@ -1,4 +1,4 @@
-use super::ProjectContext;
+use super::types::ProjectContext;
 use crate::planning::task_types::TaskClassification;
 
 pub(crate) fn build_decomposition_prompt(
