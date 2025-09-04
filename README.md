@@ -92,12 +92,22 @@ DOGE_LOG=debug \
 ./target/release/doge-code
 ```
 
+## .dogeignore File
+
+The `.dogeignore` file specifies files and directories that should be ignored by the Doge-Code agent. This file uses the same syntax as `.gitignore`.
+
+### Purpose
+
+- **Exclude files from LLM context**: Files and directories listed in `.dogeignore` will not be included in the context sent to the LLM. This helps to reduce the size of the context and prevent sensitive or irrelevant information from being sent to the LLM.
+- **Exclude files from analysis**: The agent will not analyze files and directories listed in `.dogeignore`. This can improve performance by reducing the amount of code that needs to be processed.
+
 ## Usage
 
 Run without flags to launch the TUI:
 
 You can also start in watch mode to react to file system changes:
 `./target/release/doge-code --watch`
+
 ```bash
 ./target/release/doge-code
 ```
