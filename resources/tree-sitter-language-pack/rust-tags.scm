@@ -86,3 +86,11 @@
   ]
 ) @definition
 (#set! "kind" "Variable")
+
+;; Line comments
+(line_comment) @comment
+(#set! "kind" "Comment")
+
+;; Block comments
+(block_comment) @comment
+(#set! "kind" "Comment")

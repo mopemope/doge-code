@@ -34,6 +34,7 @@ fn visit_go_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, recv_ctx
         "const_declaration" | "var_declaration" => {
             handle_const_or_var_declaration(map, node, src, file, file_total_lines)
         }
+        "comment" => handle_comment(map, node, src, file, file_total_lines),
         _ => {}
     }
 
@@ -200,4 +201,21 @@ fn handle_const_or_var_declaration(
         }
         c.goto_parent();
     }
+}
+
+fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_total_lines: usize) {
+    let name = node_text(node, src).to_string();
+    let symbol_info = SymbolInfo {
+        name,
+        kind: SymbolKind::Comment,
+        file: file.to_path_buf(),
+        start_line: node.start_position().row + 1,
+        start_col: node.start_position().column + 1,
+        end_line: node.end_position().row + 1,
+        end_col: node.end_position().column + 1,
+        parent: None,
+        file_total_lines,
+        function_lines: None,
+    };
+    map.symbols.push(symbol_info);
 }

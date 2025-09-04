@@ -207,32 +207,42 @@ impl PlanLifecycleManager {
 
     /// Get statistics
     pub fn get_statistics(&self) -> crate::planning::plan_statistics::PlanStatistics {
-        let mut stats = crate::planning::plan_statistics::PlanStatistics::default();
-        stats.total_plans = self.active_plans.len() + self.recent_plans.len();
-        stats.active_plans = self.active_plans.len();
-
+        let mut completed_plans = 0;
+        let mut failed_plans = 0;
+        let mut cancelled_plans = 0;
         let mut total_duration = 0i64;
         let mut completed_count = 0;
 
         for execution in self.recent_plans.iter() {
             match execution.status {
                 PlanStatus::Completed => {
-                    stats.completed_plans += 1;
+                    completed_plans += 1;
                     if let (Some(start), Some(end)) = (execution.start_time, execution.end_time) {
                         total_duration += (end - start).num_seconds();
                         completed_count += 1;
                     }
                 }
-                PlanStatus::Failed => stats.failed_plans += 1,
-                PlanStatus::Cancelled => stats.cancelled_plans += 1,
+                PlanStatus::Failed => failed_plans += 1,
+                PlanStatus::Cancelled => cancelled_plans += 1,
                 _ => {}
             }
         }
 
-        if completed_count > 0 {
-            stats.average_completion_time = total_duration as f64 / completed_count as f64;
-        }
+        let total_plans = self.active_plans.len() + self.recent_plans.len();
+        let active_plans = self.active_plans.len();
+        let average_completion_time = if completed_count > 0 {
+            total_duration as f64 / completed_count as f64
+        } else {
+            0.0
+        };
 
-        stats
+        crate::planning::plan_statistics::PlanStatistics {
+            total_plans,
+            active_plans,
+            completed_plans,
+            failed_plans,
+            cancelled_plans,
+            average_completion_time,
+        }
     }
 }

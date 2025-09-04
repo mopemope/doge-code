@@ -46,6 +46,7 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
             }
         }
         "assignment" => handle_assignment(map, node, src, file, file_total_lines),
+        "comment" => handle_comment(map, node, src, file, file_total_lines),
         _ => {}
     }
 
@@ -201,4 +202,21 @@ fn first_param_is_self_or_cls(fn_node: Node, src: &str) -> bool {
         }
     }
     false
+}
+
+fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_total_lines: usize) {
+    let name = node_text(node, src).to_string();
+    let symbol_info = SymbolInfo {
+        name,
+        kind: SymbolKind::Comment,
+        file: file.to_path_buf(),
+        start_line: node.start_position().row + 1,
+        start_col: node.start_position().column + 1,
+        end_line: node.end_position().row + 1,
+        end_col: node.end_position().column + 1,
+        parent: None,
+        file_total_lines,
+        function_lines: None,
+    };
+    map.symbols.push(symbol_info);
 }
