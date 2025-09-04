@@ -1,4 +1,4 @@
-use crate::tui::theme::Theme;
+use crate::{config::IGNORE_FILE, tui::theme::Theme};
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -219,7 +219,9 @@ impl TuiApp {
 
         let mut candidates = Vec::new();
         let walker = ignore::WalkBuilder::new(&project_root)
-            .git_ignore(true)
+            .ignore(false)
+            .hidden(false)
+            .add_custom_ignore_filename(IGNORE_FILE)
             .build();
 
         for result in walker {
@@ -233,8 +235,8 @@ impl TuiApp {
                         }
                     }
                 }
-                Err(_e) => {
-                    //debug!("Error walking directory: {}", e);
+                Err(e) => {
+                    debug!("Error walking directory: {}", e);
                 }
             }
         }

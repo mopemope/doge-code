@@ -4,6 +4,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+pub const IGNORE_FILE: &str = ".dogeignore";
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub base_url: String,
