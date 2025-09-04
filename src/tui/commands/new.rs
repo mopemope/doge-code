@@ -83,7 +83,7 @@ impl TuiExecutor {
         };
 
         Ok(Self {
-            cfg,
+            cfg: cfg.clone(),
             tools,
             repomap,
             client,
@@ -96,6 +96,9 @@ impl TuiExecutor {
 
             task_analyzer,
             plan_manager,
+            custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
+                &cfg.project_root,
+            ),
         })
     }
 }
