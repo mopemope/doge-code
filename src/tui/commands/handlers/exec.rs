@@ -1,4 +1,5 @@
 use crate::planning::create_task_plan;
+use crate::planning::plan_status::PlanStatus;
 use crate::tui::view::TuiApp;
 
 use tokio::sync::watch;
@@ -448,9 +449,9 @@ impl TuiExecutor {
                 ui.push_log("\n[ACTIVE] Active plans:");
                 for plan_execution in &active_plans {
                     let status_icon = match plan_execution.status {
-                        crate::planning::PlanStatus::Created => "[CREATED]",
-                        crate::planning::PlanStatus::Running => "[RUNNING]",
-                        crate::planning::PlanStatus::Paused => "[PAUSED]",
+                        PlanStatus::Created => "[CREATED]",
+                        PlanStatus::Running => "[RUNNING]",
+                        PlanStatus::Paused => "[PAUSED]",
                         _ => "[UNKNOWN]",
                     };
                     ui.push_log(format!(
@@ -467,9 +468,9 @@ impl TuiExecutor {
                 ui.push_log("\n[HISTORY] Recent plan history:");
                 for plan_execution in recent_plans.iter().rev().take(5) {
                     let status_icon = match plan_execution.status {
-                        crate::planning::PlanStatus::Completed => "[COMPLETED]",
-                        crate::planning::PlanStatus::Failed => "[FAILED]",
-                        crate::planning::PlanStatus::Cancelled => "[CANCELLED]",
+                        PlanStatus::Completed => "[COMPLETED]",
+                        PlanStatus::Failed => "[FAILED]",
+                        PlanStatus::Cancelled => "[CANCELLED]",
                         _ => "[UNKNOWN]",
                     };
                     ui.push_log(format!(
