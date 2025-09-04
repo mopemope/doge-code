@@ -4,6 +4,7 @@ use crate::tui::view::TuiApp;
 use tracing::{error, info, warn};
 
 use crate::tui::commands::core::{CommandHandler, TuiExecutor};
+use crate::tui::commands::handlers::custom::load_custom_commands;
 
 impl CommandHandler for TuiExecutor {
     fn handle(&mut self, line: &str, ui: &mut TuiApp) {
@@ -31,6 +32,9 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  /tokens - Show token usage");
                 ui.push_log("  /plan - Analyze task and planning");
                 ui.push_log("  /compact - Compact conversation history to reduce token usage");
+                ui.push_log("");
+                ui.push_log("Custom commands:");
+                self.display_custom_commands_help(ui);
                 ui.push_log("");
                 ui.push_log("Scroll controls:");
                 ui.push_log("  Page Up/Down - Scroll by page");
@@ -170,4 +174,39 @@ impl CommandHandler for TuiExecutor {
             }
         }
     }
+}
+
+impl TuiExecutor {
+    /// Display help for custom commands
+    pub fn display_custom_commands_help(&self, ui: &mut TuiApp) {
+        let custom_commands = load_custom_commands(&self.cfg.project_root);
+
+        if custom_commands.is_empty() {
+            ui.push_log("  (No custom commands found)");
+        } else {
+            for (name, command) in custom_commands {
+                let scope_str = match command.scope {
+                    CommandScope::Project => {
+                        if let Some(namespace) = &command.namespace {
+                            format!("(project:{})", namespace)
+                        } else {
+                            "(project)".to_string()
+                        }
+                    }
+                    CommandScope::User => "(user)".to_string(),
+                };
+                ui.push_log(format!(
+                    "  /{} - {} {}",
+                    name, command.description, scope_str
+                ));
+            }
+        }
+    }
+}
+
+/// Command scope (project or user)
+#[derive(Debug, Clone)]
+pub enum CommandScope {
+    Project,
+    User,
 }
