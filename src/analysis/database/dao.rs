@@ -314,6 +314,7 @@ fn symbol_to_active_model(
             crate::analysis::symbol::SymbolKind::AssocFn => "assoc_fn".to_string(),
             crate::analysis::symbol::SymbolKind::Mod => "mod".to_string(),
             crate::analysis::symbol::SymbolKind::Variable => "var".to_string(),
+            crate::analysis::symbol::SymbolKind::Comment => "comment".to_string(),
         }),
         file_path: Set(file_path_str.to_string()),
         start_line: Set(symbol.start_line as i32),
@@ -340,6 +341,7 @@ fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolInfo> 
         "assoc_fn" => crate::analysis::symbol::SymbolKind::AssocFn,
         "mod" => crate::analysis::symbol::SymbolKind::Mod,
         "var" => crate::analysis::symbol::SymbolKind::Variable,
+        "comment" => crate::analysis::symbol::SymbolKind::Comment,
         _ => {
             return Err(anyhow::anyhow!(
                 "unexpected value for SymbolKind: {}",

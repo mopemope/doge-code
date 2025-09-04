@@ -12,6 +12,7 @@ pub enum SymbolKind {
     AssocFn,
     Mod,
     Variable,
+    Comment,
 }
 
 impl SymbolKind {
@@ -26,6 +27,7 @@ impl SymbolKind {
             SymbolKind::AssocFn => "assoc_fn",
             SymbolKind::Mod => "mod",
             SymbolKind::Variable => "var",
+            SymbolKind::Comment => "comment",
         }
     }
 }

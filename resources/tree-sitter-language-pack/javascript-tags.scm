@@ -29,3 +29,7 @@
   name: (identifier) @name
 ) @definition
 (#set! "kind" "Variable")
+
+;; Line comments
+(comment) @comment
+(#set! "kind" "Comment")
