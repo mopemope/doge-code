@@ -372,7 +372,12 @@ impl TuiExecutor {
                 None => ui.push_log("OPENAI_API_KEY not set; cannot call LLM."),
             }
         } else {
-            ui.push_log(format!("> {line}"));
+            // Check if it's a custom command
+            if line.starts_with('/') {
+                self.handle_custom_command(line, ui);
+            } else {
+                ui.push_log(format!("> {line}"));
+            }
         }
     }
 
