@@ -28,7 +28,7 @@ pub struct SessionData {
 impl SessionData {
     /// Create a new SessionData.
     pub fn new(title: impl Into<String>) -> Self {
-        let id = Uuid::new_v4().to_string(); // UUIDv4を使用
+        let id = Uuid::now_v7().to_string(); // UUIDv7を使用
         let created_at = Utc::now().timestamp();
         let meta = SessionMeta {
             id,
