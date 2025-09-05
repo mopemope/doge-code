@@ -47,6 +47,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub instructions_file: Option<String>,
 
+    /// Resume the latest session
+    #[arg(short, long, default_value_t = false)]
+    pub resume: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -99,6 +103,15 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
 
     let exec = match TuiExecutor::new(cfg.clone()) {
         Ok(exec) => {
+            // If resume flag is set, load the latest session
+            if cfg.resume {
+                let mut session_manager = exec.session_manager.lock().unwrap();
+                if let Err(e) = session_manager.load_latest_session() {
+                    eprintln!("Failed to load latest session: {}", e);
+                } else if session_manager.current_session.is_some() {
+                    println!("Resumed latest session");
+                }
+            }
             //            app.push_log("Repomap initialization completed.");
             exec
         }
