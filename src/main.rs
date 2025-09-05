@@ -11,15 +11,14 @@ mod tui;
 pub mod utils;
 pub mod watch;
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use dotenvy::dotenv;
-use tracing::info;
-
 use crate::config::AppConfig;
 use crate::tui::commands::TuiExecutor;
 use crate::tui::state::TuiApp;
 use crate::watch::run_watch_mode;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use dotenvy::dotenv;
+use tracing::info;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -43,6 +42,10 @@ pub struct Cli {
     /// Disable repomap creation at startup
     #[arg(long, default_value_t = false)]
     pub no_repomap: bool,
+
+    /// Path to the project instructions file
+    #[arg(short, long)]
+    pub instructions_file: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

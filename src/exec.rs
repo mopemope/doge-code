@@ -179,8 +179,8 @@ mod tests {
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
-            project_instructions_file: "PROJECT.md".to_string(), // Add project_instructions_file
-            no_repomap: true,                                    // Disable repomap for simplicity
+            project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
+            no_repomap: true, // Disable repomap for simplicity
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };
@@ -206,8 +206,8 @@ mod tests {
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
-            project_instructions_file: "PROJECT.md".to_string(), // Add project_instructions_file
-            no_repomap: true,                                    // Disable repomap for simplicity
+            project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
+            no_repomap: true, // Disable repomap for simplicity
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };

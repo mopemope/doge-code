@@ -42,7 +42,25 @@ where
 /// Load project-specific instructions from a file.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
 fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
-    load_project_instructions_inner(&cfg.project_root, |p: &Path| std::fs::read_to_string(p))
+    match cfg.project_instructions_file {
+        Some(ref path) => {
+            let path = PathBuf::from(path);
+            if path.exists() {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => Some(content),
+                    Err(e) => {
+                        error!("Failed to read {}: {}", path.display(), e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        None => load_project_instructions_inner(&cfg.project_root, |p: &Path| {
+            std::fs::read_to_string(p)
+        }),
+    }
 }
 
 /// Combine the base system prompt with project-specific instructions.
