@@ -181,6 +181,7 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
             no_repomap: true, // Disable repomap for simplicity
+            resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };
@@ -208,6 +209,7 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
             no_repomap: true, // Disable repomap for simplicity
+            resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
         };

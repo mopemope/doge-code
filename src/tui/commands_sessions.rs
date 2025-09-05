@@ -36,6 +36,14 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Load the latest session
+    pub fn load_latest_session(&mut self) -> Result<()> {
+        if let Some(session) = self.store.get_latest()? {
+            self.current_session = Some(session);
+        }
+        Ok(())
+    }
+
     /// Delete a session by ID
     pub fn delete_session(&mut self, id: &str) -> Result<()> {
         self.store.delete(id)?;
@@ -48,10 +56,10 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Clear the current session's history
-    pub fn clear_current_session_history(&mut self) -> Result<()> {
+    /// Clear the current session's conversation
+    pub fn clear_current_session_conversation(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
-            session.clear_history();
+            session.clear_conversation();
             self.store.save(session)?;
         }
         Ok(())
@@ -63,14 +71,14 @@ impl SessionManager {
         history: &[crate::llm::types::ChatMessage],
     ) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
-            // Clear existing history
-            session.clear_history();
+            // Clear existing conversation
+            session.clear_conversation();
 
-            // Add each message to the session history
-            // For simplicity, we'll serialize the ChatMessage to JSON
+            // Add each message to the session conversation
             for msg in history {
-                if let Ok(serialized) = serde_json::to_string(msg) {
-                    session.add_to_history(serialized);
+                // Convert serde_json::Value to HashMap<String, serde_json::Value>
+                if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(msg) {
+                    session.add_conversation_entry(map.into_iter().collect());
                 }
             }
 
@@ -83,11 +91,15 @@ impl SessionManager {
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
             format!(
-                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  History entries: {}",
+                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
                 session.meta.id,
                 session.meta.title,
                 session.meta.created_at,
-                session.history.len()
+                session.timestamp,
+                session.conversation.len(),
+                session.token_count,
+                session.requests,
+                session.tool_calls
             )
         })
     }

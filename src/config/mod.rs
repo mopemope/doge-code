@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub theme: String,                             // newly added
     pub project_instructions_file: Option<String>, // newly added
     pub no_repomap: bool,                          // newly added
+    pub resume: bool,                              // newly added
     // Auto-compact threshold (configurable via env or config file)
     pub auto_compact_prompt_token_threshold: u32,
 }
@@ -63,6 +64,7 @@ pub struct FileConfig {
     pub theme: Option<String>,                     // newly added
     pub project_instructions_file: Option<String>, // newly added
     pub no_repomap: Option<bool>,                  // newly added
+    pub resume: Option<bool>,                      // newly added
     // Auto-compact threshold (optional in config file)
     pub auto_compact_prompt_token_threshold: Option<u32>,
 }
@@ -158,6 +160,7 @@ impl AppConfig {
             theme,                     // newly added
             project_instructions_file, // newly added
             no_repomap: cli.no_repomap || file_cfg.no_repomap.unwrap_or(false),
+            resume: cli.resume,
             auto_compact_prompt_token_threshold,
         })
     }

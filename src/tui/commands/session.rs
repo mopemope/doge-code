@@ -61,10 +61,14 @@ impl TuiExecutor {
                             self.conversation_history.lock(),
                         ) {
                             history.clear();
-                            // Deserialize session history entries into ChatMessage objects
-                            for entry in &session.history {
+                            // Deserialize session conversation entries into ChatMessage objects
+                            for entry in &session.conversation {
+                                let map: serde_json::Map<_, _> =
+                                    entry.clone().into_iter().collect();
                                 if let Ok(msg) =
-                                    serde_json::from_str::<crate::llm::types::ChatMessage>(entry)
+                                    serde_json::from_value::<crate::llm::types::ChatMessage>(
+                                        serde_json::Value::Object(map),
+                                    )
                                 {
                                     history.push(msg);
                                 }
@@ -97,9 +101,9 @@ impl TuiExecutor {
                     ui.push_log("No session loaded.");
                 }
             }
-            "clear" => match session_manager.clear_current_session_history() {
-                Ok(()) => ui.push_log("Cleared current session history."),
-                Err(e) => ui.push_log(format!("Failed to clear session history: {}", e)),
+            "clear" => match session_manager.clear_current_session_conversation() {
+                Ok(()) => ui.push_log("Cleared current session conversation."),
+                Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },
             _ => {
                 ui.push_log("Unknown session command. Usage: /session <new|list|switch|save|delete|current|clear>");

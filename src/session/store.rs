@@ -3,7 +3,6 @@ use crate::session::error::SessionError;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 pub struct SessionStore {
     pub(crate) root: PathBuf,
@@ -40,40 +39,25 @@ impl SessionStore {
             if !p.is_dir() {
                 continue;
             }
-            let meta_p = p.join("meta.json");
-            if let Ok(s) = fs::read_to_string(&meta_p).map_err(SessionError::ReadError)
-                && let Ok(meta) =
-                    serde_json::from_str::<SessionMeta>(&s).map_err(SessionError::ParseError)
+            let session_p = p.join("session.json");
+            if let Ok(s) = fs::read_to_string(&session_p).map_err(SessionError::ReadError)
+                && let Ok(session_data) =
+                    serde_json::from_str::<SessionData>(&s).map_err(SessionError::ParseError)
             {
-                out.push(meta);
+                out.push(session_data.meta);
             }
         }
-        out.sort_by_key(|m| m.created_at);
-        out.reverse();
+        // Sort by created_at in descending order (newest first)
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(out)
     }
 
     /// Create a new session and return the session data.
     pub fn create(&self, title: impl Into<String>) -> Result<SessionData, SessionError> {
-        let id = Uuid::new_v4().to_string();
-        let dir = self.root.join(&id);
-        fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
-        let meta = SessionMeta {
-            id: id.clone(),
-            created_at: chrono::Utc::now().timestamp(),
-            title: title.into(),
-        };
-        let data = SessionData {
-            meta: meta.clone(),
-            history: Vec::new(),
-        };
-        fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)
-            .map_err(SessionError::WriteError)?;
-        fs::write(
-            dir.join("history.json"),
-            serde_json::to_string_pretty(&data.history)?,
-        )
-        .map_err(SessionError::WriteError)?;
+        // SessionData::newを使用して新しいセッションを作成
+        let data = SessionData::new(title);
+
+        self.save(&data)?; // saveメソッドを使用してセッションを保存
         Ok(data)
     }
 
@@ -87,27 +71,26 @@ impl SessionStore {
         if !dir.exists() {
             return Err(SessionError::NotFound(id.to_string()));
         }
-        let meta_s = fs::read_to_string(dir.join("meta.json")).map_err(SessionError::ReadError)?;
-        let meta: SessionMeta = serde_json::from_str(&meta_s).map_err(SessionError::ParseError)?;
-        let hist_s = fs::read_to_string(dir.join("history.json")).unwrap_or_else(|_| "[]".into());
-        let history: Vec<String> = serde_json::from_str(&hist_s).unwrap_or_default();
-        Ok(SessionData { meta, history })
+
+        // Load the entire session data from a single JSON file
+        let session_file = dir.join("session.json");
+        let session_s = fs::read_to_string(session_file).map_err(SessionError::ReadError)?;
+        let session_data: SessionData =
+            serde_json::from_str(&session_s).map_err(SessionError::ParseError)?;
+
+        Ok(session_data)
     }
 
     /// Save the session data.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
         let dir = self.root.join(&data.meta.id);
         fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
-        fs::write(
-            dir.join("meta.json"),
-            serde_json::to_string_pretty(&data.meta)?,
-        )
-        .map_err(SessionError::WriteError)?;
-        fs::write(
-            dir.join("history.json"),
-            serde_json::to_string_pretty(&data.history)?,
-        )
-        .map_err(SessionError::WriteError)?;
+
+        // Save the entire session data as a single JSON file
+        let session_file = dir.join("session.json");
+        fs::write(session_file, serde_json::to_string_pretty(data)?)
+            .map_err(SessionError::WriteError)?;
+
         Ok(())
     }
 
@@ -121,6 +104,17 @@ impl SessionStore {
             fs::remove_dir_all(dir).map_err(SessionError::DeleteError)?;
         }
         Ok(())
+    }
+
+    /// Get the latest session data.
+    pub fn get_latest(&self) -> Result<Option<SessionData>, SessionError> {
+        let sessions = self.list()?;
+        if let Some(latest_meta) = sessions.first() {
+            let session = self.load(&latest_meta.id)?;
+            Ok(Some(session))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -206,8 +200,24 @@ mod tests {
             "Session titles should match"
         );
         assert_eq!(
-            loaded_session.history, created_session.history,
-            "Session histories should match"
+            loaded_session.conversation, created_session.conversation,
+            "Session conversations should match"
+        );
+        assert_eq!(
+            loaded_session.timestamp, created_session.timestamp,
+            "Session timestamp should match"
+        );
+        assert_eq!(
+            loaded_session.token_count, created_session.token_count,
+            "Session token_count should match"
+        );
+        assert_eq!(
+            loaded_session.requests, created_session.requests,
+            "Session requests should match"
+        );
+        assert_eq!(
+            loaded_session.tool_calls, created_session.tool_calls,
+            "Session tool_calls should match"
         );
     }
 
@@ -219,21 +229,27 @@ mod tests {
         let mut session = store
             .create("Test Session")
             .expect("Failed to create session");
-        let entry = "Test entry";
-        session.add_to_history(entry);
+        let mut entry = std::collections::HashMap::new();
+        entry.insert(
+            "test".to_string(),
+            serde_json::Value::String("entry".to_string()),
+        );
+        session.add_conversation_entry(entry);
+        session.increment_token_count(10);
+        session.increment_requests();
+        session.increment_tool_calls();
         store.save(&session).expect("Failed to save session");
         let loaded_session = store
             .load(&session.meta.id)
             .expect("Failed to load session");
         assert_eq!(
-            loaded_session.history.len(),
+            loaded_session.conversation.len(),
             1,
-            "History should have one entry"
+            "Conversation should have one entry"
         );
-        assert_eq!(
-            loaded_session.history[0], entry,
-            "History entry should match"
-        );
+        assert_eq!(loaded_session.token_count, 10, "Token count should be 10");
+        assert_eq!(loaded_session.requests, 1, "Requests count should be 1");
+        assert_eq!(loaded_session.tool_calls, 1, "Tool calls count should be 1");
     }
 
     #[test]
@@ -285,5 +301,35 @@ mod tests {
         assert!(load_result.is_err(), "Loading with empty ID should fail");
         let delete_result = store.delete("");
         assert!(delete_result.is_err(), "Deleting with empty ID should fail");
+    }
+
+    #[test]
+    fn test_get_latest() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        // セッションが存在しない場合
+        let latest = store.get_latest().expect("Failed to get latest session");
+        assert!(
+            latest.is_none(),
+            "Should return None when no sessions exist"
+        );
+
+        // セッションを作成
+        let _session1 = store
+            .create("Session 1")
+            .expect("Failed to create session 1");
+        let session2 = store
+            .create("Session 2")
+            .expect("Failed to create session 2");
+
+        // 最新のセッションを取得
+        let latest = store.get_latest().expect("Failed to get latest session");
+        assert!(latest.is_some(), "Should return Some when sessions exist");
+        assert_eq!(
+            latest.unwrap().meta.id,
+            session2.meta.id,
+            "Should return the most recently created session"
+        );
     }
 }
