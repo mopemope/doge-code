@@ -60,6 +60,10 @@ pub fn tool_def() -> ToolDef {
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of results to return (default: 50)"
+                    },
+                    "keyword_search": {
+                        "type": "string",
+                        "description": "Search for symbols containing specific keywords in their associated comments"
                     }
                 },
                 "required": []
@@ -81,6 +85,8 @@ pub struct SearchRepomapArgs {
     pub sort_by: Option<String>,
     pub sort_desc: Option<bool>,
     pub limit: Option<usize>,
+    /// Search for symbols containing specific keywords
+    pub keyword_search: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +105,8 @@ pub struct SymbolSearchResult {
     pub end_line: usize,
     pub function_lines: Option<usize>,
     pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 impl From<SymbolInfo> for SymbolSearchResult {
@@ -110,6 +118,7 @@ impl From<SymbolInfo> for SymbolSearchResult {
             end_line: s.end_line,
             function_lines: s.function_lines,
             parent: s.parent,
+            keywords: s.keywords,
         }
     }
 }
@@ -208,6 +217,31 @@ impl RepomapSearchTools {
                         }
                     } else {
                         // For symbols without function_lines data, skip if we have a maximum requirement
+                        continue;
+                    }
+                }
+
+                // Apply keyword search filter
+                if let Some(keyword_search) = &args.keyword_search {
+                    let keyword_lower = keyword_search.to_lowercase();
+                    let mut found = false;
+
+                    // Check if the symbol name contains the keyword
+                    if symbol.name.to_lowercase().contains(&keyword_lower) {
+                        found = true;
+                    }
+
+                    // Check if any of the symbol's keywords contain the search term
+                    if !found {
+                        for keyword in &symbol.keywords {
+                            if keyword.to_lowercase().contains(&keyword_lower) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !found {
                         continue;
                     }
                 }
@@ -337,6 +371,7 @@ mod tests {
             parent: None,
             file_total_lines,
             function_lines,
+            keywords: vec![],
         }
     }
 
@@ -422,19 +457,58 @@ mod tests {
     }
 
     #[test]
-    fn test_limit_results() {
+    fn test_keyword_search() {
         let symbols = vec![
-            create_test_symbol("func1", SymbolKind::Function, "file1.rs", 100, Some(10)),
-            create_test_symbol("func2", SymbolKind::Function, "file2.rs", 200, Some(20)),
-            create_test_symbol("func3", SymbolKind::Function, "file3.rs", 300, Some(30)),
+            create_test_symbol_with_keywords(
+                "test_function",
+                SymbolKind::Function,
+                "test.rs",
+                100,
+                Some(10),
+                vec!["testing".to_string(), "functionality".to_string()],
+            ),
+            create_test_symbol_with_keywords(
+                "other_function",
+                SymbolKind::Function,
+                "test.rs",
+                100,
+                Some(15),
+                vec!["other".to_string(), "utility".to_string()],
+            ),
         ];
 
         let args = SearchRepomapArgs {
-            limit: Some(2),
+            keyword_search: Some("testing".to_string()),
             ..Default::default()
         };
 
         let results = RepomapSearchTools::filter_and_group_symbols(symbols, args);
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbols.len(), 1);
+        assert_eq!(results[0].symbols[0].name, "test_function");
+    }
+
+    // Helper function to create a test symbol with keywords
+    fn create_test_symbol_with_keywords(
+        name: &str,
+        kind: SymbolKind,
+        file: &str,
+        file_total_lines: usize,
+        function_lines: Option<usize>,
+        keywords: Vec<String>,
+    ) -> SymbolInfo {
+        SymbolInfo {
+            name: name.to_string(),
+            kind,
+            file: PathBuf::from(file),
+            start_line: 1,
+            start_col: 0,
+            end_line: function_lines.map(|l| l + 1).unwrap_or(10),
+            end_col: 1,
+            parent: None,
+            file_total_lines,
+            function_lines,
+            keywords,
+        }
     }
 }

@@ -46,6 +46,9 @@ pub struct SymbolInfo {
     pub file_total_lines: usize,
     /// Number of lines in the function (only for functions)
     pub function_lines: Option<usize>,
+    /// Keywords extracted from comments associated with this symbol
+    #[serde(default)]
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -230,6 +230,7 @@ mod tests {
             parent: None,
             file_total_lines: 10,
             function_lines: Some(3),
+            keywords: vec![],
         }];
         let repomap = RepoMap { symbols };
         let mut hashes = HashMap::new();

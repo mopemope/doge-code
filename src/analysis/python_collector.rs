@@ -3,7 +3,9 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-use super::collector::{LanguageSpecificExtractor, name_from, node_text};
+use super::collector::{
+    LanguageSpecificExtractor, extract_keywords_from_comment, name_from, node_text,
+};
 
 // ---------------- Python Extractor -----------------
 pub struct PythonExtractor;
@@ -17,25 +19,72 @@ impl LanguageSpecificExtractor for PythonExtractor {
         file: &Path,
     ) -> Result<()> {
         let root = tree.root_node();
-        visit_py_node(map, root, src, file, None);
+
+        // First pass: collect all comments and their positions
+        let mut comments = Vec::new();
+        collect_comments(root, src, &mut comments);
+
+        // Second pass: extract symbols and associate keywords
+        visit_py_node(map, root, src, file, None, &comments);
         Ok(())
     }
 }
 
-fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ctx: Option<String>) {
+/// Collect all comments in the file with their positions
+fn collect_comments(node: Node, src: &str, comments: &mut Vec<(usize, String)>) {
+    if node.kind() == "comment" {
+        let comment_text = node_text(node, src).to_string();
+        comments.push((node.start_position().row, comment_text));
+    }
+
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_comments(cursor.node(), src, comments);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
+    }
+}
+
+/// Find comments that are associated with a node (before or near it)
+fn find_associated_comments(node: Node, comments: &[(usize, String)]) -> Vec<String> {
+    let node_start_line = node.start_position().row;
+    let mut keywords = Vec::new();
+
+    // Look for comments within 3 lines before the node
+    for (line, comment) in comments {
+        if *line < node_start_line && node_start_line - line <= 3 {
+            keywords.extend(extract_keywords_from_comment(comment));
+        }
+    }
+
+    keywords
+}
+
+fn visit_py_node(
+    map: &mut RepoMap,
+    node: Node,
+    src: &str,
+    file: &Path,
+    class_ctx: Option<String>,
+    comments: &[(usize, String)],
+) {
     let file_total_lines = src.lines().count();
 
     match node.kind() {
         "function_definition" => {
-            handle_function_definition(map, node, src, file, &class_ctx, file_total_lines)
+            handle_function_definition(map, node, src, file, &class_ctx, file_total_lines, comments)
         }
         "class_definition" => {
             if let Some(name) = name_from(node, "name", src) {
-                handle_class_definition(map, node, src, file, file_total_lines, &name);
+                handle_class_definition(map, node, src, file, file_total_lines, &name, comments);
                 let mut c = node.walk();
                 if c.goto_first_child() {
                     loop {
-                        visit_py_node(map, c.node(), src, file, Some(name.clone()));
+                        visit_py_node(map, c.node(), src, file, Some(name.clone()), comments);
                         if !c.goto_next_sibling() {
                             break;
                         }
@@ -45,7 +94,6 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
                 return;
             }
         }
-        "assignment" => handle_assignment(map, node, src, file, file_total_lines),
         "comment" => handle_comment(map, node, src, file, file_total_lines),
         _ => {}
     }
@@ -53,7 +101,7 @@ fn visit_py_node(map: &mut RepoMap, node: Node, src: &str, file: &Path, class_ct
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            visit_py_node(map, c.node(), src, file, class_ctx.clone());
+            visit_py_node(map, c.node(), src, file, class_ctx.clone(), comments);
             if !c.goto_next_sibling() {
                 break;
             }
@@ -69,6 +117,7 @@ fn handle_function_definition(
     file: &Path,
     class_ctx: &Option<String>,
     file_total_lines: usize,
+    comments: &[(usize, String)],
 ) {
     if let Some(name) = name_from(node, "name", src) {
         let is_method = class_ctx.is_some() && first_param_is_self_or_cls(node, src);
@@ -80,6 +129,7 @@ fn handle_function_definition(
             SymbolKind::Function
         };
         let function_lines = node.end_position().row - node.start_position().row + 1;
+        let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
             name,
             kind,
@@ -91,6 +141,7 @@ fn handle_function_definition(
             parent: class_ctx.clone(),
             file_total_lines,
             function_lines: Some(function_lines),
+            keywords,
         };
         map.symbols.push(symbol_info);
     }
@@ -103,7 +154,9 @@ fn handle_class_definition(
     file: &Path,
     file_total_lines: usize,
     name: &str,
+    comments: &[(usize, String)],
 ) {
+    let keywords = find_associated_comments(node, comments);
     let symbol_info = SymbolInfo {
         name: name.to_string(),
         kind: SymbolKind::Struct,
@@ -115,73 +168,9 @@ fn handle_class_definition(
         parent: None,
         file_total_lines,
         function_lines: None,
+        keywords,
     };
     map.symbols.push(symbol_info);
-}
-
-fn handle_assignment(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-) {
-    if let Some(lhs) = node.child_by_field_name("left") {
-        if lhs.kind() == "identifier" {
-            let name = node_text(lhs, src).to_string();
-            let symbol_info = SymbolInfo {
-                name,
-                kind: SymbolKind::Variable,
-                file: file.to_path_buf(),
-                start_line: lhs.start_position().row + 1,
-                start_col: lhs.start_position().column + 1,
-                end_line: lhs.end_position().row + 1,
-                end_col: lhs.end_position().column + 1,
-                parent: None,
-                file_total_lines,
-                function_lines: None,
-            };
-            map.symbols.push(symbol_info);
-        } else if lhs.kind() == "pattern_list" || lhs.kind() == "tuple_pattern" {
-            extract_identifiers_from_py_lhs(map, lhs, src, file, file_total_lines);
-        }
-    }
-}
-
-fn extract_identifiers_from_py_lhs(
-    map: &mut RepoMap,
-    lhs_node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-) {
-    if lhs_node.kind() == "identifier" {
-        let name = node_text(lhs_node, src).to_string();
-        let symbol_info = SymbolInfo {
-            name,
-            kind: SymbolKind::Variable,
-            file: file.to_path_buf(),
-            start_line: lhs_node.start_position().row + 1,
-            start_col: lhs_node.start_position().column + 1,
-            end_line: lhs_node.end_position().row + 1,
-            end_col: lhs_node.end_position().column + 1,
-            parent: None,
-            file_total_lines,
-            function_lines: None,
-        };
-        map.symbols.push(symbol_info);
-    } else {
-        let mut c = lhs_node.walk();
-        if c.goto_first_child() {
-            loop {
-                extract_identifiers_from_py_lhs(map, c.node(), src, file, file_total_lines);
-                if !c.goto_next_sibling() {
-                    break;
-                }
-            }
-            c.goto_parent();
-        }
-    }
 }
 
 fn first_param_is_self_or_cls(fn_node: Node, src: &str) -> bool {
@@ -206,6 +195,8 @@ fn first_param_is_self_or_cls(fn_node: Node, src: &str) -> bool {
 
 fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_total_lines: usize) {
     let name = node_text(node, src).to_string();
+    // For comments, we extract keywords directly from the comment text
+    let keywords = extract_keywords_from_comment(&name);
     let symbol_info = SymbolInfo {
         name,
         kind: SymbolKind::Comment,
@@ -217,6 +208,7 @@ fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_to
         parent: None,
         file_total_lines,
         function_lines: None,
+        keywords,
     };
     map.symbols.push(symbol_info);
 }

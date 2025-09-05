@@ -120,6 +120,7 @@ mod tests {
             parent: None,
             file_total_lines: 100,    // Dummy total lines in file
             function_lines: Some(10), // Dummy lines in function
+            keywords: vec![],
         }
     }
 

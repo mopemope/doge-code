@@ -15,6 +15,8 @@ pub struct SearchRepomapArgs {
     pub sort_by: Option<String>,
     pub sort_desc: Option<bool>,
     pub limit: Option<usize>,
+    /// Search for symbols containing specific keywords
+    pub keyword_search: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +35,8 @@ pub struct SymbolSearchResult {
     pub end_line: usize,
     pub function_lines: Option<usize>,
     pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 impl From<SymbolInfo> for SymbolSearchResult {
@@ -44,6 +48,7 @@ impl From<SymbolInfo> for SymbolSearchResult {
             end_line: s.end_line,
             function_lines: s.function_lines,
             parent: s.parent,
+            keywords: s.keywords,
         }
     }
 }

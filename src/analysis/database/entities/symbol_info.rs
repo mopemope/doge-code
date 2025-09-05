@@ -23,6 +23,8 @@ pub struct Model {
     pub function_lines: Option<i32>,
     #[sea_orm(column_type = "Text")]
     pub project_root: String, // Associate with project
+    #[sea_orm(column_type = "Text", default_value = "")]
+    pub keywords: String, // Store keywords as a JSON array string
     pub created_at: DateTimeUtc,
 }
 
