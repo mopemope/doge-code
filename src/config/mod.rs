@@ -15,9 +15,9 @@ pub struct AppConfig {
     pub git_root: Option<PathBuf>,
     pub llm: LlmConfig,
     pub enable_stream_tools: bool,
-    pub theme: String,                     // newly added
-    pub project_instructions_file: String, // newly added
-    pub no_repomap: bool,                  // newly added
+    pub theme: String,                             // newly added
+    pub project_instructions_file: Option<String>, // newly added
+    pub no_repomap: bool,                          // newly added
     // Auto-compact threshold (configurable via env or config file)
     pub auto_compact_prompt_token_threshold: u32,
 }
@@ -132,9 +132,8 @@ impl AppConfig {
         // Add theme setting
         let theme = file_cfg.theme.unwrap_or_else(|| "dark".to_string());
         // Add project_instructions_file setting
-        let project_instructions_file = file_cfg
-            .project_instructions_file
-            .unwrap_or_else(|| "PROJECT.md".to_string());
+        let project_instructions_file =
+            cli.instructions_file.or(file_cfg.project_instructions_file);
 
         // Determine auto-compact threshold (priority: env var -> config file -> default)
         let auto_compact_prompt_token_threshold =
