@@ -234,7 +234,9 @@ impl TuiExecutor {
 
                                 // Also save conversation history to session
                                 let mut sm = session_manager.lock().unwrap();
-                                let _ = sm.update_current_session_with_history(&history);
+                                if let Err(e) = sm.update_current_session_with_history(&history) {
+                                    tracing::error!(?e, "Failed to update session with conversation history");
+                                }
                             }
                         }
                         Err(e) => {
@@ -259,7 +261,9 @@ impl TuiExecutor {
 
                                 // Also save conversation history to session
                                 let mut sm = session_manager.lock().unwrap();
-                                let _ = sm.update_current_session_with_history(&history);
+                                if let Err(e) = sm.update_current_session_with_history(&history) {
+                                    tracing::error!(?e, "Failed to update session with conversation history on error");
+                                }
                             }
                         }
                     }

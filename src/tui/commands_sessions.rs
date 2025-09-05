@@ -1,5 +1,6 @@
 use crate::session::{SessionData, SessionStore};
 use anyhow::Result;
+use tracing::debug;
 
 /// Session management for TUI
 pub struct SessionManager {
@@ -70,6 +71,10 @@ impl SessionManager {
         &mut self,
         history: &[crate::llm::types::ChatMessage],
     ) -> Result<()> {
+        debug!(
+            "Updating session with history: {:?} {:?}",
+            history, &self.current_session
+        );
         if let Some(ref mut session) = self.current_session {
             // Clear existing conversation
             session.clear_conversation();
@@ -82,7 +87,10 @@ impl SessionManager {
                 }
             }
 
-            self.store.save(session)?;
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
         }
         Ok(())
     }

@@ -73,8 +73,13 @@ impl TuiExecutor {
                             history.push(result.compacted_message.clone());
 
                             // Also save conversation history to session
-                            if let Ok(mut sm) = session_manager.lock() {
-                                let _ = sm.update_current_session_with_history(&history);
+                            if let Ok(mut sm) = session_manager.lock()
+                                && let Err(e) = sm.update_current_session_with_history(&history)
+                            {
+                                tracing::error!(
+                                    ?e,
+                                    "Failed to update session with conversation history"
+                                );
                             }
                         }
 

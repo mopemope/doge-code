@@ -3,6 +3,7 @@ use crate::session::error::SessionError;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use tracing::error;
 
 pub struct SessionStore {
     pub(crate) root: PathBuf,
@@ -12,7 +13,10 @@ impl SessionStore {
     /// Create a new SessionStore. Session data is stored in .doge/sessions in the project directory.
     pub fn new_default() -> Result<Self, SessionError> {
         let base = default_store_dir()?;
-        fs::create_dir_all(&base).map_err(SessionError::CreateDirError)?;
+        fs::create_dir_all(&base).map_err(|e| {
+            error!(?e, "Failed to create session store directory: {:?}", base);
+            SessionError::CreateDirError(e)
+        })?;
         Ok(Self { root: base })
     }
 
@@ -20,7 +24,10 @@ impl SessionStore {
     #[allow(dead_code)]
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(SessionError::CreateDirError)?;
+        fs::create_dir_all(&root).map_err(|e| {
+            error!(?e, "Failed to create session store directory: {:?}", root);
+            SessionError::CreateDirError(e)
+        })?;
         Ok(Self { root })
     }
 
@@ -88,8 +95,14 @@ impl SessionStore {
 
         // Save the entire session data as a single JSON file
         let session_file = dir.join("session.json");
-        fs::write(session_file, serde_json::to_string_pretty(data)?)
-            .map_err(SessionError::WriteError)?;
+        let json_data = serde_json::to_string_pretty(data)?;
+        fs::write(&session_file, &json_data).map_err(|e| {
+            error!(
+                ?e,
+                "Failed to write session data to file: {:?}", session_file
+            );
+            SessionError::WriteError(e)
+        })?;
 
         Ok(())
     }
