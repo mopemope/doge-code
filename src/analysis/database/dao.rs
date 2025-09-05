@@ -301,6 +301,10 @@ fn symbol_to_active_model(
         .to_str()
         .context("File path is not valid UTF-8")?;
 
+    // Convert keywords to a JSON string
+    let keywords_json =
+        serde_json::to_string(&symbol.keywords).unwrap_or_else(|_| "[]".to_string());
+
     Ok(ActiveModel {
         id: Default::default(), // Auto-increment
         name: Set(symbol.name.clone()),
@@ -325,6 +329,7 @@ fn symbol_to_active_model(
         file_total_lines: Set(symbol.file_total_lines as i32),
         function_lines: Set(symbol.function_lines.map(|l| l as i32)),
         project_root: Set(project_root.to_string()),
+        keywords: Set(keywords_json),
         created_at: Set(Utc::now()),
     })
 }
@@ -349,6 +354,11 @@ fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolInfo> 
             ));
         }
     };
+
+    // Parse keywords from JSON string
+    let keywords: Vec<String> =
+        serde_json::from_str(&model.keywords).unwrap_or_else(|_| Vec::new());
+
     Ok(AnalysisSymbolInfo {
         name: model.name,
         kind,
@@ -360,6 +370,7 @@ fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolInfo> 
         parent: model.parent,
         file_total_lines: model.file_total_lines as usize,
         function_lines: model.function_lines.map(|l| l as usize),
+        keywords,
     })
 }
 
@@ -418,6 +429,7 @@ mod tests {
             parent: None,
             file_total_lines: 10,
             function_lines: Some(3),
+            keywords: vec![],
         }];
         let repomap = RepoMap { symbols };
         let mut hashes = HashMap::new();
