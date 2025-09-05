@@ -182,11 +182,11 @@ impl Analyzer {
         let files = find_target_files(&self.root)?;
         info!("Found {} target files for analysis", files.len());
 
-        // 現在のファイルハッシュを計算
+        // Calculate current file hashes
         let current_hashes = calculate_file_hashes(&files).await;
         info!("Calculated hashes for {} files", current_hashes.len());
 
-        // キャッシュの有効性をチェック
+        // Check cache validity
         if self
             .cache_store
             .is_cache_valid(&current_hashes)
@@ -211,7 +211,7 @@ impl Analyzer {
             }
         }
 
-        // キャッシュが無効または存在しない場合は、差分更新を試行
+        // If the cache is invalid or does not exist, try a differential update
         let repomap = if let Some(cached_data) = self
             .cache_store
             .load()
@@ -225,7 +225,7 @@ impl Analyzer {
             self.build_parallel().await?
         };
 
-        // 新しいキャッシュを保存
+        // Save new cache
         let cache = RepomapCache::new(self.root.clone(), repomap.clone(), current_hashes);
         if let Err(e) = self.cache_store.save(&cache).await {
             warn!("Failed to save repomap cache: {}", e);

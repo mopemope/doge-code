@@ -83,7 +83,7 @@ pub fn calculate_hash_diff(
     let mut modified = Vec::new();
     let mut removed = Vec::new();
 
-    // 新しいファイルまたは変更されたファイルを検出
+    // Detect new or modified files
     for (path, new_hash) in new_hashes {
         match old_hashes.get(path) {
             Some(old_hash) if old_hash == new_hash => {
@@ -100,7 +100,7 @@ pub fn calculate_hash_diff(
         }
     }
 
-    // 削除されたファイルを検出
+    // Detect deleted files
     for path in old_hashes.keys() {
         if !new_hashes.contains_key(path) {
             removed.push(path.clone());
@@ -155,7 +155,7 @@ mod tests {
         fs::write(&file_path, "Hello, World!").unwrap();
 
         let hash = calculate_file_hash(&file_path).unwrap();
-        // "Hello, World!"のSHA256ハッシュ
+        // SHA256 hash of "Hello, World!"
         assert_eq!(
             hash,
             "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
@@ -189,16 +189,16 @@ mod tests {
         let file3 = PathBuf::from("file3.txt");
         let file4 = PathBuf::from("file4.txt");
 
-        // 古いハッシュ
+        // Old hashes
         old_hashes.insert(file1.clone(), "hash1".to_string());
         old_hashes.insert(file2.clone(), "hash2".to_string());
         old_hashes.insert(file3.clone(), "hash3".to_string());
 
-        // 新しいハッシュ
-        new_hashes.insert(file1.clone(), "hash1".to_string()); // 変更なし
-        new_hashes.insert(file2.clone(), "hash2_modified".to_string()); // 変更
-        new_hashes.insert(file4.clone(), "hash4".to_string()); // 追加
-        // file3は削除
+        // New hashes
+        new_hashes.insert(file1.clone(), "hash1".to_string()); // No change
+        new_hashes.insert(file2.clone(), "hash2_modified".to_string()); // Modified
+        new_hashes.insert(file4.clone(), "hash4".to_string()); // Added
+        // file3 is deleted
 
         let diff = calculate_hash_diff(&old_hashes, &new_hashes);
 

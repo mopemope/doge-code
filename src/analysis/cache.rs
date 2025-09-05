@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs; // 追加
-use std::path::{Path, PathBuf}; // 追加
+use std::fs; // Add
+use std::path::{Path, PathBuf}; // Add
 use tracing::{debug, info};
 
 /// repomap cache metadata
@@ -42,7 +42,7 @@ impl RepomapMetadata {
     }
 }
 
-/// repomapキャッシュ全体のデータ構造
+/// Data structure for the entire repomap cache
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepomapCache {
     pub metadata: RepomapMetadata,
@@ -83,7 +83,7 @@ impl RepomapStore {
     pub async fn new(project_root: PathBuf) -> Result<Self> {
         let db_path = get_default_db_path(&project_root);
 
-        // 親ディレクトリ `.doge` が存在することを確認
+        // Check if the parent directory `.doge` exists
         if let Some(parent_dir) = Path::new(&db_path).parent() {
             fs::create_dir_all(parent_dir)
                 .with_context(|| format!("Failed to create directory: {}", parent_dir.display()))?;

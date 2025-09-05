@@ -61,10 +61,10 @@ impl SessionStore {
 
     /// Create a new session and return the session data.
     pub fn create(&self) -> Result<SessionData, SessionError> {
-        // SessionData::newを使用して新しいセッションを作成
+        // Create a new session using SessionData::new
         let data = SessionData::new();
 
-        self.save(&data)?; // saveメソッドを使用してセッションを保存
+        self.save(&data)?; // Save the session using the save method
         Ok(data)
     }
 
@@ -180,7 +180,7 @@ mod tests {
         let session2 = store.create().expect("Failed to create session 2");
         let sessions = store.list().expect("Failed to list sessions");
         assert_eq!(sessions.len(), 2, "Should have 2 sessions");
-        // セッションがリストされていることを確認するだけで、順序は確認しない
+        // Just check that the sessions are listed, not the order
         let session_ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert!(
             session_ids.contains(&session1.meta.id.as_str()),
@@ -310,18 +310,18 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
 
-        // セッションが存在しない場合
+        // If no session exists
         let latest = store.get_latest().expect("Failed to get latest session");
         assert!(
             latest.is_none(),
             "Should return None when no sessions exist"
         );
 
-        // セッションを作成
+        // Create a session
         let _session1 = store.create().expect("Failed to create session 1");
         let session2 = store.create().expect("Failed to create session 2");
 
-        // 最新のセッションを取得
+        // Get the latest session
         let latest = store.get_latest().expect("Failed to get latest session");
         assert!(latest.is_some(), "Should return Some when sessions exist");
         assert_eq!(
