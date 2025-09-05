@@ -60,9 +60,9 @@ impl SessionStore {
     }
 
     /// Create a new session and return the session data.
-    pub fn create(&self, title: impl Into<String>) -> Result<SessionData, SessionError> {
+    pub fn create(&self) -> Result<SessionData, SessionError> {
         // SessionData::newを使用して新しいセッションを作成
-        let data = SessionData::new(title);
+        let data = SessionData::new();
 
         self.save(&data)?; // saveメソッドを使用してセッションを保存
         Ok(data)
@@ -176,10 +176,8 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
 
-        let session1 = store.create("Session1").expect("Failed to create session1");
-        let session2 = store
-            .create("Session 2")
-            .expect("Failed to create session 2");
+        let session1 = store.create().expect("Failed to create session1");
+        let session2 = store.create().expect("Failed to create session 2");
         let sessions = store.list().expect("Failed to list sessions");
         assert_eq!(sessions.len(), 2, "Should have 2 sessions");
         // セッションがリストされていることを確認するだけで、順序は確認しない
@@ -199,18 +197,13 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
 
-        let title = "Test Session";
-        let created_session = store.create(title).expect("Failed to create session");
+        let created_session = store.create().expect("Failed to create session");
         let loaded_session = store
             .load(&created_session.meta.id)
             .expect("Failed to load session");
         assert_eq!(
             loaded_session.meta.id, created_session.meta.id,
             "Session IDs should match"
-        );
-        assert_eq!(
-            loaded_session.meta.title, title,
-            "Session titles should match"
         );
         assert_eq!(
             loaded_session.conversation, created_session.conversation,
@@ -239,9 +232,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
 
-        let mut session = store
-            .create("Test Session")
-            .expect("Failed to create session");
+        let mut session = store.create().expect("Failed to create session");
         let mut entry = std::collections::HashMap::new();
         entry.insert(
             "test".to_string(),
@@ -270,9 +261,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
 
-        let session = store
-            .create("Test Session")
-            .expect("Failed to create session");
+        let session = store.create().expect("Failed to create session");
         let session_id = session.meta.id;
         store.delete(&session_id).expect("Failed to delete session");
 
@@ -329,12 +318,8 @@ mod tests {
         );
 
         // セッションを作成
-        let _session1 = store
-            .create("Session 1")
-            .expect("Failed to create session 1");
-        let session2 = store
-            .create("Session 2")
-            .expect("Failed to create session 2");
+        let _session1 = store.create().expect("Failed to create session 1");
+        let session2 = store.create().expect("Failed to create session 2");
 
         // 最新のセッションを取得
         let latest = store.get_latest().expect("Failed to get latest session");

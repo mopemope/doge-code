@@ -24,8 +24,8 @@ impl SessionManager {
     }
 
     /// Create a new session
-    pub fn create_session(&mut self, title: &str) -> Result<()> {
-        let session = self.store.create(title)?;
+    pub fn create_session(&mut self) -> Result<()> {
+        let session = self.store.create()?;
         self.current_session = Some(session);
         Ok(())
     }
@@ -72,7 +72,7 @@ impl SessionManager {
         history: &[crate::llm::types::ChatMessage],
     ) -> Result<()> {
         debug!(
-            "Updating session with history: {:?} {:?}",
+            "Updating session with history: {:?} session: {:?}",
             history, &self.current_session
         );
         if let Some(ref mut session) = self.current_session {
@@ -99,9 +99,8 @@ impl SessionManager {
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
             format!(
-                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
+                "Current Session:\n  ID: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
                 session.meta.id,
-                session.meta.title,
                 session.meta.created_at,
                 session.timestamp,
                 session.conversation.len(),

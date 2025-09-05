@@ -344,13 +344,13 @@ impl TuiApp {
     }
 
     /// Create a new session
-    pub fn create_session(&mut self, title: impl Into<String>) -> Result<String> {
+    pub fn create_session(&mut self) -> Result<String> {
         // Save current session if it exists
         if let Some(ref current_session) = self.current_session {
             self.session_store.save(current_session)?;
         }
 
-        let new_session = self.session_store.create(title)?;
+        let new_session = self.session_store.create()?;
         let session_id = new_session.meta.id.clone();
         self.current_session = Some(new_session);
         self.log.push(format!(

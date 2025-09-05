@@ -7,7 +7,6 @@ use uuid::Uuid;
 pub struct SessionMeta {
     pub id: String,
     pub created_at: i64,
-    pub title: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,14 +26,10 @@ pub struct SessionData {
 
 impl SessionData {
     /// Create a new SessionData.
-    pub fn new(title: impl Into<String>) -> Self {
+    pub fn new() -> Self {
         let id = Uuid::now_v7().to_string(); // UUIDv7を使用
         let created_at = Utc::now().timestamp();
-        let meta = SessionMeta {
-            id,
-            created_at,
-            title: title.into(),
-        };
+        let meta = SessionMeta { id, created_at };
         Self {
             meta,
             timestamp: created_at,
@@ -83,14 +78,12 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let title = "Test Session";
-        let session_data = SessionData::new(title);
+        let session_data = SessionData::new();
         assert!(
             !session_data.meta.id.is_empty(),
             "Session ID should not be empty"
         );
         assert!(session_data.meta.created_at > 0, "Created at should be set");
-        assert_eq!(session_data.meta.title, title, "Title should match");
         assert!(
             session_data.conversation.is_empty(),
             "Conversation should be empty initially"
@@ -103,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_add_conversation_entry() {
-        let mut session_data = SessionData::new("Test Session");
+        let mut session_data = SessionData::new();
         let mut entry = HashMap::new();
         entry.insert(
             "role".to_string(),
@@ -127,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_clear_conversation() {
-        let mut session_data = SessionData::new("Test Session");
+        let mut session_data = SessionData::new();
         let mut entry1 = HashMap::new();
         entry1.insert(
             "role".to_string(),
@@ -162,21 +155,21 @@ mod tests {
 
     #[test]
     fn test_increment_token_count() {
-        let mut session_data = SessionData::new("Test Session");
+        let mut session_data = SessionData::new();
         session_data.increment_token_count(10);
         assert_eq!(session_data.token_count, 10, "Token count should be 10");
     }
 
     #[test]
     fn test_increment_requests() {
-        let mut session_data = SessionData::new("Test Session");
+        let mut session_data = SessionData::new();
         session_data.increment_requests();
         assert_eq!(session_data.requests, 1, "Requests count should be 1");
     }
 
     #[test]
     fn test_increment_tool_calls() {
-        let mut session_data = SessionData::new("Test Session");
+        let mut session_data = SessionData::new();
         session_data.increment_tool_calls();
         assert_eq!(session_data.tool_calls, 1, "Tool calls count should be 1");
     }
