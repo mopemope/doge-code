@@ -217,11 +217,31 @@ impl TuiExecutor {
         }
 
         if !line.starts_with('/') {
+            {
+                let mut sm = self.session_manager.lock().unwrap();
+                if sm.current_session.is_none() {
+                    match sm.create_session() {
+                        Ok(()) => {
+                            // if let Some(info) = sm.current_session_info() {
+                            //     ui.push_log(format!(
+                            //         "[INFO] No active session. New session created.\n{}",
+                            //         info
+                            //     ));
+                            // }
+                        }
+                        Err(e) => {
+                            ui.push_log(format!(
+                                "[ERROR] Failed to create session automatically: {}",
+                                e
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
             let rest = line;
             self.last_user_prompt = Some(rest.to_string());
             ui.push_log(format!("> {rest}"));
-
-            // Auto-detect plan execution
             let plan_to_execute = {
                 if let Ok(plan_manager) = self.plan_manager.lock() {
                     plan_manager.find_executable_plan(rest)
