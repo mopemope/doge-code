@@ -157,7 +157,7 @@ impl TuiApp {
             "/compact".to_string(),
         ];
 
-        // カスタムコマンドを取得
+        // Get custom commands
         if let Some(handler) = &self.handler {
             commands.extend(handler.get_custom_commands());
         }

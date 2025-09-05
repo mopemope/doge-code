@@ -27,7 +27,7 @@ pub struct SessionData {
 impl SessionData {
     /// Create a new SessionData.
     pub fn new() -> Self {
-        let id = Uuid::now_v7().to_string(); // UUIDv7を使用
+        let id = Uuid::now_v7().to_string(); // Use UUIDv7
         let created_at = Utc::now().timestamp();
         let meta = SessionMeta { id, created_at };
         Self {
@@ -43,31 +43,31 @@ impl SessionData {
     /// Add a new entry to the conversation.
     pub fn add_conversation_entry(&mut self, entry: HashMap<String, serde_json::Value>) {
         self.conversation.push(entry);
-        self.timestamp = Utc::now().timestamp(); // 更新日時を更新
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 
     /// Clear the conversation.
     pub fn clear_conversation(&mut self) {
         self.conversation.clear();
-        self.timestamp = Utc::now().timestamp(); // 更新日時を更新
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 
     /// Increment token count.
     pub fn increment_token_count(&mut self, count: u64) {
         self.token_count += count;
-        self.timestamp = Utc::now().timestamp(); // 更新日時を更新
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 
     /// Increment requests count.
     pub fn increment_requests(&mut self) {
         self.requests += 1;
-        self.timestamp = Utc::now().timestamp(); // 更新日時を更新
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 
     /// Increment tool calls count.
     pub fn increment_tool_calls(&mut self) {
         self.tool_calls += 1;
-        self.timestamp = Utc::now().timestamp(); // 更新日時を更新
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 }
 
