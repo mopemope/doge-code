@@ -11,42 +11,21 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_repomap".to_string(),
-            description: "Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase.".to_string(),
+            description: "Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords in symbol comments.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "min_file_lines": {
-                        "type": "integer",
-                        "description": "Minimum number of lines in the file (e.g., 500 for large files)"
-                    },
                     "max_file_lines": {
                         "type": "integer", 
                         "description": "Maximum number of lines in the file"
-                    },
-                    "min_function_lines": {
-                        "type": "integer",
-                        "description": "Minimum number of lines in functions (e.g., 100 for large functions)"
                     },
                     "max_function_lines": {
                         "type": "integer",
                         "description": "Maximum number of lines in functions"
                     },
-                    "symbol_kinds": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter by symbol kinds: 'fn', 'struct', 'enum', 'trait', 'impl', 'method', 'assoc_fn', 'mod', 'var'"
-                    },
                     "file_pattern": {
                         "type": "string",
                         "description": "File path pattern to match (substring match)"
-                    },
-                    "min_symbols_per_file": {
-                        "type": "integer",
-                        "description": "Minimum number of symbols per file"
-                    },
-                    "max_symbols_per_file": {
-                        "type": "integer",
-                        "description": "Maximum number of symbols per file"
                     },
                     "sort_by": {
                         "type": "string",
@@ -64,6 +43,10 @@ pub fn tool_def() -> ToolDef {
                     "keyword_search": {
                         "type": "string",
                         "description": "Search for symbols containing specific keywords in their associated comments"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Search for symbols containing symbol name"
                     }
                 },
                 "required": []
@@ -87,6 +70,8 @@ pub struct SearchRepomapArgs {
     pub limit: Option<usize>,
     /// Search for symbols containing specific keywords
     pub keyword_search: Option<String>,
+    /// Search for symbols containing symbol name
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,23 +206,24 @@ impl RepomapSearchTools {
                     }
                 }
 
+                // Apply name search filter
+                if let Some(name_search) = &args.name {
+                    let name_lower = name_search.to_lowercase();
+                    if !symbol.name.to_lowercase().contains(&name_lower) {
+                        continue;
+                    }
+                }
+
                 // Apply keyword search filter
                 if let Some(keyword_search) = &args.keyword_search {
                     let keyword_lower = keyword_search.to_lowercase();
                     let mut found = false;
 
-                    // Check if the symbol name contains the keyword
-                    if symbol.name.to_lowercase().contains(&keyword_lower) {
-                        found = true;
-                    }
-
                     // Check if any of the symbol's keywords contain the search term
-                    if !found {
-                        for keyword in &symbol.keywords {
-                            if keyword.to_lowercase().contains(&keyword_lower) {
-                                found = true;
-                                break;
-                            }
+                    for keyword in &symbol.keywords {
+                        if keyword.to_lowercase().contains(&keyword_lower) {
+                            found = true;
+                            break;
                         }
                     }
 
@@ -486,6 +472,38 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbols.len(), 1);
         assert_eq!(results[0].symbols[0].name, "test_function");
+    }
+
+    #[test]
+    fn test_name_search() {
+        let symbols = vec![
+            create_test_symbol_with_keywords(
+                "calculate_total",
+                SymbolKind::Function,
+                "math.rs",
+                100,
+                Some(10),
+                vec!["math".to_string(), "calculation".to_string()],
+            ),
+            create_test_symbol_with_keywords(
+                "format_string",
+                SymbolKind::Function,
+                "string.rs",
+                100,
+                Some(15),
+                vec!["string".to_string(), "format".to_string()],
+            ),
+        ];
+
+        let args = SearchRepomapArgs {
+            name: Some("calculate".to_string()),
+            ..Default::default()
+        };
+
+        let results = RepomapSearchTools::filter_and_group_symbols(symbols, args);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbols.len(), 1);
+        assert_eq!(results[0].symbols[0].name, "calculate_total");
     }
 
     // Helper function to create a test symbol with keywords
