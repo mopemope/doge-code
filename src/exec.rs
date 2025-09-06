@@ -137,6 +137,7 @@ impl Executor {
             msgs,
             Some(tx), // Pass the sender
             None,     // No cancellation token for now
+            None,     // No session manager for exec mode
         )
         .await;
 
