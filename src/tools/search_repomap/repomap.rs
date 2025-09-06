@@ -11,7 +11,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_repomap".to_string(),
-            description: "Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords in symbol comments.".to_string(),
+            description: "Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -42,7 +42,7 @@ pub fn tool_def() -> ToolDef {
                     },
                     "keyword_search": {
                         "type": "string",
-                        "description": "Search for symbols containing specific keywords in their associated comments"
+                        "description": "Search for symbols containing specific keywords, feature names, and other relevant terms in their associated comments"
                     },
                     "name": {
                         "type": "string",
