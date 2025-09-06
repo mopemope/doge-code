@@ -25,7 +25,7 @@ You have access to the following tools for interacting with the file system and 
 
 - **get_symbol_info**: Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. You can optionally filter by file path (`include`) and symbol kind (e.g., 'fn', 'struct'). This is useful for understanding the codebase structure, locating definitions, or getting context about specific code elements. The returned information includes the symbol's kind, name, file path, line number, and a relevant code snippet.
 
-- **search_repomap**: Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords in symbol comments.
+- **search_repomap**: Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments.
 
 ## File Editing Tools
 
