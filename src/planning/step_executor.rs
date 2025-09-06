@@ -276,6 +276,7 @@ impl TaskExecutor {
             messages,
             ui_tx.clone(),
             None,
+            None, // No session manager for step executor
         )
         .await
         {

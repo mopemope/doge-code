@@ -63,6 +63,7 @@ impl LlmTaskDecomposer {
             messages,
             None,
             None,
+            None, // No session manager for decomposer
         )
         .await
         {

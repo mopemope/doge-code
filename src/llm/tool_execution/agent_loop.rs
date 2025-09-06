@@ -2,20 +2,23 @@ use crate::llm::LlmErrorKind;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
+use crate::tui::commands_sessions::SessionManager;
 use anyhow::{Result, anyhow};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
     model: &str,
-    tools: &FsTools,
+    fs: &FsTools,
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
+    session_manager: Option<Arc<Mutex<SessionManager>>>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
-    let runtime = ToolRuntime::new(tools);
+    let runtime = ToolRuntime::new(fs);
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
 
@@ -52,6 +55,10 @@ pub async fn run_agent_loop(
                 tool_calls: msg.tool_calls.clone(),
                 tool_call_id: None,
             });
+
+            // Track tool calls count
+            let tool_calls_count = msg.tool_calls.len() as u64;
+
             for tc in msg.tool_calls {
                 // Always send processing status to UI if available
                 if let Some(tx) = &ui_tx {
@@ -161,6 +168,16 @@ pub async fn run_agent_loop(
                     tool_calls: vec![],
                     tool_call_id: tc.id,
                 });
+            }
+
+            // Update session with tool calls count if any tool calls were made and session manager is available
+            if tool_calls_count > 0
+                && let Some(ref sm) = session_manager
+            {
+                let mut session_mgr = sm.lock().unwrap();
+                if let Err(e) = session_mgr.update_current_session_with_tool_call_count() {
+                    tracing::error!(?e, "Failed to update session with tool call count");
+                }
             }
             continue;
         } else {

@@ -65,6 +65,14 @@ impl TuiExecutor {
                         let _ = tx.send("::status:sending".into());
                     }
 
+                    // Increment request count in session
+                    {
+                        let mut sm = session_manager.lock().unwrap();
+                        if let Err(e) = sm.update_current_session_with_request_count() {
+                            tracing::error!(?e, "Failed to update session with request count");
+                        }
+                    }
+
                     let res = crate::llm::run_agent_loop(
                         &c,
                         &model,
@@ -72,10 +80,12 @@ impl TuiExecutor {
                         msgs,
                         tx.clone(),
                         Some(cancel_token),
+                        Some(session_manager.clone()),
                     )
                     .await;
                     // Get token usage after the agent loop completes
                     let tokens_used = c.get_prompt_tokens_used();
+                    let total_tokens = c.get_tokens_used();
                     match res {
                         Ok((updated_messages, _final_msg)) => {
                             if let Some(tx) = tx {
@@ -85,7 +95,7 @@ impl TuiExecutor {
                                 let _ = tx.send(format!(
                                     "::tokens:prompt:{},total:{}",
                                     tokens_used,
-                                    c.get_tokens_used()
+                                    total_tokens
                                 ));
                             }
                             // Update conversation history (save all messages except system messages)
@@ -105,6 +115,11 @@ impl TuiExecutor {
                                 if let Err(e) = sm.update_current_session_with_history(&history) {
                                     tracing::error!(?e, "Failed to update session with conversation history");
                                 }
+                                
+                                // Update token count in session
+                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                    tracing::error!(?e, "Failed to update session with token count");
+                                }
                             }
                         }
                         Err(e) => {
@@ -115,7 +130,7 @@ impl TuiExecutor {
                                 let _ = tx.send(format!(
                                     "::tokens:prompt:{},total:{}",
                                     tokens_used,
-                                    c.get_tokens_used()
+                                    total_tokens
                                 ));
                             }
                             // Update conversation history on error (only user input)
@@ -131,6 +146,11 @@ impl TuiExecutor {
                                 let mut sm = session_manager.lock().unwrap();
                                 if let Err(e) = sm.update_current_session_with_history(&history) {
                                     tracing::error!(?e, "Failed to update session with conversation history on error");
+                                }
+                                
+                                // Update token count in session even on error
+                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                    tracing::error!(?e, "Failed to update session with token count on error");
                                 }
                             }
                         }

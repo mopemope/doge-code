@@ -95,6 +95,42 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Update the current session with token count
+    pub fn update_current_session_with_token_count(&mut self, token_count: u64) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.increment_token_count(token_count);
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Update the current session with request count
+    pub fn update_current_session_with_request_count(&mut self) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.increment_requests();
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Update the current session with tool call count
+    pub fn update_current_session_with_tool_call_count(&mut self) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.increment_tool_calls();
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Get current session info
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {

@@ -3,8 +3,10 @@ use crate::llm::stream_tools::{ToolDeltaBuffer, execute_tool_call};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
+use crate::tui::commands_sessions::SessionManager;
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -14,6 +16,7 @@ pub async fn run_agent_streaming_once(
     fs: &FsTools,
     mut messages: Vec<ChatMessage>,
     cancel: Option<CancellationToken>,
+    session_manager: Option<Arc<Mutex<SessionManager>>>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
     let cancel_token = cancel.unwrap_or_default();
 
@@ -55,6 +58,19 @@ pub async fn run_agent_streaming_once(
                             buf.push_delta(idx, name_delta.as_deref(), args_delta.as_deref(), None);
                             // Try finalize and execute immediately when JSON becomes valid
                             if buf.finalize_sync_call(idx).is_ok() {
+                                // Update session with tool call count if session manager is available
+                                if let Some(ref sm) = session_manager {
+                                    let mut session_mgr = sm.lock().unwrap();
+                                    if let Err(e) =
+                                        session_mgr.update_current_session_with_tool_call_count()
+                                    {
+                                        tracing::error!(
+                                            ?e,
+                                            "Failed to update session with tool call count"
+                                        );
+                                    }
+                                }
+
                                 let exec = execute_tool_call(&runtime, idx, &buf).await;
                                 if let Ok(val) = exec {
                                     messages.push(ChatMessage {
