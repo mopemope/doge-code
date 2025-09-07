@@ -77,9 +77,12 @@ async fn chat_tools_once_inner(
         format!("Bearer {}", client.api_key).parse().unwrap(),
     );
 
-    if let Ok(payload) = serde_json::to_string_pretty(&req) {
-        debug!(payload=%payload, endpoint=%url, "sending chat.completions (tools) payload");
-    }
+    // if let Ok(payload) = serde_json::to_string_pretty(&req) {
+    //     debug!(payload=%payload, endpoint=%url, "sending chat.completions (tools) payload");
+    // }
+    // if let Ok(messages) = serde_json::to_string_pretty(&req.messages) {
+    //     debug!(messages=%messages, endpoint=%url, "sending chat.completions (tools) messages");
+    // }
 
     let cancel_token = cancel.unwrap_or_default();
     let req_builder = client.inner.post(&url).headers(headers).json(&req);
