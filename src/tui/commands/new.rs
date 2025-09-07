@@ -68,7 +68,9 @@ impl TuiExecutor {
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
         // Initialize plan manager
-        let plan_manager = Arc::new(Mutex::new(crate::planning::PlanManager::new()?));
+        let plan_manager = Arc::new(Mutex::new(crate::planning::PlanManager::new(
+            cfg.project_root.clone(),
+        )?));
 
         // Initialize task analyzer
         let task_analyzer = if let Some(client) = &client {
