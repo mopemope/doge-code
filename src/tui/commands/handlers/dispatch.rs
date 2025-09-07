@@ -141,6 +141,7 @@ impl CommandHandler for TuiExecutor {
                 } else {
                     ui.push_log("[no running task]");
                 }
+                ui.dirty = true;
             }
 
             "/compact" => {
