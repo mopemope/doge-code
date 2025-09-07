@@ -63,7 +63,7 @@ fn collect_ts_js(
     }
 }
 
-/// Collect all comments in the file with their positions
+/// Collect all comments in the file with their positions.
 fn collect_comments(node: Node, src: &str, comments: &mut Vec<(usize, String)>) {
     if node.kind() == "comment" {
         let comment_text = node_text(node, src).to_string();
@@ -82,7 +82,7 @@ fn collect_comments(node: Node, src: &str, comments: &mut Vec<(usize, String)>) 
     }
 }
 
-/// Find comments that are associated with a node (before or near it)
+/// Find comments that are associated with a node (before or near it).
 fn find_associated_comments(node: Node, comments: &[(usize, String)]) -> Vec<String> {
     let node_start_line = node.start_position().row;
     let mut keywords = Vec::new();

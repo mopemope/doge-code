@@ -85,7 +85,10 @@ impl Analyzer {
         info!("Found {} target files for analysis", file_count);
 
         let num_cpus = num_cpus::get();
-        let chunk_size = std::cmp::max(1, file_count / num_cpus);
+        // Set the number of chunks to the minimum of the number of CPUs and the number of files
+        let num_chunks = std::cmp::min(num_cpus, file_count);
+        // Calculate the chunk size (set to 1 if the number of files is 0)
+        let chunk_size = std::cmp::max(1, file_count.div_ceil(num_chunks));
         let chunks: Vec<Vec<PathBuf>> = files
             .chunks(chunk_size)
             .map(|chunk| chunk.to_vec())
@@ -272,8 +275,10 @@ impl Analyzer {
         if !changed_files.is_empty() {
             info!("Re-analyzing {} changed files", changed_files.len());
 
-            // Process changed files in parallel
-            let chunk_size = std::cmp::max(1, changed_files.len() / num_cpus::get());
+            // Set the number of chunks to the minimum of the number of CPUs and the number of files
+            let num_chunks = std::cmp::min(num_cpus::get(), changed_files.len());
+            // Calculate the chunk size (set to 1 if the number of files is 0)
+            let chunk_size = std::cmp::max(1, changed_files.len().div_ceil(num_chunks));
             let chunks: Vec<Vec<PathBuf>> = changed_files
                 .chunks(chunk_size)
                 .map(|chunk| chunk.to_vec())
