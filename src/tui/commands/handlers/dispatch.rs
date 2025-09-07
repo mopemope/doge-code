@@ -35,7 +35,9 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
                 ui.push_log("");
                 ui.push_log("Session Management:");
-                ui.push_log("  /session <new|list|switch|save|delete|current|clear> - Manage sessions");
+                ui.push_log(
+                    "  /session <new|list|switch|save|delete|current|clear> - Manage sessions",
+                );
                 ui.push_log("");
                 ui.push_log("Task Planning & Execution:");
                 ui.push_log("  /plan <task> - Analyze task and create an execution plan");
