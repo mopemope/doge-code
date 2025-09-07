@@ -53,4 +53,9 @@ impl TuiExecutor {
     pub fn get_custom_command(&self, name: &str) -> Option<&CustomCommand> {
         self.custom_commands.get(name)
     }
+
+    /// Set the UI sender for sending messages to the TUI
+    pub fn set_ui_tx(&mut self, ui_tx: Option<std::sync::mpsc::Sender<String>>) {
+        self.ui_tx = ui_tx;
+    }
 }
