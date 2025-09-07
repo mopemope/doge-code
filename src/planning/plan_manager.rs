@@ -3,7 +3,7 @@ use crate::planning::plan_lifecycle::PlanLifecycleManager;
 use crate::planning::plan_statistics::PlanStatistics;
 use crate::planning::plan_storage::PlanStorage;
 use crate::planning::task_types::*;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -21,8 +21,8 @@ pub struct PlanManager {
 
 impl PlanManager {
     /// 新しい計画管理システムを作成
-    pub fn new() -> Result<Self> {
-        let plans_dir = Self::get_plans_directory()?;
+    pub fn new(project_root: PathBuf) -> Result<Self> {
+        let plans_dir = Self::get_plans_directory(project_root)?;
         std::fs::create_dir_all(&plans_dir)?;
 
         let lifecycle_manager = PlanLifecycleManager::new(50);
@@ -36,10 +36,8 @@ impl PlanManager {
     }
 
     /// Get plan save directory
-    fn get_plans_directory() -> Result<PathBuf> {
-        let config_dir =
-            dirs::config_dir().ok_or_else(|| anyhow!("Could not determine config directory"))?;
-        Ok(config_dir.join("doge-code").join("plans"))
+    fn get_plans_directory(project_root: PathBuf) -> Result<PathBuf> {
+        Ok(project_root.join(".doge").join("plans"))
     }
 
     /// Register new plan
@@ -225,7 +223,8 @@ impl PlanManager {
 
 impl Default for PlanManager {
     fn default() -> Self {
-        Self::new().expect("Failed to create PlanManager")
+        let project_root = std::env::current_dir().expect("Failed to get current directory");
+        Self::new(project_root).expect("Failed to create PlanManager")
     }
 }
 
@@ -270,7 +269,8 @@ mod tests {
     fn create_test_plan_manager() -> Result<(PlanManager, TempDir)> {
         // テスト用の一時ディレクトリを使用
         let temp_dir = TempDir::new()?;
-        let plans_dir = temp_dir.path().join("plans");
+        let project_root = temp_dir.path().to_path_buf();
+        let plans_dir = project_root.join(".doge").join("plans");
         std::fs::create_dir_all(&plans_dir)?;
 
         let lifecycle_manager = PlanLifecycleManager::new(50);
@@ -441,5 +441,31 @@ mod tests {
         let recent_plans = manager.get_recent_plans();
         assert_eq!(recent_plans.len(), 1);
         assert_eq!(recent_plans[0].status, PlanStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_get_plans_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+        let plans_dir = PlanManager::get_plans_directory(project_root.clone()).unwrap();
+
+        assert_eq!(plans_dir, project_root.join(".doge").join("plans"));
+        assert!(plans_dir.starts_with(&project_root));
+        assert_eq!(plans_dir.file_name().unwrap(), "plans");
+        assert_eq!(plans_dir.parent().unwrap().file_name().unwrap(), ".doge");
+    }
+
+    #[test]
+    fn test_plan_manager_new_creates_plans_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+
+        // PlanManager::new を呼び出すと、.doge/plans ディレクトリが作成されるはず
+        let manager = PlanManager::new(project_root.clone());
+        assert!(manager.is_ok());
+
+        let plans_dir = project_root.join(".doge").join("plans");
+        assert!(plans_dir.exists());
+        assert!(plans_dir.is_dir());
     }
 }
