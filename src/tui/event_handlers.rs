@@ -32,38 +32,53 @@ pub fn handle_normal_mode_key(
             code: KeyCode::Enter,
             ..
         } => {
+            debug!(
+                "Enter key pressed. completion_active: {}",
+                app.completion_active
+            );
+            let mut submit = false;
             if app.completion_active {
-                let completed_item = app.completion_candidates[app.completion_index].clone();
-                let current_input = app.textarea.lines()[0].clone();
-
-                let new_input = if app.completion_type == CompletionType::Command {
-                    // Command completion
-                    let mut parts: Vec<&str> = current_input.split_whitespace().collect();
-                    if !parts.is_empty() {
-                        parts[0] = &completed_item;
-                    }
-                    parts.join(" ") + " "
-                } else if app.completion_type == CompletionType::FilePath {
-                    // File path completion
-                    if let Some(at_pos) = current_input.rfind('@') {
-                        let before_at = &current_input[..=at_pos];
-                        format!("{}{}", before_at, completed_item)
-                    } else {
-                        current_input // Should not happen
-                    }
+                let current_input = app.textarea.lines()[0].trim();
+                // If the user has typed a command that is in the completion list, submit it directly.
+                if app.completion_type == CompletionType::Command
+                    && app.completion_candidates.iter().any(|c| c == current_input)
+                {
+                    submit = true;
                 } else {
-                    current_input
-                };
+                    // Otherwise, apply the currently selected completion.
+                    let completed_item = app.completion_candidates[app.completion_index].clone();
+                    let current_line = app.textarea.lines()[0].clone();
 
-                // Clear existing content and insert new_input
-                app.textarea.delete_line_by_head();
-                app.textarea.delete_line_by_end();
-                app.textarea.insert_str(&new_input);
-                app.textarea.move_cursor(CursorMove::End);
+                    let new_input = if app.completion_type == CompletionType::Command {
+                        let mut parts: Vec<&str> = current_line.split_whitespace().collect();
+                        if !parts.is_empty() {
+                            parts[0] = &completed_item;
+                        }
+                        parts.join(" ") + " "
+                    } else if app.completion_type == CompletionType::FilePath {
+                        if let Some(at_pos) = current_line.rfind('@') {
+                            let before_at = &current_line[..=at_pos];
+                            format!("{}{}", before_at, completed_item)
+                        } else {
+                            current_line
+                        }
+                    } else {
+                        current_line
+                    };
+
+                    app.textarea.delete_line_by_head();
+                    app.textarea.delete_line_by_end();
+                    app.textarea.insert_str(&new_input);
+                    app.textarea.move_cursor(CursorMove::End);
+                }
                 app.completion_active = false;
                 app.dirty = true;
             } else {
-                // Submit message logic
+                submit = true;
+            }
+
+            if submit {
+                debug!("Submitting line: '{}'", app.textarea.lines().join("\n"));
                 let line = app.textarea.lines().join("\n");
                 if !line.trim().is_empty() {
                     if app.input_history.last().map(|s| s.as_str()) != Some(line.as_str()) {
@@ -80,7 +95,6 @@ pub fn handle_normal_mode_key(
 
                 app.pending_instructions.push_back(line);
 
-                // Clear the textarea
                 app.textarea = TextArea::default();
                 app.textarea
                     .set_block(Block::default().borders(Borders::ALL).title("Input"));

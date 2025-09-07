@@ -24,6 +24,7 @@ impl TuiApp {
             );
             if is_idle && let Some(instruction) = self.pending_instructions.pop_front() {
                 self.dispatch(&instruction);
+                self.dirty = true;
             }
 
             // Update spinner state for active statuses and enough time has passed
