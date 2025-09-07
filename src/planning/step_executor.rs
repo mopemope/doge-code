@@ -28,15 +28,21 @@ impl TaskExecutor {
     pub async fn execute_plan(
         &self,
         plan: TaskPlan,
+        background: bool,
         ui_tx: Option<mpsc::Sender<String>>,
     ) -> Result<ExecutionResult> {
         info!("Starting execution of plan: {}", plan.id);
 
         if let Some(tx) = &ui_tx {
-            let _ = tx.send(format!(
-                "[START] Task execution started: {}",
-                plan.original_request
-            ));
+            let message = if background {
+                format!(
+                    "[START] Task execution started in background: {}",
+                    plan.original_request
+                )
+            } else {
+                format!("[START] Task execution started: {}", plan.original_request)
+            };
+            let _ = tx.send(message);
         }
 
         let mut context = ExecutionContext::new();
@@ -60,18 +66,24 @@ impl TaskExecutor {
             }
 
             // Progress notification
-            if let Some(tx) = &ui_tx {
-                let _ = tx.send(format!(
-                    "[STEP] Step {}/{}: {}",
-                    index + 1,
-                    total_steps,
-                    step.description
-                ));
+            #[allow(clippy::collapsible_if)]
+            if !background {
+                if let Some(tx) = &ui_tx {
+                    let _ = tx.send(format!(
+                        "[STEP] Step {}/{}: {}",
+                        index + 1,
+                        total_steps,
+                        step.description
+                    ));
+                }
             }
 
             // Step execution
             let step_start = chrono::Utc::now();
-            match self.execute_step(step, &mut context, &ui_tx).await {
+            match self
+                .execute_step(step, &mut context, &ui_tx, background)
+                .await
+            {
                 Ok(result) => {
                     let duration = (chrono::Utc::now() - step_start).num_seconds() as u64;
                     let step_result = StepResult {
@@ -86,7 +98,7 @@ impl TaskExecutor {
                     context.mark_completed(&step.id, step_result);
                     successful_steps += 1;
 
-                    if let Some(tx) = &ui_tx {
+                    if !background && let Some(tx) = &ui_tx {
                         let _ = tx.send(format!("[DONE] Completed: {}", step.description));
                     }
                 }
@@ -170,18 +182,32 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &mut ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         debug!("Executing step: {} ({})", step.id, step.description);
 
         // Execute based on step type
         match step.step_type {
-            StepType::Analysis => self.execute_analysis_step(step, context, ui_tx).await,
-            StepType::Planning => self.execute_planning_step(step, context, ui_tx).await,
-            StepType::Implementation => {
-                self.execute_implementation_step(step, context, ui_tx).await
+            StepType::Analysis => {
+                self.execute_analysis_step(step, context, ui_tx, background)
+                    .await
             }
-            StepType::Validation => self.execute_validation_step(step, context, ui_tx).await,
-            StepType::Cleanup => self.execute_cleanup_step(step, context, ui_tx).await,
+            StepType::Planning => {
+                self.execute_planning_step(step, context, ui_tx, background)
+                    .await
+            }
+            StepType::Implementation => {
+                self.execute_implementation_step(step, context, ui_tx, background)
+                    .await
+            }
+            StepType::Validation => {
+                self.execute_validation_step(step, context, ui_tx, background)
+                    .await
+            }
+            StepType::Cleanup => {
+                self.execute_cleanup_step(step, context, ui_tx, background)
+                    .await
+            }
         }
     }
 
@@ -191,9 +217,11 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         let prompt = prompt_builder::build_analysis_prompt(step, context);
-        self.execute_llm_step(&prompt, step, ui_tx).await
+        self.execute_llm_step(&prompt, step, ui_tx, background)
+            .await
     }
 
     /// Execute planning step
@@ -202,9 +230,11 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         let prompt = prompt_builder::build_planning_prompt(step, context);
-        self.execute_llm_step(&prompt, step, ui_tx).await
+        self.execute_llm_step(&prompt, step, ui_tx, background)
+            .await
     }
 
     /// Execute implementation step
@@ -213,9 +243,11 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         let prompt = prompt_builder::build_implementation_prompt(step, context);
-        self.execute_llm_step(&prompt, step, ui_tx).await
+        self.execute_llm_step(&prompt, step, ui_tx, background)
+            .await
     }
 
     /// Execute validation step
@@ -224,9 +256,12 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         let prompt = prompt_builder::build_validation_prompt(step, context);
-        let result = self.execute_llm_step(&prompt, step, ui_tx).await?;
+        let result = self
+            .execute_llm_step(&prompt, step, ui_tx, background)
+            .await?;
 
         // Check validation criteria
         validator::validate_step_criteria(step, &result, &self.fs_tools).await?;
@@ -240,9 +275,11 @@ impl TaskExecutor {
         step: &TaskStep,
         context: &ExecutionContext,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         let prompt = prompt_builder::build_cleanup_prompt(step, context);
-        self.execute_llm_step(&prompt, step, ui_tx).await
+        self.execute_llm_step(&prompt, step, ui_tx, background)
+            .await
     }
 
     /// Execute LLM step
@@ -251,10 +288,11 @@ impl TaskExecutor {
         prompt: &str,
         step: &TaskStep,
         ui_tx: &Option<mpsc::Sender<String>>,
+        background: bool,
     ) -> Result<String> {
         debug!("Executing LLM step: {}", step.description);
 
-        if let Some(tx) = ui_tx {
+        if !background && let Some(tx) = ui_tx {
             let _ = tx.send(format!(
                 "[LLM] Executing step with LLM: {}",
                 step.description
@@ -284,7 +322,7 @@ impl TaskExecutor {
                 let result = final_message.content;
                 debug!("LLM step completed successfully");
 
-                if let Some(tx) = ui_tx {
+                if !background && let Some(tx) = ui_tx {
                     let _ = tx.send(format!("[DONE] LLM step completed: {}", step.description));
                 }
 

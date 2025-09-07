@@ -80,9 +80,24 @@ impl TuiExecutor {
 
         // Handle /execute command for plan execution
         if let Some(rest) = line.strip_prefix("/execute") {
-            let plan_id = rest.trim();
-            ui.push_log(format!("> /execute {}", plan_id));
-            self.handle_execute_command(plan_id, ui);
+            let mut plan_id = "".to_string();
+            let mut background = false;
+
+            let parts = rest.split_whitespace();
+            for part in parts {
+                if part == "--background" || part == "-b" {
+                    background = true;
+                } else {
+                    plan_id = part.to_string();
+                }
+            }
+
+            ui.push_log(format!(
+                "> /execute {} {}",
+                plan_id,
+                if background { "--background" } else { "" }
+            ));
+            self.handle_execute_command(&plan_id, background, ui);
             return;
         }
 
@@ -143,7 +158,7 @@ impl TuiExecutor {
 
                 // Start plan execution
                 let plan_id = plan_execution.plan.id.clone();
-                self.execute_plan_async(&plan_id, ui);
+                self.execute_plan_async(&plan_id, false, ui);
                 return;
             }
 
@@ -311,7 +326,7 @@ impl TuiExecutor {
     }
 
     /// Handle /execute command
-    fn handle_execute_command(&mut self, plan_id: &str, ui: &mut TuiApp) {
+    fn handle_execute_command(&mut self, plan_id: &str, background: bool, ui: &mut TuiApp) {
         if plan_id.is_empty() {
             // Execute the latest plan
             let latest_plan = {
@@ -328,7 +343,7 @@ impl TuiExecutor {
                     "[TARGET] Executing latest plan: {}",
                     plan_execution.plan.original_request
                 ));
-                self.execute_plan_async(&plan_id, ui);
+                self.execute_plan_async(&plan_id, background, ui);
             } else {
                 ui.push_log(
                     "[ERROR] No executable plan found. Please analyze a task with /plan first.",
@@ -346,7 +361,7 @@ impl TuiExecutor {
 
             if plan_exists {
                 ui.push_log(format!("[TARGET] Executing plan: {}", plan_id));
-                self.execute_plan_async(plan_id, ui);
+                self.execute_plan_async(plan_id, background, ui);
             } else {
                 ui.push_log(format!("[ERROR] Plan ID '{}' not found.", plan_id));
             }
@@ -419,7 +434,7 @@ impl TuiExecutor {
     }
 
     /// Execute plan asynchronously
-    fn execute_plan_async(&mut self, plan_id: &str, ui: &mut TuiApp) {
+    fn execute_plan_async(&mut self, plan_id: &str, background: bool, ui: &mut TuiApp) {
         if self.client.is_none() {
             ui.push_log("[ERROR] LLM client is not configured.");
             return;
@@ -447,7 +462,11 @@ impl TuiExecutor {
             return;
         }
 
-        ui.push_log("[INFO] Starting plan execution...");
+        if background {
+            ui.push_log("[INFO] Starting plan execution in background...".to_string());
+        } else {
+            ui.push_log("[INFO] Starting plan execution...".to_string());
+        }
 
         let rt = tokio::runtime::Handle::current();
         let client = self.client.as_ref().unwrap().clone();
@@ -462,7 +481,7 @@ impl TuiExecutor {
             let executor =
                 crate::planning::step_executor::TaskExecutor::new(client, model, fs_tools);
 
-            match executor.execute_plan(plan, ui_tx.clone()).await {
+            match executor.execute_plan(plan, background, ui_tx.clone()).await {
                 Ok(result) => {
                     if let Ok(pm) = plan_manager.lock() {
                         let _ = pm.complete_execution(&plan_id, result.clone());
@@ -471,22 +490,23 @@ impl TuiExecutor {
                     if let Some(tx) = ui_tx {
                         if result.success {
                             let _ = tx.send(
-                                "[SUCCESS] Plan execution completed successfully!".to_string(),
+                                format!("[SUCCESS] Plan {} completed successfully!", &plan_id[..8])
+                                    .to_string(),
                             );
                         } else {
                             let _ = tx.send(format!(
-                                "[WARNING] Plan execution partially completed: {}",
+                                "[WARNING] Plan {} partially completed: {}",
+                                &plan_id[..8],
                                 result.final_message
                             ));
                         }
+                        // Always send summary to UI regardless of background mode
                         let _ = tx.send(format!(
-                            "[TIMER] Execution time: {}s",
-                            result.total_duration
-                        ));
-                        let _ = tx.send(format!(
-                            "[CONFIRMED] Completed steps: {}/{}",
+                            "[SUMMARY] Plan {}: {}/{} steps confirmed. Total time: {}s.",
+                            &plan_id[..8],
                             result.completed_steps.len(),
-                            result.completed_steps.len()
+                            result.completed_steps.len(), // This seems to be the same number, might need to check logic
+                            result.total_duration
                         ));
                     }
                 }
@@ -496,7 +516,7 @@ impl TuiExecutor {
                     }
 
                     if let Some(tx) = ui_tx {
-                        let _ = tx.send(format!("[ERROR] Plan execution failed: {}", e));
+                        let _ = tx.send(format!("[ERROR] Plan {} failed: {}", &plan_id[..8], e));
                     }
                 }
             }

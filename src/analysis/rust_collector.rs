@@ -385,6 +385,7 @@ fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_to
     map.symbols.push(symbol_info);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_impl_items(
     map: &mut RepoMap,
     parent_name: &Option<String>,
