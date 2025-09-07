@@ -90,7 +90,7 @@ impl TuiExecutor {
             repomap,
             client,
             history,
-            ui_tx: None,
+            ui_tx: None, // This will be set by TuiApp later
             cancel_tx: None,
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history

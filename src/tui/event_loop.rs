@@ -106,6 +106,11 @@ impl TuiApp {
                             self.dirty = true;
                             self.spinner_state = 0;
                         }
+                        "::status:idle" => {
+                            self.status = Status::Idle;
+                            self.dirty = true;
+                            self.spinner_state = 0;
+                        }
                         "::status:shell_running" => {
                             self.status = Status::ShellCommandRunning;
                             self.dirty = true;

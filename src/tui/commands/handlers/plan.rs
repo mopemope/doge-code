@@ -14,6 +14,9 @@ impl TuiExecutor {
         }
 
         ui.push_log(format!("> /plan {}", task_description));
+        ui.push_log("[INFO] Analyzing task and generating plan...");
+        ui.status = crate::tui::state::Status::Processing;
+        ui.dirty = true;
 
         // Use tokio runtime for asynchronous processing
         let task_analyzer = &self.task_analyzer;
@@ -22,7 +25,7 @@ impl TuiExecutor {
         // Analysis is performed synchronously
         match task_analyzer.analyze(&task_desc) {
             Ok(classification) => {
-                ui.push_log("[ANALYSIS] Analyzing task...");
+                ui.push_log("[ANALYSIS] Task analysis completed.");
                 ui.push_log(format!(
                     "[PLANNING] Task classification: {:?}",
                     classification.task_type
@@ -47,6 +50,7 @@ impl TuiExecutor {
                     "[CONFIRMED] Confidence: {:.1}%",
                     classification.confidence * 100.0
                 ));
+                ui.push_log("[INFO] Decomposing task into steps...");
 
                 // Decomposition is performed asynchronously in a separate thread
                 let rt = tokio::runtime::Handle::current();
@@ -61,10 +65,7 @@ impl TuiExecutor {
                     {
                         Ok(steps) => {
                             if let Some(tx) = ui_tx {
-                                let _ = tx.send(format!(
-                                    "[PLAN] Execution plan ({} steps):",
-                                    steps.len()
-                                ));
+                                let _ = tx.send("[INFO] Plan decomposition completed.".to_string());
 
                                 for (i, step) in steps.iter().enumerate() {
                                     let step_icon = match step.step_type {
@@ -111,6 +112,9 @@ impl TuiExecutor {
                                                 plan.total_estimated_duration
                                             ));
                                             let _ = tx.send(format!("[ID] Plan ID: {}", plan_id));
+                                            let _ = tx.send(
+                                                "[INFO] Plan generation completed.".to_string(),
+                                            );
                                             let _ = tx.send("[INFO] How to execute:".to_string());
                                             let _ = tx.send(
                                                 "   /execute        - Execute the latest plan"
@@ -138,12 +142,14 @@ impl TuiExecutor {
                                         }
                                     }
                                 }
+                                let _ = tx.send("::status:idle".to_string());
                             }
                         }
                         Err(e) => {
                             if let Some(tx) = ui_tx {
                                 let _ =
                                     tx.send(format!("[ERROR] Failed to decompose steps: {}", e));
+                                let _ = tx.send("::status:idle".to_string());
                             }
                         }
                     }
@@ -151,6 +157,8 @@ impl TuiExecutor {
             }
             Err(e) => {
                 ui.push_log(format!("[ERROR] Failed to analyze task: {}", e));
+                ui.status = crate::tui::state::Status::Idle;
+                ui.dirty = true;
             }
         }
     }

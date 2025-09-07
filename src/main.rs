@@ -121,6 +121,8 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
         }
     };
 
+    let mut exec = exec;
+    exec.set_ui_tx(app.sender());
     app = app.with_handler(Box::new(exec));
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
