@@ -5,6 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::error;
 
+/// Maximum number of sessions to keep
+const MAX_SESSIONS: usize = 100;
+
 pub struct SessionStore {
     pub(crate) root: PathBuf,
 }
@@ -60,11 +63,16 @@ impl SessionStore {
     }
 
     /// Create a new session and return the session data.
+    /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn create(&self) -> Result<SessionData, SessionError> {
         // Create a new session using SessionData::new
         let data = SessionData::new();
 
         self.save(&data)?; // Save the session using the save method
+
+        // Clean up old sessions if we exceed the limit
+        cleanup_old_sessions(self)?;
+
         Ok(data)
     }
 
@@ -89,6 +97,7 @@ impl SessionStore {
     }
 
     /// Save the session data.
+    /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
         let dir = self.root.join(&data.meta.id);
         fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
@@ -103,6 +112,9 @@ impl SessionStore {
             );
             SessionError::WriteError(e)
         })?;
+
+        // Clean up old sessions if we exceed the limit
+        cleanup_old_sessions(self)?;
 
         Ok(())
     }
@@ -136,6 +148,28 @@ fn default_store_dir() -> Result<PathBuf, SessionError> {
     let project_dir = env::current_dir().map_err(SessionError::ReadError)?;
     let base = project_dir.join(".doge/sessions");
     Ok(base)
+}
+
+/// Clean up old sessions if we exceed the maximum limit
+fn cleanup_old_sessions(store: &SessionStore) -> Result<(), SessionError> {
+    let sessions = store.list()?;
+    if sessions.len() > MAX_SESSIONS {
+        // Calculate how many sessions to delete
+        let excess_count = sessions.len() - MAX_SESSIONS;
+
+        // The sessions are sorted by creation date in descending order (newest first)
+        // So we need to delete from the end of the vector (oldest sessions)
+        for session_meta in sessions.iter().skip(MAX_SESSIONS) {
+            store.delete(&session_meta.id)?;
+        }
+
+        tracing::info!(
+            "Cleaned up {} old sessions to maintain limit of {}",
+            excess_count,
+            MAX_SESSIONS
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,6 +362,36 @@ mod tests {
             latest.unwrap().meta.id,
             session2.meta.id,
             "Should return the most recently created session"
+        );
+    }
+
+    #[test]
+    fn test_session_limit_and_cleanup() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        // Create more sessions than the limit
+        for _ in 0..105 {
+            store.create().expect("Failed to create session");
+        }
+
+        // Check that we only have the maximum allowed sessions
+        let sessions = store.list().expect("Failed to list sessions");
+        assert_eq!(
+            sessions.len(),
+            MAX_SESSIONS,
+            "Should limit sessions to MAX_SESSIONS"
+        );
+
+        // Create one more session
+        store.create().expect("Failed to create session");
+
+        // Check that we still have the maximum allowed sessions
+        let sessions = store.list().expect("Failed to list sessions");
+        assert_eq!(
+            sessions.len(),
+            MAX_SESSIONS,
+            "Should still limit sessions to MAX_SESSIONS"
         );
     }
 }
