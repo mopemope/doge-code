@@ -197,7 +197,7 @@ pub(super) fn filter_and_group_symbols(
     }
 
     // Apply limit
-    let limit = args.limit.unwrap_or(50);
+    let limit = args.limit.unwrap_or(20);
     results.truncate(limit);
 
     results
