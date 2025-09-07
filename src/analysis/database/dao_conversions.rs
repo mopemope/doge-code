@@ -1,7 +1,7 @@
-use crate::analysis::database::entities::file_hash::*;
-use crate::analysis::database::entities::symbol_info::*;
+use crate::analysis::database::entities::file_hash::ActiveModel as FileHashActiveModel;
+use crate::analysis::database::entities::symbol_info::ActiveModel as SymbolInfoActiveModel;
 use crate::analysis::database::entities::symbol_info::Model as SymbolInfoModel;
-use crate::analysis::{SymbolInfo as AnalysisSymbolInfo};
+use crate::analysis::symbol::SymbolInfo as AnalysisSymbolInfo;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use sea_orm::Set;
@@ -11,13 +11,17 @@ use std::path::PathBuf;
 pub fn symbol_to_active_model(
     symbol: &AnalysisSymbolInfo,
     project_root: &str,
-) -> Result<ActiveModel> {
+) -> Result<SymbolInfoActiveModel> {
     let file_path_str = symbol
         .file
         .to_str()
         .context("File path is not valid UTF-8")?;
 
-    Ok(ActiveModel {
+    // Convert keywords to a JSON string
+    let keywords_json =
+        serde_json::to_string(&symbol.keywords).unwrap_or_else(|_| "[]".to_string());
+
+    Ok(SymbolInfoActiveModel {
         id: Default::default(), // Auto-increment
         name: Set(symbol.name.clone()),
         kind: Set(match symbol.kind {
@@ -30,6 +34,7 @@ pub fn symbol_to_active_model(
             crate::analysis::symbol::SymbolKind::AssocFn => "assoc_fn".to_string(),
             crate::analysis::symbol::SymbolKind::Mod => "mod".to_string(),
             crate::analysis::symbol::SymbolKind::Variable => "var".to_string(),
+            crate::analysis::symbol::SymbolKind::Comment => "comment".to_string(),
         }),
         file_path: Set(file_path_str.to_string()),
         start_line: Set(symbol.start_line as i32),
@@ -40,6 +45,7 @@ pub fn symbol_to_active_model(
         file_total_lines: Set(symbol.file_total_lines as i32),
         function_lines: Set(symbol.function_lines.map(|l| l as i32)),
         project_root: Set(project_root.to_string()),
+        keywords: Set(keywords_json),
         created_at: Set(Utc::now()),
     })
 }
@@ -56,6 +62,7 @@ pub fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolIn
         "assoc_fn" => crate::analysis::symbol::SymbolKind::AssocFn,
         "mod" => crate::analysis::symbol::SymbolKind::Mod,
         "var" => crate::analysis::symbol::SymbolKind::Variable,
+        "comment" => crate::analysis::symbol::SymbolKind::Comment,
         _ => {
             return Err(anyhow::anyhow!(
                 "unexpected value for SymbolKind: {}",
@@ -63,6 +70,11 @@ pub fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolIn
             ));
         }
     };
+
+    // Parse keywords from JSON string
+    let keywords: Vec<String> =
+        serde_json::from_str(&model.keywords).unwrap_or_else(|_| Vec::new());
+
     Ok(AnalysisSymbolInfo {
         name: model.name,
         kind,
@@ -74,6 +86,7 @@ pub fn active_model_to_symbol(model: SymbolInfoModel) -> Result<AnalysisSymbolIn
         parent: model.parent,
         file_total_lines: model.file_total_lines as usize,
         function_lines: model.function_lines.map(|l| l as usize),
+        keywords,
     })
 }
 
@@ -82,8 +95,8 @@ pub fn file_hash_to_active_model(
     file_path: &str,
     hash: &str,
     project_root: &str,
-) -> ActiveModel {
-    ActiveModel {
+) -> FileHashActiveModel {
+    FileHashActiveModel {
         id: Default::default(), // Auto-increment
         file_path: Set(file_path.to_string()),
         hash: Set(hash.to_string()),
