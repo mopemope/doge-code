@@ -4,7 +4,7 @@ use crossterm::{
     cursor, execute,
     terminal::{self},
 };
-use ratatui::widgets::{Block, Borders};
+use ratatui::widgets::Block;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
