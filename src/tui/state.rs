@@ -269,7 +269,7 @@ impl TuiApp {
         };
 
         let mut textarea = TextArea::default();
-        textarea.set_block(Block::default().borders(Borders::ALL).title("Input"));
+        textarea.set_block(Block::default().title("Input"));
         textarea.set_placeholder_text("Enter your message...");
 
         let app = Self {
