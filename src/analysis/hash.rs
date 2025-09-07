@@ -33,7 +33,10 @@ pub async fn calculate_file_hashes(file_paths: &[PathBuf]) -> HashMap<PathBuf, S
     let mut tasks = Vec::new();
 
     // Split files into chunks for parallel processing
-    let chunk_size = std::cmp::max(1, file_paths.len() / num_cpus::get());
+    // Set the number of chunks to the minimum of the number of CPUs and the number of files
+    let num_chunks = std::cmp::min(num_cpus::get(), file_paths.len());
+    // Calculate the chunk size (set to 1 if the number of files is 0)
+    let chunk_size = std::cmp::max(1, file_paths.len().div_ceil(num_chunks));
     let chunks: Vec<Vec<PathBuf>> = file_paths
         .chunks(chunk_size)
         .map(|chunk| chunk.to_vec())
