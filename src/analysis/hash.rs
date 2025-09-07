@@ -1,19 +1,28 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-/// Calculate SHA256 hash of a file
+/// Calculate SHA256 hash of a file using streaming to reduce memory usage
 pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
-    let content = fs::read(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
-
+    let file = File::open(file_path)
+        .with_context(|| format!("Failed to open file: {}", file_path.display()))?;
+    let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(&content);
-    let hash = hasher.finalize();
+    let mut buffer = [0; 8192]; // 8KB buffer
 
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+
+    let hash = hasher.finalize();
     Ok(format!("{:x}", hash))
 }
 
