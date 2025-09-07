@@ -1,5 +1,6 @@
 use crate::analysis::language_config::language_configs;
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -7,41 +8,29 @@ use std::{
 use tracing::debug;
 
 pub fn find_target_files(root: &Path) -> Result<Vec<PathBuf>> {
-    use ignore::WalkBuilder;
-
-    let patterns: Vec<_> = language_configs()
+    // Get the set of target extensions
+    let target_extensions: HashSet<String> = language_configs()
         .iter()
-        .flat_map(|c| c.extensions.iter().map(|ext| format!("**/*.{}", ext)))
+        .flat_map(|c| c.extensions.iter())
+        .map(|s| s.to_string())
         .collect();
 
-    // Use glob crate to find files matching the patterns
-    let mut glob_files = HashSet::new();
-    for pattern in &patterns {
-        let full_pattern = root.join(pattern);
-        if let Ok(glob_result) = glob::glob(full_pattern.to_str().unwrap()) {
-            for entry in glob_result {
-                if let Ok(path) = entry
-                    && path.is_file()
-                {
-                    glob_files.insert(path);
-                }
-            }
-        }
-    }
-
-    // Use ignore crate to filter out files that should be ignored
     let mut files = Vec::new();
+
+    // Use ignore crate to walk the directory and filter files
     for result in WalkBuilder::new(root)
-        .git_ignore(true) // Explicitly enable .gitignore
+        .git_ignore(true) // Enable .gitignore
         .require_git(false) // Allow .gitignore outside of git repo
         .build()
     {
         let entry = result.context("walk entry")?;
         if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            let path = entry.path().to_path_buf();
-            // Check if the file matches our glob patterns
-            if glob_files.contains(&path) {
-                files.push(path);
+            let path = entry.path();
+            // Check if the file extension is in the target extensions
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && target_extensions.contains(ext)
+            {
+                files.push(path.to_path_buf());
             }
         }
     }

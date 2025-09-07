@@ -42,14 +42,16 @@ pub fn fs_read_many_files(
                 Ok(path) => {
                     all_paths.push(path);
                 }
-                Err(e) => return Err(anyhow::anyhow!(e)),
+                Err(e) => return Err(anyhow::anyhow!("{}", e)),
             }
         }
     }
 
     if let Some(exclude_patterns) = exclude {
         for pattern in exclude_patterns {
-            all_paths.retain(|path| !path.to_str().unwrap_or("").contains(&pattern));
+            all_paths.retain(|path: &std::path::PathBuf| {
+                !path.to_str().unwrap_or("").contains(&pattern)
+            });
         }
     }
 
