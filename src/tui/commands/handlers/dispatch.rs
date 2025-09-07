@@ -21,17 +21,26 @@ impl CommandHandler for TuiExecutor {
             "/help" => {
                 ui.push_log("Available commands:");
                 ui.push_log("  /help - Show this help message");
-                ui.push_log("  /map - Show repository analysis");
-                ui.push_log("  /tools - List available tools");
-                ui.push_log("  /clear - Clear the log area");
-                ui.push_log("  /open <path> - Open a file in your editor");
                 ui.push_log("  /quit - Exit the application");
+                ui.push_log("  /clear - Clear the conversation and log area");
+                ui.push_log("  /open <path> - Open a file in your editor");
                 ui.push_log("  /theme <name> - Switch theme (dark/light)");
-                ui.push_log("  /session <cmd> - Session management (new|list|switch|save|delete|current|clear)");
-                ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
+                ui.push_log("  /tools - List available tools");
                 ui.push_log("  /tokens - Show token usage");
-                ui.push_log("  /plan - Analyze task and planning");
                 ui.push_log("  /compact - Compact conversation history to reduce token usage");
+                ui.push_log("  /cancel - Cancel the current operation");
+                ui.push_log("");
+                ui.push_log("Repository Analysis:");
+                ui.push_log("  /map - Show repository analysis summary");
+                ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
+                ui.push_log("");
+                ui.push_log("Session Management:");
+                ui.push_log("  /session <new|list|switch|save|delete|current|clear> - Manage sessions");
+                ui.push_log("");
+                ui.push_log("Task Planning & Execution:");
+                ui.push_log("  /plan <task> - Analyze task and create an execution plan");
+                ui.push_log("  /plans - List active and recent plans");
+                ui.push_log("  /execute [plan_id] - Execute the latest or a specific plan");
                 ui.push_log("");
                 ui.push_log("Custom commands:");
                 self.display_custom_commands_help(ui);
@@ -49,7 +58,18 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  Esc - Cancel operation or exit shell mode");
                 ui.push_log("  Ctrl+C - Cancel (press twice to exit)");
             }
-            "/tools" => ui.push_log("Available tools: fs_search, fs_read, fs_write "),
+            "/tools" => {
+                ui.push_log("Available tools for the LLM:");
+                ui.push_log("  - fs_list: List files and directories");
+                ui.push_log("  - fs_read: Read a file");
+                ui.push_log("  - fs_read_many_files: Read multiple files");
+                ui.push_log("  - fs_write: Write to a file");
+                ui.push_log("  - search_text: Search for text in files");
+                ui.push_log("  - execute_bash: Execute a shell command");
+                ui.push_log("  - find_file: Find a file by name or pattern");
+                ui.push_log("  - get_symbol_info: Get information about code symbols from repomap");
+                ui.push_log("  - search_repomap: Search the repomap with specific criteria");
+            }
             "/clear" => {
                 ui.clear_log();
             }
