@@ -50,13 +50,12 @@ pub async fn run_agent_loop(
         // If assistant returned final content without tool calls, we are done.
         if msg.tool_calls.is_empty() {
             // Send final assistant content to UI (if present)
-            if let Some(content) = &msg.content {
-                if !content.is_empty() {
-                    if let Some(tx) = &ui_tx {
-                        debug!(response_content = ?content, "Sending LLM response content (final).");
-                        let _ = tx.send(format!("::status:done:{}", content));
-                    }
-                }
+            if let Some(content) = &msg.content
+                && !content.is_empty()
+                && let Some(tx) = &ui_tx
+            {
+                debug!(response_content = ?content, "Sending LLM response content (final).");
+                let _ = tx.send(format!("::status:done:{}", content));
             }
 
             messages.push(ChatMessage {
@@ -67,27 +66,23 @@ pub async fn run_agent_loop(
             });
 
             // If files were written during tool execution, compute and send git diff
-            if file_was_written {
-                if let Some(tx) = &ui_tx {
-                    match Command::new("git")
-                        .arg("diff")
-                        .arg("--color=always")
-                        .output()
-                    {
-                        Ok(output) => {
-                            if !output.stdout.is_empty() {
-                                let diff_output =
-                                    String::from_utf8_lossy(&output.stdout).to_string();
-                                // Send diff output with a reserved prefix so the TUI can display it as a popup
-                                let _ = tx.send(format!("::diff_output:{}", diff_output));
-                            }
+            if file_was_written && let Some(tx) = &ui_tx {
+                match Command::new("git")
+                    .arg("diff")
+                    .arg("--color=always")
+                    .output()
+                {
+                    Ok(output) => {
+                        if !output.stdout.is_empty() {
+                            let diff_output = String::from_utf8_lossy(&output.stdout).to_string();
+                            // Send diff output with a reserved prefix so the TUI can display it as a popup
+                            let _ = tx.send(format!("::diff_output:{}", diff_output));
                         }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to run git diff");
-                            if let Some(tx) = &ui_tx {
-                                let _ =
-                                    tx.send(format!("::diff_output:Failed to run git diff: {}", e));
-                            }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to run git diff");
+                        if let Some(tx) = &ui_tx {
+                            let _ = tx.send(format!("::diff_output:Failed to run git diff: {}", e));
                         }
                     }
                 }
@@ -103,13 +98,12 @@ pub async fn run_agent_loop(
         }
 
         // There are tool calls to process. Send intermediate content if available.
-        if let Some(content) = &msg.content {
-            if !content.is_empty() {
-                if let Some(tx) = &ui_tx {
-                    debug!(response_content = ?content, "Sending intermediate LLM response content.");
-                    let _ = tx.send(content.clone());
-                }
-            }
+        if let Some(content) = &msg.content
+            && !content.is_empty()
+            && let Some(tx) = &ui_tx
+        {
+            debug!(response_content = ?content, "Sending intermediate LLM response content.");
+            let _ = tx.send(content.clone());
         }
 
         messages.push(ChatMessage {
@@ -136,25 +130,23 @@ pub async fn run_agent_loop(
                     for key in ["path", "paths", "file_path", "filename"].iter() {
                         if let Some(value) = obj.get_mut(*key) {
                             if value.is_string() {
-                                if let Some(path_str) = value.as_str() {
-                                    if let Some(file_name) = std::path::Path::new(path_str)
+                                if let Some(path_str) = value.as_str()
+                                    && let Some(file_name) = std::path::Path::new(path_str)
                                         .file_name()
                                         .and_then(|s| s.to_str())
-                                    {
-                                        *value = file_name.to_string().into();
-                                    }
+                                {
+                                    *value = file_name.to_string().into();
                                 }
-                            } else if value.is_array() {
-                                if let Some(arr) = value.as_array_mut() {
-                                    for item in arr.iter_mut() {
-                                        if let Some(path_str) = item.as_str() {
-                                            if let Some(file_name) = std::path::Path::new(path_str)
-                                                .file_name()
-                                                .and_then(|s| s.to_str())
-                                            {
-                                                *item = file_name.to_string().into();
-                                            }
-                                        }
+                            } else if value.is_array()
+                                && let Some(arr) = value.as_array_mut()
+                            {
+                                for item in arr.iter_mut() {
+                                    if let Some(path_str) = item.as_str()
+                                        && let Some(file_name) = std::path::Path::new(path_str)
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                    {
+                                        *item = file_name.to_string().into();
                                     }
                                 }
                             }
@@ -184,7 +176,11 @@ pub async fn run_agent_loop(
             };
 
             // Set file_was_written flag for tools that modify files
-            if (tc.function.name == "fs_write" || tc.function.name == "edit" || tc.function.name == "apply_patch") && res.is_ok() {
+            if (tc.function.name == "fs_write"
+                || tc.function.name == "edit"
+                || tc.function.name == "apply_patch")
+                && res.is_ok()
+            {
                 file_was_written = true;
             }
 

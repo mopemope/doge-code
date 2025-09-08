@@ -60,6 +60,12 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(output) = msg.strip_prefix("::diff_output:") {
+                        self.diff_output = Some(output.to_string());
+                        self.dirty = true;
+                        continue;
+                    }
+
                     match msg.as_str() {
                         "::status:done" => {
                             if is_streaming {
@@ -264,6 +270,28 @@ impl TuiApp {
             if event::poll(Duration::from_millis(50))?
                 && let Event::Key(k) = event::read()?
             {
+                if self.diff_output.is_some() {
+                    match k.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.diff_output = None;
+                            self.diff_scroll = 0;
+                            self.dirty = true;
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            self.diff_scroll = self.diff_scroll.saturating_add(1);
+                            self.dirty = true;
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            self.diff_scroll = self.diff_scroll.saturating_sub(1);
+                            self.dirty = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Global key handlers
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     let now = Instant::now();
