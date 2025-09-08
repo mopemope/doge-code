@@ -135,6 +135,8 @@ pub struct TuiApp {
     // auto-compact flag to avoid duplicate triggers
     pub auto_compact_pending: bool,
     pub pending_instructions: VecDeque<String>,
+    pub diff_output: Option<String>,
+    pub diff_scroll: u16,
 }
 
 impl TuiApp {
@@ -308,6 +310,8 @@ impl TuiApp {
             // auto-compact starts not pending
             auto_compact_pending: false,
             pending_instructions: VecDeque::new(),
+            diff_output: None,
+            diff_scroll: 0,
         };
 
         Ok(app)

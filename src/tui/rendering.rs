@@ -1,8 +1,9 @@
 use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
+use ansi_to_tui::IntoText;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation},
 };
 // use tracing::debug;
 
@@ -61,6 +62,10 @@ impl TuiApp {
         self.render_main_content(f, chunks[1], &plan, &self.theme);
 
         self.render_footer(f, chunks[2]);
+
+        if let Some(diff_output) = &self.diff_output.clone() {
+            self.render_diff_popup(f, size, diff_output);
+        }
 
         // The cursor is now handled by the TextArea widget, so no need to set it manually.
     }
@@ -293,4 +298,62 @@ impl TuiApp {
             f.render_widget(list, completion_area);
         }
     }
+
+    fn render_diff_popup(&mut self, f: &mut Frame, area: Rect, diff_content: &str) {
+        let text = match diff_content.as_bytes().into_text() {
+            Ok(text) => text,
+            Err(_) => diff_content.into(), // Fallback to plain text
+        };
+
+        let block = Block::default()
+            .title("Git Diff (Press ESC or q to close)")
+            .borders(Borders::ALL);
+
+        let line_count = text.height();
+
+        let paragraph = Paragraph::new(text)
+            .block(block)
+            .scroll((self.diff_scroll, 0));
+
+        // Create a centered popup area
+        let popup_area = centered_rect(80, 90, area);
+        f.render_widget(Clear, popup_area); // Clear the background
+        f.render_widget(paragraph, popup_area);
+
+        if line_count > popup_area.height as usize {
+            let mut scrollbar_state =
+                ratatui::widgets::ScrollbarState::new(line_count - popup_area.height as usize)
+                    .position(self.diff_scroll as usize);
+
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight),
+                popup_area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+    }
+}
+
+/// helper function to create a centered rect using up certain percentage of the available rect `r`
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
