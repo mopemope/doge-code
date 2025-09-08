@@ -29,7 +29,6 @@ pub async fn dispatch_tool_call(
         "fs_read_many_files" => fs::fs_read_many_files(runtime, &args_val).await,
 
         // Analysis / repomap
-        "get_symbol_info" => analysis::get_symbol_info(runtime, &args_val).await,
         "search_repomap" => analysis::search_repomap(runtime, &args_val).await,
 
         // Tools and helpers

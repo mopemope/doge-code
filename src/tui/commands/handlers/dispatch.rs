@@ -69,7 +69,6 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  - search_text: Search for text in files");
                 ui.push_log("  - execute_bash: Execute a shell command");
                 ui.push_log("  - find_file: Find a file by name or pattern");
-                ui.push_log("  - get_symbol_info: Get information about code symbols from repomap");
                 ui.push_log("  - search_repomap: Search the repomap with specific criteria");
             }
             "/clear" => {

@@ -259,7 +259,7 @@ The LLM has access to comprehensive tools for autonomous operation:
 - `find_file` - Find files by name pattern
 
 ### Code Analysis Tools
-- `get_symbol_info` - Query repository map for functions, classes, and symbols
+
 - `search_repomap` - Search analyzed code symbols with filtering
 
 
