@@ -72,6 +72,11 @@ impl OpenAIClient {
         };
 
         let mut headers = HeaderMap::new();
+        headers.insert(
+            "HTTP-Refer",
+            "https://github.com/mopemope/doge-code".parse().unwrap(),
+        );
+        headers.insert("X-Title", "Doge-Code".parse().unwrap());
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(
             AUTHORIZATION,
