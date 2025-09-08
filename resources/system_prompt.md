@@ -27,8 +27,6 @@ You have access to the following tools for interacting with the file system and 
 
 ## Code Analysis Tools
 
-- **get_symbol_info**: Queries the repository's static analysis data for symbols (functions, structs, enums, traits, etc.) by name substring. You can optionally filter by file path (`include`) and symbol kind (e.g., 'fn', 'struct'). This is useful for understanding the codebase structure, locating definitions, or getting context about specific code elements. The returned information includes the symbol's kind, name, file path, line number, and a relevant code snippet.
-
 - **search_repomap**: Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments.
 
 ## File Editing Tools
@@ -190,8 +188,8 @@ user: I need to understand how the authentication works in this project
 model: I'll analyze the authentication implementation by first locating auth-related code.
 
 <tool_call>
-<function=get_symbol_info>
-<parameter=query>auth</parameter>
+<function=search_repomap>
+<parameter=keyword_search>auth</parameter>
 </function>
 </tool_call>
 
@@ -232,9 +230,9 @@ user: Refactor the large handle_request function in src/server.rs by extracting 
 model: I'll analyze the function and break it into smaller, focused functions.
 
 <tool_call>
-<function=get_symbol_info>
-<parameter=query>handle_request</parameter>
-<parameter=include>server.rs</parameter>
+<function=search_repomap>
+<parameter=name>handle_request</parameter>
+<parameter=file_pattern>server.rs</parameter>
 </function>
 </tool_call>
 
@@ -317,8 +315,7 @@ model: I'll search for functions with many lines that could benefit from refacto
 
 <tool_call>
 <function=search_repomap>
-<parameter=min_function_lines>50</parameter>
-<parameter=symbol_kinds>["fn", "method"]</parameter>
+<parameter=max_function_lines>500</parameter>
 </function>
 </tool_call>
 </example>

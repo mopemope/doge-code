@@ -11,14 +11,11 @@ use crate::tools::read;
 use crate::tools::read_many;
 use crate::tools::search_repomap;
 use crate::tools::search_text;
-use crate::tools::symbol;
-use crate::tools::symbol::SymbolTools;
 use crate::tools::write;
 use crate::tui::commands_sessions::SessionManager;
 
 #[derive(Debug, Clone)]
 pub struct FsTools {
-    symbol_tools: SymbolTools,
     search_repomap_tools: search_repomap::RepomapSearchTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
     pub session_manager: Option<Arc<Mutex<SessionManager>>>,
@@ -33,7 +30,6 @@ impl Default for FsTools {
 impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
         Self {
-            symbol_tools: SymbolTools::new(),
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             repomap,
             session_manager: None,
@@ -125,20 +121,6 @@ impl FsTools {
             filename: filename.to_string(),
         })
         .await
-    }
-
-    pub async fn get_symbol_info(
-        &self,
-        query: &str,
-        include: Option<&str>,
-        kind: Option<&str>,
-    ) -> Result<Vec<symbol::SymbolQueryResult>> {
-        let repomap_guard = self.repomap.read().await;
-        if let Some(map) = &*repomap_guard {
-            self.symbol_tools.get_symbol_info(map, query, include, kind)
-        } else {
-            Err(anyhow::anyhow!("repomap is still generating"))
-        }
     }
 
     pub async fn search_repomap(

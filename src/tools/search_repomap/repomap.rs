@@ -1,25 +1,47 @@
+use crate::analysis::{RepoMap, SymbolInfo};
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
-
-use crate::analysis::{RepoMap, SymbolInfo};
-
 mod repomap_filter;
 use repomap_filter::filter_and_group_symbols;
+
+const DESCRIPTION: &str = "
+This is an advanced, structural code search tool for the entire repository.
+Unlike simple text-matching tools like grep or ripgrep, it understands code structure (symbol names, comments) and metrics (file size, function size), allowing you to combine these criteria for precise searches.
+This is the primary, first-choice tool that should be used to investigate the codebase or pinpoint locations for modification.
+By passing feature names or keywords from a user's request to the `keyword_search` parameter, you can quickly and accurately discover relevant code and files.
+
+Primary Use Cases:
+- Identifying the location of code related to a specific feature.
+- Finding refactoring candidates, such as large files or complex functions.
+- Analyzing patterns of the codebase's overall structure and complexity.
+
+Key Parameter:
+
+- keyword_search:
+ - Specifies the core keywords, feature names, or relevant terms for the search.
+ - It searches against both symbol names (e.g., function/class names) and the comments associated with those symbols.
+ - Set the most critical terms extracted from the user's instructions here.
+- name:
+ - Searches directly for a specific symbol by its name (e.g., function name, class name, variable name).
+- max_file_lines:
+ - Filters files based on the number of lines. Comparison operators can be used.
+- max_function_lines
+ - Filters for files containing functions that meet the specified line count criteria. Comparison operators can be used.";
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_repomap".to_string(),
-            description: "Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments.".to_string(),
+            description: DESCRIPTION.to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "max_file_lines": {
-                        "type": "integer", 
+                        "type": "integer",
                         "description": "Maximum number of lines in the file"
                     },
                     "max_function_lines": {
