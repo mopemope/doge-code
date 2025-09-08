@@ -7,6 +7,7 @@ use crate::analysis::{Analyzer, RepoMap};
 use crate::config::AppConfig;
 use crate::llm::{self, OpenAIClient};
 use crate::tools::FsTools;
+use crate::tui::commands_sessions::SessionManager;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -29,7 +30,9 @@ impl Executor {
     pub fn new(cfg: AppConfig) -> Result<Self> {
         info!("Initializing Executor for exec subcommand");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
-        let tools = FsTools::new(repomap.clone());
+        // Initialize session manager for exec mode (even though it won't be used for persistence)
+        let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
+        let tools = FsTools::new(repomap.clone()).with_session_manager(session_manager);
 
         // Only initialize repomap if not disabled
         if !cfg.no_repomap {

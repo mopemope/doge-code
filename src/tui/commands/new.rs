@@ -67,6 +67,9 @@ impl TuiExecutor {
         // Initialize session manager
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
+        // Pass session manager to tools
+        let tools = tools.with_session_manager(session_manager.clone());
+
         // Initialize plan manager
         let plan_manager = Arc::new(Mutex::new(crate::planning::PlanManager::new(
             cfg.project_root.clone(),

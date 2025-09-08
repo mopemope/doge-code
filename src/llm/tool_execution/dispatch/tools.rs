@@ -14,12 +14,35 @@ pub async fn execute_bash(
 }
 
 pub async fn edit(
-    _runtime: &ToolRuntime<'_>,
+    runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;
     match crate::tools::edit::edit(params).await {
-        Ok(res) => Ok(serde_json::to_value(res)?),
+        Ok(res) => {
+            // If the edit was successful, update the session with the lines edited
+            if res.success {
+                // Update session with tool call count
+                if let Some(session_manager) = &runtime.fs.session_manager {
+                    let mut session_mgr = session_manager.lock().unwrap();
+                    if let Err(e) = session_mgr.update_current_session_with_tool_call_count() {
+                        tracing::error!(?e, "Failed to update session with tool call count");
+                    }
+
+                    // Update session with lines edited count
+                    if let Some(lines_edited) = res.lines_edited {
+                        let session_mgr = &mut *session_mgr; // Release the immutable borrow
+                        if let Some(ref mut session) = session_mgr.current_session {
+                            session.increment_lines_edited(lines_edited);
+                            if let Err(e) = session_mgr.store.save(session) {
+                                tracing::error!(?e, "Failed to save session data");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::to_value(res)?)
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }

@@ -22,6 +22,8 @@ pub struct SessionData {
     pub requests: u64,
     /// Number of tool calls made
     pub tool_calls: u64,
+    /// Number of lines edited
+    pub lines_edited: u64,
 }
 
 impl SessionData {
@@ -37,6 +39,7 @@ impl SessionData {
             token_count: 0,
             requests: 0,
             tool_calls: 0,
+            lines_edited: 0,
         }
     }
 
@@ -67,6 +70,12 @@ impl SessionData {
     /// Increment tool calls count.
     pub fn increment_tool_calls(&mut self) {
         self.tool_calls += 1;
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
+    }
+
+    /// Increment lines edited count.
+    pub fn increment_lines_edited(&mut self, count: u64) {
+        self.lines_edited += count;
         self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
 }
