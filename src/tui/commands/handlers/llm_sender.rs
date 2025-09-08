@@ -73,6 +73,7 @@ impl TuiExecutor {
                         }
                     }
 
+                    let cfg = self.cfg.clone();
                     let res = crate::llm::run_agent_loop(
                         &c,
                         &model,
@@ -81,6 +82,7 @@ impl TuiExecutor {
                         tx.clone(),
                         Some(cancel_token),
                         Some(session_manager.clone()),
+                        &cfg,
                     )
                     .await;
                     // Get token usage after the agent loop completes

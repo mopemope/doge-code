@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::{ChatMessage, OpenAIClient, run_agent_loop};
 use crate::planning::llm_decomposer::types::*;
 use crate::planning::task_types::*;
@@ -15,6 +16,7 @@ pub struct LlmTaskDecomposer {
     pub model: String,
     pub fs_tools: FsTools,
     pub repomap: Arc<RwLock<Option<crate::analysis::RepoMap>>>,
+    pub cfg: AppConfig,
 }
 
 impl LlmTaskDecomposer {
@@ -23,12 +25,14 @@ impl LlmTaskDecomposer {
         model: String,
         fs_tools: FsTools,
         repomap: Arc<RwLock<Option<crate::analysis::RepoMap>>>,
+        cfg: AppConfig,
     ) -> Self {
         Self {
             client,
             model,
             fs_tools,
             repomap,
+            cfg,
         }
     }
 
@@ -64,6 +68,7 @@ impl LlmTaskDecomposer {
             None,
             None,
             None, // No session manager for decomposer
+            &self.cfg,
         )
         .await
         {

@@ -117,7 +117,7 @@ mod tests {
         fs::write(root.join("a/b/c.txt"), "").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let result = fs_list(&format!("{root_str}"), Some(3), None).unwrap();
+        let result = fs_list(root_str, Some(3), None).unwrap();
         assert_eq!(
             result,
             vec![

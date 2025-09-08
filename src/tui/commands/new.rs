@@ -82,6 +82,7 @@ impl TuiExecutor {
                 cfg.model.clone(),
                 tools.clone(),
                 repomap.clone(),
+                cfg.clone(),
             )
         } else {
             crate::planning::TaskAnalyzer::new()

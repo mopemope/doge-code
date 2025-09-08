@@ -1,4 +1,5 @@
 use crate::analysis::RepoMap;
+use crate::config::AppConfig;
 use crate::llm::OpenAIClient;
 use crate::planning::llm_decomposer::LlmTaskDecomposer;
 use crate::tools::FsTools;
@@ -26,6 +27,9 @@ pub(crate) fn with_llm_decomposer(
     model: String,
     fs_tools: FsTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
+    cfg: AppConfig,
 ) {
-    *llm_decomposer_slot = Some(LlmTaskDecomposer::new(client, model, fs_tools, repomap));
+    *llm_decomposer_slot = Some(LlmTaskDecomposer::new(
+        client, model, fs_tools, repomap, cfg,
+    ));
 }

@@ -215,6 +215,7 @@ impl TuiExecutor {
                     let fs = self.tools.clone();
                     let conversation_history = self.conversation_history.clone();
                     let session_manager = self.session_manager.clone();
+                    let cfg = self.cfg.clone();
                     rt.spawn(async move {
                         // Notify that request sending has started
                         if let Some(tx) = &tx {
@@ -237,6 +238,7 @@ impl TuiExecutor {
                             tx.clone(),
                             Some(cancel_token),
                             Some(session_manager.clone()),
+                            &cfg,
                         )
                         .await;
                         // Get token usage after the agent loop completes
@@ -476,10 +478,11 @@ impl TuiExecutor {
         let plan_manager = self.plan_manager.clone();
         let plan_id = plan_id.to_string();
         let plan = plan_execution.plan;
+        let cfg = self.cfg.clone();
 
         rt.spawn(async move {
             let executor =
-                crate::planning::step_executor::TaskExecutor::new(client, model, fs_tools);
+                crate::planning::step_executor::TaskExecutor::new(client, model, fs_tools, cfg);
 
             match executor.execute_plan(plan, background, ui_tx.clone()).await {
                 Ok(result) => {
