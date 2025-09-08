@@ -38,6 +38,7 @@ pub struct EditResult {
     pub success: bool,
     pub message: String,
     pub diff: Option<String>,
+    pub lines_edited: Option<u64>,
 }
 
 pub async fn edit(params: EditParams) -> Result<EditResult> {
@@ -64,6 +65,7 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
             success: false,
             message: "Target block not found in the file.".to_string(),
             diff: None,
+            lines_edited: None,
         });
     }
     if occurrences > 1 {
@@ -71,6 +73,7 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
             success: false,
             message: "Target block is not unique. Found multiple occurrences.".to_string(),
             diff: None,
+            lines_edited: None,
         });
     }
 
@@ -81,11 +84,15 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
     let diff = diffy::create_patch(&original_content, &modified_content);
     let diff_text = diff.to_string();
 
+    // 5. Count actual lines edited by comparing the diff
+    let lines_edited = count_lines_in_diff(&diff_text);
+
     if dry_run {
         return Ok(EditResult {
             success: true,
             message: "Dry run successful. No changes were made.".to_string(),
             diff: Some(diff_text),
+            lines_edited: Some(lines_edited),
         });
     }
 
@@ -98,7 +105,23 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
         success: true,
         message: "File updated successfully.".to_string(),
         diff: Some(diff_text),
+        lines_edited: Some(lines_edited),
     })
+}
+
+/// Count the actual number of lines edited based on the diff
+fn count_lines_in_diff(diff_text: &str) -> u64 {
+    let mut lines_edited = 0u64;
+    for line in diff_text.lines() {
+        // In a unified diff, lines starting with '+' or '-' indicate changes
+        if line.starts_with('+') || line.starts_with('-') {
+            // Skip the header lines that start with +++ or ---
+            if !line.starts_with("+++") && !line.starts_with("---") {
+                lines_edited += 1;
+            }
+        }
+    }
+    lines_edited
 }
 
 #[cfg(test)]
@@ -124,6 +147,7 @@ mod tests {
         let result = edit(params).await.unwrap();
         assert!(result.success);
         assert_eq!(result.message, "File updated successfully.");
+        assert!(result.lines_edited.is_some());
 
         let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
         assert_eq!(new_content, "Hello, Rust!\nThis is a test.");
@@ -146,6 +170,7 @@ mod tests {
         let result = edit(params).await.unwrap();
         assert!(result.success);
         assert!(result.diff.is_some());
+        assert!(result.lines_edited.is_some());
 
         let content_after = tokio::fs::read_to_string(file_path).await.unwrap();
         assert_eq!(content_after, original_content);
@@ -167,8 +192,48 @@ mod tests {
 
         let result = edit(params).await.unwrap();
         assert!(result.success);
+        assert!(result.lines_edited.is_some());
 
         let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
         assert_eq!(new_content, "No hash PROVIDED test.");
+    }
+
+    #[tokio::test]
+    async fn test_count_lines_in_diff() {
+        // Test case 1: Simple addition
+        let diff_text = "---
++++
+@@ -1,1 +1,2 @@
+ Line 1
++Line 2";
+        assert_eq!(count_lines_in_diff(diff_text), 1);
+
+        // Test case 2: Simple deletion
+        let diff_text = "---
++++
+@@ -1,2 +1,1 @@
+ Line 1
+-Line 2";
+        assert_eq!(count_lines_in_diff(diff_text), 1);
+
+        // Test case 3: Modification (delete + add)
+        let diff_text = "---
++++
+@@ -1,2 +1,2 @@
+ Line 1
+-Line 2
++Line Two";
+        assert_eq!(count_lines_in_diff(diff_text), 2);
+
+        // Test case 4: Multiple changes
+        let diff_text = "---
++++
+@@ -1,3 +1,3 @@
+ Line 1
+-Line 2
++Line Two
+ Line 3
++Line 4";
+        assert_eq!(count_lines_in_diff(diff_text), 3);
     }
 }

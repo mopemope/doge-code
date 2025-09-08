@@ -3,6 +3,7 @@ use anyhow::Result;
 use tracing::debug;
 
 /// Session management for TUI
+#[derive(Debug)]
 pub struct SessionManager {
     pub store: SessionStore,
     pub current_session: Option<SessionData>,

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::analysis::RepoMap;
@@ -14,12 +14,14 @@ use crate::tools::search_text;
 use crate::tools::symbol;
 use crate::tools::symbol::SymbolTools;
 use crate::tools::write;
+use crate::tui::commands_sessions::SessionManager;
 
 #[derive(Debug, Clone)]
 pub struct FsTools {
     symbol_tools: SymbolTools,
     search_repomap_tools: search_repomap::RepomapSearchTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
+    pub session_manager: Option<Arc<Mutex<SessionManager>>>,
 }
 
 impl Default for FsTools {
@@ -34,7 +36,13 @@ impl FsTools {
             symbol_tools: SymbolTools::new(),
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             repomap,
+            session_manager: None,
         }
+    }
+
+    pub fn with_session_manager(mut self, session_manager: Arc<Mutex<SessionManager>>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
     }
 
     pub fn fs_list(
