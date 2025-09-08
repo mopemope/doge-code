@@ -141,6 +141,7 @@ impl Executor {
             Some(tx), // Pass the sender
             None,     // No cancellation token for now
             None,     // No session manager for exec mode
+            &self.cfg,
         )
         .await;
 
@@ -188,6 +189,7 @@ mod tests {
             resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            show_diff: true,
         };
 
         let executor = Executor::new(cfg);
@@ -216,6 +218,7 @@ mod tests {
             resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            show_diff: true,
         };
 
         let mut executor = Executor::new(cfg).unwrap();

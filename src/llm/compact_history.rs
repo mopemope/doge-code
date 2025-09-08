@@ -4,6 +4,7 @@
 //! it into a structured format that preserves essential information while reducing
 //! token usage for future LLM interactions.
 
+use crate::config::AppConfig;
 use crate::llm::{self, OpenAIClient};
 use crate::tools::FsTools;
 use anyhow::Result;
@@ -75,6 +76,8 @@ pub struct CompactParams {
     pub fs_tools: FsTools,
     /// The conversation history to compact
     pub history: Vec<llm::types::ChatMessage>,
+    /// The application config
+    pub cfg: AppConfig,
 }
 
 /// Result of compacting conversation history
@@ -130,6 +133,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
         None, // No UI sender for this function
         None, // No cancellation token for this operation
         None, // No session manager for compact history
+        &params.cfg,
     )
     .await
     {

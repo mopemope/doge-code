@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::{ChatMessage, OpenAIClient, run_agent_loop};
 use crate::planning::execution_context::ExecutionContext;
 use crate::planning::prompt_builder;
@@ -13,14 +14,16 @@ pub struct TaskExecutor {
     client: OpenAIClient,
     model: String,
     fs_tools: FsTools,
+    cfg: AppConfig,
 }
 
 impl TaskExecutor {
-    pub fn new(client: OpenAIClient, model: String, fs_tools: FsTools) -> Self {
+    pub fn new(client: OpenAIClient, model: String, fs_tools: FsTools, cfg: AppConfig) -> Self {
         Self {
             client,
             model,
             fs_tools,
+            cfg,
         }
     }
 
@@ -315,6 +318,7 @@ impl TaskExecutor {
             ui_tx.clone(),
             None,
             None, // No session manager for step executor
+            &self.cfg,
         )
         .await
         {
@@ -353,6 +357,7 @@ mod tests {
         RiskLevel, StepResult, StepType, TaskClassification, TaskPlan, TaskStep, TaskType,
     };
     use crate::tools::FsTools;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -360,8 +365,23 @@ mod tests {
         let client = OpenAIClient::new("http://test.com", "test-key").unwrap();
         let repomap = Arc::new(RwLock::new(None));
         let fs_tools = FsTools::new(repomap);
+        let cfg = AppConfig {
+            base_url: "http://test.com".to_string(),
+            model: "test-model".to_string(),
+            api_key: Some("test-key".to_string()),
+            project_root: PathBuf::new(),
+            git_root: None,
+            llm: Default::default(),
+            enable_stream_tools: false,
+            theme: "dark".to_string(),
+            project_instructions_file: None,
+            no_repomap: false,
+            resume: false,
+            auto_compact_prompt_token_threshold: 1000,
+            show_diff: true,
+        };
 
-        TaskExecutor::new(client, "test-model".to_string(), fs_tools)
+        TaskExecutor::new(client, "test-model".to_string(), fs_tools, cfg)
     }
 
     #[allow(dead_code)]

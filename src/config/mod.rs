@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub resume: bool,                              // newly added
     // Auto-compact threshold (configurable via env or config file)
     pub auto_compact_prompt_token_threshold: u32,
+    pub show_diff: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +68,7 @@ pub struct FileConfig {
     pub resume: Option<bool>,                      // newly added
     // Auto-compact threshold (optional in config file)
     pub auto_compact_prompt_token_threshold: Option<u32>,
+    pub show_diff: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -162,6 +164,7 @@ impl AppConfig {
             no_repomap: cli.no_repomap || file_cfg.no_repomap.unwrap_or(false),
             resume: cli.resume,
             auto_compact_prompt_token_threshold,
+            show_diff: file_cfg.show_diff.unwrap_or(true),
         })
     }
 }

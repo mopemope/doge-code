@@ -45,11 +45,13 @@ impl TuiExecutor {
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
         client.reason_enable = false;
+        let cfg = self.cfg.clone();
         let params = crate::llm::CompactParams {
             client,
             model,
             fs_tools,
             history,
+            cfg,
         };
 
         let conversation_history = self.conversation_history.clone();

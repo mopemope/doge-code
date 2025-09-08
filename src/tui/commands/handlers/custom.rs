@@ -191,6 +191,7 @@ impl TuiExecutor {
                 let fs = self.tools.clone();
                 let conversation_history = self.conversation_history.clone();
                 let session_manager = self.session_manager.clone();
+                let cfg = self.cfg.clone();
                 rt.spawn(async move {
                     // Notify that request sending has started
                     if let Some(tx) = &tx {
@@ -213,6 +214,7 @@ impl TuiExecutor {
                         tx.clone(),
                         Some(cancel_token),
                         Some(session_manager.clone()),
+                        &cfg,
                     )
                     .await;
                     // Get token usage after the agent loop completes

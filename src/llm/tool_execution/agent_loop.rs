@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
     model: &str,
@@ -16,7 +17,8 @@ pub async fn run_agent_loop(
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
-    session_manager: Option<Arc<Mutex<SessionManager>>>,
+    _session_manager: Option<Arc<Mutex<SessionManager>>>,
+    cfg: &crate::config::AppConfig,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
     let runtime = ToolRuntime::new(fs);
@@ -66,7 +68,10 @@ pub async fn run_agent_loop(
             });
 
             // If files were written during tool execution, compute and send git diff
-            if file_was_written && let Some(tx) = &ui_tx {
+            if cfg.show_diff
+                && file_was_written
+                && let Some(tx) = &ui_tx
+            {
                 match Command::new("git")
                     .arg("diff")
                     .arg("--color=always")
@@ -81,9 +86,7 @@ pub async fn run_agent_loop(
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to run git diff");
-                        if let Some(tx) = &ui_tx {
-                            let _ = tx.send(format!("::diff_output:Failed to run git diff: {}", e));
-                        }
+                        let _ = tx.send(format!("::diff_output:Failed to run git diff: {}", e));
                     }
                 }
             }

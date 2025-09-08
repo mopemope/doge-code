@@ -5,6 +5,7 @@ mod patterns;
 mod tools_mapping;
 
 use crate::analysis::RepoMap;
+use crate::config::AppConfig;
 use crate::llm::OpenAIClient;
 use crate::tools::FsTools;
 use anyhow::Result;
@@ -48,8 +49,16 @@ impl TaskAnalyzer {
         model: String,
         fs_tools: FsTools,
         repomap: Arc<RwLock<Option<RepoMap>>>,
+        cfg: AppConfig,
     ) -> Self {
-        with_llm_decomposer(&mut self.llm_decomposer, client, model, fs_tools, repomap);
+        with_llm_decomposer(
+            &mut self.llm_decomposer,
+            client,
+            model,
+            fs_tools,
+            repomap,
+            cfg,
+        );
         self
     }
 
