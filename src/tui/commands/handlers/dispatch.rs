@@ -1,6 +1,7 @@
 use crate::analysis::Analyzer;
 use crate::tui::theme::Theme;
 use crate::tui::view::TuiApp;
+use std::any::Any;
 use tracing::{error, info, warn};
 
 use crate::tui::commands::core::{CommandHandler, TuiExecutor};
@@ -52,7 +53,7 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  Ctrl+Up/Down - Scroll by line");
                 ui.push_log("  Ctrl+Home - Scroll to top");
                 ui.push_log("  Ctrl+End - Scroll to bottom");
-                ui.push_log("  Ctrl+L - Return to bottom (auto-scroll)");
+                ui.push_log("  Ctrl+L - Return to bottom (auto-scroll");
                 ui.push_log("");
                 ui.push_log("Other controls:");
                 ui.push_log("  @ - File completion");
@@ -69,6 +70,7 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  - search_text: Search for text in files");
                 ui.push_log("  - execute_bash: Execute a shell command");
                 ui.push_log("  - find_file: Find a file by name or pattern");
+                ui.push_log("  - get_symbol_info: Get information about code symbols from repomap");
                 ui.push_log("  - search_repomap: Search the repomap with specific criteria");
             }
             "/clear" => {
@@ -203,6 +205,10 @@ impl CommandHandler for TuiExecutor {
             .keys()
             .map(|name| format!("/{}", name))
             .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

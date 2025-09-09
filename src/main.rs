@@ -126,6 +126,17 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
     app = app.with_handler(Box::new(exec));
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
+
+    // Display session statistics on shutdown
+    if let Some(handler) = &app.handler
+        && let Some(executor) = handler.as_any().downcast_ref::<TuiExecutor>()
+    {
+        let session_manager = executor.session_manager.lock().unwrap();
+        if let Some(stats) = session_manager.get_session_statistics() {
+            println!("{}", stats);
+        }
+    }
+
     Ok(())
 }
 

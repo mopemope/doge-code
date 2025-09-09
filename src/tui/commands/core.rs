@@ -5,6 +5,7 @@ use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tui::commands::handlers::custom::CustomCommand;
 use crate::tui::view::TuiApp;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, watch};
@@ -12,6 +13,7 @@ use tokio::sync::{RwLock, watch};
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
     fn get_custom_commands(&self) -> Vec<String>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub struct TuiExecutor {

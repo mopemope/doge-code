@@ -18,25 +18,42 @@ pub async fn edit(
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;
+
+    // Count the tool call attempt
+    if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
+        tracing::error!(?e, "Failed to update session with tool call count");
+    }
+
     match crate::tools::edit::edit(params).await {
         Ok(res) => {
-            // If the edit was successful, update the session with the lines edited
+            // Record success/failure for this tool call
             if res.success {
-                // Update session with tool call count
-                if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
-                    tracing::error!(?e, "Failed to update session with tool call count");
+                if let Err(e) = runtime.fs.record_tool_call_success("edit") {
+                    tracing::error!(?e, "Failed to record tool call success for edit");
                 }
 
-                // Update session with lines edited count
+                // Update session with lines edited count and log on error
                 if let Some(lines_edited) = res.lines_edited
                     && let Err(e) = runtime.fs.update_session_with_lines_edited(lines_edited)
                 {
                     tracing::error!(?e, "Failed to update session with lines edited count");
                 }
+            } else if let Err(e) = runtime.fs.record_tool_call_failure("edit") {
+                tracing::error!(?e, "Failed to record tool call failure for edit");
             }
+
             Ok(serde_json::to_value(res)?)
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(e) => {
+            // Record failure for the tool call
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("edit") {
+                tracing::error!(
+                    ?rec_err,
+                    "Failed to record tool call failure for edit on error"
+                );
+            }
+            Err(anyhow!("{e}"))
+        }
     }
 }
 
@@ -45,15 +62,34 @@ pub async fn apply_patch(
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let params = serde_json::from_value(args.clone())?;
+
+    // Count the tool call attempt
+    if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
+        tracing::error!(?e, "Failed to update session with tool call count");
+    }
+
     match crate::tools::apply_patch::apply_patch(params).await {
         Ok(res) => {
-            // Update session with tool call count
-            if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
-                tracing::error!(?e, "Failed to update session with tool call count");
+            // Record success/failure for this tool call
+            if res.success {
+                if let Err(e) = runtime.fs.record_tool_call_success("apply_patch") {
+                    tracing::error!(?e, "Failed to record tool call success for apply_patch");
+                }
+            } else if let Err(e) = runtime.fs.record_tool_call_failure("apply_patch") {
+                tracing::error!(?e, "Failed to record tool call failure for apply_patch");
             }
 
             Ok(serde_json::to_value(res)?)
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(e) => {
+            // Record failure for the tool call
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("apply_patch") {
+                tracing::error!(
+                    ?rec_err,
+                    "Failed to record tool call failure for apply_patch on error"
+                );
+            }
+            Err(anyhow!("{e}"))
+        }
     }
 }

@@ -24,6 +24,10 @@ pub struct SessionData {
     pub tool_calls: u64,
     /// Number of lines edited
     pub lines_edited: u64,
+    /// Tool call success counts by tool name
+    pub tool_call_successes: HashMap<String, u64>,
+    /// Tool call failure counts by tool name
+    pub tool_call_failures: HashMap<String, u64>,
 }
 
 impl SessionData {
@@ -40,6 +44,8 @@ impl SessionData {
             requests: 0,
             tool_calls: 0,
             lines_edited: 0,
+            tool_call_successes: HashMap::new(),
+            tool_call_failures: HashMap::new(),
         }
     }
 
@@ -78,6 +84,26 @@ impl SessionData {
         self.lines_edited += count;
         self.timestamp = Utc::now().timestamp(); // Update timestamp
     }
+
+    /// Record a successful tool call.
+    pub fn record_tool_call_success(&mut self, tool_name: &str) {
+        let count = self
+            .tool_call_successes
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *count += 1;
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
+    }
+
+    /// Record a failed tool call.
+    pub fn record_tool_call_failure(&mut self, tool_name: &str) {
+        let count = self
+            .tool_call_failures
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *count += 1;
+        self.timestamp = Utc::now().timestamp(); // Update timestamp
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +127,14 @@ mod tests {
         assert_eq!(session_data.token_count, 0, "Token count should be 0");
         assert_eq!(session_data.requests, 0, "Requests count should be 0");
         assert_eq!(session_data.tool_calls, 0, "Tool calls count should be 0");
+        assert!(
+            session_data.tool_call_successes.is_empty(),
+            "Tool call successes should be empty"
+        );
+        assert!(
+            session_data.tool_call_failures.is_empty(),
+            "Tool call failures should be empty"
+        );
     }
 
     #[test]
@@ -181,5 +215,32 @@ mod tests {
         let mut session_data = SessionData::new();
         session_data.increment_tool_calls();
         assert_eq!(session_data.tool_calls, 1, "Tool calls count should be 1");
+    }
+
+    #[test]
+    fn test_record_tool_call_success() {
+        let mut session_data = SessionData::new();
+        session_data.record_tool_call_success("fs_read");
+        session_data.record_tool_call_success("fs_read");
+        session_data.record_tool_call_success("fs_write");
+
+        assert_eq!(*session_data.tool_call_successes.get("fs_read").unwrap(), 2);
+        assert_eq!(
+            *session_data.tool_call_successes.get("fs_write").unwrap(),
+            1
+        );
+        assert!(session_data.tool_call_failures.is_empty());
+    }
+
+    #[test]
+    fn test_record_tool_call_failure() {
+        let mut session_data = SessionData::new();
+        session_data.record_tool_call_failure("fs_read");
+        session_data.record_tool_call_failure("fs_write");
+        session_data.record_tool_call_failure("fs_write");
+
+        assert_eq!(*session_data.tool_call_failures.get("fs_read").unwrap(), 1);
+        assert_eq!(*session_data.tool_call_failures.get("fs_write").unwrap(), 2);
+        assert!(session_data.tool_call_successes.is_empty());
     }
 }

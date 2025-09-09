@@ -132,6 +132,30 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Record a successful tool call in the current session
+    pub fn record_tool_call_success(&mut self, tool_name: &str) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.record_tool_call_success(tool_name);
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a failed tool call in the current session
+    pub fn record_tool_call_failure(&mut self, tool_name: &str) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.record_tool_call_failure(tool_name);
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Get current session info
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
@@ -145,6 +169,47 @@ impl SessionManager {
                 session.requests,
                 session.tool_calls
             )
+        })
+    }
+
+    /// Get detailed session statistics including tool call success/failure counts
+    pub fn get_session_statistics(&self) -> Option<String> {
+        self.current_session.as_ref().map(|session| {
+            let mut stats = format!(
+                "\n=== Session Statistics ===\n\
+                 ID: {}\n\
+                 Created: {}\n\
+                 Updated: {}\n\
+                 Requests: {}\n\
+                 Token count: {}\n\
+                 Tool calls: {}\n\
+                 Lines edited: {}",
+                session.meta.id,
+                session.meta.created_at,
+                session.timestamp,
+                session.requests,
+                session.token_count,
+                session.tool_calls,
+                session.lines_edited
+            );
+
+            // Add tool call success statistics
+            if !session.tool_call_successes.is_empty() {
+                stats.push_str("\n\nTool Call Successes:");
+                for (tool_name, count) in &session.tool_call_successes {
+                    stats.push_str(&format!("\n  {}: {}", tool_name, count));
+                }
+            }
+
+            // Add tool call failure statistics
+            if !session.tool_call_failures.is_empty() {
+                stats.push_str("\n\nTool Call Failures:");
+                for (tool_name, count) in &session.tool_call_failures {
+                    stats.push_str(&format!("\n  {}: {}", tool_name, count));
+                }
+            }
+
+            stats
         })
     }
 }

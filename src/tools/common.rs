@@ -50,6 +50,24 @@ impl FsTools {
         Ok(())
     }
 
+    /// Record a successful tool call in the current session
+    pub fn record_tool_call_success(&self, tool_name: &str) -> Result<()> {
+        if let Some(session_manager) = &self.session_manager {
+            let mut session_mgr = session_manager.lock().unwrap();
+            session_mgr.record_tool_call_success(tool_name)?;
+        }
+        Ok(())
+    }
+
+    /// Record a failed tool call in the current session
+    pub fn record_tool_call_failure(&self, tool_name: &str) -> Result<()> {
+        if let Some(session_manager) = &self.session_manager {
+            let mut session_mgr = session_manager.lock().unwrap();
+            session_mgr.record_tool_call_failure(tool_name)?;
+        }
+        Ok(())
+    }
+
     /// Update the current session with lines edited count
     pub fn update_session_with_lines_edited(&self, lines_edited: u64) -> Result<()> {
         if let Some(session_manager) = &self.session_manager {
@@ -107,7 +125,16 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        list::fs_list(path, max_depth, pattern)
+        match list::fs_list(path, max_depth, pattern) {
+            Ok(result) => {
+                self.record_tool_call_success("fs_list")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("fs_list")?;
+                Err(e)
+            }
+        }
     }
 
     pub fn fs_read(
@@ -119,7 +146,16 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        read::fs_read(path, offset, limit)
+        match read::fs_read(path, offset, limit) {
+            Ok(result) => {
+                self.record_tool_call_success("fs_read")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("fs_read")?;
+                Err(e)
+            }
+        }
     }
 
     pub fn fs_read_many_files(
@@ -131,7 +167,16 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        read_many::fs_read_many_files(paths, exclude, recursive)
+        match read_many::fs_read_many_files(paths, exclude, recursive) {
+            Ok(result) => {
+                self.record_tool_call_success("fs_read_many_files")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("fs_read_many_files")?;
+                Err(e)
+            }
+        }
     }
 
     pub fn search_text(
@@ -142,21 +187,48 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        search_text::search_text(search_pattern, file_glob)
+        match search_text::search_text(search_pattern, file_glob) {
+            Ok(result) => {
+                self.record_tool_call_success("search_text")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("search_text")?;
+                Err(e)
+            }
+        }
     }
 
     pub fn fs_write(&self, path: &str, content: &str) -> Result<()> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        write::fs_write(path, content)
+        match write::fs_write(path, content) {
+            Ok(result) => {
+                self.record_tool_call_success("fs_write")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("fs_write")?;
+                Err(e)
+            }
+        }
     }
 
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        execute::execute_bash(command).await
+        match execute::execute_bash(command).await {
+            Ok(result) => {
+                self.record_tool_call_success("execute_bash")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("execute_bash")?;
+                Err(e)
+            }
+        }
     }
 
     /// Finds files in the project based on a filename or pattern.
@@ -195,10 +267,20 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        find_file::find_file(find_file::FindFileArgs {
+        match find_file::find_file(find_file::FindFileArgs {
             filename: filename.to_string(),
         })
         .await
+        {
+            Ok(result) => {
+                self.record_tool_call_success("find_file")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("find_file")?;
+                Err(e)
+            }
+        }
     }
 
     pub async fn search_repomap(
@@ -209,10 +291,19 @@ impl FsTools {
         self.update_session_with_tool_call_count()?;
 
         let repomap_guard = self.repomap.read().await;
-        if let Some(map) = &*repomap_guard {
+        match if let Some(map) = &*repomap_guard {
             self.search_repomap_tools.search_repomap(map, args)
         } else {
             Err(anyhow::anyhow!("repomap is still generating"))
+        } {
+            Ok(result) => {
+                self.record_tool_call_success("search_repomap")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("search_repomap")?;
+                Err(e)
+            }
         }
     }
 }
