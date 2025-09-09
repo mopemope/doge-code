@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::TuiApp;
 use crate::tui::commands::core::CommandHandler;
+use std::any::Any;
 
 struct MockCommandHandler {
     custom_commands: Vec<String>,
@@ -13,6 +14,10 @@ impl CommandHandler for MockCommandHandler {
 
     fn get_custom_commands(&self) -> Vec<String> {
         self.custom_commands.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
