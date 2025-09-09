@@ -17,9 +17,9 @@ pub struct SearchRepomapArgs {
     pub sort_desc: Option<bool>,
     pub limit: Option<usize>,
     /// Search for symbols containing specific keywords
-    pub keyword_search: Option<String>,
+    pub keyword_search: Option<Vec<String>>,
     /// Search for symbols containing symbol name
-    pub name: Option<String>,
+    pub name: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

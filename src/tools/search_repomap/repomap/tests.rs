@@ -1,5 +1,6 @@
 use super::*;
 use crate::analysis::SymbolKind;
+use crate::tools::search_repomap::repomap::repomap_filter::filter_and_group_symbols;
 use std::path::PathBuf;
 
 fn create_test_symbol(
@@ -150,7 +151,7 @@ fn test_keyword_search() {
     ];
 
     let args = SearchRepomapArgs {
-        keyword_search: Some("testing".to_string()),
+        keyword_search: Some(vec!["testing".to_string()]),
         ..Default::default()
     };
 
@@ -158,6 +159,58 @@ fn test_keyword_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "test_function");
+}
+
+#[test]
+fn test_keyword_search_multiple_terms() {
+    let symbols = vec![
+        create_test_symbol_with_keywords(
+            "test_function",
+            SymbolKind::Function,
+            "test.rs",
+            100,
+            Some(10),
+            vec!["testing".to_string(), "functionality".to_string()],
+        ),
+        create_test_symbol_with_keywords(
+            "other_function",
+            SymbolKind::Function,
+            "test.rs",
+            100,
+            Some(15),
+            vec!["other".to_string(), "utility".to_string()],
+        ),
+        create_test_symbol_with_keywords(
+            "math_function",
+            SymbolKind::Function,
+            "math.rs",
+            100,
+            Some(20),
+            vec!["mathematics".to_string(), "calculation".to_string()],
+        ),
+    ];
+
+    let args = SearchRepomapArgs {
+        keyword_search: Some(vec!["testing".to_string(), "mathematics".to_string()]),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(symbols, args);
+    assert_eq!(results.len(), 2);
+    // Results should include both test_function and math_function
+    let mut found_test = false;
+    let mut found_math = false;
+    for result in &results {
+        for symbol in &result.symbols {
+            if symbol.name == "test_function" {
+                found_test = true;
+            } else if symbol.name == "math_function" {
+                found_math = true;
+            }
+        }
+    }
+    assert!(found_test);
+    assert!(found_math);
 }
 
 #[test]
@@ -179,10 +232,18 @@ fn test_name_search() {
             Some(15),
             vec!["string".to_string(), "format".to_string()],
         ),
+        create_test_symbol_with_keywords(
+            "parse_json",
+            SymbolKind::Function,
+            "json.rs",
+            100,
+            Some(20),
+            vec!["json".to_string(), "parsing".to_string()],
+        ),
     ];
 
     let args = SearchRepomapArgs {
-        name: Some("calculate".to_string()),
+        name: Some(vec!["calculate".to_string()]),
         ..Default::default()
     };
 
@@ -190,4 +251,56 @@ fn test_name_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "calculate_total");
+}
+
+#[test]
+fn test_name_search_multiple_terms() {
+    let symbols = vec![
+        create_test_symbol_with_keywords(
+            "calculate_total",
+            SymbolKind::Function,
+            "math.rs",
+            100,
+            Some(10),
+            vec!["math".to_string(), "calculation".to_string()],
+        ),
+        create_test_symbol_with_keywords(
+            "format_string",
+            SymbolKind::Function,
+            "string.rs",
+            100,
+            Some(15),
+            vec!["string".to_string(), "format".to_string()],
+        ),
+        create_test_symbol_with_keywords(
+            "parse_json",
+            SymbolKind::Function,
+            "json.rs",
+            100,
+            Some(20),
+            vec!["json".to_string(), "parsing".to_string()],
+        ),
+    ];
+
+    let args = SearchRepomapArgs {
+        name: Some(vec!["calculate".to_string(), "parse".to_string()]),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(symbols, args);
+    assert_eq!(results.len(), 2);
+    // Results should include both calculate_total and parse_json
+    let mut found_calculate = false;
+    let mut found_parse = false;
+    for result in &results {
+        for symbol in &result.symbols {
+            if symbol.name == "calculate_total" {
+                found_calculate = true;
+            } else if symbol.name == "parse_json" {
+                found_parse = true;
+            }
+        }
+    }
+    assert!(found_calculate);
+    assert!(found_parse);
 }

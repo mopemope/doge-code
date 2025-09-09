@@ -7,6 +7,9 @@ pub use types::*;
 mod search_tools;
 pub use search_tools::RepomapSearchTools;
 
+#[cfg(test)]
+mod tests;
+
 const DESCRIPTION: &str = "
 This is an advanced, structural code search tool for the entire repository.
 Unlike simple text-matching tools like grep or ripgrep, it understands code structure (symbol names, comments) and metrics (file size, function size), allowing you to combine these criteria for precise searches.
@@ -66,12 +69,14 @@ pub fn tool_def() -> ToolDef {
                         "description": "Maximum number of results to return (default: 50)"
                     },
                     "keyword_search": {
-                        "type": "string",
-                        "description": "Search for symbols containing specific keywords, feature names, and other relevant terms in their associated comments"
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "A list of search for symbols containing specific keywords in their associated comments"
                     },
                     "name": {
-                        "type": "string",
-                        "description": "Search for symbols containing symbol name"
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "A list of search for symbols containing symbol name"
                     }
                 },
                 "required": []
