@@ -1,9 +1,9 @@
 use crate::analysis::{Analyzer, RepoMap};
 use crate::llm::OpenAIClient;
+use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::commands::prompt::build_system_prompt;
-use crate::tui::commands_sessions::SessionManager;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;

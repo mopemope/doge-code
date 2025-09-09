@@ -6,8 +6,8 @@
 use crate::analysis::{Analyzer, RepoMap};
 use crate::config::AppConfig;
 use crate::llm::{self, OpenAIClient};
+use crate::session::SessionManager;
 use crate::tools::FsTools;
-use crate::tui::commands_sessions::SessionManager;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;

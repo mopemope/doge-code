@@ -8,7 +8,7 @@ use tracing::error;
 /// Maximum number of sessions to keep
 const MAX_SESSIONS: usize = 100;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionStore {
     pub(crate) root: PathBuf,
 }

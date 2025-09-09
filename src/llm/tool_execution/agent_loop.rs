@@ -1,8 +1,8 @@
 use crate::llm::LlmErrorKind;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
+use crate::session::SessionManager;
 use crate::tools::FsTools;
-use crate::tui::commands_sessions::SessionManager;
 use anyhow::{Result, anyhow};
 use std::process::Command;
 use std::sync::{Arc, Mutex};

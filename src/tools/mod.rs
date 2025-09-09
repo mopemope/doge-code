@@ -12,3 +12,6 @@ pub mod search_text;
 pub mod write;
 
 pub use common::FsTools;
+
+#[cfg(test)]
+mod common_test;

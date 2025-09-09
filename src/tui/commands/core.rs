@@ -1,9 +1,9 @@
 use crate::analysis::RepoMap;
 use crate::llm::OpenAIClient;
 use crate::planning::{PlanManager, TaskAnalyzer};
+use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tui::commands::handlers::custom::CustomCommand;
-use crate::tui::commands_sessions::SessionManager;
 use crate::tui::view::TuiApp;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
