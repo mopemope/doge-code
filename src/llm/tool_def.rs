@@ -14,5 +14,6 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::find_file::tool_def(),
         tools::read_many::tool_def(),
         tools::todo_write::tool_def(),
+        tools::todo_read::tool_def(),
     ]
 }
