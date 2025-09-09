@@ -26,6 +26,7 @@ pub async fn chat_tools_once(
             Err(e) => {
                 last_error = e;
                 if attempt >= MAX_RETRIES {
+                    error!("Error occuerd: {:?}", e);
                     break;
                 }
                 // Exponential backoff with jitter
@@ -103,7 +104,7 @@ async fn chat_tools_once_inner(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
+        // error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
 
