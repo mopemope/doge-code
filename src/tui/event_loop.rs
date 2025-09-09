@@ -274,10 +274,7 @@ impl TuiApp {
                     // Use a larger scroll step based on popup height so a single key press
                     // moves more quickly through large diffs. This improves usability when
                     // holding keys is unreliable across terminals. The step is at least 1.
-                    let popup_height = terminal
-                        .size()
-                        .map(|s| s.height)
-                        .unwrap_or(20);
+                    let popup_height = terminal.size().map(|s| s.height).unwrap_or(20);
                     let mut step = popup_height.saturating_sub(1) / 6; // ~6 steps per popup
                     if step == 0 {
                         step = 1;
