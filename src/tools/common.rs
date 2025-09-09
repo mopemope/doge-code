@@ -12,6 +12,7 @@ use crate::tools::read;
 use crate::tools::read_many;
 use crate::tools::search_repomap;
 use crate::tools::search_text;
+use crate::tools::todo_write;
 use crate::tools::write;
 
 #[derive(Debug, Clone)]
@@ -302,6 +303,28 @@ impl FsTools {
             }
             Err(e) => {
                 self.record_tool_call_failure("search_repomap")?;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<()> {
+        // Update session with tool call count
+        self.update_session_with_tool_call_count()?;
+
+        // Get the current session ID
+        let session_id = self
+            .get_current_session()
+            .map(|session| session.meta.id)
+            .ok_or_else(|| anyhow::anyhow!("No current session"))?;
+
+        match todo_write::todo_write(todos, &session_id) {
+            Ok(result) => {
+                self.record_tool_call_success("todo_write")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("todo_write")?;
                 Err(e)
             }
         }
