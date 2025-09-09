@@ -16,7 +16,7 @@ pub fn tool_def() -> ToolDef {
 This tool is typically used in a sequence:
 1. Read the original file content and its hash using `fs_read`.
 2. Generate the desired `modified_content`.
-3. Generate the `patch_content` using `create_patch(original_content, modified_content)`.
+3. Generate the `patch_content`.
 4. Call this tool, `apply_patch`, with the `patch_content` and the original hash to safely modify the file.
 
 Arguments:

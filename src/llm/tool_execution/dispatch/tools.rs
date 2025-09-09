@@ -47,17 +47,6 @@ pub async fn edit(
     }
 }
 
-pub async fn create_patch(
-    _runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<serde_json::Value> {
-    let params = serde_json::from_value(args.clone())?;
-    match crate::tools::create_patch::create_patch(params).await {
-        Ok(res) => Ok(serde_json::to_value(res)?),
-        Err(e) => Err(anyhow!("{e}")),
-    }
-}
-
 pub async fn apply_patch(
     _runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,

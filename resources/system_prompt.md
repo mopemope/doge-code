@@ -33,16 +33,8 @@ You have access to the following tools for interacting with the file system and 
 
 - **edit**: Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file.
 
-- **create_patch**: Generates a patch in the unified diff format by comparing the `original_content` of a file with its `modified_content`. This tool is crucial for preparing complex, multi-location changes that will be applied using `apply_patch`. First, use `fs_read` to get the `original_content` and its hash. Then, generate the `modified_content` (the entire desired file content after changes). Finally, call this tool with both contents to obtain the `patch_content` string.
-
 - **apply_patch**: Atomically applies a patch to a file in the unified diff format. This is a powerful and safe way to perform complex, multi-location edits.
 
-  This tool is typically used in a sequence:
-  1. Read the original file content and its hash using `fs_read`.
-  2. Generate the desired `modified_content`.
-  3. Generate the `patch_content` using `create_patch(original_content, modified_content)`.
-  4. Call this tool, `apply_patch`, with the `patch_content` and the original hash to safely modify the file.
-
   **Arguments**:
   - `file_path` (string, required): The absolute path to the file you want to modify.
   - `patch_content` (string, required): The patch to apply, formatted as a unified diff. Example:
@@ -55,33 +47,18 @@ You have access to the following tools for interacting with the file system and 
     +line 2 to be added
      line 3
     ```
-  '''
+    
   This tool is typically used in a sequence:
   1. Read the original file content and its hash using `fs_read`.
   2. Generate the desired `modified_content`.
-  3. Generate the `patch_content` using `create_patch(original_content, modified_content)`.
+  3. Generate the `patch_content`.
   4. Call this tool, `apply_patch`, with the `patch_content` and the original hash to safely modify the file.
-
-  **Arguments**:
-  - `file_path` (string, required): The absolute path to the file you want to modify.
-  - `patch_content` (string, required): The patch to apply, formatted as a unified diff. Example:
-    ```diff
-    --- a/original_file.txt
-    +++ b/modified_file.txt
-    @@ -1,3 +1,3 @@
-     line 1
-    -line 2 to be removed
-    +line 2 to be added
-     line 3
-    ```
-  - `dry_run` (boolean, optional): If `true`, the tool will check if the patch can be applied cleanly and show the potential result without actually modifying the file. Defaults to `false`.
 
   Returns a detailed result object, indicating success or failure with a descriptive message.
 
 ## Utility Tools
 
 - **execute_bash**: Executes an arbitrary bash command within the project root directory. It captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system and consider their impact beforehand. Interactive commands are not supported.
-'''
 
 # Core Mandates
 
@@ -239,13 +216,6 @@ model: I'll analyze the function and break it into smaller, focused functions.
 <tool_call>
 <function=fs_read>
 <parameter=path>/absolute/path/to/project/src/server.rs</parameter>
-</function>
-</tool_call>
-
-<tool_call>
-<function=create_patch>
-<parameter=original_content>// original file content here</parameter>
-<parameter=modified_content>// refactored file content with extracted functions</parameter>
 </function>
 </tool_call>
 
