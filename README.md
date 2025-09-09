@@ -269,6 +269,7 @@ The LLM has access to comprehensive tools for autonomous operation:
 - `apply_patch` - Apply patches to files
 - `edit` - Advanced file editing with search/replace operations
 - `todo_write` - Create and manage a structured task list for the current coding session
+- `todo_read` - Read the todo list for the current session
 
 ### Multi-file Operations
 - `read_many_files` - Read multiple files efficiently in parallel
