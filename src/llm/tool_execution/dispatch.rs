@@ -34,7 +34,6 @@ pub async fn dispatch_tool_call(
         // Tools and helpers
         "execute_bash" => tools::execute_bash(runtime, &args_val).await,
         "edit" => tools::edit(runtime, &args_val).await,
-        "create_patch" => tools::create_patch(runtime, &args_val).await,
         "apply_patch" => tools::apply_patch(runtime, &args_val).await,
 
         other => Err(anyhow!("unknown tool: {other}")),
