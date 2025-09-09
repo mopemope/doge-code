@@ -1,6 +1,5 @@
 #[cfg(test)]
-use crate::session::SessionStore;
-use crate::tui::commands_sessions::SessionManager;
+use crate::session::{SessionManager, SessionStore};
 use tempfile::tempdir;
 
 #[test]
