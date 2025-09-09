@@ -9,6 +9,7 @@ pub mod read;
 pub mod read_many;
 pub mod search_repomap;
 pub mod search_text;
+pub mod todo_write;
 pub mod write;
 
 pub use common::FsTools;

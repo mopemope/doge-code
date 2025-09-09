@@ -212,4 +212,12 @@ impl SessionManager {
             stats
         })
     }
+
+    /// Get the current session ID
+    pub fn get_current_session_id(&self) -> Result<String> {
+        self.current_session
+            .as_ref()
+            .map(|session| session.meta.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("No current session"))
+    }
 }
