@@ -294,9 +294,9 @@ pub fn handle_normal_mode_key(
         }
 
         other => {
-            debug!("Handling other key event: {:?}", other.code);
+            // debug!("Handling other key event: {:?}", other.code);
             let handled_by_textarea = app.textarea.input(Input::from(other));
-            debug!("Handled by textarea: {}", handled_by_textarea);
+            // debug!("Handled by textarea: {}", handled_by_textarea);
             if handled_by_textarea {
                 app.dirty = true;
                 let input_str = app.textarea.lines()[0].clone();
