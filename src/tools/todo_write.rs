@@ -157,6 +157,7 @@ pub struct TodoItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TodoList {
+    session_id: String,
     todos: Vec<TodoItem>,
 }
 
@@ -202,7 +203,10 @@ pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<()> {
         .with_context(|| format!("Failed to create todo directory: {}", todo_dir.display()))?;
 
     // Create the todo list
-    let todo_list = TodoList { todos };
+    let todo_list = TodoList {
+        session_id: session_id.to_string(),
+        todos,
+    };
 
     // Serialize the todo list to JSON
     let json_content = serde_json::to_string_pretty(&todo_list)
