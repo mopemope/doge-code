@@ -27,7 +27,15 @@ You have access to the following tools for interacting with the file system and 
 
 ## Code Analysis Tools
 
-- **search_repomap**: Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments.
+- **search_repomap**: Advanced search functionality for the repository map. Allows filtering by file size, function size, symbol counts, and other metrics. Useful for finding large files (>500 lines), large functions (>100 lines), files with many symbols, or analyzing code complexity patterns. You can combine multiple filters to find specific patterns in the codebase. Search for specific symbols by name or filter by keywords, feature names, and other relevant terms in symbol comments. Key parameters include:
+  - `max_file_lines`: Maximum number of lines in the file
+  - `max_function_lines`: Maximum number of lines in functions
+  - `file_pattern`: File path pattern to match (substring match)
+  - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path)
+  - `sort_desc`: Sort in descending order (default: true)
+  - `limit`: Maximum number of results to return (default: 50)
+  - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments
+  - `name`: A list of search terms for symbols containing symbol names
 
 ## File Editing Tools
 

@@ -78,22 +78,38 @@ pub(super) fn filter_and_group_symbols(
             }
 
             // Apply name search filter
-            if let Some(name_search) = &args.name {
-                let name_lower = name_search.to_lowercase();
-                if !symbol.name.to_lowercase().contains(&name_lower) {
+            if let Some(name_searches) = &args.name {
+                let mut found = false;
+                let symbol_name_lower = symbol.name.to_lowercase();
+
+                for name_search in name_searches {
+                    if symbol_name_lower.contains(&name_search.to_lowercase()) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
                     continue;
                 }
             }
 
             // Apply keyword search filter
-            if let Some(keyword_search) = &args.keyword_search {
-                let keyword_lower = keyword_search.to_lowercase();
+            if let Some(keyword_searches) = &args.keyword_search {
                 let mut found = false;
 
-                // Check if any of the symbol's keywords contain the search term
-                for keyword in &symbol.keywords {
-                    if keyword.to_lowercase().contains(&keyword_lower) {
-                        found = true;
+                // Check if any of the symbol's keywords contain any of the search terms
+                for keyword_search in keyword_searches {
+                    let keyword_lower = keyword_search.to_lowercase();
+
+                    for keyword in &symbol.keywords {
+                        if keyword.to_lowercase().contains(&keyword_lower) {
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if found {
                         break;
                     }
                 }
