@@ -12,6 +12,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "fs_read_many_files".to_string(),
             description: "Reads the content of multiple files at once. You can specify a list of file paths or glob patterns. This is useful for getting a comprehensive overview of multiple files, such as all source files in a directory or a set of related configuration files.".to_string(),
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {

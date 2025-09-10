@@ -34,6 +34,7 @@ Arguments:
 - `dry_run` (boolean, optional): If `true`, the tool will check if the patch can be applied cleanly and show the potential result without actually modifying the file. Defaults to `false`.
 
 Returns a detailed result object, indicating success or failure with a descriptive message.".to_string(),
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
