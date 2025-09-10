@@ -156,7 +156,7 @@ pub struct TodoItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TodoList {
+pub struct TodoList {
     // session_id is optional to remain compatible with older files that
     // contained only the `todos` field.
     session_id: Option<String>,

@@ -1,19 +1,96 @@
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
+use serde::de::{self, Deserializer, Visitor};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Serialize fields as RFC3339 strings and accept both integer epoch seconds and
+/// RFC3339 strings when deserializing for backward compatibility.
+fn serialize_rfc3339<S>(val: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(val)
+}
+
+fn deserialize_rfc3339<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct RfcVisitor;
+
+    impl<'de> Visitor<'de> for RfcVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                formatter,
+                "an RFC3339 timestamp string or integer seconds since epoch"
+            )
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let dt = Utc
+                .timestamp_opt(value, 0)
+                .single()
+                .ok_or_else(|| E::custom("invalid timestamp"))?;
+            Ok(dt.to_rfc3339())
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let secs = value as i64;
+            let dt = Utc
+                .timestamp_opt(secs, 0)
+                .single()
+                .ok_or_else(|| E::custom("invalid timestamp"))?;
+            Ok(dt.to_rfc3339())
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            // Accept RFC3339 strings as-is.
+            Ok(value.to_string())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(RfcVisitor)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
-    pub created_at: i64,
+    #[serde(
+        serialize_with = "serialize_rfc3339",
+        deserialize_with = "deserialize_rfc3339"
+    )]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
     pub meta: SessionMeta,
-    /// Last updated timestamp
-    pub timestamp: i64,
+    /// Last updated timestamp (RFC3339 string)
+    #[serde(
+        serialize_with = "serialize_rfc3339",
+        deserialize_with = "deserialize_rfc3339"
+    )]
+    pub timestamp: String,
     /// Conversation payload data sent to LLM
     pub conversation: Vec<HashMap<String, serde_json::Value>>,
     /// Number of tokens consumed
@@ -34,11 +111,14 @@ impl SessionData {
     /// Create a new SessionData.
     pub fn new() -> Self {
         let id = Uuid::now_v7().to_string(); // Use UUIDv7
-        let created_at = Utc::now().timestamp();
-        let meta = SessionMeta { id, created_at };
+        let now = Utc::now().to_rfc3339();
+        let meta = SessionMeta {
+            id,
+            created_at: now.clone(),
+        };
         Self {
             meta,
-            timestamp: created_at,
+            timestamp: now,
             conversation: Vec::new(),
             token_count: 0,
             requests: 0,
@@ -52,37 +132,37 @@ impl SessionData {
     /// Add a new entry to the conversation.
     pub fn add_conversation_entry(&mut self, entry: HashMap<String, serde_json::Value>) {
         self.conversation.push(entry);
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Clear the conversation.
     pub fn clear_conversation(&mut self) {
         self.conversation.clear();
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Increment token count.
     pub fn increment_token_count(&mut self, count: u64) {
         self.token_count += count;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Increment requests count.
     pub fn increment_requests(&mut self) {
         self.requests += 1;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Increment tool calls count.
     pub fn increment_tool_calls(&mut self) {
         self.tool_calls += 1;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Increment lines edited count.
     pub fn increment_lines_edited(&mut self, count: u64) {
         self.lines_edited += count;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Record a successful tool call.
@@ -92,7 +172,7 @@ impl SessionData {
             .entry(tool_name.to_string())
             .or_insert(0);
         *count += 1;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 
     /// Record a failed tool call.
@@ -102,13 +182,14 @@ impl SessionData {
             .entry(tool_name.to_string())
             .or_insert(0);
         *count += 1;
-        self.timestamp = Utc::now().timestamp(); // Update timestamp
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
     use std::collections::HashMap;
 
     #[test]
@@ -118,12 +199,23 @@ mod tests {
             !session_data.meta.id.is_empty(),
             "Session ID should not be empty"
         );
-        assert!(session_data.meta.created_at > 0, "Created at should be set");
+        assert!(
+            !session_data.meta.created_at.is_empty(),
+            "Created at should be set"
+        );
+        // Ensure created_at is RFC3339 parseable
+        DateTime::parse_from_rfc3339(&session_data.meta.created_at)
+            .expect("Created at should be RFC3339 formatted");
         assert!(
             session_data.conversation.is_empty(),
             "Conversation should be empty initially"
         );
-        assert!(session_data.timestamp > 0, "Timestamp should be set");
+        assert!(
+            !session_data.timestamp.is_empty(),
+            "Timestamp should be set"
+        );
+        DateTime::parse_from_rfc3339(&session_data.timestamp)
+            .expect("Timestamp should be RFC3339 formatted");
         assert_eq!(session_data.token_count, 0, "Token count should be 0");
         assert_eq!(session_data.requests, 0, "Requests count should be 0");
         assert_eq!(session_data.tool_calls, 0, "Tool calls count should be 0");
