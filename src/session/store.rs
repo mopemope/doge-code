@@ -59,7 +59,19 @@ impl SessionStore {
             }
         }
         // Sort by created_at in descending order (newest first)
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // created_at is stored as an RFC3339 string; try to parse it for
+        // accurate ordering. If parsing fails for either entry, fall back to
+        // string comparison.
+        out.sort_by(|a, b| {
+            let a_dt = chrono::DateTime::parse_from_rfc3339(&a.created_at).ok();
+            let b_dt = chrono::DateTime::parse_from_rfc3339(&b.created_at).ok();
+            match (a_dt, b_dt) {
+                (Some(a_dt), Some(b_dt)) => b_dt.cmp(&a_dt),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => b.created_at.cmp(&a.created_at),
+            }
+        });
         Ok(out)
     }
 
