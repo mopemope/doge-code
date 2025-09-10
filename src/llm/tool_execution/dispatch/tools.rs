@@ -93,3 +93,41 @@ pub async fn apply_patch(
         }
     }
 }
+
+pub async fn todo_write(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    #[derive(serde::Deserialize)]
+    struct TodoWriteArgs {
+        todos: Vec<crate::tools::todo_write::TodoItem>,
+    }
+
+    let params: TodoWriteArgs = serde_json::from_value(args.clone())?;
+
+    // Count the tool call attempt
+    if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
+        tracing::error!(?e, "Failed to update session with tool call count");
+    }
+
+    match runtime.fs.todo_write(params.todos) {
+        Ok(_) => {
+            // Record success for this tool call
+            if let Err(e) = runtime.fs.record_tool_call_success("todo_write") {
+                tracing::error!(?e, "Failed to record tool call success for todo_write");
+            }
+
+            Ok(json!({ "success": true }))
+        }
+        Err(e) => {
+            // Record failure for the tool call
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("todo_write") {
+                tracing::error!(
+                    ?rec_err,
+                    "Failed to record tool call failure for todo_write on error"
+                );
+            }
+            Err(anyhow!("{e}"))
+        }
+    }
+}

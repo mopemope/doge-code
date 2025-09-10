@@ -35,6 +35,7 @@ pub async fn dispatch_tool_call(
         "execute_bash" => tools::execute_bash(runtime, &args_val).await,
         "edit" => tools::edit(runtime, &args_val).await,
         "apply_patch" => tools::apply_patch(runtime, &args_val).await,
+        "todo_write" => tools::todo_write(runtime, &args_val).await,
 
         other => Err(anyhow!("unknown tool: {other}")),
     }
