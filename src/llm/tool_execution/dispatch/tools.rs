@@ -120,7 +120,7 @@ pub async fn todo_write(
             }
 
             // Return the todos as the tool result so the agent loop can forward them to the UI
-            Ok(json!({ "ok": true, "todos": res }))
+            Ok(serde_json::to_value(res)?)
         }
         Err(e) => {
             // Record failure for the tool call

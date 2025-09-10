@@ -309,7 +309,7 @@ impl FsTools {
         }
     }
 
-    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<String> {
+    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<todo_write::TodoList> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
