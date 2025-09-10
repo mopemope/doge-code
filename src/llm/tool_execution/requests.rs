@@ -26,7 +26,7 @@ pub async fn chat_tools_once(
             Err(e) => {
                 last_error = e;
                 if attempt >= MAX_RETRIES {
-                    error!("Error occuerd: {:?}", e);
+                    error!("Error occuerd: {:?}", &last_error);
                     break;
                 }
                 // Exponential backoff with jitter
