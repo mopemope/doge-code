@@ -159,8 +159,8 @@ pub struct TodoItem {
 pub struct TodoList {
     // session_id is optional to remain compatible with older files that
     // contained only the `todos` field.
-    session_id: Option<String>,
-    todos: Vec<TodoItem>,
+    pub session_id: Option<String>,
+    pub todos: Vec<TodoItem>,
 }
 
 pub fn tool_def() -> ToolDef {
