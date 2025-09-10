@@ -20,8 +20,8 @@ use tracing::{debug, error, warn};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct TodoResult {
-    ok: bool,
-    todos: TodoList,
+    pub ok: bool,
+    pub todos: TodoList,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,10 +247,11 @@ pub async fn run_agent_loop(
                 && let Ok(tool_result) = &res
                 && let Ok(todo_res) = serde_json::from_value::<TodoResult>(tool_result.clone())
             {
+                debug!(?todo_res, "Updated todo list from todo_write tool");
                 // Send the todo list to the UI
                 if let Some(tx) = &ui_tx {
                     // Serialize the todo list to JSON and send it to the UI
-                    if let Ok(todo_list_json) = serde_json::to_string(&todo_res.todos) {
+                    if let Ok(todo_list_json) = serde_json::to_string(&todo_res.todos.todos) {
                         let _ = tx.send(format!("::todo_list:{}", todo_list_json));
                     }
                 }
