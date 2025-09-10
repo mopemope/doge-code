@@ -1,5 +1,3 @@
-use std::ops::Mul;
-
 use crate::llm::LlmErrorKind;
 use crate::llm::chat_with_tools::{
     ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
@@ -7,6 +5,7 @@ use crate::llm::chat_with_tools::{
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::types::ChatMessage;
 use anyhow::{Result, anyhow};
+use std::ops::Mul;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, warn};
 

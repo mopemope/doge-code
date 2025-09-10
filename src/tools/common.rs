@@ -320,9 +320,9 @@ impl FsTools {
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
         match todo_write::todo_write(todos, &session_id) {
-            Ok(result) => {
+            Ok(_) => {
                 self.record_tool_call_success("todo_write")?;
-                Ok(result)
+                Ok(())
             }
             Err(e) => {
                 self.record_tool_call_failure("todo_write")?;
@@ -342,9 +342,9 @@ impl FsTools {
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
         match todo_read::todo_read_from_base_path(&session_id, ".") {
-            Ok(result) => {
+            Ok(todo_list) => {
                 self.record_tool_call_success("todo_read")?;
-                Ok(result)
+                Ok(todo_list)
             }
             Err(e) => {
                 self.record_tool_call_failure("todo_read")?;
