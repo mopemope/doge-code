@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
@@ -193,7 +193,7 @@ pub async fn run_agent_loop(
                     "{\"error\":\"failed to serialize tool result\"}".to_string()
                 }),
                 Err(e) => {
-                    warn!(error = %e, "tool execution failed");
+                    error!(error = %e, "tool execution failed");
                     serde_json::to_string(&serde_json::json!({ "error": e.to_string() }))
                         .unwrap_or_else(|_e| {
                             "{\"error\":\"failed to serialize error\"}".to_string()
@@ -221,10 +221,10 @@ pub async fn run_agent_loop(
                 let _ = tx.send(combined);
             }
 
-            // Also emit structured debug/warn logs (include truncated result summary for debugging)
+            // Also emit structured debug/error logs (include truncated result summary for debugging)
             match &res {
                 Ok(_) => debug!("[tool] {} succeeded: {}", tc.function.name, result_summary),
-                Err(e) => warn!("[tool] {} failed: {}", tc.function.name, e),
+                Err(e) => error!("[tool] {} failed: {}", tc.function.name, e),
             }
 
             // tool message to feed back to the LLM
