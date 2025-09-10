@@ -200,7 +200,7 @@ pub fn tool_def() -> ToolDef {
 /// This function will create `.doge/todos/<session_id>.json` if it doesn't
 /// exist. If it does exist the function will update existing todo items by
 /// matching on `id`. Items that do not exist will be appended.
-pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<()> {
+pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<String> {
     todo_write_from_base_path(todos, session_id, ".")
 }
 
@@ -209,7 +209,7 @@ pub fn todo_write_from_base_path(
     todos: Vec<TodoItem>,
     session_id: &str,
     base_path: &str,
-) -> Result<()> {
+) -> Result<String> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");
     let todo_file_path = todo_dir.join(format!("{}.json", session_id));
@@ -288,14 +288,14 @@ pub fn todo_write_from_base_path(
         .with_context(|| "Failed to serialize todo list to JSON")?;
 
     // Write the JSON content to the file
-    fs::write(&todo_file_path, json_content).with_context(|| {
+    fs::write(&todo_file_path, &json_content).with_context(|| {
         format!(
             "Failed to write todo list to file: {}",
             todo_file_path.display()
         )
     })?;
 
-    Ok(())
+    Ok(json_content)
 }
 
 #[cfg(test)]
