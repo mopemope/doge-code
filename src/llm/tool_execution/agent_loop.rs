@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+// Add TodoItem definition
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TodoItem {
+    id: String,
+    content: String,
+    status: String, // pending, in_progress, completed
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
@@ -225,6 +233,20 @@ pub async fn run_agent_loop(
             match &res {
                 Ok(_) => debug!("[tool] {} succeeded: {}", tc.function.name, result_summary),
                 Err(e) => error!("[tool] {} failed: {}", tc.function.name, e),
+            }
+
+            // Check if the tool call is todo_write and update the todo list in the UI
+            if tc.function.name == "todo_write"
+                && let Ok(tool_result) = &res
+                && let Ok(todo_list) = serde_json::from_value::<Vec<TodoItem>>(tool_result.clone())
+            {
+                // Send the todo list to the UI
+                if let Some(tx) = &ui_tx {
+                    // Serialize the todo list to JSON and send it to the UI
+                    if let Ok(todo_list_json) = serde_json::to_string(&todo_list) {
+                        let _ = tx.send(format!("::todo_list:{}", todo_list_json));
+                    }
+                }
             }
 
             // tool message to feed back to the LLM

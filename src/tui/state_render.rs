@@ -83,6 +83,7 @@ pub fn build_render_plan(
     prompt_tokens: u32,                            // prompt tokens
     total_tokens: Option<u32>,                     // total tokens (if available)
     scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
+    todo_list: &[crate::tui::state::TodoItem],     // Add todo_list parameter
 ) -> crate::tui::state::RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -150,6 +151,21 @@ pub fn build_render_plan(
     // Build wrapped physical lines from logs with scroll support
     let max_log_rows = main_content_height as usize;
     let mut all_phys_lines: Vec<String> = Vec::new();
+
+    // Add todo list to the display if there are any items
+    if !todo_list.is_empty() {
+        all_phys_lines.push("Todo List:".to_string());
+        for todo in todo_list {
+            let status_symbol = match todo.status.as_str() {
+                "pending" => "○",
+                "in_progress" => "●",
+                "completed" => "✓",
+                _ => "○",
+            };
+            all_phys_lines.push(format!("  {} {}", status_symbol, todo.content));
+        }
+        all_phys_lines.push(String::new()); // Add a blank line after todo list
+    }
 
     // Build all physical lines first
     for line in log.iter() {

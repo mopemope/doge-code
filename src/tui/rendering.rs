@@ -50,6 +50,7 @@ impl TuiApp {
             self.tokens_prompt_used,
             self.tokens_total_used,
             &self.scroll_state,
+            &self.todo_list, // Pass todo_list
         );
 
         // debug!(

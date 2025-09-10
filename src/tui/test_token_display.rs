@@ -32,6 +32,7 @@ mod tests {
             tokens_used,
             None,
             &crate::tui::state::ScrollState::default(),
+            &[],
         );
 
         // Check that the token count is included in the title
@@ -70,6 +71,7 @@ mod tests {
             tokens_used,
             None,
             &crate::tui::state::ScrollState::default(),
+            &[],
         );
 
         // Check that the token count is not included in the title when it's 0
