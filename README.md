@@ -254,7 +254,7 @@ The LLM has access to comprehensive tools for autonomous operation:
 ### Filesystem Tools
 - `fs_read` - Read files with optional line range specification
 - `fs_write` - Write files with automatic parent directory creation
-- `fs_search` - Search files using regex patterns with glob filtering
+- `search_text` - Search files using regex patterns with glob filtering
 - `fs_list` - List directory contents with configurable depth
 - `find_file` - Find files by name pattern
 
