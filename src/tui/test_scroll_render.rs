@@ -42,6 +42,7 @@ mod tests {
                 0,
                 None,
                 scroll_state,
+                &[],
             );
 
             // Log lines should not exceed the actual main content area height
@@ -93,6 +94,7 @@ mod tests {
             0,
             None,
             scroll_state,
+            &[],
         );
 
         // Should show exactly main_content_height lines
@@ -127,6 +129,7 @@ mod tests {
             0,
             None,
             &scroll_state,
+            &[],
         );
 
         // Should not show the latest line when scrolled up
@@ -199,6 +202,7 @@ mod tests {
             0,
             None,
             scroll_state,
+            &[],
         );
 
         println!("Plan log_lines count: {}", plan.log_lines.len());
@@ -254,6 +258,7 @@ mod tests {
                 0,
                 None,
                 scroll_state,
+                &[],
             );
 
             println!("  Expected main height: {}", expected_main_height);
@@ -309,6 +314,7 @@ mod tests {
             0,
             None,
             scroll_state,
+            &[],
         );
 
         println!("Main content height: {}", main_content_height);
@@ -381,6 +387,7 @@ mod tests {
             tokens_used,
             None,
             &scroll_state,
+            &[],
         );
 
         // Should show the last few lines
@@ -408,6 +415,7 @@ mod tests {
             tokens_used,
             None,
             &scroll_state,
+            &[],
         );
 
         // Should not show the latest line

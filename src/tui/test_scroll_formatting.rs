@@ -60,6 +60,7 @@ mod tests {
             0,
             None,
             scroll_state,
+            &[],
         );
 
         // Should show the most recent lines when auto-scrolling

@@ -11,6 +11,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
 use tui_textarea::TextArea;
 
+// Add TodoItem definition
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String, // pending, in_progress, completed
+}
+
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum CompletionType {
     #[default]
@@ -137,6 +145,8 @@ pub struct TuiApp {
     pub pending_instructions: VecDeque<String>,
     pub diff_output: Option<String>,
     pub diff_scroll: u16,
+    // todo list
+    pub todo_list: Vec<TodoItem>,
 }
 
 impl TuiApp {
@@ -312,6 +322,8 @@ impl TuiApp {
             pending_instructions: VecDeque::new(),
             diff_output: None,
             diff_scroll: 0,
+            // todo list
+            todo_list: Vec::new(),
         };
 
         Ok(app)

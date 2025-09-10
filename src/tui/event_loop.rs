@@ -236,6 +236,17 @@ impl TuiApp {
                             self.status = Status::Error;
                             self.dirty = true;
                         }
+                        _ if msg.starts_with("::todo_list:") => {
+                            let todo_list_json = &msg["::todo_list:".len()..];
+                            if let Ok(todo_list) = serde_json::from_str::<
+                                Vec<crate::tui::state::TodoItem>,
+                            >(todo_list_json)
+                            {
+                                self.todo_list = todo_list;
+                                self.dirty = true;
+                            }
+                            continue;
+                        }
                         _ => {
                             if msg.starts_with("::status:") {
                                 debug!("Filtered out status message from log display");
