@@ -110,14 +110,17 @@ pub async fn todo_write(
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    match runtime.fs.todo_write(params.todos) {
+    // Move the todos out so we can return them as the tool result payload
+    let todos = params.todos;
+    match runtime.fs.todo_write(todos.clone()) {
         Ok(_) => {
             // Record success for this tool call
             if let Err(e) = runtime.fs.record_tool_call_success("todo_write") {
                 tracing::error!(?e, "Failed to record tool call success for todo_write");
             }
 
-            Ok(json!({ "success": true }))
+            // Return the todos as the tool result so the agent loop can forward them to the UI
+            Ok(serde_json::to_value(&todos)?)
         }
         Err(e) => {
             // Record failure for the tool call

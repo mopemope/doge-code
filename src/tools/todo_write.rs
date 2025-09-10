@@ -157,7 +157,9 @@ pub struct TodoItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TodoList {
-    session_id: String,
+    // session_id is optional to remain compatible with older files that
+    // contained only the `todos` field.
+    session_id: Option<String>,
     todos: Vec<TodoItem>,
 }
 
@@ -193,23 +195,96 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
+/// Write or update the todo list file for the given session.
+///
+/// This function will create `.doge/todos/<session_id>.json` if it doesn't
+/// exist. If it does exist the function will update existing todo items by
+/// matching on `id`. Items that do not exist will be appended.
 pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<()> {
+    todo_write_from_base_path(todos, session_id, ".")
+}
+
+/// Helper that allows tests to specify a base path.
+pub fn todo_write_from_base_path(
+    todos: Vec<TodoItem>,
+    session_id: &str,
+    base_path: &str,
+) -> Result<()> {
     // Define the todo file path
-    let todo_dir = Path::new(".doge").join("todos");
+    let todo_dir = Path::new(base_path).join(".doge").join("todos");
     let todo_file_path = todo_dir.join(format!("{}.json", session_id));
 
     // Create the todo directory if it doesn't exist
     fs::create_dir_all(&todo_dir)
         .with_context(|| format!("Failed to create todo directory: {}", todo_dir.display()))?;
 
-    // Create the todo list
-    let todo_list = TodoList {
-        session_id: session_id.to_string(),
-        todos,
+    // Load existing todos if the file exists
+    let mut existing = if todo_file_path.exists() {
+        let content = fs::read_to_string(&todo_file_path)
+            .with_context(|| format!("Failed to read todo file: {}", todo_file_path.display()))?;
+
+        // Try to parse the existing file. If parsing fails we'll fallback to an
+        // empty list so we don't block the user's request.
+        match serde_json::from_str::<TodoList>(&content) {
+            Ok(mut tl) => {
+                // Ensure session_id is set
+                if tl.session_id.is_none() {
+                    tl.session_id = Some(session_id.to_string());
+                }
+                tl
+            }
+            Err(_) => {
+                // Try to salvage if the file contains an object with `todos` field
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(todos_val) = v.get("todos") {
+                        if let Ok(parsed_todos) =
+                            serde_json::from_value::<Vec<TodoItem>>(todos_val.clone())
+                        {
+                            TodoList {
+                                session_id: Some(session_id.to_string()),
+                                todos: parsed_todos,
+                            }
+                        } else {
+                            TodoList {
+                                session_id: Some(session_id.to_string()),
+                                todos: vec![],
+                            }
+                        }
+                    } else {
+                        TodoList {
+                            session_id: Some(session_id.to_string()),
+                            todos: vec![],
+                        }
+                    }
+                } else {
+                    TodoList {
+                        session_id: Some(session_id.to_string()),
+                        todos: vec![],
+                    }
+                }
+            }
+        }
+    } else {
+        TodoList {
+            session_id: Some(session_id.to_string()),
+            todos: vec![],
+        }
     };
 
+    // Merge incoming todos: update items with matching id, otherwise append.
+    for new_item in todos.into_iter() {
+        if let Some(pos) = existing.todos.iter().position(|t| t.id == new_item.id) {
+            existing.todos[pos] = new_item;
+        } else {
+            existing.todos.push(new_item);
+        }
+    }
+
+    // Ensure session_id is set to the current session
+    existing.session_id = Some(session_id.to_string());
+
     // Serialize the todo list to JSON
-    let json_content = serde_json::to_string_pretty(&todo_list)
+    let json_content = serde_json::to_string_pretty(&existing)
         .with_context(|| "Failed to serialize todo list to JSON")?;
 
     // Write the JSON content to the file
@@ -226,40 +301,77 @@ pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_todo_write_success() {
+    fn test_todo_write_create_and_update() {
         // Create a temporary directory for testing
         let temp_dir = tempdir().unwrap();
-        let _temp_path = temp_dir.path(); // Prefix with underscore to indicate it's intentionally unused
+        let base = temp_dir.path().to_str().unwrap();
+        let session_id = "test-session";
 
-        // Set up a mock session manager or use a test session
-        // For this test, we'll assume a session ID is available
-        // In a real test, you might need to mock the SessionManager or set up a test session
-
-        // Create a sample todo list
-        let _todos = [
+        // Initial todos
+        let initial = vec![
             TodoItem {
-                id: "task-1".to_string(),
-                content: "Implement feature A".to_string(),
+                id: "1".to_string(),
+                content: "First".to_string(),
                 status: "pending".to_string(),
             },
             TodoItem {
-                id: "task-2".to_string(),
-                content: "Fix bug B".to_string(),
-                status: "in_progress".to_string(),
+                id: "2".to_string(),
+                content: "Second".to_string(),
+                status: "pending".to_string(),
             },
         ];
 
-        // Call todo_write function
-        // Note: This test might need adjustment based on how session ID is obtained in tests
-        // For now, we'll just check that the function compiles and doesn't panic
-        // A more complete test would involve setting up a real session or mocking the session manager
-        // assert!(todo_write(todos).is_ok());
+        // Create file
+        todo_write_from_base_path(initial.clone(), session_id, base).unwrap();
 
-        // Since we can't easily test with a real session in this context,
-        // we'll just ensure the function signature is correct and it compiles
-        // The actual functionality would be tested in an integration test with a real session
+        let todo_file_path = std::path::Path::new(base)
+            .join(".doge")
+            .join("todos")
+            .join(format!("{}.json", session_id));
+        assert!(todo_file_path.exists());
+
+        let content = fs::read_to_string(&todo_file_path).unwrap();
+        let read: TodoList = serde_json::from_str(&content).unwrap();
+        assert_eq!(read.todos.len(), 2);
+        assert_eq!(read.session_id.as_deref(), Some(session_id));
+        assert_eq!(read.todos[0].id, "1");
+        assert_eq!(read.todos[0].content, "First");
+        assert_eq!(read.todos[0].status, "pending");
+
+        // Update: modify id 1 and append id 3
+        let update = vec![
+            TodoItem {
+                id: "1".to_string(),
+                content: "First updated".to_string(),
+                status: "completed".to_string(),
+            },
+            TodoItem {
+                id: "3".to_string(),
+                content: "Third".to_string(),
+                status: "pending".to_string(),
+            },
+        ];
+
+        todo_write_from_base_path(update.clone(), session_id, base).unwrap();
+
+        let content2 = fs::read_to_string(&todo_file_path).unwrap();
+        let read2: TodoList = serde_json::from_str(&content2).unwrap();
+        assert_eq!(read2.todos.len(), 3);
+
+        let t1 = read2.todos.iter().find(|t| t.id == "1").unwrap();
+        assert_eq!(t1.content, "First updated");
+        assert_eq!(t1.status, "completed");
+
+        let t2 = read2.todos.iter().find(|t| t.id == "2").unwrap();
+        assert_eq!(t2.content, "Second");
+        assert_eq!(t2.status, "pending");
+
+        let t3 = read2.todos.iter().find(|t| t.id == "3").unwrap();
+        assert_eq!(t3.content, "Third");
+        assert_eq!(t3.status, "pending");
     }
 }

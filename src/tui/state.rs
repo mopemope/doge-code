@@ -57,6 +57,8 @@ pub struct RenderPlan {
     pub input_cursor_col: u16,
     // scroll indicator info
     pub scroll_info: Option<ScrollInfo>,
+    /// Todo list items to be rendered separately from the log area
+    pub todo_list: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +149,11 @@ pub struct TuiApp {
     pub diff_scroll: u16,
     // todo list
     pub todo_list: Vec<TodoItem>,
+    /// If true, the todo list received from `todo_write` that contained only
+    /// completed items should be hidden when the next user instruction is
+    /// dispatched. This preserves the current display but clears the list on
+    /// the following command as requested.
+    pub hide_todo_on_next_instruction: bool,
 }
 
 impl TuiApp {
@@ -324,6 +331,7 @@ impl TuiApp {
             diff_scroll: 0,
             // todo list
             todo_list: Vec::new(),
+            hide_todo_on_next_instruction: false,
         };
 
         Ok(app)
@@ -486,6 +494,16 @@ impl TuiApp {
     pub fn dispatch(&mut self, line: &str) {
         // Clear the last LLM response content as a new user command is being processed
         self.last_llm_response_content = None;
+
+        // If the todo list was flagged to be hidden on the next instruction,
+        // clear it now and reset the flag. This ensures the todo list created
+        // by `todo_write` that contains only completed items will be hidden
+        // starting from the user's next command.
+        if self.hide_todo_on_next_instruction {
+            self.todo_list.clear();
+            self.hide_todo_on_next_instruction = false;
+        }
+
         if self.handler.is_some() {
             let mut handler = self.handler.take().unwrap();
             handler.handle(line, self);

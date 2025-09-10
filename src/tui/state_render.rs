@@ -152,9 +152,19 @@ pub fn build_render_plan(
     let max_log_rows = main_content_height as usize;
     let mut all_phys_lines: Vec<String> = Vec::new();
 
-    // Add todo list to the display if there are any items
+    // Build all physical lines first
+    for line in log.iter() {
+        let line = line.trim_end_matches('\n');
+        let parts = wrap_display(line, w_usize);
+        all_phys_lines.extend(parts);
+    }
+
+    // Add todo list items to the log as regular messages
     if !todo_list.is_empty() {
-        all_phys_lines.push("Todo List:".to_string());
+        // Add a separator before the todo list
+        all_phys_lines.push("--- Todo List ---".to_string());
+
+        // Add each todo item with its status symbol
         for todo in todo_list {
             let status_symbol = match todo.status.as_str() {
                 "pending" => "○",
@@ -162,16 +172,11 @@ pub fn build_render_plan(
                 "completed" => "✓",
                 _ => "○",
             };
-            all_phys_lines.push(format!("  {} {}", status_symbol, todo.content));
+            all_phys_lines.push(format!("{} {}", status_symbol, todo.content));
         }
-        all_phys_lines.push(String::new()); // Add a blank line after todo list
-    }
 
-    // Build all physical lines first
-    for line in log.iter() {
-        let line = line.trim_end_matches('\n');
-        let parts = wrap_display(line, w_usize);
-        all_phys_lines.extend(parts);
+        // Add a separator after the todo list
+        all_phys_lines.push("-----------------".to_string());
     }
 
     let total_lines = all_phys_lines.len();
@@ -226,5 +231,7 @@ pub fn build_render_plan(
         input_line,
         input_cursor_col,
         scroll_info,
+        // Pass an empty todo list since we've already added the items to the log
+        todo_list: vec![],
     }
 }
