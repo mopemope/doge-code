@@ -23,6 +23,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "todo_read".to_string(),
             description: "Read the todo list for the current session.".to_string(),
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {},

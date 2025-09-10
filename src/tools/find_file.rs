@@ -38,6 +38,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "find_file".to_string(),
             description: "Finds files in the project based on a filename or pattern. It allows searching for files by name or using glob patterns. The tool is designed to be used by the LLM agent to efficiently locate files without needing to know the exact path. It supports various search criteria to provide flexibility in finding the desired files.".to_string(),
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {

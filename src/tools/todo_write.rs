@@ -169,6 +169,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "todo_write".to_string(),
             description: DESCRIPTION.to_owned(),
+            strict: Some(true),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -189,7 +190,8 @@ pub fn tool_def() -> ToolDef {
                         }
                     }
                 },
-                "required": ["todos"]
+                "required": ["todos"],
+                "additionalProperties": false,
             }),
         },
     }

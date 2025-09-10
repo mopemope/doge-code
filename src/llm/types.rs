@@ -5,6 +5,8 @@ pub struct ToolFunctionDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value, // JSON Schema object
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

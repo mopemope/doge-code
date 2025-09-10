@@ -11,6 +11,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "edit".to_string(),
             description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
+strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
