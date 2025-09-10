@@ -42,25 +42,51 @@ where
 /// Load project-specific instructions from a file.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
 fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
-    match cfg.project_instructions_file {
-        Some(ref path) => {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => Some(content),
-                    Err(e) => {
-                        error!("Failed to read {}: {}", path.display(), e);
-                        None
-                    }
-                }
-            } else {
+    // Determine which project-specific instructions file (if any) will be used,
+    // then attempt to load its contents.
+    if let Some(path) = get_project_instructions_file_path(cfg) {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                error!("Failed to read {}: {}", path.display(), e);
                 None
             }
         }
-        None => load_project_instructions_inner(&cfg.project_root, |p: &Path| {
-            std::fs::read_to_string(p)
-        }),
+    } else {
+        None
     }
+}
+
+/// Return the path to the project-specific instructions file if one is available.
+/// Priority:
+/// 1. If `cfg.project_instructions_file` is set and the path exists (absolute or
+///    relative to the current working directory), return it.
+/// 2. If the path is not found, try resolving it relative to the configured
+///    `project_root`.
+/// 3. Otherwise, search for priority files (AGENTS.md, QWEN.md, GEMINI.md) in the
+///    project root and return the first match.
+pub(crate) fn get_project_instructions_file_path(
+    cfg: &crate::config::AppConfig,
+) -> Option<PathBuf> {
+    // Check explicit config path first
+    if let Some(ref p) = cfg.project_instructions_file {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+
+        // If the given path didn't exist as-is, try resolving relative to project_root
+        let rel = cfg.project_root.join(p);
+        if rel.exists() {
+            return Some(rel);
+        }
+
+        // Not found
+        return None;
+    }
+
+    // Fallback: search for priority files in the project root
+    find_project_instructions_file(&cfg.project_root)
 }
 
 /// Combine the base system prompt with project-specific instructions.

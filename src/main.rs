@@ -123,6 +123,13 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
 
     let mut exec = exec;
     exec.set_ui_tx(app.sender());
+    // Show which project instructions file (if any) was used at startup
+    if let Some(path) = crate::tui::commands::prompt::get_project_instructions_file_path(&exec.cfg)
+    {
+        app.push_log(format!("Project instructions file: {}", path.display()));
+    } else {
+        app.push_log("Project instructions file: (none)");
+    }
     app = app.with_handler(Box::new(exec));
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
