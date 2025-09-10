@@ -113,14 +113,14 @@ pub async fn todo_write(
     // Move the todos out so we can return them as the tool result payload
     let todos = params.todos;
     match runtime.fs.todo_write(todos.clone()) {
-        Ok(_) => {
+        Ok(res) => {
             // Record success for this tool call
             if let Err(e) = runtime.fs.record_tool_call_success("todo_write") {
                 tracing::error!(?e, "Failed to record tool call success for todo_write");
             }
 
             // Return the todos as the tool result so the agent loop can forward them to the UI
-            Ok(serde_json::to_value(&todos)?)
+            Ok(json!({ "ok": true, "todos": res }))
         }
         Err(e) => {
             // Record failure for the tool call

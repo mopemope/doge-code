@@ -309,7 +309,7 @@ impl FsTools {
         }
     }
 
-    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<()> {
+    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<String> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
@@ -320,9 +320,9 @@ impl FsTools {
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
         match todo_write::todo_write(todos, &session_id) {
-            Ok(_) => {
+            Ok(res) => {
                 self.record_tool_call_success("todo_write")?;
-                Ok(())
+                Ok(res)
             }
             Err(e) => {
                 self.record_tool_call_failure("todo_write")?;
