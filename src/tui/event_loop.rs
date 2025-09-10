@@ -242,7 +242,18 @@ impl TuiApp {
                                 Vec<crate::tui::state::TodoItem>,
                             >(todo_list_json)
                             {
-                                self.todo_list = todo_list;
+                                // If the list is non-empty and every item is marked completed,
+                                // clear the todo list immediately so it is not displayed in the TUI.
+                                let all_completed = !todo_list.is_empty()
+                                    && todo_list.iter().all(|t| t.status == "completed");
+                                if all_completed {
+                                    // Do not display completed-only todo lists
+                                    self.todo_list.clear();
+                                    self.hide_todo_on_next_instruction = false;
+                                } else {
+                                    self.todo_list = todo_list.clone();
+                                    self.hide_todo_on_next_instruction = false;
+                                }
                                 self.dirty = true;
                             }
                             continue;

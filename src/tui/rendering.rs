@@ -64,6 +64,12 @@ impl TuiApp {
 
         self.render_footer(f, chunks[2]);
 
+        // If there are todo items in the plan, add them to the log as regular messages
+        if !plan.todo_list.is_empty() {
+            // We'll add todo items to the log in the build_render_plan function
+            // This section is intentionally left empty to remove the separate panel rendering
+        }
+
         if let Some(diff_output) = &self.diff_output.clone() {
             self.render_diff_popup(f, size, diff_output);
         }
