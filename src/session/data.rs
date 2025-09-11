@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 /// Serialize fields as RFC3339 strings and accept both integer epoch seconds and
 /// RFC3339 strings when deserializing for backward compatibility.
-fn serialize_rfc3339<S>(val: &String, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_rfc3339<S>(val: &str, serializer: S) -> Result<S::Ok, S::Error>
 where
-    S: Serializer,
+    S: serde::Serializer,
 {
     serializer.serialize_str(val)
 }

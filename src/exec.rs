@@ -32,7 +32,8 @@ impl Executor {
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
         // Initialize session manager for exec mode (even though it won't be used for persistence)
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
-        let tools = FsTools::new(repomap.clone()).with_session_manager(session_manager);
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
+            .with_session_manager(session_manager);
 
         // Only initialize repomap if not disabled
         if !cfg.no_repomap {
@@ -190,6 +191,7 @@ mod tests {
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
+            allowed_commands: vec![], // Add allowed_commands
         };
 
         let executor = Executor::new(cfg);
@@ -219,6 +221,7 @@ mod tests {
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
+            allowed_commands: vec![], // Add allowed_commands
         };
 
         let mut executor = Executor::new(cfg).unwrap();
