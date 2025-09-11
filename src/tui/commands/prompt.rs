@@ -18,26 +18,7 @@ pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<Path
     None
 }
 
-/// Inner function for loading project instructions, allowing for mocking the file reader.
-pub(crate) fn load_project_instructions_inner<F>(
-    project_root: &Path,
-    read_file: F,
-) -> Option<String>
-where
-    F: Fn(&Path) -> std::io::Result<String>,
-{
-    if let Some(path) = find_project_instructions_file(project_root) {
-        match read_file(&path) {
-            Ok(content) => Some(content),
-            Err(e) => {
-                error!("Failed to read {}: {}", path.display(), e);
-                None
-            }
-        }
-    } else {
-        None
-    }
-}
+
 
 /// Load project-specific instructions from a file.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.

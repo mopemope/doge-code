@@ -1,6 +1,5 @@
 use chrono::{TimeZone, Utc};
 use serde::de::{self, Deserializer, Visitor};
-use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
