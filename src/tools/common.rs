@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::analysis::RepoMap;
+use crate::config::AppConfig;
 use crate::session::{SessionData, SessionManager};
 use crate::tools::execute;
 use crate::tools::find_file;
@@ -21,20 +22,22 @@ pub struct FsTools {
     search_repomap_tools: search_repomap::RepomapSearchTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
     pub session_manager: Option<Arc<Mutex<SessionManager>>>,
+    pub config: Arc<AppConfig>,
 }
 
 impl Default for FsTools {
     fn default() -> Self {
-        Self::new(Arc::new(RwLock::new(None)))
+        Self::new(Arc::new(RwLock::new(None)), Arc::new(AppConfig::default()))
     }
 }
 
 impl FsTools {
-    pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
+    pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             repomap,
             session_manager: None,
+            config,
         }
     }
 
@@ -221,6 +224,13 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
+        // Check if the command is allowed
+        if !self.is_command_allowed(command) {
+            tracing::warn!("Command '{}' is not allowed", command);
+            self.record_tool_call_failure("execute_bash")?;
+            return Err(anyhow::anyhow!("Command '{}' is not allowed", command));
+        }
+
         match execute::execute_bash(command).await {
             Ok(result) => {
                 self.record_tool_call_success("execute_bash")?;
@@ -351,5 +361,153 @@ impl FsTools {
                 Err(e)
             }
         }
+    }
+
+    /// Check if a command is allowed based on the allowed_commands list
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        // If no allowed commands are specified, allow all commands (backward compatibility)
+        if self.config.allowed_commands.is_empty() {
+            return true;
+        }
+
+        // Check if the command matches any of the allowed commands (prefix match)
+        self.config.allowed_commands.iter().any(|allowed| {
+            // Exact match or prefix match (with space or end of string)
+            command == allowed || command.starts_with(&format!("{} ", allowed))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use anyhow::Result;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config with allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec!["echo".to_string(), "ls".to_string()],
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // This should succeed because "echo" is in the allowed list
+        let result = fs_tools.execute_bash("echo 'hello world'").await;
+        assert!(result.is_ok());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_with_permissions_not_allowed() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config with allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec!["echo".to_string(), "ls".to_string()],
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // This should fail because "rm" is not in the allowed list
+        let result = fs_tools.execute_bash("rm -rf /").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_with_permissions_no_config() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config without allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec![], // Empty list means all commands are allowed
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // This should be allowed because the allowed_commands list is empty
+        let result = fs_tools.execute_bash("echo 'hello world'").await;
+        assert!(result.is_ok());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_is_command_allowed_exact_match() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config with allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec!["cargo".to_string(), "ls".to_string()],
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // Exact match should be allowed
+        assert!(fs_tools.is_command_allowed("cargo"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_is_command_allowed_prefix_match() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config with allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec!["cargo".to_string(), "ls".to_string()],
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // Prefix match should be allowed
+        assert!(fs_tools.is_command_allowed("cargo build"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_is_command_allowed_not_allowed() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Create a config with allowed commands
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            allowed_commands: vec!["cargo".to_string(), "ls".to_string()],
+            ..Default::default()
+        };
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // Command not in the allowed list should not be allowed
+        assert!(!fs_tools.is_command_allowed("rm"));
+
+        Ok(())
     }
 }

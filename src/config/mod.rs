@@ -22,6 +22,29 @@ pub struct AppConfig {
     // Auto-compact threshold (configurable via env or config file)
     pub auto_compact_prompt_token_threshold: u32,
     pub show_diff: bool,
+    // Allowed commands for execute_bash tool
+    pub allowed_commands: Vec<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            api_key: None,
+            project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            git_root: None,
+            llm: LlmConfig::default(),
+            enable_stream_tools: false,
+            theme: "dark".to_string(),
+            project_instructions_file: None,
+            no_repomap: false,
+            resume: false,
+            auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            show_diff: true,
+            allowed_commands: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +92,8 @@ pub struct FileConfig {
     // Auto-compact threshold (optional in config file)
     pub auto_compact_prompt_token_threshold: Option<u32>,
     pub show_diff: Option<bool>,
+    // Allowed commands for execute_bash tool
+    pub allowed_commands: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -165,6 +190,7 @@ impl AppConfig {
             resume: cli.resume,
             auto_compact_prompt_token_threshold,
             show_diff: file_cfg.show_diff.unwrap_or(true),
+            allowed_commands: file_cfg.allowed_commands.unwrap_or_default(),
         })
     }
 }

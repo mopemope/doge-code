@@ -364,7 +364,6 @@ mod tests {
     fn create_test_executor() -> TaskExecutor {
         let client = OpenAIClient::new("http://test.com", "test-key").unwrap();
         let repomap = Arc::new(RwLock::new(None));
-        let fs_tools = FsTools::new(repomap);
         let cfg = AppConfig {
             base_url: "http://test.com".to_string(),
             model: "test-model".to_string(),
@@ -379,7 +378,9 @@ mod tests {
             resume: false,
             auto_compact_prompt_token_threshold: 1000,
             show_diff: true,
+            allowed_commands: vec![], // Add allowed_commands field
         };
+        let fs_tools = FsTools::new(repomap, Arc::new(cfg.clone()));
 
         TaskExecutor::new(client, "test-model".to_string(), fs_tools, cfg)
     }

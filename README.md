@@ -73,6 +73,17 @@ log_level = "info"
 theme = "dark"
 # Auto-compact threshold (prompt tokens). When the prompt token count reaches this number, the TUI will automatically trigger a conversation compaction (/compact).
 auto_compact_prompt_token_threshold = 300000
+
+# Allowed commands for execute_bash tool
+# You can specify exact commands or use patterns
+# Example:
+# allowed_commands = [
+#   "cargo build",
+#   "cargo test",
+#   "git status",
+#   "ls -la"
+# ]
+allowed_commands = []
 ```
 
 ### Environment Variables and CLI Options

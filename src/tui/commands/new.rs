@@ -13,7 +13,7 @@ impl TuiExecutor {
     pub fn new(cfg: crate::config::AppConfig) -> Result<Self> {
         info!("Initializing TuiExecutor");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
-        let tools = FsTools::new(repomap.clone());
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
 
         // Only initialize repomap if not disabled
         if !cfg.no_repomap {
