@@ -18,8 +18,6 @@ pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<Path
     None
 }
 
-
-
 /// Load project-specific instructions from a file.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
 fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
