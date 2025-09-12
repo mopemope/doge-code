@@ -29,14 +29,23 @@ impl TuiExecutor {
                 }
                 Err(e) => ui.push_log(format!("Failed to list sessions: {}", e)),
             },
-            "new" => match session_manager.create_session() {
-                Ok(()) => {
-                    if let Some(info) = (*session_manager).current_session_info() {
-                        ui.push_log(format!("Created new session:\n{}", info));
+            "new" => {
+                // Allow optional title argument: /session new <title words...>
+                let initial_prompt = if args.len() > 1 {
+                    Some(args[1..].join(" "))
+                } else {
+                    None
+                };
+                match session_manager.create_session(initial_prompt) {
+                    Ok(()) => {
+                        if let Some(info) = (*session_manager).current_session_info() {
+                            ui.push_log(format!("Created new session:\n{}", info));
+                        }
                     }
+                    Err(e) => ui.push_log(format!("Failed to create session: {}", e)),
                 }
-                Err(e) => ui.push_log(format!("Failed to create session: {}", e)),
-            },
+            }
+
             "switch" => {
                 if args.len() != 2 {
                     ui.push_log("Usage: /session switch <id>");

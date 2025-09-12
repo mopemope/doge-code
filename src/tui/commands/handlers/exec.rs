@@ -119,7 +119,8 @@ impl TuiExecutor {
             {
                 let mut sm = self.session_manager.lock().unwrap();
                 if sm.current_session.is_none() {
-                    match sm.create_session() {
+                    // Use the incoming user line as the initial prompt/title for the new session
+                    match sm.create_session(Some(line.to_string())) {
                         Ok(()) => {
                             // if let Some(info) = sm.current_session_info() {
                             //     ui.push_log(format!(

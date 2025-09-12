@@ -20,7 +20,7 @@ fn test_session_metric_tracking() {
 
     // Create a new session
     session_manager
-        .create_session()
+        .create_session(None)
         .expect("Failed to create session");
     assert!(session_manager.current_session.is_some());
 
