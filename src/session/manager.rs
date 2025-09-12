@@ -24,9 +24,25 @@ impl SessionManager {
         self.store.list().map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// Create a new session
-    pub fn create_session(&mut self) -> Result<()> {
-        let session = self.store.create()?;
+    /// Create a new session with an optional initial prompt.
+    /// If `initial_prompt` is provided the session title will be set and persisted.
+    pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
+        let mut session = self.store.create()?;
+
+        if let Some(prompt) = initial_prompt {
+            // Use owned String; pass &str to session API
+            session.set_initial_prompt(&prompt);
+            // Mark that the title is user-provided
+            session.meta.title_is_default = false;
+            if let Err(e) = self.store.save(&session) {
+                tracing::error!(
+                    ?e,
+                    "Failed to save session data after setting initial prompt"
+                );
+                return Err(e.into());
+            }
+        }
+
         self.current_session = Some(session);
         Ok(())
     }
@@ -98,14 +114,15 @@ impl SessionManager {
 
             // If the session title is default (auto-generated) and we have a first user prompt, override it
             if session.meta.title_is_default
-                && let Some(prompt) = first_user_prompt {
-                    session.set_initial_prompt(&prompt);
-                    // Mark that the title is now user-provided
-                    session.meta.title_is_default = false;
-                    tracing::debug!(
-                        "Overrode default session title with first user prompt (truncated to 30 chars)"
-                    );
-                }
+                && let Some(prompt) = first_user_prompt
+            {
+                session.set_initial_prompt(&prompt);
+                // Mark that the title is now user-provided
+                session.meta.title_is_default = false;
+                tracing::debug!(
+                    "Overrode default session title with first user prompt (truncated to 30 chars)"
+                );
+            }
 
             if let Err(e) = self.store.save(session) {
                 tracing::error!(?e, "Failed to save session data");
