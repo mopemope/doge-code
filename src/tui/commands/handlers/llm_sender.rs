@@ -7,6 +7,9 @@ use tracing::info;
 impl TuiExecutor {
     /// Send message to LLM for processing
     pub fn send_to_llm(&mut self, ui: &mut TuiApp, content: String) {
+        // Store the last user input for retrying after compact
+        ui.last_user_input = Some(content.clone());
+        
         match self.client.as_ref() {
             Some(c) => {
                 let rt = tokio::runtime::Handle::current();
@@ -83,6 +86,7 @@ impl TuiExecutor {
                         Some(cancel_token),
                         Some(session_manager.clone()),
                         &cfg,
+                        Some(self),
                     )
                     .await;
                     // Get token usage after the agent loop completes
@@ -125,6 +129,15 @@ impl TuiExecutor {
                             }
                         }
                         Err(e) => {
+                            // Check if the error is due to context length exceeded
+                            if let Some(crate::llm::LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<crate::llm::LlmErrorKind>() {
+                                if let Some(tx) = tx {
+                                    let _ = tx.send("[INFO] Context length exceeded. Compacting conversation history...".to_string());
+                                    // Send a special message to trigger the compact command in the UI
+                                    let _ = tx.send("::trigger_compact".to_string());
+                                }
+                            }
+                            
                             if let Some(tx) = tx {
                                 let _ = tx.send(format!("LLM error: {e}"));
                                 let _ = tx.send("::status:error".into());

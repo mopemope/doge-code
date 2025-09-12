@@ -66,7 +66,30 @@ impl TuiApp {
                         continue;
                     }
 
+                    #[allow(unreachable_patterns)]
                     match msg.as_str() {
+                        "::trigger_compact" => {
+                            self.push_log(
+                                "[AUTO] Triggering /compact due to context length exceeded."
+                                    .to_string(),
+                            );
+                            self.dispatch("/compact");
+                            self.dirty = true;
+                        }
+                        "[SUCCESS] Conversation history has been compacted." => {
+                            // Only clear pending flag on the specific compact success message
+                            self.auto_compact_pending = false;
+                            self.push_log(msg);
+                            self.dirty = true;
+
+                            // Retry the last user input after compacting
+                            if let Some(last_input) = self.last_user_input.clone() {
+                                self.push_log(
+                                    "[AUTO] Retrying last user input after compacting.".to_string(),
+                                );
+                                self.dispatch(&last_input);
+                            }
+                        }
                         "::status:done" => {
                             if is_streaming {
                                 self.finalize_and_append_llm_response("");

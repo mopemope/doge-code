@@ -240,6 +240,7 @@ impl TuiExecutor {
                             Some(cancel_token),
                             Some(session_manager.clone()),
                             &cfg,
+                            None, // Pass None instead of self
                         )
                         .await;
                         // Get token usage after the agent loop completes

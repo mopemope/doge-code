@@ -20,6 +20,7 @@ pub async fn run_agent_loop(
     cancel: Option<CancellationToken>,
     _session_manager: Option<Arc<Mutex<SessionManager>>>,
     cfg: &crate::config::AppConfig,
+    tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
     let runtime = ToolRuntime::new(fs);
@@ -47,7 +48,30 @@ pub async fn run_agent_loop(
                 messages.clone(),
                 &runtime.tools,
                 Some(cancel_token.clone()),
-            ) => res?,
+            ) => {
+                match res {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        // Check if the error is due to context length exceeded
+                        if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>()
+                            && let Some(_executor) = tui_executor {
+                                // Send a message to the UI to indicate that we are compacting
+                                if let Some(tx) = &ui_tx {
+                                    let _ = tx.send("[INFO] Context length exceeded. Compacting conversation history...".to_string());
+                                }
+
+                                // Call the compact command
+                                // Since we don't have access to TuiApp here, we'll need to find a way to trigger the compact command.
+                                // One approach is to send a special message to the UI to trigger the compact command.
+                                // For now, we'll just return an error to indicate that the operation should be retried after compacting.
+                                // A better approach would be to have a callback or a channel to notify the TUI to run the compact command.
+                                // For now, we'll return the error to let the caller handle it.
+                                return Err(anyhow!(LlmErrorKind::ContextLengthExceeded));
+                            }
+                        return Err(e);
+                    }
+                }
+            },
         };
 
         // If assistant returned final content without tool calls, we are done.

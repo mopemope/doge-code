@@ -134,6 +134,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
         None, // No cancellation token for this operation
         None, // No session manager for compact history
         &params.cfg,
+        None, // No TuiExecutor for compact history
     )
     .await
     {

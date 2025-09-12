@@ -143,6 +143,7 @@ impl Executor {
             None,     // No cancellation token for now
             None,     // No session manager for exec mode
             &self.cfg,
+            None, // No TuiExecutor for exec mode
         )
         .await;
 

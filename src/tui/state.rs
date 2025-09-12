@@ -154,6 +154,8 @@ pub struct TuiApp {
     /// dispatched. This preserves the current display but clears the list on
     /// the following command as requested.
     pub hide_todo_on_next_instruction: bool,
+    // last user input for retrying after compact
+    pub last_user_input: Option<String>,
 }
 
 impl TuiApp {
@@ -332,6 +334,8 @@ impl TuiApp {
             // todo list
             todo_list: Vec::new(),
             hide_todo_on_next_instruction: false,
+            // last user input for retrying after compact
+            last_user_input: None,
         };
 
         Ok(app)

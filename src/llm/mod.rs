@@ -40,6 +40,8 @@ pub enum LlmErrorKind {
     Deserialize,
     #[error("request cancelled")]
     Cancelled,
+    #[error("context length exceeded")]
+    ContextLengthExceeded,
     #[error("unknown error")]
     Unknown,
 }
