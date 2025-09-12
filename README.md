@@ -75,13 +75,15 @@ theme = "dark"
 auto_compact_prompt_token_threshold = 300000
 
 # Allowed commands for execute_bash tool
-# You can specify exact commands or use patterns
+# You can specify commands that are allowed to be executed
+# Only exact matches or prefix matches (with a space) are allowed
+# For example, if you allow "cargo", then "cargo build" and "cargo test" will be allowed
+# but "carg" or "cargox" will not be allowed
 # Example:
 # allowed_commands = [
-#   "cargo build",
-#   "cargo test",
-#   "git status",
-#   "ls -la"
+#   "cargo",
+#   "git",
+#   "ls"
 # ]
 allowed_commands = []
 ```
