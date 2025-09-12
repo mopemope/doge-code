@@ -145,13 +145,13 @@ impl FsTools {
     pub fn fs_read(
         &self,
         path: &str,
-        offset: Option<usize>,
+        start_line: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match read::fs_read(path, offset, limit) {
+        match read::fs_read(path, start_line, limit) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read")?;
                 Ok(result)
