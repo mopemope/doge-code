@@ -11,12 +11,12 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "fs_read".to_string(),
             strict: None,
-            description: "Reads the content of a text file from the absolute path. You can specify a starting line offset and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".to_string(),
+            description: "Reads the content of a text file from the absolute path. You can specify a starting line and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "offset": {"type": "integer"},
+                    "start_line": {"type": "integer"},
                     "limit": {"type": "integer"}
                 },
                 "required": ["path"]
@@ -25,7 +25,7 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub fn fs_read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
+pub fn fs_read(path: &str, start_line: Option<usize>, limit: Option<usize>) -> Result<String> {
     let p = Path::new(path);
 
     // Ensure the path is absolute
@@ -41,7 +41,7 @@ pub fn fs_read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Resul
     let mut s = String::new();
     f.read_to_string(&mut s)
         .with_context(|| format!("read {}", p.display()))?;
-    match (offset, limit) {
+    match (start_line, limit) {
         (Some(o), Some(l)) => Ok(s.lines().skip(o).take(l).collect::<Vec<_>>().join("\n")),
         _ => Ok(s),
     }
@@ -66,7 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_read_with_offset_limit() {
+    fn test_fs_read_with_start_line_limit() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let mut file = NamedTempFile::new_in(root).unwrap();

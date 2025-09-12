@@ -23,15 +23,15 @@ pub async fn fs_read(
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let offset = args
-        .get("offset")
+    let start_line = args
+        .get("start_line")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
-    match runtime.fs.fs_read(path, offset, limit) {
+    match runtime.fs.fs_read(path, start_line, limit) {
         Ok(text) => Ok(json!({ "ok": true, "path": path, "content": text })),
         Err(e) => Err(anyhow!("{e}")),
     }
