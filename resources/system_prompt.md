@@ -164,6 +164,19 @@ Your thought process for choosing tools is critical. Follow these guidelines to 
   - `limit`: Maximum number of results to return (default: 50)
   - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments
   - `name`: A list of search terms for symbols containing symbol names
+Return Value:
+The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:
+- `file`: The absolute path to the file.
+- `file_total_lines`: The total number of lines in the file.
+- `symbol_count`: The number of symbols found in the file that match the criteria.
+- `symbols`: A list of `SymbolSearchResult` objects, each containing details about a matched symbol:
+  - `name`: The name of the symbol (e.g., function name, class name).
+  - `kind`: The type of the symbol (e.g., 'Function', 'Class', 'Method').
+  - `start_line`: The starting line number of the symbol definition.
+  - `end_line`: The ending line number of the symbol definition.
+  - `function_lines`: The number of lines in the function, if applicable.
+  - `parent`: The name of the parent symbol, if any.
+  - `keywords`: A list of keywords extracted from the comments associated with the symbol.
 
 ### File Editing Tools
 

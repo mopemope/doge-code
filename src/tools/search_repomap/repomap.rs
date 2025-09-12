@@ -32,7 +32,21 @@ Key Parameter:
 - max_file_lines:
  - Filters files based on the number of lines. Comparison operators can be used.
 - max_function_lines
- - Filters for files containing functions that meet the specified line count criteria. Comparison operators can be used.";
+ - Filters for files containing functions that meet the specified line count criteria. Comparison operators can be used.
+
+Return Value:
+The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:
+- `file`: The absolute path to the file.
+- `file_total_lines`: The total number of lines in the file.
+- `symbol_count`: The number of symbols found in the file that match the criteria.
+- `symbols`: A list of `SymbolSearchResult` objects, each containing details about a matched symbol:
+  - `name`: The name of the symbol (e.g., function name, class name).
+  - `kind`: The type of the symbol (e.g., 'Function', 'Class', 'Method').
+  - `start_line`: The starting line number of the symbol definition.
+  - `end_line`: The ending line number of the symbol definition.
+  - `function_lines`: The number of lines in the function, if applicable.
+  - `parent`: The name of the parent symbol, if any.
+  - `keywords`: A list of keywords extracted from the comments associated with the symbol.";
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
