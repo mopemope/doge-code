@@ -67,7 +67,6 @@ impl LlmTaskDecomposer {
             messages,
             None,
             None,
-            None, // No session manager for decomposer
             &self.cfg,
             None, // No TuiExecutor for decomposer
         )

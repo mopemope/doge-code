@@ -132,7 +132,6 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
         msgs,
         None, // No UI sender for this function
         None, // No cancellation token for this operation
-        None, // No session manager for compact history
         &params.cfg,
         None, // No TuiExecutor for compact history
     )

@@ -238,7 +238,6 @@ impl TuiExecutor {
                             msgs,
                             tx.clone(),
                             Some(cancel_token),
-                            Some(session_manager.clone()),
                             &cfg,
                             None, // Pass None instead of self
                         )

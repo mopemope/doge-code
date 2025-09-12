@@ -67,6 +67,14 @@ impl TuiExecutor {
         // Initialize session manager
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
+        // Create a default session if none exists
+        {
+            let mut session_mgr = session_manager.lock().unwrap();
+            if session_mgr.current_session.is_none() {
+                session_mgr.create_session(None)?;
+            }
+        }
+
         // Pass session manager to tools
         let tools = tools.with_session_manager(session_manager.clone());
 
