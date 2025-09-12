@@ -104,6 +104,19 @@ async fn chat_tools_once_inner(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
+
+        // Check if the error is due to context length exceeded
+        if status.as_u16() == 400
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(code) = json
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+            && code == "context_length_exceeded"
+        {
+            return Err(anyhow!(LlmErrorKind::ContextLengthExceeded));
+        }
+
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
 

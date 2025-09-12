@@ -319,6 +319,7 @@ impl TaskExecutor {
             None,
             None, // No session manager for step executor
             &self.cfg,
+            None, // No TuiExecutor for step executor
         )
         .await
         {

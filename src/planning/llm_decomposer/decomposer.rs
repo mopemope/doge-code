@@ -69,6 +69,7 @@ impl LlmTaskDecomposer {
             None,
             None, // No session manager for decomposer
             &self.cfg,
+            None, // No TuiExecutor for decomposer
         )
         .await
         {
