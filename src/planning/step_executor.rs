@@ -317,7 +317,6 @@ impl TaskExecutor {
             messages,
             ui_tx.clone(),
             None,
-            None, // No session manager for step executor
             &self.cfg,
             None, // No TuiExecutor for step executor
         )

@@ -45,7 +45,7 @@ fn test_session_metric_tracking() {
     };
 
     session_manager
-        .update_current_session_with_history(&[user_msg.clone()])
+        .update_current_session_with_history(std::slice::from_ref(&user_msg))
         .expect("Failed to update session with history");
 
     let session = session_manager.current_session.as_ref().unwrap();

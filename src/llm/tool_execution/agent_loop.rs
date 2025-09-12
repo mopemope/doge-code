@@ -1,12 +1,10 @@
 use crate::llm::LlmErrorKind;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
-use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tools::todo_write::TodoList;
 use anyhow::{Result, anyhow};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
@@ -18,7 +16,6 @@ pub async fn run_agent_loop(
     mut messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
-    _session_manager: Option<Arc<Mutex<SessionManager>>>,
     cfg: &crate::config::AppConfig,
     tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
