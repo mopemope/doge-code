@@ -30,6 +30,36 @@ fn test_session_metric_tracking() {
     assert_eq!(session.requests, 0);
     assert_eq!(session.tool_calls, 0);
 
+    // Test that session title is set to the default initially
+    assert!(!session.meta.title.is_empty());
+    assert!(session.meta.title_is_default);
+
+    // Simulate a conversation where the first user message should set the session title
+    let user_msg = crate::llm::types::ChatMessage {
+        role: "user".into(),
+        content: Some(
+            "これはテストの最初のユーザー入力です。Unicode文字列を含みます。".to_string(),
+        ),
+        tool_calls: vec![],
+        tool_call_id: None,
+    };
+
+    session_manager
+        .update_current_session_with_history(&[user_msg.clone()])
+        .expect("Failed to update session with history");
+
+    let session = session_manager.current_session.as_ref().unwrap();
+    // Title should be set to the first 30 Unicode characters of the user input
+    let expected_title: String = user_msg
+        .content
+        .as_ref()
+        .unwrap()
+        .chars()
+        .take(30)
+        .collect();
+    assert_eq!(session.meta.title, expected_title);
+    assert!(!session.meta.title_is_default);
+
     // Test incrementing token count
     session_manager
         .update_current_session_with_token_count(100)

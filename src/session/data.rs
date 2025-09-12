@@ -79,6 +79,10 @@ pub struct SessionMeta {
         deserialize_with = "deserialize_rfc3339"
     )]
     pub created_at: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub title_is_default: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -114,6 +118,8 @@ impl SessionData {
         let meta = SessionMeta {
             id,
             created_at: now.clone(),
+            title: "New Session".to_string(), // Initialize title to a sensible default
+            title_is_default: true,
         };
         Self {
             meta,
@@ -181,6 +187,13 @@ impl SessionData {
             .entry(tool_name.to_string())
             .or_insert(0);
         *count += 1;
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
+    }
+
+    /// Set the initial prompt for the session and update the title.
+    pub fn set_initial_prompt(&mut self, prompt: &str) {
+        // Take the first 30 characters of the prompt as the title
+        self.meta.title = prompt.chars().take(30).collect();
         self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
 }

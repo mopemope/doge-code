@@ -186,8 +186,9 @@ pub fn tool_def() -> ToolDef {
                                 "content": {"type": "string"},
                                 "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
                             },
-                            "required": ["id", "content", "status"]
-                        }
+                            "required": ["id", "content", "status"],
+                            "additionalProperties": false,
+                       }
                     }
                 },
                 "required": ["todos"],
