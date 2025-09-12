@@ -115,7 +115,7 @@ impl FsTools {
     pub fn get_session_info(&self) -> Option<String> {
         if let Some(session_manager) = &self.session_manager {
             let session_mgr = session_manager.lock().unwrap();
-            session_mgr.current_session_info()
+            (*session_mgr).current_session_info()
         } else {
             None
         }

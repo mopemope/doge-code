@@ -45,19 +45,19 @@ pub fn tool_def() -> ToolDef {
                 "type": "object",
                 "properties": {
                     "max_file_lines": {
-                        "type": ["integer", null],
+                        "type": ["integer", "null"],
                         "description": "Maximum number of lines in the file"
                     },
                     "max_function_lines": {
-                        "type": ["integer", null],
+                        "type": ["integer","null"],
                         "description": "Maximum number of lines in functions"
                     },
                     "file_pattern": {
-                        "type": ["string", null],
+                        "type": ["string", "null"],
                         "description": "File path pattern to match (substring match)"
                     },
                     "sort_by": {
-                        "type": ["string", null],
+                        "type": ["string", "null"],
                         "enum": ["file_lines", "function_lines", "symbol_count", "file_path"],
                         "description": "Sort results by specified criteria"
                     },
@@ -70,12 +70,12 @@ pub fn tool_def() -> ToolDef {
                         "description": "Maximum number of results to return (default: 50)"
                     },
                     "keyword_search": {
-                        "type": ["array", null],
+                        "type": ["array", "null"],
                         "items": {"type": "string"},
                         "description": "A list of search for symbols containing specific keywords in their associated comments"
                     },
                     "name": {
-                        "type": ["array", null],
+                        "type": ["array", "null"],
                         "items": {"type": "string"},
                         "description": "A list of search for symbols containing symbol name"
                     }

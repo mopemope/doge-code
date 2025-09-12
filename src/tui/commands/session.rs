@@ -31,7 +31,7 @@ impl TuiExecutor {
             },
             "new" => match session_manager.create_session() {
                 Ok(()) => {
-                    if let Some(info) = session_manager.current_session_info() {
+                    if let Some(info) = (*session_manager).current_session_info() {
                         ui.push_log(format!("Created new session:\n{}", info));
                     }
                 }
@@ -45,7 +45,7 @@ impl TuiExecutor {
                 let id = args[1];
                 match session_manager.load_session(id) {
                     Ok(()) => {
-                        if let Some(info) = session_manager.current_session_info() {
+                        if let Some(info) = (*session_manager).current_session_info() {
                             ui.push_log(format!("Switched to session:\n{}", info));
                         }
                         // Load conversation history from session
@@ -88,7 +88,7 @@ impl TuiExecutor {
                 }
             }
             "current" => {
-                if let Some(info) = session_manager.current_session_info() {
+                if let Some(info) = (*session_manager).current_session_info() {
                     ui.push_log(info);
                 } else {
                     ui.push_log("No session loaded.");

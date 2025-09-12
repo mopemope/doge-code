@@ -80,6 +80,14 @@ impl SessionManager {
             // Clear existing conversation
             session.clear_conversation();
 
+            // Find the first user prompt in the history to set session title if not set
+            let first_user_prompt = history
+                .iter()
+                .find(|m| {
+                    m.role == "user" && m.content.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                })
+                .and_then(|m| m.content.clone());
+
             // Add each message to the session conversation
             for msg in history {
                 // Convert serde_json::Value to HashMap<String, serde_json::Value>
@@ -87,6 +95,17 @@ impl SessionManager {
                     session.add_conversation_entry(map.into_iter().collect());
                 }
             }
+
+            // If the session title is default (auto-generated) and we have a first user prompt, override it
+            if session.meta.title_is_default
+                && let Some(prompt) = first_user_prompt {
+                    session.set_initial_prompt(&prompt);
+                    // Mark that the title is now user-provided
+                    session.meta.title_is_default = false;
+                    tracing::debug!(
+                        "Overrode default session title with first user prompt (truncated to 30 chars)"
+                    );
+                }
 
             if let Err(e) = self.store.save(session) {
                 tracing::error!(?e, "Failed to save session data");
@@ -156,12 +175,25 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Set the initial prompt for the current session
+    pub fn set_initial_prompt_for_current_session(&mut self, prompt: &str) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.set_initial_prompt(prompt);
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Get current session info
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
             format!(
-                "Current Session:\n  ID: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
+                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
                 session.meta.id,
+                session.meta.title,
                 session.meta.created_at,
                 session.timestamp,
                 session.conversation.len(),
@@ -178,6 +210,7 @@ impl SessionManager {
             let mut stats = format!(
                 "\n=== Session Statistics ===\n\
                  ID: {}\n\
+                 Title: {}\n\
                  Created: {}\n\
                  Updated: {}\n\
                  Requests: {}\n\
@@ -185,6 +218,7 @@ impl SessionManager {
                  Tool calls: {}\n\
                  Lines edited: {}",
                 session.meta.id,
+                session.meta.title,
                 session.meta.created_at,
                 session.timestamp,
                 session.requests,
