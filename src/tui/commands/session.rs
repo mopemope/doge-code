@@ -21,8 +21,8 @@ impl TuiExecutor {
                         ui.push_log("Sessions:");
                         for session in sessions {
                             ui.push_log(format!(
-                                "  {} (Created: {})",
-                                session.id, session.created_at
+                                "  {} ({}) - Created: {}",
+                                session.title, session.id, session.created_at
                             ));
                         }
                     }
