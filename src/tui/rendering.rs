@@ -140,6 +140,14 @@ impl TuiApp {
             // );
         }
 
+        // If in session list mode, render the session list instead of log
+        if self.input_mode == crate::tui::state::InputMode::SessionList
+            && let Some(session_list_state) = &self.session_list_state
+        {
+            self.render_session_list(f, area, session_list_state, theme);
+            return;
+        }
+
         let mut lines: Vec<Line> = Vec::new();
         let mut is_in_code_block = false;
 
@@ -224,6 +232,42 @@ impl TuiApp {
         //     "Paragraph widget rendered {} lines in area {}x{}",
         //     lines_to_render, area.width, area.height
         // );
+    }
+
+    fn render_session_list(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        session_list_state: &crate::tui::state::SessionListState,
+        theme: &Theme,
+    ) {
+        let items: Vec<ListItem> = session_list_state
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, session)| {
+                let content = format!(
+                    "{} ({}) - Created: {}",
+                    session.title, session.id, session.created_at
+                );
+                let style = if i == session_list_state.selected_index {
+                    theme.completion_selected_style
+                } else {
+                    theme.completion_style
+                };
+                ListItem::new(content).style(style)
+            })
+            .collect();
+
+        let list =
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(
+                    "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
+                ))
+                .highlight_style(theme.completion_selected_style)
+                .highlight_symbol(">> ");
+
+        f.render_widget(list, area);
     }
 
     fn render_footer(&mut self, f: &mut Frame, area: Rect) {

@@ -71,7 +71,7 @@ where
     deserializer.deserialize_any(RfcVisitor)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMeta {
     pub id: String,
     #[serde(
