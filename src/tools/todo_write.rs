@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use tracing::debug;
 
 const DESCRIPTION: &str = r#"
 Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
@@ -220,6 +221,8 @@ pub fn todo_write_from_base_path(
     // Create the todo directory if it doesn't exist
     fs::create_dir_all(&todo_dir)
         .with_context(|| format!("Failed to create todo directory: {}", todo_dir.display()))?;
+
+    debug!("write todo: {:?}", todos);
 
     // Load existing todos if the file exists
     let mut existing = if todo_file_path.exists() {
