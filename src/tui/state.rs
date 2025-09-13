@@ -19,6 +19,13 @@ pub struct TodoItem {
     pub status: String, // pending, in_progress, completed
 }
 
+// Session list state for TUI
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionListState {
+    pub sessions: Vec<crate::session::SessionMeta>,
+    pub selected_index: usize,
+}
+
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum CompletionType {
     #[default]
@@ -32,6 +39,7 @@ pub enum InputMode {
     #[default]
     Normal,
     Shell,
+    SessionList, // Session list selection mode
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +164,8 @@ pub struct TuiApp {
     pub hide_todo_on_next_instruction: bool,
     // last user input for retrying after compact
     pub last_user_input: Option<String>,
+    // session list state
+    pub session_list_state: Option<SessionListState>,
 }
 
 impl TuiApp {
@@ -336,6 +346,8 @@ impl TuiApp {
             hide_todo_on_next_instruction: false,
             // last user input for retrying after compact
             last_user_input: None,
+            // session list state
+            session_list_state: None,
         };
 
         Ok(app)
@@ -493,6 +505,16 @@ impl TuiApp {
         self.log.clear();
         self.last_llm_response_content = None;
         self.scroll_state = ScrollState::default();
+    }
+
+    /// Enter session list mode with the provided sessions
+    pub fn enter_session_list_mode(&mut self, sessions: Vec<crate::session::SessionMeta>) {
+        self.session_list_state = Some(SessionListState {
+            sessions,
+            selected_index: 0,
+        });
+        self.input_mode = InputMode::SessionList;
+        self.dirty = true;
     }
 
     pub fn dispatch(&mut self, line: &str) {

@@ -4,7 +4,9 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
-use crate::tui::event_handlers::{handle_normal_mode_key, handle_shell_mode_key};
+use crate::tui::event_handlers::{
+    handle_normal_mode_key, handle_session_list_key, handle_shell_mode_key,
+};
 use crate::tui::state::{InputMode, Status, TuiApp};
 
 impl TuiApp {
@@ -370,6 +372,11 @@ impl TuiApp {
                     }
                     InputMode::Shell => {
                         handle_shell_mode_key(self, k)?;
+                    }
+                    InputMode::SessionList => {
+                        if handle_session_list_key(self, k, terminal)? {
+                            return Ok(());
+                        }
                     }
                 }
             }

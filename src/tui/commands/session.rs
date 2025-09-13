@@ -18,13 +18,8 @@ impl TuiExecutor {
                     if sessions.is_empty() {
                         ui.push_log("No sessions found.");
                     } else {
-                        ui.push_log("Sessions:");
-                        for session in sessions {
-                            ui.push_log(format!(
-                                "  {} ({}) - Created: {}",
-                                session.title, session.id, session.created_at
-                            ));
-                        }
+                        // Enter session list mode with the sessions
+                        ui.enter_session_list_mode(sessions);
                     }
                 }
                 Err(e) => ui.push_log(format!("Failed to list sessions: {}", e)),
@@ -54,9 +49,10 @@ impl TuiExecutor {
                 let id = args[1];
                 match session_manager.load_session(id) {
                     Ok(()) => {
-                        if let Some(info) = (*session_manager).current_session_info() {
-                            ui.push_log(format!("Switched to session:\n{}", info));
-                        }
+                        // Clear the TUI display
+                        ui.clear_log();
+                        ui.push_log(format!("Switched to session: {}", id));
+
                         // Load conversation history from session
                         if let (Some(session), Ok(mut history)) = (
                             &session_manager.current_session,
@@ -92,7 +88,42 @@ impl TuiExecutor {
                 }
                 let id = args[1];
                 match session_manager.delete_session(id) {
-                    Ok(()) => ui.push_log(format!("Deleted session: {}", id)),
+                    Ok(()) => {
+                        ui.push_log(format!("Deleted session: {}", id));
+                        // If we're in session list mode, refresh the list
+                        if ui.input_mode == crate::tui::state::InputMode::SessionList {
+                            match session_manager.list_sessions() {
+                                Ok(sessions) => {
+                                    if sessions.is_empty() {
+                                        // Exit session list mode if no sessions left
+                                        ui.input_mode = crate::tui::state::InputMode::Normal;
+                                        ui.session_list_state = None;
+                                        ui.push_log("No more sessions available.");
+                                    } else {
+                                        // Update the session list
+                                        if let Some(ref mut session_list_state) =
+                                            ui.session_list_state
+                                        {
+                                            session_list_state.sessions = sessions;
+                                            // Make sure selected index is within bounds
+                                            if session_list_state.selected_index
+                                                >= session_list_state.sessions.len()
+                                            {
+                                                session_list_state.selected_index =
+                                                    session_list_state
+                                                        .sessions
+                                                        .len()
+                                                        .saturating_sub(1);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    ui.push_log(format!("Failed to refresh session list: {}", e))
+                                }
+                            }
+                        }
+                    }
                     Err(e) => ui.push_log(format!("Failed to delete session: {}", e)),
                 }
             }
