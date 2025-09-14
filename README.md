@@ -7,7 +7,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 ### Core Capabilities
 
 - **Interactive TUI Interface** - Real-time streaming output with status indicators and cancellation support
-- **Multi-language Repository Analysis** - Static analysis using tree-sitter for Rust, TypeScript, JavaScript, Python, Go, and Java
+- **Multi-language Repository Analysis** - Static analysis using tree-sitter for Rust, TypeScript, JavaScript, Python, Go, C#, and Java
 - **Autonomous Agent Loop** - Advanced agent capabilities with function calling, tool execution, and feedback loops.
 - **Task Planning & Execution** - Decomposes complex tasks, creates execution plans, and carries them out autonomously.
 - **OpenAI-compatible API Integration** - Streaming chat completions with tool use support
@@ -296,6 +296,7 @@ Repository analysis supports:
 - **JavaScript** (.js, .mjs, .cjs) - Functions, classes, objects
 - **Python** (.py) - Functions, classes, methods
 - **Go** (.go) - Functions, types, methods, interfaces
+- **C#** (.cs) - Namespaces, classes/structs, interfaces, enums, methods/constructors, properties/fields
 - **Java** (.java) - Classes, methods, interfaces
 
 The analysis extracts:

@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod cache;
 pub mod collector;
+pub mod csharp_collector;
 pub mod database;
 pub mod file_finder;
 pub mod go_collector;
@@ -15,6 +16,7 @@ pub mod ts_js_collector;
 pub use analyzer::Analyzer;
 pub use cache::{RepomapCache, RepomapStore};
 pub use collector::LanguageSpecificExtractor;
+pub use csharp_collector::CSharpExtractor;
 pub use database::connection::{connect_database, get_default_db_path};
 pub use go_collector::GoExtractor;
 pub use hash::{HashDiff, calculate_file_hashes};

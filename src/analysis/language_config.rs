@@ -1,6 +1,6 @@
 use crate::analysis::{
-    GoExtractor, JavaScriptExtractor, LanguageSpecificExtractor, PythonExtractor, RustExtractor,
-    TypeScriptExtractor,
+    CSharpExtractor, GoExtractor, JavaScriptExtractor, LanguageSpecificExtractor, PythonExtractor,
+    RustExtractor, TypeScriptExtractor,
 };
 use std::{collections::HashMap, sync::OnceLock};
 use tree_sitter::Language;
@@ -39,6 +39,11 @@ pub fn language_configs() -> &'static [LanguageConfig] {
                 language: tree_sitter_go::LANGUAGE.into(),
                 collector: Box::new(GoExtractor),
                 extensions: &["go"],
+            },
+            LanguageConfig {
+                language: tree_sitter_c_sharp::LANGUAGE.into(),
+                collector: Box::new(CSharpExtractor),
+                extensions: &["cs"],
             },
         ]
     })
