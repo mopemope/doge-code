@@ -1,7 +1,8 @@
 use crate::utils::get_git_repository_root;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 pub const IGNORE_FILE: &str = ".dogeignore";
@@ -77,7 +78,7 @@ pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 250_000;
 
 // Threshold constant removed; use AppConfig.auto_compact_prompt_token_threshold at runtime
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
@@ -96,7 +97,7 @@ pub struct FileConfig {
     pub allowed_commands: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct PartialLlmConfig {
     pub connect_timeout_ms: Option<u64>,
     pub request_timeout_ms: Option<u64>,
@@ -112,14 +113,21 @@ impl AppConfig {
         let project_root = std::env::current_dir().context("resolve current dir")?;
         let git_root = get_git_repository_root(&project_root);
 
+        // Load project-specific configuration first (highest priority after CLI args and env vars)
+        let project_cfg = load_project_config(&project_root).unwrap_or_default();
+
+        // Load global configuration
         let file_cfg = load_file_config().unwrap_or_default();
+
         let api_key = cli
             .api_key
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or(project_cfg.api_key)
             .or(file_cfg.api_key);
         let base_url = if cli.base_url.is_empty() {
             std::env::var("OPENAI_BASE_URL")
                 .ok()
+                .or(project_cfg.base_url)
                 .or(file_cfg.base_url)
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
         } else {
@@ -128,47 +136,87 @@ impl AppConfig {
         let model = if cli.model.is_empty() {
             std::env::var("OPENAI_MODEL")
                 .ok()
+                .or(project_cfg.model)
                 .or(file_cfg.model)
                 .unwrap_or_else(|| "gpt-4o-mini".to_string())
         } else {
             cli.model
         };
-        let project_root = file_cfg.project_root.unwrap_or(project_root);
+        let project_root = project_cfg
+            .project_root
+            .or(file_cfg.project_root)
+            .unwrap_or(project_root);
 
         let llm_defaults = LlmConfig::default();
-        let llm = if let Some(p) = file_cfg.llm {
-            LlmConfig {
-                connect_timeout_ms: p
-                    .connect_timeout_ms
-                    .unwrap_or(llm_defaults.connect_timeout_ms),
-                request_timeout_ms: p
-                    .request_timeout_ms
-                    .unwrap_or(llm_defaults.request_timeout_ms),
-                read_idle_timeout_ms: p
-                    .read_idle_timeout_ms
-                    .unwrap_or(llm_defaults.read_idle_timeout_ms),
-                max_retries: p.max_retries.unwrap_or(llm_defaults.max_retries),
-                retry_base_ms: p.retry_base_ms.unwrap_or(llm_defaults.retry_base_ms),
-                retry_jitter_ms: p.retry_jitter_ms.unwrap_or(llm_defaults.retry_jitter_ms),
-                respect_retry_after: p
-                    .respect_retry_after
-                    .unwrap_or(llm_defaults.respect_retry_after),
+        let llm = {
+            // Merge LLM config: project_cfg takes precedence over file_cfg
+            let merged_llm_cfg = match (&project_cfg.llm, &file_cfg.llm) {
+                (Some(project_llm), Some(file_llm)) => {
+                    // Merge project and file configs
+                    Some(PartialLlmConfig {
+                        connect_timeout_ms: project_llm
+                            .connect_timeout_ms
+                            .or(file_llm.connect_timeout_ms),
+                        request_timeout_ms: project_llm
+                            .request_timeout_ms
+                            .or(file_llm.request_timeout_ms),
+                        read_idle_timeout_ms: project_llm
+                            .read_idle_timeout_ms
+                            .or(file_llm.read_idle_timeout_ms),
+                        max_retries: project_llm.max_retries.or(file_llm.max_retries),
+                        retry_base_ms: project_llm.retry_base_ms.or(file_llm.retry_base_ms),
+                        retry_jitter_ms: project_llm.retry_jitter_ms.or(file_llm.retry_jitter_ms),
+                        respect_retry_after: project_llm
+                            .respect_retry_after
+                            .or(file_llm.respect_retry_after),
+                    })
+                }
+                (Some(project_llm), None) => Some(project_llm.clone()),
+                (None, Some(file_llm)) => Some(file_llm.clone()),
+                (None, None) => None,
+            };
+
+            if let Some(p) = merged_llm_cfg {
+                LlmConfig {
+                    connect_timeout_ms: p
+                        .connect_timeout_ms
+                        .unwrap_or(llm_defaults.connect_timeout_ms),
+                    request_timeout_ms: p
+                        .request_timeout_ms
+                        .unwrap_or(llm_defaults.request_timeout_ms),
+                    read_idle_timeout_ms: p
+                        .read_idle_timeout_ms
+                        .unwrap_or(llm_defaults.read_idle_timeout_ms),
+                    max_retries: p.max_retries.unwrap_or(llm_defaults.max_retries),
+                    retry_base_ms: p.retry_base_ms.unwrap_or(llm_defaults.retry_base_ms),
+                    retry_jitter_ms: p.retry_jitter_ms.unwrap_or(llm_defaults.retry_jitter_ms),
+                    respect_retry_after: p
+                        .respect_retry_after
+                        .unwrap_or(llm_defaults.respect_retry_after),
+                }
+            } else {
+                llm_defaults
             }
-        } else {
-            llm_defaults
         };
 
-        // Add theme setting
-        let theme = file_cfg.theme.unwrap_or_else(|| "dark".to_string());
-        // Add project_instructions_file setting
-        let project_instructions_file =
-            cli.instructions_file.or(file_cfg.project_instructions_file);
+        // Add theme setting (project config takes precedence)
+        let theme = project_cfg
+            .theme
+            .or(file_cfg.theme)
+            .unwrap_or_else(|| "dark".to_string());
 
-        // Determine auto-compact threshold (priority: env var -> config file -> default)
+        // Add project_instructions_file setting (CLI args take precedence)
+        let project_instructions_file = cli
+            .instructions_file
+            .or(project_cfg.project_instructions_file)
+            .or(file_cfg.project_instructions_file);
+
+        // Determine auto-compact threshold (priority: env var -> project config -> global config -> default)
         let auto_compact_prompt_token_threshold =
             std::env::var("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
+                .or(project_cfg.auto_compact_prompt_token_threshold)
                 .or(file_cfg.auto_compact_prompt_token_threshold)
                 .unwrap_or(DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD);
 
@@ -182,15 +230,21 @@ impl AppConfig {
             enable_stream_tools: std::env::var("DOGE_STREAM_TOOLS")
                 .ok()
                 .and_then(|v| v.parse().ok())
+                .or(project_cfg.enable_stream_tools)
                 .or(file_cfg.enable_stream_tools)
                 .unwrap_or(false),
             theme,                     // newly added
             project_instructions_file, // newly added
-            no_repomap: cli.no_repomap || file_cfg.no_repomap.unwrap_or(false),
+            no_repomap: cli.no_repomap
+                || project_cfg.no_repomap.unwrap_or(false)
+                || file_cfg.no_repomap.unwrap_or(false),
             resume: cli.resume,
             auto_compact_prompt_token_threshold,
-            show_diff: file_cfg.show_diff.unwrap_or(true),
-            allowed_commands: file_cfg.allowed_commands.unwrap_or_default(),
+            show_diff: project_cfg.show_diff.or(file_cfg.show_diff).unwrap_or(true),
+            allowed_commands: project_cfg
+                .allowed_commands
+                .or(file_cfg.allowed_commands)
+                .unwrap_or_default(),
         })
     }
 }
@@ -238,3 +292,32 @@ pub fn load_file_config() -> Result<FileConfig> {
     }
     Ok(FileConfig::default())
 }
+
+/// Load project-specific configuration from .doge/config.toml
+pub fn load_project_config(project_root: &Path) -> Result<FileConfig> {
+    let project_config_path = project_root.join(".doge").join("config.toml");
+
+    if project_config_path.exists() {
+        let s = fs::read_to_string(&project_config_path).with_context(|| {
+            format!(
+                "read project config file: {}",
+                project_config_path.display()
+            )
+        })?;
+        match toml::from_str::<FileConfig>(&s) {
+            Ok(cfg) => {
+                info!(path=%project_config_path.display(), "loaded project config file");
+                Ok(cfg)
+            }
+            Err(e) => {
+                warn!(path=%project_config_path.display(), error=%e.to_string(), "parse project config failed");
+                Ok(FileConfig::default())
+            }
+        }
+    } else {
+        Ok(FileConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests;
