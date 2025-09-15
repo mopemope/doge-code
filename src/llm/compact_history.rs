@@ -55,15 +55,7 @@ The structure MUST be as follows:
         -->
     </recent_actions>
 
-    <current_plan>
-        <!-- The agent's step-by-step plan. Mark completed steps. -->
-        <!-- Example:
-         1. [DONE] Identify all files using the deprecated 'UserAPI'.
-         2. [IN PROGRESS] Refactor \`src/components/UserProfile.tsx\` to use the new 'ProfileAPI'.
-         3. [TODO] Refactor the remaining files.
-         4. [TODO] Update tests to reflect the API change.
-        -->
-    </current_plan>
+    
 </state_snapshot>"#;
 
 /// Parameters for compacting conversation history

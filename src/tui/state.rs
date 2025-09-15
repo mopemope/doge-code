@@ -181,9 +181,6 @@ impl TuiApp {
             "/session".to_string(),
             "/rebuild-repomap".to_string(),
             "/tokens".to_string(),
-            "/plan".to_string(),
-            "/execute".to_string(),
-            "/plans".to_string(),
             "/cancel".to_string(),
             "/compact".to_string(),
         ];
