@@ -54,7 +54,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "search_repomap".to_string(),
             description: DESCRIPTION.to_owned(),
-            strict: Some(true),
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -94,7 +94,6 @@ pub fn tool_def() -> ToolDef {
                         "description": "A list of search for symbols containing symbol name"
                     }
                 },
-                "required": ["max_file_lines", "max_function_lines", "file_pattern", "sort_by", "sort_desc", "limit", "keyword_search", "name"],
                 "additionalProperties": false
             }),
         },

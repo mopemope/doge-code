@@ -233,6 +233,16 @@ model:
 </example>
 
 <example>
+user: Where is the `parse_config` function defined?
+model: I will use the `search_repomap` tool to find the definition of the `parse_config` function.
+<tool_call>
+<function=search_repomap>
+<parameter=name>parse_config</parameter>
+</function>
+</tool_call>
+</example>
+
+<example>
 user: Find all TODO comments in the codebase and show me where they are
 model: I'll search for TODO comments across the codebase.
 
