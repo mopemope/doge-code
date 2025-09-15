@@ -60,7 +60,7 @@ fn test_filter_by_file_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("large.rs"));
     assert_eq!(results[0].file_total_lines, 600);
@@ -84,7 +84,7 @@ fn test_filter_by_function_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "large_func");
@@ -102,7 +102,7 @@ fn test_filter_by_symbol_kind() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].kind, "fn");
@@ -122,7 +122,7 @@ fn test_sort_by_file_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].file_total_lines, 500); // largest first
     assert_eq!(results[1].file_total_lines, 300);
@@ -155,7 +155,7 @@ fn test_keyword_search() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "test_function");
@@ -195,7 +195,7 @@ fn test_keyword_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both test_function and math_function
     let mut found_test = false;
@@ -247,7 +247,7 @@ fn test_name_search() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "calculate_total");
@@ -287,7 +287,7 @@ fn test_name_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(symbols, args);
+    let results = filter_and_group_symbols(&symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both calculate_total and parse_json
     let mut found_calculate = false;
@@ -303,4 +303,49 @@ fn test_name_search_multiple_terms() {
     }
     assert!(found_calculate);
     assert!(found_parse);
+}
+
+#[test]
+fn test_code_doc_field_matching() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file_path = tmp.path().join("example.rs");
+    let content = "/// This is a doc line with special_doc_term\nfn example() {\n  // inline comment\n  let x = \"special_code_term\";\n}\n";
+    std::fs::write(&file_path, content).unwrap();
+
+    let file_str = file_path.to_str().unwrap();
+
+    let symbols = vec![create_test_symbol(
+        "example",
+        SymbolKind::Function,
+        file_str,
+        content.lines().count(),
+        Some(4),
+    )];
+
+    // doc match
+    let args_doc = SearchRepomapArgs {
+        fields: Some(vec!["doc".to_string()]),
+        keyword_search: Some(vec!["special_doc_term".to_string()]),
+        ..Default::default()
+    };
+    let results_doc = filter_and_group_symbols(&symbols, args_doc);
+    assert_eq!(results_doc.len(), 1);
+    assert_eq!(results_doc[0].symbols.len(), 1);
+    let sym_doc = &results_doc[0].symbols[0];
+    assert!(sym_doc.match_score.is_some());
+    assert!(!sym_doc.matches.is_empty());
+    assert_eq!(sym_doc.matches[0].field, "doc");
+
+    // code match
+    let args_code = SearchRepomapArgs {
+        fields: Some(vec!["code".to_string()]),
+        keyword_search: Some(vec!["special_code_term".to_string()]),
+        ..Default::default()
+    };
+    let results_code = filter_and_group_symbols(&symbols, args_code);
+    assert_eq!(results_code.len(), 1);
+    let sym_code = &results_code[0].symbols[0];
+    assert!(sym_code.match_score.is_some());
+    assert!(!sym_code.matches.is_empty());
+    assert_eq!(sym_code.matches[0].field, "code");
 }

@@ -31,11 +31,19 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
   - Example: For a request like "fix the login button", you would use `keyword_search: ["login", "button", "auth"]`.
 - `name`:
   - Use this when you are looking for a specific, named symbol (function, class, etc.).
+- `symbol_kinds`:
+  - Use this to narrow your search to specific types of symbols.
+  - Example: `symbol_kinds: ["Function", "Struct"]`
+- `fields`:
+  - Optional list of fields to search in. Supported values: `name`, `keyword`, `code`, `doc`.
+  - If omitted, all fields are searched. Use `fields` to narrow scope and save tokens (e.g., `fields:["name","doc"]`).
 - `max_file_lines` / `max_function_lines`:
   - Use these to filter for code that might be too complex or require refactoring.
 
 **Return Value:**
-The tool returns a list of `RepomapSearchResult` objects, each containing file and symbol information, including the symbol's name, kind, location, and associated keywords. Use this information to proceed with `fs_read` to inspect the code."#;
+The tool returns a list of `RepomapSearchResult` objects, each containing file and symbol information, including the symbol's name, kind, location, associated keywords, and the **code_snippet**.
+The `code_snippet` allows you to understand the code immediately without a followup `fs_read` call.
+"#;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -59,6 +67,11 @@ pub fn tool_def() -> ToolDef {
                         "type": ["string", "null"],
                         "description": "File path pattern to match (substring match)"
                     },
+                    "symbol_kinds": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": "Filter results by symbol kind (e.g., 'Function', 'Struct', 'Trait')."
+                    },
                     "sort_by": {
                         "type": ["string", "null"],
                         "enum": ["file_lines", "function_lines", "symbol_count", "file_path"],
@@ -81,6 +94,23 @@ pub fn tool_def() -> ToolDef {
                         "type": ["array", "null"],
                         "items": {"type": "string"},
                         "description": "A list of search for symbols containing symbol name"
+                    },
+                    "fields": {
+                        "type": ["array","null"],
+                        "items": {"type":"string"},
+                        "description": "Fields to search in (name, keyword, code, doc). If omitted, all fields are searched."
+                    },
+                    "include_snippets": {
+                        "type": ["boolean","null"],
+                        "description": "Whether to include code snippets in the result (default: true)"
+                    },
+                    "context_lines": {
+                        "type": ["integer","null"],
+                        "description": "Number of context lines to include around matched symbol when snippets are returned"
+                    },
+                    "snippet_max_chars": {
+                        "type": ["integer","null"],
+                        "description": "Maximum characters for a snippet (truncate with '...' if exceeded)"
                     }
                 },
                 "additionalProperties": false

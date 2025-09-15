@@ -170,6 +170,7 @@ Using `search_text` before `search_repomap` is inefficient and will lead to poor
   - `max_file_lines`: Maximum number of lines in the file
   - `max_function_lines`: Maximum number of lines in functions
   - `file_pattern`: File path pattern to match (substring match)
+  - `symbol_kinds`: Filter results by symbol kind (e.g., 'Function', 'Struct', 'Trait').
   - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path)
   - `sort_desc`: Sort in descending order (default: true)
   - `limit`: Maximum number of results to return (default: 50)
@@ -188,11 +189,12 @@ The tool returns a list of `RepomapSearchResult` objects, each representing a fi
   - `function_lines`: The number of lines in the function, if applicable.
   - `parent`: The name of the parent symbol, if any.
   - `keywords`: A list of keywords extracted from the comments associated with the symbol.
+  - `code_snippet`: The actual code block for the symbol.
 
 **Using search_repomap Results:**
-- Always examine the returned `symbols` list to understand the context of the code.
-- Use `fs_read` to view the actual code content of the file at the specified line numbers.
-- If multiple symbols are returned, prioritize those that are most relevant to the user's request based on their `name`, `kind`, and `keywords`.
+- **Prioritize analyzing the `code_snippet`** within the returned `symbols` list. This gives you immediate context without needing a separate file read.
+- Use the other symbol details (`name`, `kind`, `keywords`) to assess relevance.
+- Only use `fs_read` if you need to see more context around the symbol than the snippet provides.
 
 ### File Editing Tools
 

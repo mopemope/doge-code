@@ -22,7 +22,8 @@ impl RepomapSearchTools {
         map: &RepoMap,
         args: SearchRepomapArgs,
     ) -> Result<Vec<RepomapSearchResult>> {
-        let results = filter_and_group_symbols(map.symbols.clone(), args);
+        // Avoid cloning the entire symbols vector; pass a reference-aware API
+        let results = filter_and_group_symbols(&map.symbols, args);
         Ok(results)
     }
 }
