@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod c_collector;
 pub mod cache;
 pub mod collector;
 pub mod csharp_collector;
@@ -14,6 +15,7 @@ pub mod symbol;
 pub mod ts_js_collector;
 
 pub use analyzer::Analyzer;
+pub use c_collector::CExtractor;
 pub use cache::{RepomapCache, RepomapStore};
 pub use collector::LanguageSpecificExtractor;
 pub use csharp_collector::CSharpExtractor;
