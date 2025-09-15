@@ -9,7 +9,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - **Interactive TUI Interface** - Real-time streaming output with status indicators and cancellation support
 - **Multi-language Repository Analysis** - Static analysis using tree-sitter for Rust, TypeScript, JavaScript, Python, Go, C#, and Java
 - **Autonomous Agent Loop** - Advanced agent capabilities with function calling, tool execution, and feedback loops.
-- **Task Planning & Execution** - Decomposes complex tasks, creates execution plans, and carries them out autonomously.
+
 - **OpenAI-compatible API Integration** - Streaming chat completions with tool use support
 - **Comprehensive Tool System** - 15+ built-in tools for filesystem operations, code analysis, and execution
 
@@ -363,8 +363,7 @@ Application logs are written to `./debug.log` for debugging and troubleshooting.
 - **Performance Optimizations** - Faster analysis, caching improvements, and memory optimization
 - **Plugin System** - Extensible architecture for custom tools and integrations
 
-### Current Development
-See `.plan/` directory for detailed development plans and progress tracking.
+
 
 ## License
 
