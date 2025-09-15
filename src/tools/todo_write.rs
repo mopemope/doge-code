@@ -222,75 +222,16 @@ pub fn todo_write_from_base_path(
     fs::create_dir_all(&todo_dir)
         .with_context(|| format!("Failed to create todo directory: {}", todo_dir.display()))?;
 
-    debug!("write todo: {:?}", todos);
+    debug!("write todos: {:?}", todos);
 
     // Load existing todos if the file exists
-    let mut existing = if todo_file_path.exists() {
-        let content = fs::read_to_string(&todo_file_path)
-            .with_context(|| format!("Failed to read todo file: {}", todo_file_path.display()))?;
-
-        // Try to parse the existing file. If parsing fails we'll fallback to an
-        // empty list so we don't block the user's request.
-        match serde_json::from_str::<TodoList>(&content) {
-            Ok(mut tl) => {
-                // Ensure session_id is set
-                if tl.session_id.is_none() {
-                    tl.session_id = Some(session_id.to_string());
-                }
-                tl
-            }
-            Err(_) => {
-                // Try to salvage if the file contains an object with `todos` field
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(todos_val) = v.get("todos") {
-                        if let Ok(parsed_todos) =
-                            serde_json::from_value::<Vec<TodoItem>>(todos_val.clone())
-                        {
-                            TodoList {
-                                session_id: Some(session_id.to_string()),
-                                todos: parsed_todos,
-                            }
-                        } else {
-                            TodoList {
-                                session_id: Some(session_id.to_string()),
-                                todos: vec![],
-                            }
-                        }
-                    } else {
-                        TodoList {
-                            session_id: Some(session_id.to_string()),
-                            todos: vec![],
-                        }
-                    }
-                } else {
-                    TodoList {
-                        session_id: Some(session_id.to_string()),
-                        todos: vec![],
-                    }
-                }
-            }
-        }
-    } else {
-        TodoList {
-            session_id: Some(session_id.to_string()),
-            todos: vec![],
-        }
+    let new_todos = TodoList {
+        session_id: Some(session_id.to_string()),
+        todos,
     };
 
-    // Merge incoming todos: update items with matching id, otherwise append.
-    for new_item in todos.into_iter() {
-        if let Some(pos) = existing.todos.iter().position(|t| t.id == new_item.id) {
-            existing.todos[pos] = new_item;
-        } else {
-            existing.todos.push(new_item);
-        }
-    }
-
-    // Ensure session_id is set to the current session
-    existing.session_id = Some(session_id.to_string());
-
     // Serialize the todo list to JSON
-    let json_content = serde_json::to_string_pretty(&existing)
+    let json_content = serde_json::to_string_pretty(&new_todos)
         .with_context(|| "Failed to serialize todo list to JSON")?;
 
     // Write the JSON content to the file
@@ -301,7 +242,7 @@ pub fn todo_write_from_base_path(
         )
     })?;
 
-    Ok(existing)
+    Ok(new_todos)
 }
 
 #[cfg(test)]
@@ -366,16 +307,11 @@ mod tests {
 
         let content2 = fs::read_to_string(&todo_file_path).unwrap();
         let read2: TodoList = serde_json::from_str(&content2).unwrap();
-        assert_eq!(read2.todos.len(), 3);
+        assert_eq!(read2.todos.len(), 2);
 
         let t1 = read2.todos.iter().find(|t| t.id == "1").unwrap();
         assert_eq!(t1.content, "First updated");
         assert_eq!(t1.status, "completed");
-
-        let t2 = read2.todos.iter().find(|t| t.id == "2").unwrap();
-        assert_eq!(t2.content, "Second");
-        assert_eq!(t2.status, "pending");
-
         let t3 = read2.todos.iter().find(|t| t.id == "3").unwrap();
         assert_eq!(t3.content, "Third");
         assert_eq!(t3.status, "pending");
