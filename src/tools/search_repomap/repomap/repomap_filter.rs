@@ -104,8 +104,7 @@ pub(super) fn filter_and_group_symbols(
                 if let Some(lines) = &file_lines {
                     let start_idx = symbol.start_line.saturating_sub(1);
                     let end_idx = symbol.end_line.min(lines.len());
-                    for i in start_idx..end_idx {
-                        let line = lines[i];
+                    for (i, line) in lines.iter().enumerate().take(end_idx).skip(start_idx) {
                         let line_lower = line.to_lowercase();
                         if let Some(col) = line_lower.find(term_lower) {
                             let matched = &line[col..col + term_lower.len()];
