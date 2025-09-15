@@ -10,43 +10,32 @@ pub use search_tools::RepomapSearchTools;
 #[cfg(test)]
 mod tests;
 
-const DESCRIPTION: &str = "
-This is an advanced, structural code search tool for the entire repository.
-Unlike simple text-matching tools like grep or ripgrep, it understands code structure (symbol names, comments) and metrics (file size, function size), allowing you to combine these criteria for precise searches.
-This is the primary, first-choice tool that should be used to investigate the codebase or pinpoint locations for modification.
-By passing feature names or keywords from a user's request to the `keyword_search` parameter, you can quickly and accurately discover relevant code and files.
+const DESCRIPTION: &str = r#"
+This is an advanced, structural code search tool that you MUST use as the first step for any code analysis or modification task.
+It is your primary tool for understanding the codebase. Unlike simple text search, it understands code structure (symbols, comments) and helps you locate relevant code with surgical precision.
 
-Primary Use Cases:
-- Identifying the location of code related to a specific feature.
-- Finding refactoring candidates, such as large files or complex functions.
-- Analyzing patterns of the codebase's overall structure and complexity.
+**Workflow:**
+1.  **ALWAYS start with this tool.** Analyze the user's request to identify keywords (features, concepts, variable names).
+2.  Use these keywords in the `keyword_search` or `name` parameter to find the most relevant code locations.
+3.  Analyze the results to determine your next step.
 
-Key Parameter:
+**Primary Use Cases:**
+- **Mandatory first step:** Finding the location of code related to any feature or bug.
+- **Code analysis:** Finding refactoring candidates (e.g., large files, complex functions) or analyzing the codebase structure.
 
-- keyword_search:
- - Specifies the core keywords, feature names, or relevant terms for the search.
- - It searches against both symbol names (e.g., function/class names) and the comments associated with those symbols.
- - Set the most critical terms extracted from the user's instructions here.
-- name:
- - Searches directly for a specific symbol by its name (e.g., function name, class name, variable name).
-- max_file_lines:
- - Filters files based on the number of lines. Comparison operators can be used.
-- max_function_lines
- - Filters for files containing functions that meet the specified line count criteria. Comparison operators can be used.
+**Key Parameters:**
 
-Return Value:
-The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:
-- `file`: The absolute path to the file.
-- `file_total_lines`: The total number of lines in the file.
-- `symbol_count`: The number of symbols found in the file that match the criteria.
-- `symbols`: A list of `SymbolSearchResult` objects, each containing details about a matched symbol:
-  - `name`: The name of the symbol (e.g., function name, class name).
-  - `kind`: The type of the symbol (e.g., 'Function', 'Class', 'Method').
-  - `start_line`: The starting line number of the symbol definition.
-  - `end_line`: The ending line number of the symbol definition.
-  - `function_lines`: The number of lines in the function, if applicable.
-  - `parent`: The name of the parent symbol, if any.
-  - `keywords`: A list of keywords extracted from the comments associated with the symbol.";
+- `keyword_search`:
+  - **Your primary search parameter.** Use this to find symbols and comments related to a feature or concept.
+  - Extract keywords from the user's request and provide them as a list.
+  - Example: For a request like "fix the login button", you would use `keyword_search: ["login", "button", "auth"]`.
+- `name`:
+  - Use this when you are looking for a specific, named symbol (function, class, etc.).
+- `max_file_lines` / `max_function_lines`:
+  - Use these to filter for code that might be too complex or require refactoring.
+
+**Return Value:**
+The tool returns a list of `RepomapSearchResult` objects, each containing file and symbol information, including the symbol's name, kind, location, and associated keywords. Use this information to proceed with `fs_read` to inspect the code."#;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {

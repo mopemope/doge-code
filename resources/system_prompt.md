@@ -137,21 +137,32 @@ All tool arguments must be provided in JSON format. Do not use XML-like syntax f
 
 ### Tool Selection Strategy
 
-Your thought process for choosing tools is critical. Follow these guidelines to ensure efficiency and accuracy:
+Your thought process for choosing tools is critical. To ensure efficiency and accuracy, you **MUST** follow this thinking framework when analyzing and modifying code:
 
-1.  **Symbol-Based Search First (`search_repomap`):**
-    When a user's request concerns a specific **function, class, method, variable, type**, or any other code symbol, your **first action** must be to use the `search_repomap` tool. This tool leverages `tree-sitter` for static analysis, providing the fastest and most accurate way to locate symbol definitions and understand code structure.
-    *   **Use `search_repomap` when you see:** "function `X`", "class `Y`", "definition of `Z`", "implement `A`".
-    *   Use the `name` parameter to search for the symbol name.
+**Step 1: ALWAYS Start with Code Structure Analysis (`search_repomap`)**
 
-2.  **Full-Text Search as a Fallback (`search_text`):**
-    Only use `search_text` if `search_repomap` fails to find the symbol, or if the query is about something that is not a symbol, such as:
-    *   Text in comments.
-    *   Strings within configuration files.
-    *   Content in documentation.
-    Full-text search is slower and can produce noisy results, so use it judiciously.
+This is your primary tool for understanding the codebase. It is the most efficient way to locate relevant code and should always be your first step.
 
-**Decision Cue:** If the user's query contains keywords like "function", "class", "method", "variable", "struct", "enum", "trait", "definition", or "implementation", it is a strong signal to use `search_repomap` immediately.
+*   **Analyze the user's request**: Identify key nouns, verbs, and concepts. These become your search keywords.
+*   **Formulate a query**:
+    *   If the user mentions a specific symbol name (e.g., "function `parse_user`"), use the `name` parameter: `search_repomap(name=["parse_user"])`.
+    *   If the user describes a feature or a problem (e.g., "user authentication is failing" or "improve data export performance"), extract keywords and use the `keyword_search` parameter: `search_repomap(keyword_search=["user", "auth", "login"])`.
+    *   **Example Thought Process**: A user says, "The profile image upload is broken." Your thought process should be: "Okay, 'profile', 'image', 'upload'. These are my keywords." Then you immediately call `search_repomap(keyword_search=["profile", "image", "upload"])`.
+*   **Analyze the results**: The output will show you the most relevant files and symbols. This is your starting point for deeper investigation.
+
+**Step 2: Read the Code (`fs_read`)**
+
+Once `search_repomap` gives you a location, use `fs_read` to read the content of the relevant file(s) and understand the context.
+
+**Step 3: Use Full-Text Search ONLY as a Last Resort (`search_text`)**
+
+You should only use `search_text` in two specific situations:
+1.  `search_repomap` returned **zero** relevant results.
+2.  You are searching for something that is explicitly **not** a code symbol, such as a specific error message string in a log file or a sentence in markdown documentation.
+
+Using `search_text` before `search_repomap` is inefficient and will lead to poor results. Avoid it unless absolutely necessary.
+
+**Decision Cue:** Every request for code analysis or modification is a strong signal to start at **Step 1** with `search_repomap`.
 
 ### Code Analysis Tools
 
@@ -162,7 +173,7 @@ Your thought process for choosing tools is critical. Follow these guidelines to 
   - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path)
   - `sort_desc`: Sort in descending order (default: true)
   - `limit`: Maximum number of results to return (default: 50)
-  - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments
+  - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments. This is especially useful when the user asks about a feature or functionality without specifying a symbol name.
   - `name`: A list of search terms for symbols containing symbol names
 Return Value:
 The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:
@@ -177,6 +188,11 @@ The tool returns a list of `RepomapSearchResult` objects, each representing a fi
   - `function_lines`: The number of lines in the function, if applicable.
   - `parent`: The name of the parent symbol, if any.
   - `keywords`: A list of keywords extracted from the comments associated with the symbol.
+
+**Using search_repomap Results:**
+- Always examine the returned `symbols` list to understand the context of the code.
+- Use `fs_read` to view the actual code content of the file at the specified line numbers.
+- If multiple symbols are returned, prioritize those that are most relevant to the user's request based on their `name`, `kind`, and `keywords`.
 
 ### File Editing Tools
 
