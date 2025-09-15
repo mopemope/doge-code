@@ -39,11 +39,7 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log(
                     "  /session <new|list|switch|save|delete|current|clear> - Manage sessions",
                 );
-                ui.push_log("");
-                ui.push_log("Task Planning & Execution:");
-                ui.push_log("  /plan <task> - Analyze task and create an execution plan");
-                ui.push_log("  /plans - List active and recent plans");
-                ui.push_log("  /execute [plan_id] - Execute the latest or a specific plan");
+
                 ui.push_log("");
                 ui.push_log("Custom commands:");
                 self.display_custom_commands_help(ui);

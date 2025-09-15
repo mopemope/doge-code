@@ -1,6 +1,6 @@
 use crate::analysis::RepoMap;
 use crate::llm::OpenAIClient;
-use crate::planning::{PlanManager, TaskAnalyzer};
+
 use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tui::commands::handlers::custom::CustomCommand;
@@ -30,11 +30,6 @@ pub struct TuiExecutor {
     pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
     // Session management
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
-
-    // Task analyzer for planning
-    pub(crate) task_analyzer: TaskAnalyzer,
-    // Plan manager for execution
-    pub(crate) plan_manager: Arc<Mutex<PlanManager>>,
 
     // Custom commands
     pub(crate) custom_commands: HashMap<String, CustomCommand>,

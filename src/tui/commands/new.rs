@@ -78,24 +78,6 @@ impl TuiExecutor {
         // Pass session manager to tools
         let tools = tools.with_session_manager(session_manager.clone());
 
-        // Initialize plan manager
-        let plan_manager = Arc::new(Mutex::new(crate::planning::PlanManager::new(
-            cfg.project_root.clone(),
-        )?));
-
-        // Initialize task analyzer
-        let task_analyzer = if let Some(client) = &client {
-            crate::planning::TaskAnalyzer::new().with_llm_decomposer(
-                client.clone(),
-                cfg.model.clone(),
-                tools.clone(),
-                repomap.clone(),
-                cfg.clone(),
-            )
-        } else {
-            crate::planning::TaskAnalyzer::new()
-        };
-
         Ok(Self {
             cfg: cfg.clone(),
             tools,
@@ -108,8 +90,6 @@ impl TuiExecutor {
             conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history
             session_manager,
 
-            task_analyzer,
-            plan_manager,
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
