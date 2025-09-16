@@ -22,7 +22,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - **Editor Integration** - `/open <path>` command launches your preferred editor and safely returns to TUI
 - **Project Instructions** - Automatic loading of project-specific instructions from AGENTS.md, QWEN.md, or GEMINI.md
 - **Shell Mode** - Execute shell commands directly within the TUI using `!` or `/shell`.
-- **File Watch Mode** - Run in a non-interactive mode to watch for file changes and execute predefined tasks.
+- **File Watch Mode** - Run in a non-interactive mode to watch for file changes and execute predefined tasks. When a file is modified, Doge-Code looks for comments with the pattern `// AI!: <instruction>` and automatically executes the instruction using the LLM.
 
 ### TUI Experience
 
@@ -54,13 +54,14 @@ target/release/doge-code
 
 You can configure via TOML config file, CLI flags, or environment variables (dotenv is supported).
 
-**Priority**: CLI > Environment > Config file > Defaults
+**Priority**: CLI > Environment > Project config file > Global config file > Defaults
 
 ### Config File Locations (XDG Base Directory spec)
 1. `$DOGE_CODE_CONFIG` (explicit file path, highest priority)
 2. `$XDG_CONFIG_HOME/doge-code/config.toml`
 3. `~/.config/doge-code/config.toml`
 4. Each dir in `$XDG_CONFIG_DIRS` (colon-separated): `dir/doge-code/config.toml`
+5. Project-specific config: `<project-root>/.doge/config.toml` (loaded first with highest precedence among config files)
 
 ### Sample Configuration
 
@@ -72,7 +73,9 @@ api_key = "sk-..."
 log_level = "info"
 theme = "dark"
 # Auto-compact threshold (prompt tokens). When the prompt token count reaches this number, the TUI will automatically trigger a conversation compaction (/compact).
-auto_compact_prompt_token_threshold = 300000
+auto_compact_prompt_token_threshold = 250000
+# Show diff when applying patches
+show_diff = true
 
 # Allowed commands for execute_bash tool
 # You can specify commands that are allowed to be executed
@@ -86,6 +89,7 @@ auto_compact_prompt_token_threshold = 300000
 #   "ls"
 # ]
 allowed_commands = []
+
 ```
 
 ### Environment Variables and CLI Options
@@ -94,6 +98,8 @@ allowed_commands = []
 - `--model` or `OPENAI_MODEL` (default: `gpt-4o-mini`)
 - `--api-key` or `OPENAI_API_KEY`
 - `--log-level` or `DOGE_LOG` (default: `info`)
+- `--no-repomap` - Disable repomap creation at startup
+- `--resume` - Resume the latest session
 
 Example:
 
@@ -102,7 +108,7 @@ OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1 \
 OPENAI_MODEL=gpt-4o-mini \
 DOGE_LOG=debug \
-./target/release/doge-code
+./target/release/doge-code --no-repomap --resume
 ```
 
 ## .dogeignore File
@@ -118,30 +124,28 @@ The `.dogeignore` file specifies files and directories that should be ignored by
 
 Run without flags to launch the TUI:
 
-You can also start in watch mode to react to file system changes:
-`./target/release/doge-code --watch`
-
 ```bash
 ./target/release/doge-code
 ```
 
+You can also start in watch mode to react to file system changes:
+```bash
+./target/release/doge-code --watch
 ```
 
 ### TUI Commands
 
 - **Plain prompts** (no leading slash) - Talk to the LLM.
 - **`! <command>` or `/shell <command>`** - Execute a shell command directly in the project root.
-- `/help` - List all available commands.
+- `/help` - Show this help message.
 - `/map` - Show repository analysis (functions, classes, etc.).
 - `/tools` - List available tools.
-- `/session` - Manage sessions (e.g., `/session list`, `/session new <title>`, `/session load <id>`).
-- `/log` - Display recent application logs.
-- `/clear` - Clear the log area.
+- `/session` - Manage sessions (e.g., `/session list`, `/session new <title>`, `/session switch <id>`, `/session delete <id>`).
+- `/clear` - Clear the conversation and log area.
 - `/open <path>` - Open a file in your editor (respects `$EDITOR`, `$VISUAL`).
 - `/theme <name>` - Switch theme (dark/light).
-- `/retry` - Resend your previous non-command input to the LLM.
-- `/cancel` - Cancel ongoing LLM streaming.
-- `/quit` - Exit TUI.
+- `/cancel` - Cancel the current operation.
+- `/quit` - Exit the application.
 
 ### Custom Slash Commands
 
@@ -275,17 +279,15 @@ The LLM has access to comprehensive tools for autonomous operation:
 
 - `search_repomap` - Search analyzed code symbols with filtering
 
-
 ### Development Tools
 - `execute_bash` - Execute shell commands safely
-- `create_patch` - Generate unified diff patches
 - `apply_patch` - Apply patches to files
 - `edit` - Advanced file editing with search/replace operations
 - `todo_write` - Create and manage a structured task list for the current coding session
 - `todo_read` - Read the todo list for the current session
 
 ### Multi-file Operations
-- `read_many_files` - Read multiple files efficiently in parallel
+- `fs_read_many_files` - Read multiple files efficiently in parallel
 
 ## Multi-language Support
 
@@ -328,7 +330,7 @@ The analysis extracts:
 - **UI**: crossterm for cross-platform terminal handling
 - **Logging**: tracing framework with file output to `./debug.log`
 - **Configuration**: TOML with XDG Base Directory specification compliance
-- **Testing**: Comprehensive test suite with 61+ passing tests
+- **Testing**: Comprehensive test suite with 119+ passing tests
 
 ### Architecture
 - **Modular Design**: Separate modules for analysis, LLM client, tools, TUI, and configuration
