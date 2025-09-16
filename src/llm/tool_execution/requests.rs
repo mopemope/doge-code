@@ -16,7 +16,7 @@ pub async fn chat_tools_once(
     tools: &[crate::llm::types::ToolDef],
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
-    const MAX_RETRIES: u64 = 15;
+    const MAX_RETRIES: u64 = 30;
     let mut last_error = anyhow!("Failed after {} retries", MAX_RETRIES);
 
     for attempt in 1..=MAX_RETRIES {
@@ -29,8 +29,8 @@ pub async fn chat_tools_once(
                     break;
                 }
                 // Exponential backoff with jitter
-                let delay_ms = (2_u64.mul(attempt) * 1200).min(60_000); // Max 60 seconds
-                let jitter = rand::random::<u64>() % 10000; // Add up to 10 second of jitter
+                let delay_ms = (2_u64.mul(attempt) * 1000).min(60_000); // Max 60 seconds
+                let jitter = rand::random::<u64>() % 5000; // Add up to 5 second of jitter
                 let total_delay = Duration::from_millis(delay_ms + jitter);
                 warn!(
                     attempt = attempt,
