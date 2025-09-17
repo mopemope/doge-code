@@ -20,7 +20,7 @@ pub fn start_mcp_server(
 
     let config = config.clone();
     let handle = tokio::spawn(async move {
-        info!("Starting MCP server at {}", &config.bind_address);
+        info!("Starting MCP server at {}", &config.address);
 
         let service = StreamableHttpService::new(
             move || {
@@ -32,7 +32,7 @@ pub fn start_mcp_server(
         );
 
         let router = axum::Router::new().nest_service("/mcp", service);
-        let tcp_listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
+        let tcp_listener = tokio::net::TcpListener::bind(&config.address).await?;
         axum::serve(tcp_listener, router)
             .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
             .await?;

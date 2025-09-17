@@ -119,7 +119,11 @@ async fn main() -> Result<()> {
     };
 
     // Start the MCP server if enabled
-    let _mcp_server_handle = mcp::server::start_mcp_server(&cfg.mcp_server, repomap.clone());
+    let _mcp_server_handle = if let Some(mcp_server) = cfg.mcp_servers.first() {
+        mcp::server::start_mcp_server(mcp_server, repomap.clone())
+    } else {
+        None
+    };
 
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
