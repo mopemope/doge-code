@@ -84,6 +84,7 @@ pub fn build_render_plan(
     total_tokens: Option<u32>,                     // total tokens (if available)
     scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
     todo_list: &[crate::tui::state::TodoItem],     // Add todo_list parameter
+    repomap_status: crate::tui::state::RepomapStatus, // Add repomap_status parameter
 ) -> crate::tui::state::RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -125,6 +126,15 @@ pub fn build_render_plan(
         crate::tui::state::Status::Done => "Done".to_string(),
         crate::tui::state::Status::Error => "Error".to_string(),
     };
+
+    // Add repomap status indicator
+    let repomap_status_str = match repomap_status {
+        crate::tui::state::RepomapStatus::NotStarted => "".to_string(),
+        crate::tui::state::RepomapStatus::Building => " [Repomap: Building...]".to_string(),
+        crate::tui::state::RepomapStatus::Ready => " [Repomap: Ready ✅]".to_string(), // Add checkmark emoji
+        crate::tui::state::RepomapStatus::Error => " [Repomap: Error ❌]".to_string(), // Add cross mark emoji
+    };
+
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
@@ -141,8 +151,8 @@ pub fn build_render_plan(
     };
 
     let title_full = format!(
-        "{}{}{} - {} - {}",
-        title, model_suffix, tokens_suffix, status_str, cwd
+        "{}{}{}{} - {} - {}",
+        title, model_suffix, tokens_suffix, repomap_status_str, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);

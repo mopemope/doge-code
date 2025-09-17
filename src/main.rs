@@ -84,14 +84,23 @@ async fn main() -> Result<()> {
     info!(?cfg, "app config");
 
     // Initialize repomap
-    let repomap = if !cfg.no_repomap {
+    let (repomap, status_rx) = if !cfg.no_repomap {
         let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
         let repomap_clone = repomap.clone();
         let project_root = cfg.project_root.clone();
 
+        // Create a channel for sending status messages
+        let (status_tx, status_rx) = std::sync::mpsc::channel::<String>();
+
         // Spawn an asynchronous task to build the repomap
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
+
+            // Send a message to notify that the repomap is building
+            if let Err(e) = status_tx.send("::status:repomap_building".to_string()) {
+                tracing::error!("Failed to send repomap building message: {:?}", e);
+            }
+
             match crate::analysis::Analyzer::new(&project_root).await {
                 Ok(mut analyzer) => match analyzer.build().await {
                     Ok(map) => {
@@ -103,19 +112,32 @@ async fn main() -> Result<()> {
                             duration,
                             symbol_count
                         );
+                        // Send a message to notify that the repomap is ready
+                        if let Err(e) = status_tx.send("::status:repomap_ready".to_string()) {
+                            tracing::error!("Failed to send repomap ready message: {:?}", e);
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Failed to build RepoMap: {:?}", e);
+                        // Send an error message
+                        if let Err(send_err) = status_tx.send("::status:repomap_error".to_string())
+                        {
+                            tracing::error!("Failed to send repomap error message: {:?}", send_err);
+                        }
                     }
                 },
                 Err(e) => {
                     tracing::error!("Failed to create Analyzer: {:?}", e);
+                    // Send an error message
+                    if let Err(send_err) = status_tx.send("::status:repomap_error".to_string()) {
+                        tracing::error!("Failed to send repomap error message: {:?}", send_err);
+                    }
                 }
             }
         });
-        repomap
+        (repomap, Some(status_rx))
     } else {
-        std::sync::Arc::new(tokio::sync::RwLock::new(None))
+        (std::sync::Arc::new(tokio::sync::RwLock::new(None)), None)
     };
 
     // Start the MCP server if enabled
@@ -128,13 +150,14 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
         Some(Commands::Exec { instruction }) => run_exec(cfg, instruction).await,
-        Some(Commands::Tui) | None => run_tui(cfg, repomap).await,
+        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
     }
 }
 
 async fn run_tui(
     cfg: AppConfig,
     repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
+    status_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     let mut app = TuiApp::new(
         "🦮 /help",
@@ -177,6 +200,22 @@ async fn run_tui(
         app.push_log("Project instructions file: (none)");
     }
     app = app.with_handler(Box::new(exec));
+
+    // Handle repomap status messages if available
+    if let Some(status_rx) = status_rx {
+        // Spawn a thread to handle status messages
+        let ui_tx = app.sender();
+        std::thread::spawn(move || {
+            while let Ok(status) = status_rx.recv() {
+                if let Some(ref tx) = ui_tx
+                    && let Err(e) = tx.send(status)
+                {
+                    tracing::error!("Failed to send status message to UI: {:?}", e);
+                }
+            }
+        });
+    }
+
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
     app.run()?;
 

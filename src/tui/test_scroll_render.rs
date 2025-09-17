@@ -43,6 +43,7 @@ mod tests {
                 None,
                 scroll_state,
                 &[],
+                crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
             );
 
             // Log lines should not exceed the actual main content area height
@@ -95,6 +96,7 @@ mod tests {
             None,
             scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Should show exactly main_content_height lines
@@ -130,6 +132,7 @@ mod tests {
             None,
             &scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Should not show the latest line when scrolled up
@@ -203,6 +206,7 @@ mod tests {
             None,
             scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         println!("Plan log_lines count: {}", plan.log_lines.len());
@@ -259,6 +263,7 @@ mod tests {
                 None,
                 scroll_state,
                 &[],
+                crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
             );
 
             println!("  Expected main height: {}", expected_main_height);
@@ -315,6 +320,7 @@ mod tests {
             None,
             scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         println!("Main content height: {}", main_content_height);
@@ -388,6 +394,7 @@ mod tests {
             None,
             &scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Should show the last few lines
@@ -416,6 +423,7 @@ mod tests {
             None,
             &scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Should not show the latest line

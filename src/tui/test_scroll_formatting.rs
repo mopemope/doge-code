@@ -61,6 +61,7 @@ mod tests {
             None,
             scroll_state,
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Should show the most recent lines when auto-scrolling
