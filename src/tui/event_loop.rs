@@ -155,6 +155,20 @@ impl TuiApp {
                             self.status = Status::Error;
                             self.dirty = true;
                         }
+                        "::status:repomap_building" => {
+                            self.repomap_status = crate::tui::state::RepomapStatus::Building;
+                            self.dirty = true;
+                        }
+                        "::status:repomap_ready" => {
+                            self.repomap_status = crate::tui::state::RepomapStatus::Ready;
+                            self.dirty = true;
+                            // Optionally, you can change the status or perform other actions
+                            // self.status = Status::Idle; // Example: change status to Idle
+                        }
+                        "::status:repomap_error" => {
+                            self.repomap_status = crate::tui::state::RepomapStatus::Error;
+                            self.dirty = true;
+                        }
 
                         // Clear auto-compact pending flag when compaction succeeds
                         "[SUCCESS] Conversation history has been compacted." => {

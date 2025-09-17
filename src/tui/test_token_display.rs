@@ -33,6 +33,7 @@ mod tests {
             None,
             &crate::tui::state::ScrollState::default(),
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Check that the token count is included in the title
@@ -72,6 +73,7 @@ mod tests {
             None,
             &crate::tui::state::ScrollState::default(),
             &[],
+            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
         );
 
         // Check that the token count is not included in the title when it's 0

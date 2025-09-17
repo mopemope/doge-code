@@ -56,6 +56,16 @@ pub enum Status {
     Error,
 }
 
+/// Enum to represent the status of the repomap
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepomapStatus {
+    #[default]
+    NotStarted,
+    Building,
+    Ready,
+    Error,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderPlan {
     pub footer_lines: Vec<String>,
@@ -166,6 +176,8 @@ pub struct TuiApp {
     pub last_user_input: Option<String>,
     // session list state
     pub session_list_state: Option<SessionListState>,
+    /// Status of the repomap
+    pub repomap_status: RepomapStatus,
 }
 
 impl TuiApp {
@@ -345,6 +357,8 @@ impl TuiApp {
             last_user_input: None,
             // session list state
             session_list_state: None,
+            // repomap status
+            repomap_status: RepomapStatus::default(), // Initialize with NotStarted
         };
 
         Ok(app)
