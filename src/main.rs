@@ -137,7 +137,7 @@ async fn run_tui(
     repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
 ) -> Result<()> {
     let mut app = TuiApp::new(
-        "🦮 doge-code - /help, Esc or /quit to exit",
+        "🦮 /help",
         Some(cfg.model.clone()),
         &cfg.theme, // pass theme name
     )?;
