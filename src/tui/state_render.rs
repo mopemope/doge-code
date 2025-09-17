@@ -130,9 +130,9 @@ pub fn build_render_plan(
     // Add repomap status indicator
     let repomap_status_str = match repomap_status {
         crate::tui::state::RepomapStatus::NotStarted => "".to_string(),
-        crate::tui::state::RepomapStatus::Building => " [Repomap: Building...]".to_string(),
-        crate::tui::state::RepomapStatus::Ready => " [Repomap: Ready ✅]".to_string(), // Add checkmark emoji
-        crate::tui::state::RepomapStatus::Error => " [Repomap: Error ❌]".to_string(), // Add cross mark emoji
+        crate::tui::state::RepomapStatus::Building => " [Repomap: ...]".to_string(),
+        crate::tui::state::RepomapStatus::Ready => " [Repomap: ✅]".to_string(), // Add checkmark emoji
+        crate::tui::state::RepomapStatus::Error => " [Repomap: ❌]".to_string(), // Add cross mark emoji
     };
 
     let cwd = std::env::current_dir()
@@ -151,7 +151,7 @@ pub fn build_render_plan(
     };
 
     let title_full = format!(
-        "{}{}{}{} - {} - {}",
+        "{} {} {} {} - {} - {}",
         title, model_suffix, tokens_suffix, repomap_status_str, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
@@ -177,8 +177,8 @@ pub fn build_render_plan(
         // Add each todo item with its status symbol
         for todo in todo_list {
             let status_symbol = match todo.status.as_str() {
-                "pending" => "○",
-                "in_progress" => "●",
+                "pending" => "◌",
+                "in_progress" => "◔",
                 "completed" => "✓",
                 _ => "○",
             };
