@@ -25,20 +25,24 @@ pub struct AppConfig {
     pub show_diff: bool,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Vec<String>,
-    pub mcp_server: McpServerConfig,
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
+    pub name: String,
     pub enabled: bool,
-    pub bind_address: String,
+    pub address: String,
+    pub transport: String, // "stdio" or "http"
 }
 
 impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
+            name: "default".to_string(),
             enabled: false,
-            bind_address: "127.0.0.1:8000".to_string(),
+            address: "127.0.0.1:8000".to_string(),
+            transport: "http".to_string(),
         }
     }
 }
@@ -60,7 +64,7 @@ impl Default for AppConfig {
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
             allowed_commands: vec![],
-            mcp_server: McpServerConfig::default(),
+            mcp_servers: vec![McpServerConfig::default()],
         }
     }
 }
@@ -112,13 +116,15 @@ pub struct FileConfig {
     pub show_diff: Option<bool>,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Option<Vec<String>>,
-    pub mcp_server: Option<PartialMcpServerConfig>,
+    pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct PartialMcpServerConfig {
+    pub name: Option<String>,
     pub enabled: Option<bool>,
-    pub bind_address: Option<String>,
+    pub address: Option<String>,
+    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -223,29 +229,63 @@ impl AppConfig {
             }
         };
 
-        let mcp_defaults = McpServerConfig::default();
-        let mcp_server = {
-            let merged_mcp_cfg = match (&project_cfg.mcp_server, &file_cfg.mcp_server) {
-                (Some(project_mcp), Some(file_mcp)) => Some(PartialMcpServerConfig {
-                    enabled: project_mcp.enabled.or(file_mcp.enabled),
-                    bind_address: project_mcp
-                        .bind_address
-                        .clone()
-                        .or(file_mcp.bind_address.clone()),
-                }),
-                (Some(project_mcp), None) => Some(project_mcp.clone()),
-                (None, Some(file_mcp)) => Some(file_mcp.clone()),
-                (None, None) => None,
-            };
+        // Handle MCP server configurations
+        let mcp_servers = {
+            // Merge MCP server configs from project and file configs
+            let mut merged_mcp_servers = Vec::new();
 
-            if let Some(p) = merged_mcp_cfg {
-                McpServerConfig {
-                    enabled: p.enabled.unwrap_or(mcp_defaults.enabled),
-                    bind_address: p.bind_address.unwrap_or(mcp_defaults.bind_address),
+            // Add servers from global config
+            if let Some(file_mcp_servers) = &file_cfg.mcp_servers {
+                for server in file_mcp_servers {
+                    merged_mcp_servers.push(server.clone());
                 }
-            } else {
-                mcp_defaults
             }
+
+            // Add or override with servers from project config
+            if let Some(project_mcp_servers) = &project_cfg.mcp_servers {
+                for project_server in project_mcp_servers {
+                    // Check if a server with the same name already exists
+                    if let Some(name) = &project_server.name {
+                        if let Some(existing_server) = merged_mcp_servers
+                            .iter_mut()
+                            .find(|s| s.name.as_ref() == Some(name))
+                        {
+                            // Override existing server settings
+                            if let Some(enabled) = project_server.enabled {
+                                existing_server.enabled = Some(enabled);
+                            }
+                            if let Some(address) = &project_server.address {
+                                existing_server.address = Some(address.clone());
+                            }
+                            if let Some(transport) = &project_server.transport {
+                                existing_server.transport = Some(transport.clone());
+                            }
+                        } else {
+                            // Add new server
+                            merged_mcp_servers.push(project_server.clone());
+                        }
+                    } else {
+                        // Add new server without name check
+                        merged_mcp_servers.push(project_server.clone());
+                    }
+                }
+            }
+
+            // Convert to McpServerConfig with defaults
+            let mcp_defaults = McpServerConfig::default();
+            merged_mcp_servers
+                .into_iter()
+                .map(|partial| McpServerConfig {
+                    name: partial.name.unwrap_or_else(|| "default".to_string()),
+                    enabled: partial.enabled.unwrap_or(mcp_defaults.enabled),
+                    address: partial
+                        .address
+                        .unwrap_or_else(|| mcp_defaults.address.clone()),
+                    transport: partial
+                        .transport
+                        .unwrap_or_else(|| mcp_defaults.transport.clone()),
+                })
+                .collect()
         };
 
         // Add theme setting (project config takes precedence)
@@ -294,7 +334,7 @@ impl AppConfig {
                 .allowed_commands
                 .or(file_cfg.allowed_commands)
                 .unwrap_or_default(),
-            mcp_server,
+            mcp_servers,
         })
     }
 }

@@ -192,7 +192,7 @@ mod tests {
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
             allowed_commands: vec![], // Add allowed_commands
-            mcp_server: crate::config::McpServerConfig::default(), // Add mcp_server field
+            mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
         };
 
         let executor = Executor::new(cfg);
@@ -223,7 +223,7 @@ mod tests {
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
             allowed_commands: vec![], // Add allowed_commands
-            mcp_server: crate::config::McpServerConfig::default(), // Add mcp_server field
+            mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
         };
 
         let mut executor = Executor::new(cfg).unwrap();

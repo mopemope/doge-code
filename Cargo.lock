@@ -2936,6 +2936,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-wrap"
+version = "8.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ef4f2f0422f23a82ec9f628ea2acd12871c81a9362b02c43c1aa86acfc3ba1"
+dependencies = [
+ "futures",
+ "indexmap",
+ "nix",
+ "tokio",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3305,7 +3319,9 @@ dependencies = [
  "http-body-util",
  "paste",
  "pin-project-lite",
+ "process-wrap",
  "rand 0.9.2",
+ "reqwest",
  "rmcp-macros",
  "schemars",
  "serde",
