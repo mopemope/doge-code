@@ -61,6 +61,9 @@ notify = "6.1"
 notify-rust = "4"
 tui-textarea = { version = "0.7.0", features = ["crossterm"] }
 ansi-to-tui = "3.0"
+rmcp = { version = "0.6.3", features = ["transport-streamable-http-server"] }
+axum = "0.7"
+schemars = "1.0"
 
 [dev-dependencies]
 httptest = "0.16"

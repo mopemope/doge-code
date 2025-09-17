@@ -25,6 +25,22 @@ pub struct AppConfig {
     pub show_diff: bool,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Vec<String>,
+    pub mcp_server: McpServerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    pub enabled: bool,
+    pub bind_address: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "127.0.0.1:8000".to_string(),
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -44,6 +60,7 @@ impl Default for AppConfig {
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
             allowed_commands: vec![],
+            mcp_server: McpServerConfig::default(),
         }
     }
 }
@@ -95,6 +112,13 @@ pub struct FileConfig {
     pub show_diff: Option<bool>,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Option<Vec<String>>,
+    pub mcp_server: Option<PartialMcpServerConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialMcpServerConfig {
+    pub enabled: Option<bool>,
+    pub bind_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -199,6 +223,31 @@ impl AppConfig {
             }
         };
 
+        let mcp_defaults = McpServerConfig::default();
+        let mcp_server = {
+            let merged_mcp_cfg = match (&project_cfg.mcp_server, &file_cfg.mcp_server) {
+                (Some(project_mcp), Some(file_mcp)) => Some(PartialMcpServerConfig {
+                    enabled: project_mcp.enabled.or(file_mcp.enabled),
+                    bind_address: project_mcp
+                        .bind_address
+                        .clone()
+                        .or(file_mcp.bind_address.clone()),
+                }),
+                (Some(project_mcp), None) => Some(project_mcp.clone()),
+                (None, Some(file_mcp)) => Some(file_mcp.clone()),
+                (None, None) => None,
+            };
+
+            if let Some(p) = merged_mcp_cfg {
+                McpServerConfig {
+                    enabled: p.enabled.unwrap_or(mcp_defaults.enabled),
+                    bind_address: p.bind_address.unwrap_or(mcp_defaults.bind_address),
+                }
+            } else {
+                mcp_defaults
+            }
+        };
+
         // Add theme setting (project config takes precedence)
         let theme = project_cfg
             .theme
@@ -245,6 +294,7 @@ impl AppConfig {
                 .allowed_commands
                 .or(file_cfg.allowed_commands)
                 .unwrap_or_default(),
+            mcp_server,
         })
     }
 }

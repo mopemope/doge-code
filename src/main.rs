@@ -4,6 +4,7 @@ pub mod config;
 pub mod exec;
 pub mod llm;
 pub mod logging;
+pub mod mcp;
 
 pub mod session;
 pub mod tools;
@@ -82,14 +83,55 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::from_cli(cli.clone())?;
     info!(?cfg, "app config");
 
+    // Initialize repomap
+    let repomap = if !cfg.no_repomap {
+        let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let repomap_clone = repomap.clone();
+        let project_root = cfg.project_root.clone();
+
+        // Spawn an asynchronous task to build the repomap
+        tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+            match crate::analysis::Analyzer::new(&project_root).await {
+                Ok(mut analyzer) => match analyzer.build().await {
+                    Ok(map) => {
+                        let duration = start_time.elapsed();
+                        let symbol_count = map.symbols.len();
+                        *repomap_clone.write().await = Some(map);
+                        tracing::debug!(
+                            "Background repomap generation completed in {:?} with {} symbols",
+                            duration,
+                            symbol_count
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to build RepoMap: {:?}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to create Analyzer: {:?}", e);
+                }
+            }
+        });
+        repomap
+    } else {
+        std::sync::Arc::new(tokio::sync::RwLock::new(None))
+    };
+
+    // Start the MCP server if enabled
+    let _mcp_server_handle = mcp::server::start_mcp_server(&cfg.mcp_server, repomap.clone());
+
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
         Some(Commands::Exec { instruction }) => run_exec(cfg, instruction).await,
-        Some(Commands::Tui) | None => run_tui(cfg).await,
+        Some(Commands::Tui) | None => run_tui(cfg, repomap).await,
     }
 }
 
-async fn run_tui(cfg: AppConfig) -> Result<()> {
+async fn run_tui(
+    cfg: AppConfig,
+    repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
+) -> Result<()> {
     let mut app = TuiApp::new(
         "🦮 doge-code - /help, Esc or /quit to exit",
         Some(cfg.model.clone()),
@@ -101,7 +143,7 @@ async fn run_tui(cfg: AppConfig) -> Result<()> {
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");
 
-    let exec = match TuiExecutor::new(cfg.clone()) {
+    let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
         Ok(exec) => {
             // If resume flag is set, load the latest session
             if cfg.resume {
