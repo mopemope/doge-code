@@ -1,3 +1,3 @@
 pub use self::repomap::*;
 
-mod repomap;
+pub mod repomap;

@@ -1,0 +1,158 @@
+pub mod server;
+pub mod service;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpServerConfig;
+    use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn test_mcp_server_start() {
+        let config = McpServerConfig {
+            enabled: true,
+            bind_address: "127.0.0.1:0".to_string(), // Use port 0 to get a random available port
+        };
+
+        let repomap = Arc::new(RwLock::new(None));
+        let handle = server::start_mcp_server(&config, repomap);
+
+        // The server should start successfully
+        assert!(handle.is_some());
+
+        // Give the server a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // In a real test, we would connect to the server and verify it's working
+        // For now, we'll just check that the handle exists
+    }
+
+    #[tokio::test]
+    async fn test_doge_mcp_service_creation() {
+        let service = service::DogeMcpService::new();
+        assert!(service.tool_router.has_route("say_hello"));
+        assert!(service.tool_router.has_route("search_repomap"));
+        assert!(service.tool_router.has_route("fs_read"));
+        assert!(service.tool_router.has_route("fs_read_many_files"));
+        assert!(service.tool_router.has_route("search_text"));
+        assert!(service.tool_router.has_route("fs_list"));
+        assert!(service.tool_router.has_route("find_file"));
+    }
+
+    #[tokio::test]
+    async fn test_say_hello_tool() {
+        let service = service::DogeMcpService::new();
+        let result = service.say_hello();
+        assert!(result.is_ok());
+
+        let result = result.unwrap();
+        assert_eq!(result.content.len(), 1);
+        if let RawContent::Text(ref text) = result.content[0].raw {
+            assert_eq!(text.text, "hello");
+        } else {
+            panic!("Expected text content");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fs_read_tool() {
+        let service = service::DogeMcpService::new();
+        let params = service::FsReadParams {
+            path: "/nonexistent/file.txt".to_string(),
+            start_line: None,
+            limit: None,
+        };
+
+        let result = service.fs_read(Parameters(params));
+        // This should fail because the file doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fs_list_tool() {
+        let service = service::DogeMcpService::new();
+        let params = service::FsListParams {
+            path: "/nonexistent/directory".to_string(),
+            max_depth: None,
+            pattern: None,
+        };
+
+        let result = service.fs_list(Parameters(params));
+        // This should succeed but return an empty list because the directory doesn't exist
+        assert!(result.is_ok());
+        let files = result.unwrap();
+        // The result should be serializable to JSON
+        let _json = serde_json::to_string(&files).expect("Should be serializable");
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool() {
+        let service = service::DogeMcpService::new();
+        let params = service::SearchTextParams {
+            search_pattern: "test".to_string(),
+            file_glob: Some("*.txt".to_string()),
+        };
+
+        let result = service.search_text(Parameters(params));
+        // This might fail depending on whether ripgrep is available and files exist
+        // but it shouldn't panic
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_find_file_tool() {
+        let service = service::DogeMcpService::new();
+        let params = service::FindFileParams {
+            filename: "nonexistent.txt".to_string(),
+        };
+
+        let result = service.find_file(Parameters(params)).await;
+        // This should succeed even if the file doesn't exist (it would return an empty list)
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_repomap_tool_without_repomap() {
+        let service = service::DogeMcpService::new();
+        let params = service::SearchRepomapParams {
+            max_file_lines: None,
+            max_function_lines: None,
+            file_pattern: None,
+            symbol_kinds: None,
+            sort_by: None,
+            sort_desc: None,
+            limit: None,
+            keyword_search: Some(vec!["test".to_string()]),
+            name: None,
+            fields: None,
+            include_snippets: None,
+            context_lines: None,
+            snippet_max_chars: None,
+        };
+
+        let result = service.search_repomap(Parameters(params)).await;
+        // This should fail because the repomap is not initialized
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_format_json_result() {
+        let service = service::DogeMcpService::new();
+        let test_data = vec!["item1".to_string(), "item2".to_string()];
+        let result = service.format_json_result(test_data);
+
+        assert!(result.is_ok());
+        let call_result = result.unwrap();
+        assert_eq!(call_result.content.len(), 1);
+        assert!(matches!(call_result.content[0].raw, RawContent::Text(_)));
+    }
+
+    #[tokio::test]
+    async fn test_format_error() {
+        let service = service::DogeMcpService::new();
+        let error = service.format_error("Test error", Some(serde_json::json!("details")));
+        assert_eq!(error.message, "Test error");
+    }
+}
