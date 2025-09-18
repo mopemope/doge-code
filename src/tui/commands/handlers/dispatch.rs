@@ -72,9 +72,6 @@ impl CommandHandler for TuiExecutor {
                 ui.push_log("  - todo_write: Create and manage a structured task list");
                 ui.push_log("  - todo_read: Read the todo list for the current session");
             }
-            "/clear" => {
-                ui.clear_log();
-            }
             "/rebuild-repomap" => {
                 // Force complete rebuild (ignore cache)
                 ui.push_log("[Starting forced complete repomap rebuild (ignoring cache)...]");
