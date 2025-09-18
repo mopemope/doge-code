@@ -72,6 +72,7 @@ impl TuiExecutor {
 
         // Handle /clear command to clear conversation and start new session
         if line == "/clear" {
+            ui.clear_log();
             // Clear conversation history
             if let Ok(mut history) = self.conversation_history.lock() {
                 history.clear();
