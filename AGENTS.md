@@ -207,6 +207,15 @@ Session management provides persistent conversation history and session tracking
 - Linting with clippy
 - Modular design with clear separation of concerns
 
+The guidelines are as follows:
+
+- Before executing a task, always investigate the current implementation, reorganize the task,
+  create an implementation plan, and then start the task.
+- Always execute shell commands in the foreground and include the results in the context.
+- Write code comments as much as possible, and always use English as the language.
+- Do not rush to conclusions, but think deeply and prioritize accuracy.
+- Think step-by-step and execute the task.
+
 ### Testing
 
 - Comprehensive test suite with unit tests
