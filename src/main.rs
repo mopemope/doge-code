@@ -183,7 +183,7 @@ async fn run_tui(
     status_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     let mut app = TuiApp::new(
-        "🦮 /help",
+        "🦮 doge-code 🐕‍🦺 /help",
         Some(cfg.model.clone()),
         &cfg.theme, // pass theme name
     )?;

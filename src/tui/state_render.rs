@@ -80,7 +80,7 @@ pub fn build_render_plan(
     main_content_height: u16, // Add actual main content area height
     model: Option<&str>,
     spinner_state: usize,                          // Add spinner_state parameter
-    _prompt_tokens: u32,                           // prompt tokens
+    prompt_tokens: u32,                            // prompt tokens
     _total_tokens: Option<u32>,                    // total tokens (if available)
     scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
     todo_list: &[crate::tui::state::TodoItem],     // Add todo_list parameter
@@ -127,23 +127,19 @@ pub fn build_render_plan(
         crate::tui::state::Status::Error => "Error".to_string(),
     };
 
-    let tokens_part = if _prompt_tokens > 0 {
-        match _total_tokens {
-            Some(total) => format!(" - tokens:{}/{}", _prompt_tokens, total),
-            None => format!(" - tokens:{}", _prompt_tokens),
-        }
-    } else {
-        String::new()
-    };
-
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
     let model_suffix = model.map(|m| format!(" - model:{}", m)).unwrap_or_default();
+    let tokens_suffix = if prompt_tokens > 0 {
+        format!(" - tokens:{}", prompt_tokens)
+    } else {
+        String::new()
+    };
 
     let title_full = format!(
-        "{} {}{} - {} - {}",
-        title, model_suffix, tokens_part, status_str, cwd
+        "{}{}{} - {} - {}",
+        title, model_suffix, tokens_suffix, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
