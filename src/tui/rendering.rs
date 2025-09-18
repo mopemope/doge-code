@@ -5,6 +5,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation},
 };
+use std::fmt::Write;
 // use tracing::debug;
 
 impl TuiApp {
@@ -19,7 +20,8 @@ impl TuiApp {
             .constraints([
                 Constraint::Length(2), // Header
                 Constraint::Min(1),    // Main content
-                Constraint::Length(5), // Footer (increased height for textarea)
+                Constraint::Length(2), // Status Footer
+                Constraint::Length(5), // Input area (increased to 5 for 3 visible lines)
             ])
             .split(size);
 
@@ -63,7 +65,8 @@ impl TuiApp {
         self.render_header(f, chunks[0], &plan, &self.theme);
         self.render_main_content(f, chunks[1], &plan, &self.theme);
 
-        self.render_footer(f, chunks[2]);
+        self.render_status_footer(f, chunks[2], &self.theme);
+        self.render_input_area(f, chunks[3]);
 
         // If there are todo items in the plan, add them to the log as regular messages
         if !plan.todo_list.is_empty() {
@@ -136,8 +139,7 @@ impl TuiApp {
         if plan.log_lines.len() > area.height as usize {
             // debug!(
             //     "WARNING: More lines ({}) than area height ({})",
-            //     plan.log_lines.len(),
-            //     area.height
+            //     plan.log_lines.len(), area.height
             // );
         }
 
@@ -271,7 +273,7 @@ impl TuiApp {
         f.render_widget(list, area);
     }
 
-    fn render_footer(&mut self, f: &mut Frame, area: Rect) {
+    fn render_input_area(&mut self, f: &mut Frame, area: Rect) {
         let input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
             self.theme.shell_input_style
         } else {
@@ -386,6 +388,50 @@ impl TuiApp {
                 &mut scrollbar_state,
             );
         }
+    }
+
+    fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let mut status_text = String::with_capacity(100);
+        status_text.push_str("v0.1.0 | ");
+
+        // Token usage
+        write!(status_text, "Prompt: {} ", self.tokens_prompt_used).unwrap();
+        if let Some(total) = self.tokens_total_used {
+            write!(status_text, "Total: {} | ", total).unwrap();
+        } else {
+            status_text.push_str("Total: N/A | ");
+        }
+
+        // Repomap status
+        let repomap_str = match self.repomap_status {
+            crate::tui::state::RepomapStatus::NotStarted => "NotStarted",
+            crate::tui::state::RepomapStatus::Building => "Building",
+            crate::tui::state::RepomapStatus::Ready => "Ready",
+            crate::tui::state::RepomapStatus::Error => "Error",
+        };
+        write!(status_text, "Repomap: {} | ", repomap_str).unwrap();
+
+        // Input mode
+        let mode_str = match self.input_mode {
+            crate::tui::state::InputMode::Normal => "Normal",
+            crate::tui::state::InputMode::Shell => "Shell",
+            crate::tui::state::InputMode::SessionList => "SessionList",
+        };
+        write!(status_text, "Mode: {}", mode_str).unwrap();
+
+        let footer_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+
+        let status_paragraph = Paragraph::new(status_text)
+            .style(theme.footer_style)
+            .alignment(Alignment::Left);
+        f.render_widget(status_paragraph, footer_chunks[0]);
+
+        // Separator line
+        let separator = Paragraph::new("─".repeat(area.width as usize)).style(theme.footer_style);
+        f.render_widget(separator, footer_chunks[1]);
     }
 }
 
