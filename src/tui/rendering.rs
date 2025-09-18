@@ -20,7 +20,7 @@ impl TuiApp {
             .constraints([
                 Constraint::Length(2), // Header
                 Constraint::Min(1),    // Main content
-                Constraint::Length(2), // Status Footer
+                Constraint::Length(1), // Status Footer (single line)
                 Constraint::Length(5), // Input area (increased to 5 for 3 visible lines)
             ])
             .split(size);
@@ -391,35 +391,26 @@ impl TuiApp {
     }
 
     fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let footer_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(area);
-
-        // First line: version, token usage
-        let mut line1_text = String::with_capacity(100);
-        line1_text.push_str("v0.1.0 | ");
+        // Single line footer: combine version, tokens, repomap, mode, elapsed
+        let mut footer_text = String::with_capacity(150);
+        footer_text.push_str("v0.1.0 | ");
 
         // Token usage
-        write!(line1_text, "Prompt: {} ", self.tokens_prompt_used).unwrap();
+        write!(footer_text, "Prompt: {} ", self.tokens_prompt_used).unwrap();
         if let Some(total) = self.tokens_total_used {
-            write!(line1_text, "Total: {} | ", total).unwrap();
+            write!(footer_text, "Total: {} | ", total).unwrap();
         } else {
-            line1_text.push_str("Total: N/A | ");
+            footer_text.push_str("Total: N/A | ");
         }
 
-        let line1_paragraph = Paragraph::new(line1_text)
-            .style(theme.footer_style)
-            .alignment(Alignment::Left);
-        f.render_widget(line1_paragraph, footer_chunks[0]);
-
-        // Second line: repomap status, input mode, elapsed time
+        // Repomap status
         let repomap_str = match self.repomap_status {
             crate::tui::state::RepomapStatus::NotStarted => "NotStarted",
             crate::tui::state::RepomapStatus::Building => "Building",
             crate::tui::state::RepomapStatus::Ready => "Ready",
             crate::tui::state::RepomapStatus::Error => "Error",
         };
+        footer_text.push_str(&format!("Repomap: {} | ", repomap_str));
 
         // Input mode
         let mode_str = match self.input_mode {
@@ -427,33 +418,25 @@ impl TuiApp {
             crate::tui::state::InputMode::Shell => "Shell",
             crate::tui::state::InputMode::SessionList => "SessionList",
         };
+        footer_text.push_str(&format!("Mode: {} | ", mode_str));
 
-        let prefix = format!("Repomap: {} | Mode: {} | ", repomap_str, mode_str);
-        let prefix_span = Span::styled(prefix, theme.footer_style);
-        let mut spans = vec![prefix_span];
-
-        // Elapsed time display (next to Mode)
+        // Elapsed time
         if let Some(start_time) = self.processing_start_time {
-            // Real-time elapsed time during processing
             let elapsed = start_time.elapsed();
             let elapsed_secs = elapsed.as_secs();
             let hours = elapsed_secs / 3600;
             let minutes = (elapsed_secs % 3600) / 60;
             let seconds = elapsed_secs % 60;
             let elapsed_str = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
-            let elapsed_span =
-                Span::styled(format!("Elapsed: {}", elapsed_str), theme.footer_style);
-            spans.push(elapsed_span);
+            footer_text.push_str(&format!("Elapsed: {} ", elapsed_str));
         } else if let Some(last_elapsed) = &self.last_elapsed_time {
-            // Last elapsed time after processing is done
-            let red_style = theme.footer_style.fg(Color::Red);
-            let elapsed_span = Span::styled(format!("Elapsed: {}", last_elapsed), red_style);
-            spans.push(elapsed_span);
+            footer_text.push_str(&format!("Elapsed: {} ", last_elapsed));
         }
 
-        let line2 = Line::from(spans);
-        let line2_paragraph = Paragraph::new(line2).alignment(Alignment::Left);
-        f.render_widget(line2_paragraph, footer_chunks[1]);
+        let footer_paragraph = Paragraph::new(footer_text)
+            .style(theme.footer_style)
+            .alignment(Alignment::Left);
+        f.render_widget(footer_paragraph, area);
     }
 }
 

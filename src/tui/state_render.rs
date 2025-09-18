@@ -80,11 +80,11 @@ pub fn build_render_plan(
     main_content_height: u16, // Add actual main content area height
     model: Option<&str>,
     spinner_state: usize,                          // Add spinner_state parameter
-    prompt_tokens: u32,                            // prompt tokens
-    total_tokens: Option<u32>,                     // total tokens (if available)
+    _prompt_tokens: u32,                           // prompt tokens
+    _total_tokens: Option<u32>,                    // total tokens (if available)
     scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
     todo_list: &[crate::tui::state::TodoItem],     // Add todo_list parameter
-    repomap_status: crate::tui::state::RepomapStatus, // Add repomap_status parameter
+    _repomap_status: crate::tui::state::RepomapStatus, // Add repomap_status parameter
 ) -> crate::tui::state::RenderPlan {
     let w_usize = w as usize;
     let status_str = match status {
@@ -127,32 +127,23 @@ pub fn build_render_plan(
         crate::tui::state::Status::Error => "Error".to_string(),
     };
 
-    // Add repomap status indicator
-    let repomap_status_str = match repomap_status {
-        crate::tui::state::RepomapStatus::NotStarted => "".to_string(),
-        crate::tui::state::RepomapStatus::Building => " [Repomap: ...]".to_string(),
-        crate::tui::state::RepomapStatus::Ready => " [Repomap: ✅]".to_string(), // Add checkmark emoji
-        crate::tui::state::RepomapStatus::Error => " [Repomap: ❌]".to_string(), // Add cross mark emoji
+    let tokens_part = if _prompt_tokens > 0 {
+        match _total_tokens {
+            Some(total) => format!(" - tokens:{}/{}", _prompt_tokens, total),
+            None => format!(" - tokens:{}", _prompt_tokens),
+        }
+    } else {
+        String::new()
     };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "(cwd?)".into());
     let model_suffix = model.map(|m| format!(" - model:{}", m)).unwrap_or_default();
-    // Display tokens in the form " - tokens:<prompt>" or " - tokens:<prompt>/<total>" when available.
-    // Avoid internal prefixes like `p`/`t` and extraneous brackets so the title remains clean.
-    let tokens_suffix = if prompt_tokens > 0 {
-        match total_tokens {
-            Some(total) => format!(" - tokens:{}/{}", prompt_tokens, total),
-            None => format!(" - tokens:{}", prompt_tokens),
-        }
-    } else {
-        String::new()
-    };
 
     let title_full = format!(
-        "{} {} {} {} - {} - {}",
-        title, model_suffix, tokens_suffix, repomap_status_str, status_str, cwd
+        "{} {}{} - {} - {}",
+        title, model_suffix, tokens_part, status_str, cwd
     );
     let title_trim = truncate_display(&title_full, w_usize);
     let sep = "-".repeat(w_usize);
