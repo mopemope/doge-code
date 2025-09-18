@@ -87,6 +87,12 @@ pub fn handle_normal_mode_key(
                     app.draft.clear();
                 }
 
+                // Clear last elapsed time on new submission
+                app.last_elapsed_time = None;
+
+                // Start processing timer on instruction submission
+                app.processing_start_time = Some(std::time::Instant::now());
+
                 if line.trim() == "/quit" {
                     return Ok(true);
                 }

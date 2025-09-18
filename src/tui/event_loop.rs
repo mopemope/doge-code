@@ -99,6 +99,17 @@ impl TuiApp {
                             }
                             self.status = Status::Done;
                             self.dirty = true;
+
+                            // Calculate and store final elapsed time
+                            if let Some(start_time) = self.processing_start_time.take() {
+                                let elapsed = start_time.elapsed();
+                                let elapsed_secs = elapsed.as_secs();
+                                let hours = elapsed_secs / 3600;
+                                let minutes = (elapsed_secs % 3600) / 60;
+                                let seconds = elapsed_secs % 60;
+                                self.last_elapsed_time =
+                                    Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+                            }
                         }
                         "::status:cancelled" => {
                             if is_streaming {
@@ -107,6 +118,8 @@ impl TuiApp {
                             }
                             self.status = Status::Cancelled;
                             self.dirty = true;
+                            // Reset processing_start_time to stop the timer
+                            self.processing_start_time = None;
                         }
                         "::status:preparing" => {
                             self.status = Status::Preparing;
@@ -154,6 +167,8 @@ impl TuiApp {
                             }
                             self.status = Status::Error;
                             self.dirty = true;
+                            // Reset processing_start_time to stop the timer
+                            self.processing_start_time = None;
                         }
                         "::status:repomap_building" => {
                             self.repomap_status = crate::tui::state::RepomapStatus::Building;
@@ -193,6 +208,17 @@ impl TuiApp {
                             is_streaming = false;
                             self.status = Status::Done;
                             self.dirty = true;
+
+                            // Calculate and store final elapsed time
+                            if let Some(start_time) = self.processing_start_time.take() {
+                                let elapsed = start_time.elapsed();
+                                let elapsed_secs = elapsed.as_secs();
+                                let hours = elapsed_secs / 3600;
+                                let minutes = (elapsed_secs % 3600) / 60;
+                                let seconds = elapsed_secs % 60;
+                                self.last_elapsed_time =
+                                    Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+                            }
                         }
                         _ if msg.starts_with("::tokens:") => {
                             let tokens_str = &msg["::tokens:".len()..];
@@ -274,6 +300,8 @@ impl TuiApp {
                             is_streaming = false;
                             self.status = Status::Error;
                             self.dirty = true;
+                            // Reset processing_start_time to stop the timer
+                            self.processing_start_time = None;
                         }
                         _ if msg.starts_with("::todo_list:") => {
                             let todo_list_json = &msg["::todo_list:".len()..];
