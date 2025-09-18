@@ -70,10 +70,27 @@ impl TuiExecutor {
             return;
         }
 
-        // Handle /compact command to summarize conversation history
-        if line == "/compact" {
-            ui.push_log("> /compact");
-            self.handle_compact_command(ui);
+        // Handle /clear command to clear conversation and start new session
+        if line == "/clear" {
+            // Clear conversation history
+            if let Ok(mut history) = self.conversation_history.lock() {
+                history.clear();
+            }
+
+            // Create new session to reset tokens and metrics
+            let mut sm = self.session_manager.lock().unwrap();
+            if let Err(e) = sm.create_session(None) {
+                ui.push_log(format!("Failed to create new session: {}", e));
+                return;
+            }
+
+            // Reset LLM client tokens
+            if let Some(client) = &self.client {
+                client.set_tokens(0);
+                client.set_prompt_tokens(0);
+            }
+
+            ui.push_log("Cleared conversation history and started new session. Tokens reset to 0.");
             return;
         }
 
