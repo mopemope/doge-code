@@ -8,90 +8,11 @@ use crate::tui::commands::core::TuiExecutor;
 
 impl TuiExecutor {
     pub fn handle_dispatch_rest(&mut self, line: &str, ui: &mut TuiApp) {
-        if let Some(rest) = line.strip_prefix("/open ") {
-            let path_arg = rest.trim();
-            if path_arg.is_empty() {
-                ui.push_log("usage: /open <path>");
-                return;
-            }
-            // Resolve to absolute path; allow project-internal paths and absolute paths
-            let p = std::path::Path::new(path_arg);
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                self.cfg.project_root.join(p)
-            };
-            if !abs.exists() {
-                ui.push_log(format!("not found: {}", abs.display()));
-                return;
-            }
-            // Leave TUI alt screen temporarily while spawning editor in blocking mode
-            use crossterm::{cursor, execute, terminal};
-            let mut stdout = std::io::stdout();
-            let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
-            let _ = terminal::disable_raw_mode();
-
-            // Choose editor from $EDITOR, then $VISUAL, else fallback list
-            let editor = std::env::var("EDITOR")
-                .ok()
-                .or_else(|| std::env::var("VISUAL").ok())
-                .unwrap_or_else(|| "vi".to_string());
-            let status = std::process::Command::new(&editor).arg(&abs).status();
-
-            // Re-enter TUI
-            let _ = terminal::enable_raw_mode();
-            let _ = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide);
-
-            match status {
-                Ok(s) if s.success() => ui.push_log(format!("opened: {}", abs.display())),
-                Ok(s) => ui.push_log(format!("editor exited with status {s}")),
-                Err(e) => ui.push_log(format!("failed to launch editor: {e}")),
-            }
-            return;
-        }
-
         if let Some(rest) = line.strip_prefix("/session ") {
             match self.handle_session_command(rest.trim(), ui) {
                 Ok(_) => {} // No-op on success
                 Err(e) => ui.push_log(format!("Error handling session command: {}", e)),
             }
-            return;
-        }
-
-        // Handle /tokens command to show token usage
-        if line == "/tokens" {
-            if let Some(client) = &self.client {
-                // Show prompt tokens cumulative (header should display prompt token total)
-                let tokens_used = client.get_prompt_tokens_used();
-                ui.push_log(format!("Total prompt tokens used: {}", tokens_used));
-            } else {
-                ui.push_log("No LLM client available.");
-            }
-            return;
-        }
-
-        // Handle /clear command to clear conversation and start new session
-        if line == "/clear" {
-            ui.clear_log();
-            // Clear conversation history
-            if let Ok(mut history) = self.conversation_history.lock() {
-                history.clear();
-            }
-
-            // Create new session to reset tokens and metrics
-            let mut sm = self.session_manager.lock().unwrap();
-            if let Err(e) = sm.create_session(None) {
-                ui.push_log(format!("Failed to create new session: {}", e));
-                return;
-            }
-
-            // Reset LLM client tokens
-            if let Some(client) = &self.client {
-                client.set_tokens(0);
-                client.set_prompt_tokens(0);
-            }
-
-            ui.push_log("Cleared conversation history and started new session. Tokens reset to 0.");
             return;
         }
 
