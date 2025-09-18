@@ -71,6 +71,16 @@ pub enum Commands {
     Exec {
         /// The instruction to execute
         instruction: String,
+        /// Output in JSON format for machine parsing
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Run MCP server for tool access
+    #[command()]
+    McpServer {
+        /// MCP server address (e.g., 127.0.0.1:8000)
+        address: Option<String>,
     },
 }
 
@@ -149,8 +159,21 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
-        Some(Commands::Exec { instruction }) => run_exec(cfg, instruction).await,
+        Some(Commands::Exec { instruction, json }) => run_exec(cfg, instruction, *json).await,
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
+        Some(Commands::McpServer { address }) => {
+            let addr = address
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1:8000".to_string());
+            let config = crate::config::McpServerConfig {
+                name: "doge-mcp".to_string(),
+                enabled: true,
+                address: addr,
+                transport: "http".to_string(),
+            };
+            mcp::server::start_mcp_server(&config, repomap.clone());
+            Ok(())
+        }
     }
 }
 
@@ -234,7 +257,11 @@ async fn run_tui(
 
 /// Runs the `exec` subcommand.
 /// Initializes the executor and runs the provided instruction.
-async fn run_exec(cfg: crate::config::AppConfig, instruction: &str) -> anyhow::Result<()> {
+async fn run_exec(
+    cfg: crate::config::AppConfig,
+    instruction: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg)?;
-    executor.run(instruction).await
+    executor.run(instruction, json).await
 }
