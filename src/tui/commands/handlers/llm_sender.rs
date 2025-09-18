@@ -10,6 +10,9 @@ impl TuiExecutor {
         // Store the last user input for retrying after compact
         ui.last_user_input = Some(content.clone());
         
+        // Start elapsed time tracking
+        ui.processing_start_time = Some(std::time::Instant::now());
+        
         match self.client.as_ref() {
             Some(c) => {
                 let rt = tokio::runtime::Handle::current();
@@ -27,6 +30,8 @@ impl TuiExecutor {
                 // Bridge from watch::Receiver to CancellationToken
                 tokio::spawn(async move {
                     if cancel_rx.changed().await.is_ok() && *cancel_rx.borrow() {
+                        info!("Cancellation signal received, cancelling token.");
+                        child_token.cancel();
                         info!("Cancellation signal received, cancelling token.");
                         child_token.cancel();
                     }
@@ -94,6 +99,18 @@ impl TuiExecutor {
                     let total_tokens = c.get_tokens_used();
                     match res {
                         Ok((updated_messages, _final_msg)) => {
+                            // Store the final elapsed time string without taking the start time
+                            if let Some(start_time) = ui.processing_start_time {
+                                let elapsed = start_time.elapsed();
+                                let elapsed_secs = elapsed.as_secs();
+                                let hours = elapsed_secs / 3600;
+                                let minutes = (elapsed_secs % 3600) / 60;
+                                let seconds = elapsed_secs % 60;
+                                ui.last_elapsed_time = Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+                                // Reset processing_start_time to stop the timer
+                                ui.processing_start_time = None;
+                            }
+
                             if let Some(tx) = tx {
                                 // run_agent_loop already sends the final assistant content as a
                                 // "::status:done:<content>" message. Avoid duplicating it here.
@@ -129,6 +146,18 @@ impl TuiExecutor {
                             }
                         }
                         Err(e) => {
+                            // Store the final elapsed time string without taking the start time (even on error)
+                            if let Some(start_time) = ui.processing_start_time {
+                                let elapsed = start_time.elapsed();
+                                let elapsed_secs = elapsed.as_secs();
+                                let hours = elapsed_secs / 3600;
+                                let minutes = (elapsed_secs % 3600) / 60;
+                                let seconds = elapsed_secs % 60;
+                                ui.last_elapsed_time = Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+                                // Reset processing_start_time to stop the timer
+                                ui.processing_start_time = None;
+                            }
+
                             // Check if the error is due to context length exceeded
                             if let Some(crate::llm::LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<crate::llm::LlmErrorKind>() {
                                 if let Some(tx) = tx {

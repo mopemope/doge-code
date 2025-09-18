@@ -151,6 +151,11 @@ impl TuiExecutor {
                 self.cancel_tx = Some(cancel_tx);
 
                 let cancel_token = CancellationToken::new();
+                // Start timer for processing
+                ui.processing_start_time = Some(std::time::Instant::now());
+                ui.last_elapsed_time = None;
+                ui.dirty = true;
+
                 let child_token = cancel_token.clone();
 
                 // Bridge from watch::Receiver to CancellationToken

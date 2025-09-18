@@ -178,6 +178,10 @@ pub struct TuiApp {
     pub session_list_state: Option<SessionListState>,
     /// Status of the repomap
     pub repomap_status: RepomapStatus,
+    /// Start time for processing elapsed time tracking
+    pub processing_start_time: Option<std::time::Instant>,
+    /// Final elapsed time string for display after processing completes (remains until next instruction)
+    pub last_elapsed_time: Option<String>,
 }
 
 impl TuiApp {
@@ -359,6 +363,8 @@ impl TuiApp {
             session_list_state: None,
             // repomap status
             repomap_status: RepomapStatus::default(), // Initialize with NotStarted
+            processing_start_time: None,
+            last_elapsed_time: None,
         };
 
         Ok(app)
