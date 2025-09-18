@@ -94,9 +94,18 @@ impl Executor {
 
     /// Runs the executor with the given instruction.
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
-    pub async fn run(&mut self, instruction: &str) -> Result<()> {
+    pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
         if self.client.is_none() {
-            eprintln!("OPENAI_API_KEY not set; cannot call LLM.");
+            if json {
+                let output = serde_json::json!({
+                    "success": false,
+                    "error": "OPENAI_API_KEY not set; cannot call LLM.".to_string(),
+                    "tokens_used": 0
+                });
+                println!("{}", serde_json::to_string_pretty(&output).unwrap_or_else(|_| r#"{"error": "JSON serialization failed"}"#.to_string()));
+            } else {
+                eprintln!("OPENAI_API_KEY not set; cannot call LLM.");
+            }
             return Ok(());
         }
 
@@ -150,14 +159,44 @@ impl Executor {
         let tokens_used = client.get_prompt_tokens_used();
 
         match res {
-            Ok((_updated_messages, _final_msg)) => {
-                // Print the final message content to stdout
-                println!("{}", _final_msg.content);
-                eprintln!("Total prompt tokens used: {}", tokens_used);
+            Ok((_updated_messages, final_msg)) => {
+                if json {
+                    let response = &final_msg.content;
+                    let output = serde_json::json!({
+                        "success": true,
+                        "response": response,
+                        "tokens_used": tokens_used,
+                        "tools_called": [], // TODO: Track tools called during execution
+                        "conversation_length": _updated_messages.len()
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
+                            r#"{"error": "JSON serialization failed"}"#.to_string()
+                        })
+                    );
+                } else {
+                    println!("{}", final_msg.content);
+                    eprintln!("Total prompt tokens used: {}", tokens_used);
+                }
             }
             Err(e) => {
-                eprintln!("LLM error: {}", e);
-                eprintln!("Total prompt tokens used: {}", tokens_used);
+                if json {
+                    let output = serde_json::json!({
+                        "success": false,
+                        "error": e.to_string(),
+                        "tokens_used": tokens_used
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
+                            r#"{"error": "JSON serialization failed"}"#.to_string()
+                        })
+                    );
+                } else {
+                    eprintln!("LLM error: {}", e);
+                    eprintln!("Total prompt tokens used: {}", tokens_used);
+                }
             }
         }
 
@@ -233,7 +272,7 @@ mod tests {
         // For now, we'll just ensure the function runs without panicking.
         // A more robust test would mock the LLM client or use a test harness.
 
-        let result = executor.run("test instruction").await;
+        let result = executor.run("test instruction", false).await;
         assert!(result.is_ok()); // The function should return Ok(()) even if it can't call the LLM
         // Ideally, we would check the output (stderr) for "OPENAI_API_KEY not set"
         // but capturing stdout/stderr in tests is non-trivial.
