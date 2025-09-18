@@ -29,6 +29,8 @@ pub struct SearchRepomapArgs {
     pub context_lines: Option<usize>,
     /// Maximum characters for a snippet (truncate with "..." if exceeded)
     pub snippet_max_chars: Option<usize>,
+    /// Strategy for calculating file-level match score ('max_score', 'avg_score', 'sum_score', 'hybrid')
+    pub ranking_strategy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

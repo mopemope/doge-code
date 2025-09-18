@@ -321,14 +321,64 @@ pub(super) fn filter_and_group_symbols(
             }
         }
 
-        // Compute file_match_score as max of symbol match_score
-        let file_match_score = filtered_symbol_results
-            .iter()
-            .filter_map(|s| s.match_score)
-            .fold(None, |acc: Option<f64>, v| match acc {
-                None => Some(v),
-                Some(prev) => Some(prev.max(v)),
-            });
+        // Compute file_match_score based on ranking_strategy
+        let file_match_score = match args.ranking_strategy.as_deref() {
+            Some("avg_score") => {
+                let scores: Vec<f64> = filtered_symbol_results
+                    .iter()
+                    .filter_map(|s| s.match_score)
+                    .collect();
+                if !scores.is_empty() {
+                    Some(scores.iter().sum::<f64>() / scores.len() as f64)
+                } else {
+                    None
+                }
+            }
+            Some("sum_score") => {
+                let sum: f64 = filtered_symbol_results
+                    .iter()
+                    .filter_map(|s| s.match_score)
+                    .sum();
+                Some(sum.min(1.0)) // Cap at 1.0
+            }
+            Some("hybrid") => {
+                // Example hybrid: 0.7 * max_score + 0.3 * avg_score
+                let max_score = filtered_symbol_results
+                    .iter()
+                    .filter_map(|s| s.match_score)
+                    .fold(None, |acc, v| match acc {
+                        None => Some(v),
+                        Some(prev) => Some(prev.max(v)),
+                    });
+                let avg_score = {
+                    let scores: Vec<f64> = filtered_symbol_results
+                        .iter()
+                        .filter_map(|s| s.match_score)
+                        .collect();
+                    if !scores.is_empty() {
+                        Some(scores.iter().sum::<f64>() / scores.len() as f64)
+                    } else {
+                        None
+                    }
+                };
+                match (max_score, avg_score) {
+                    (Some(max), Some(avg)) => Some((0.7 * max + 0.3 * avg).min(1.0)),
+                    (Some(max), None) => Some(max.min(1.0)),
+                    (None, Some(avg)) => Some(avg.min(1.0)),
+                    (None, None) => None,
+                }
+            }
+            _ => {
+                // Default to "max_score"
+                filtered_symbol_results
+                    .iter()
+                    .filter_map(|s| s.match_score)
+                    .fold(None, |acc, v| match acc {
+                        None => Some(v),
+                        Some(prev) => Some(prev.max(v)),
+                    })
+            }
+        };
 
         results.push(RepomapSearchResult {
             file: file_path,
@@ -392,8 +442,33 @@ pub(super) fn filter_and_group_symbols(
                     }
                 });
             }
+            "file_match_score" => {
+                results.sort_by(|a, b| {
+                    // Compare file_match_score, with None treated as 0.0
+                    let score_a = a.file_match_score.unwrap_or(0.0);
+                    let score_b = b.file_match_score.unwrap_or(0.0);
+                    if sort_desc {
+                        score_b
+                            .partial_cmp(&score_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        score_a
+                            .partial_cmp(&score_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                });
+            }
             _ => {} // No sorting for unknown criteria
         }
+    } else {
+        // Default sorting by file_match_score if no sort_by is specified
+        results.sort_by(|a, b| {
+            let score_a = a.file_match_score.unwrap_or(0.0);
+            let score_b = b.file_match_score.unwrap_or(0.0);
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     // Apply limit

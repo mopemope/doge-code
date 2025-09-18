@@ -171,16 +171,18 @@ Using `search_text` before `search_repomap` is inefficient and will lead to poor
   - `max_function_lines`: Maximum number of lines in functions
   - `file_pattern`: File path pattern to match (substring match)
   - `symbol_kinds`: Filter results by symbol kind (e.g., 'Function', 'Struct', 'Trait').
-  - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path)
+  - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path, file_match_score)
   - `sort_desc`: Sort in descending order (default: true)
   - `limit`: Maximum number of results to return (default: 50)
   - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments. This is especially useful when the user asks about a feature or functionality without specifying a symbol name.
   - `name`: A list of search terms for symbols containing symbol names
+  - `ranking_strategy`: Strategy for calculating file-level match score (`file_match_score`). Options: `max_score` (default), `avg_score`, `sum_score`, `hybrid`.
 Return Value:
 The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:
 - `file`: The absolute path to the file.
 - `file_total_lines`: The total number of lines in the file.
 - `symbol_count`: The number of symbols found in the file that match the criteria.
+- `file_match_score`: A score (0.0 to 1.0) indicating the overall relevance of the file based on its symbols and the chosen `ranking_strategy`. This score helps you prioritize which files to examine first.
 - `symbols`: A list of `SymbolSearchResult` objects, each containing details about a matched symbol:
   - `name`: The name of the symbol (e.g., function name, class name).
   - `kind`: The type of the symbol (e.g., 'Function', 'Class', 'Method').
@@ -189,11 +191,13 @@ The tool returns a list of `RepomapSearchResult` objects, each representing a fi
   - `function_lines`: The number of lines in the function, if applicable.
   - `parent`: The name of the parent symbol, if any.
   - `keywords`: A list of keywords extracted from the comments associated with the symbol.
+  - `match_score`: A score (0.0 to 1.0) indicating the relevance of this specific symbol to the search query. This score helps you prioritize which symbols within a file to examine first.
   - `code_snippet`: The actual code block for the symbol.
 
 **Using search_repomap Results:**
 - **Prioritize analyzing the `code_snippet`** within the returned `symbols` list. This gives you immediate context without needing a separate file read.
-- Use the other symbol details (`name`, `kind`, `keywords`) to assess relevance.
+- Use the `match_score` and `file_match_score` to assess relevance. Higher scores indicate higher relevance. The results are sorted by `file_match_score` by default (descending).
+- Use the other symbol details (`name`, `kind`, `keywords`) to further assess relevance.
 - Only use `fs_read` if you need to see more context around the symbol than the snippet provides.
 
 ### File Editing Tools

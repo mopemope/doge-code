@@ -39,10 +39,17 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
   - If omitted, all fields are searched. Use `fields` to narrow scope and save tokens (e.g., `fields:["name","doc"]`).
 - `max_file_lines` / `max_function_lines`:
   - Use these to filter for code that might be too complex or require refactoring.
+- `ranking_strategy`:
+  - Use this to specify how the file-level match score (`file_match_score`) is calculated.
+  - Options: `max_score` (default), `avg_score`, `sum_score`, `hybrid`.
+- `sort_by`:
+  - Use this to sort the results. 
+  - In addition to existing options (`file_lines`, `function_lines`, `symbol_count`, `file_path`), you can now sort by `file_match_score`.
 
 **Return Value:**
 The tool returns a list of `RepomapSearchResult` objects, each containing file and symbol information, including the symbol's name, kind, location, associated keywords, and the **code_snippet**.
 The `code_snippet` allows you to understand the code immediately without a followup `fs_read` call.
+Each result also includes a `file_match_score` which indicates the relevance of the file based on the symbols it contains and the chosen `ranking_strategy`.
 "#;
 
 pub fn tool_def() -> ToolDef {
@@ -74,7 +81,7 @@ pub fn tool_def() -> ToolDef {
                     },
                     "sort_by": {
                         "type": ["string", "null"],
-                        "enum": ["file_lines", "function_lines", "symbol_count", "file_path"],
+                        "enum": ["file_lines", "function_lines", "symbol_count", "file_path", "file_match_score"],
                         "description": "Sort results by specified criteria"
                     },
                     "sort_desc": {
@@ -111,6 +118,11 @@ pub fn tool_def() -> ToolDef {
                     "snippet_max_chars": {
                         "type": ["integer","null"],
                         "description": "Maximum characters for a snippet (truncate with '...' if exceeded)"
+                    },
+                    "ranking_strategy": {
+                        "type": ["string", "null"],
+                        "enum": ["max_score", "avg_score", "sum_score", "hybrid"],
+                        "description": "Strategy for calculating file-level match score (default: max_score)"
                     }
                 },
                 "additionalProperties": false

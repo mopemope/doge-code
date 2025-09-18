@@ -151,6 +151,7 @@ impl DogeMcpService {
                 include_snippets: params.include_snippets,
                 context_lines: params.context_lines.map(|v| v as usize),
                 snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
+                ranking_strategy: None,
             };
 
             match self.search_repomap_tools.search_repomap(map, args) {
