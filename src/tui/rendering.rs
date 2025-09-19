@@ -42,18 +42,12 @@ impl TuiApp {
             title: &self.title,
             status: self.status,
             log: &self.log,
-            textarea: &self.textarea,
-            input_mode: self.input_mode,
             width: size.width,
-            height: size.height,
             main_content_height,
             model,
             spinner_state: self.spinner_state,
-            prompt_tokens: self.tokens_prompt_used,
-            total_tokens: self.tokens_total_used,
             scroll_state: &self.scroll_state,
             todo_list: &self.todo_list,
-            repomap_status: self.repomap_status,
         };
         let plan = build_render_plan(params);
 
