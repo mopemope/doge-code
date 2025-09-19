@@ -228,7 +228,14 @@ impl FsTools {
         if !self.is_command_allowed(command) {
             tracing::warn!("Command '{}' is not allowed", command);
             self.record_tool_call_failure("execute_bash")?;
-            return Err(anyhow::anyhow!("Command '{}' is not allowed", command));
+            // Return a structured result indicating the command is not allowed
+            let result = execute::ExecuteBashResult {
+                stdout: String::new(),
+                stderr: format!("Command '{}' is not allowed", command),
+                exit_code: None,
+                success: false,
+            };
+            return Ok(serde_json::to_string(&result)?);
         }
 
         match execute::execute_bash(command).await {
@@ -238,7 +245,14 @@ impl FsTools {
             }
             Err(e) => {
                 self.record_tool_call_failure("execute_bash")?;
-                Err(e)
+                // Return a structured result with the error details
+                let result = execute::ExecuteBashResult {
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: None,
+                    success: false,
+                };
+                Ok(serde_json::to_string(&result)?)
             }
         }
     }
@@ -422,10 +436,11 @@ mod tests {
 
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
 
-        // This should fail because "rm" is not in the allowed list
-        let result = fs_tools.execute_bash("rm -rf /").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not allowed"));
+        // This should return a JSON string with success = false because "rm" is not in the allowed list
+        let result_str = fs_tools.execute_bash("rm -rf /").await.unwrap();
+        let result: execute::ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("not allowed"));
 
         Ok(())
     }

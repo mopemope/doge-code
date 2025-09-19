@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::tools::FsTools;
+use crate::tools::execute;
 use anyhow::Result;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -40,10 +41,11 @@ async fn test_execute_bash_with_permissions_not_allowed() -> Result<()> {
 
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
 
-    // This should fail because "rm" is not in the allowed list
-    let result = fs_tools.execute_bash("rm -rf /").await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not allowed"));
+    // This should return a JSON string with success = false because "rm" is not in the allowed list
+    let result_str = fs_tools.execute_bash("rm -rf /").await.unwrap();
+    let result: execute::ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+    assert!(!result.success);
+    assert!(result.stderr.contains("not allowed"));
 
     Ok(())
 }
@@ -241,8 +243,23 @@ async fn test_execute_bash_with_empty_allowed_commands() -> Result<()> {
     let result = fs_tools.execute_bash("echo 'test'").await;
     assert!(result.is_ok());
 
+    let result_str = result.unwrap();
+    let result: execute::ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+    assert!(result.success);
+    assert_eq!(result.stdout.trim(), "test");
+
     let result = fs_tools.execute_bash("ls -la").await;
     assert!(result.is_ok());
+
+    // We're not checking the exact output of ls -la, just that it doesn't return an error
+
+    // Test with a command that fails
+    let result = fs_tools.execute_bash("invalid_command").await;
+    assert!(result.is_ok()); // Should still return Ok with a JSON string
+
+    let result_str = result.unwrap();
+    let result: execute::ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+    assert!(!result.success);
 
     Ok(())
 }
