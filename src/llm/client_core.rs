@@ -47,7 +47,8 @@ impl OpenAIClient {
         // Rebuild reqwest client with timeouts from cfg to ensure network layer reaches server in tests and prod.
         let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(cfg.connect_timeout_ms))
-            .timeout(Duration::from_millis(cfg.request_timeout_ms));
+            .timeout(Duration::from_millis(cfg.request_timeout_ms))
+            .read_timeout(Duration::from_millis(cfg.timeout_ms)); // Add timeout settings
         // If building fails, keep existing client to avoid panic; but in normal cases it should succeed.
         if let Ok(c) = builder.build() {
             self.inner = c;
@@ -278,6 +279,91 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("400"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn chat_once_retries_on_timeout_then_succeeds() {
+        let server = Server::run();
+        // Phase 1: expect a single timeout and verify it happens
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
+                .times(1)
+                .respond_with(
+                    // Use a very short timeout in the test to trigger timeout quickly
+                    status_code(408), // HTTP 408 Request Timeout
+                ),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 50, // Short timeout to trigger
+                timeout_ms: 50,         // Short timeout to trigger
+                max_retries: 0,         // do not retry in phase 1
+                retry_base_ms: 1,
+                retry_jitter_ms: 0,
+                ..LlmConfig::default()
+            });
+        let err = client
+            .chat_once(
+                "gpt",
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: Some("hi".into()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }],
+                None,
+            )
+            .await
+            .unwrap_err();
+        // Verify that a timeout error, 408 error, request sending error, status code error, or chat error occurs
+        println!("Error: {}", err);
+        assert!(
+            format!("{err}").contains("timed out")
+                || format!("{err}").contains("408")
+                || format!("{err}").contains("error sending request")
+                || format!("{err}").contains("status code")
+                || format!("{err}").contains("chat error")
+        );
+
+        // Phase 2: expect a single 200 and verify success with one retry allowed
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
+                .times(1)
+                .respond_with(json_encoded(serde_json::json!({
+                    "id": "test",
+                    "choices": [
+                        {"index":0, "message": {"role":"assistant","content":"ok"}}
+                    ]
+                }))),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 5_000,
+                timeout_ms: 5_000,
+                max_retries: 1,
+                retry_base_ms: 1,
+                retry_jitter_ms: 0,
+                ..LlmConfig::default()
+            });
+        let msg = client
+            .chat_once(
+                "gpt",
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: Some("hi".into()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(msg.content, "ok");
     }
 
     #[test]

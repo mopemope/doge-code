@@ -132,8 +132,11 @@ impl OpenAIClient {
                     if !resp.status().is_success() {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
+                        // Retry even in case of timeout
                         if attempt < max_attempts
-                            && (status.is_server_error() || status.as_u16() == 429)
+                            && (status.is_server_error()
+                                || status.as_u16() == 429
+                                || status.as_u16() == 408)
                         {
                             let wait = self.backoff_delay(attempt, None);
                             info!(attempt, status=%status.as_u16(), wait_ms=%wait.as_millis(), "retrying stream establish after HTTP error");

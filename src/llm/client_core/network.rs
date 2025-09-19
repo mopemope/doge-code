@@ -82,7 +82,10 @@ pub async fn chat_once(
                     error!(attempt, status=%status.as_u16(), body=%text, "llm chat_once non-success status");
                     let e = anyhow::anyhow!("chat error: {} - {}", status, text);
                     let kind = crate::llm::classify_error(Some(status), &e);
-                    if should_retry(kind.clone()) && attempt < max_attempts {
+                    // Retry even in case of timeout
+                    if (should_retry(kind.clone()) || matches!(kind, LlmErrorKind::Timeout))
+                        && attempt < max_attempts
+                    {
                         let wait = backoff_delay(client, attempt, retry_after);
                         info!(attempt, kind=?kind, wait_ms=%wait.as_millis(), "retrying chat_once");
                         tokio::select! {
@@ -112,7 +115,10 @@ pub async fn chat_once(
                         error!(attempt, err=%e, "llm chat_once read body error");
                         last_err = Some(anyhow::Error::new(e).context("read chat response body"));
                         let kind = crate::llm::classify_error(None, last_err.as_ref().unwrap());
-                        if should_retry(kind.clone()) && attempt < max_attempts {
+                        // Retry even in case of timeout
+                        if (should_retry(kind.clone()) || matches!(kind, LlmErrorKind::Timeout))
+                            && attempt < max_attempts
+                        {
                             let wait = backoff_delay(client, attempt, None);
                             warn!(attempt, kind=?kind, "retrying after body read error");
                             tokio::select! {
@@ -152,7 +158,10 @@ pub async fn chat_once(
                     Err(e) => {
                         let kind = LlmErrorKind::Deserialize;
                         error!(attempt, err=%e, "llm chat_once deserialize error");
-                        if should_retry(kind.clone()) && attempt < max_attempts {
+                        // Retry even in case of timeout
+                        if (should_retry(kind.clone()) || matches!(kind, LlmErrorKind::Timeout))
+                            && attempt < max_attempts
+                        {
                             let wait = backoff_delay(client, attempt, None);
                             warn!(attempt, kind=?kind, "retrying after deserialize error");
                             tokio::select! {
@@ -175,7 +184,8 @@ pub async fn chat_once(
 
         if attempt < max_attempts {
             let kind = crate::llm::classify_error(None, last_err.as_ref().unwrap());
-            if should_retry(kind.clone()) {
+            // Retry even in case of timeout
+            if should_retry(kind.clone()) || matches!(kind, LlmErrorKind::Timeout) {
                 let wait = backoff_delay(client, attempt, None);
                 info!(attempt, kind=?kind, wait_ms=%wait.as_millis(), "retrying chat_once");
                 tokio::select! {
