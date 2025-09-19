@@ -78,6 +78,7 @@ pub struct LlmConfig {
     pub retry_base_ms: u64,
     pub retry_jitter_ms: u64,
     pub respect_retry_after: bool,
+    pub timeout_ms: u64,
 }
 
 impl Default for LlmConfig {
@@ -90,6 +91,7 @@ impl Default for LlmConfig {
             retry_base_ms: 300,
             retry_jitter_ms: 200,
             respect_retry_after: true,
+            timeout_ms: 600_000, // 10 minutes
         }
     }
 }
@@ -136,6 +138,7 @@ pub struct PartialLlmConfig {
     pub retry_base_ms: Option<u64>,
     pub retry_jitter_ms: Option<u64>,
     pub respect_retry_after: Option<bool>,
+    pub timeout_ms: Option<u64>,
 }
 
 impl AppConfig {
@@ -199,6 +202,7 @@ impl AppConfig {
                         respect_retry_after: project_llm
                             .respect_retry_after
                             .or(file_llm.respect_retry_after),
+                        timeout_ms: project_llm.timeout_ms.or(file_llm.timeout_ms),
                     })
                 }
                 (Some(project_llm), None) => Some(project_llm.clone()),
@@ -223,6 +227,7 @@ impl AppConfig {
                     respect_retry_after: p
                         .respect_retry_after
                         .unwrap_or(llm_defaults.respect_retry_after),
+                    timeout_ms: p.timeout_ms.unwrap_or(llm_defaults.timeout_ms),
                 }
             } else {
                 llm_defaults

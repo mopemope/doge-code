@@ -24,7 +24,8 @@ pub async fn chat_tools_once(
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_error = e;
-                if attempt >= MAX_RETRIES {
+                // Retry even in case of timeout
+                if attempt >= MAX_RETRIES && !last_error.to_string().contains("timed out") {
                     error!("Error occuerd: {:?}", &last_error);
                     break;
                 }
