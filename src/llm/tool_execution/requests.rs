@@ -171,7 +171,7 @@ async fn chat_tools_once_inner(
     };
 
     let response_text: String = match response_text_result {
-        Ok(text) => text,
+        Ok(text) => text.trim().to_owned(),
         Err(e) => return Err(e),
     };
 
