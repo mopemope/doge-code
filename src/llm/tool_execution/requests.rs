@@ -17,18 +17,34 @@ pub async fn chat_tools_once(
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
     const MAX_RETRIES: u64 = 30;
+    const MAX_TIMEOUT_RETRIES: u64 = 1; // Only retry once on timeout
     let mut last_error = anyhow!("Failed after {} retries", MAX_RETRIES);
+    let mut timeout_retries = 0u64;
 
     for attempt in 1..=MAX_RETRIES {
         match chat_tools_once_inner(client, model, messages.clone(), tools, cancel.clone()).await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_error = e;
-                // Retry even in case of timeout
-                if attempt >= MAX_RETRIES && !last_error.to_string().contains("timed out") {
-                    error!("Error occuerd: {:?}", &last_error);
+                // Check if the error is a timeout
+                let is_timeout = last_error.to_string().contains("timed out")
+                    || matches!(
+                        last_error.downcast_ref::<LlmErrorKind>(),
+                        Some(LlmErrorKind::Timeout)
+                    );
+
+                // If it's a timeout, limit retries
+                if is_timeout {
+                    timeout_retries += 1;
+                    if timeout_retries > MAX_TIMEOUT_RETRIES {
+                        error!("Timeout error occurred: {:?}", &last_error);
+                        break;
+                    }
+                } else if attempt >= MAX_RETRIES {
+                    error!("Error occurred: {:?}", &last_error);
                     break;
                 }
+
                 // Exponential backoff with jitter
                 let delay_ms = (2_u64.mul(attempt) * 1000).min(60_000); // Max 60 seconds
                 let jitter = rand::random::<u64>() % 5000; // Add up to 5 second of jitter
@@ -92,13 +108,28 @@ async fn chat_tools_once_inner(
     let cancel_token = cancel.unwrap_or_default();
     let req_builder = client.inner.post(&url).headers(headers).json(&req);
 
-    let resp = tokio::select! {
+    // Set timeout for the request
+    let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
+    let resp_fut = tokio::time::timeout(timeout_duration, req_builder.send());
+
+    let resp_result = tokio::select! {
         biased;
         _ = cancel_token.cancelled() => {
             warn!("chat_tools_once cancelled before send");
             return Err(anyhow!(LlmErrorKind::Cancelled));
         }
-        res = req_builder.send() => res?,
+        res = resp_fut => {
+            match res {
+                Ok(Ok(resp)) => Ok(resp),
+                Ok(Err(e)) => Err(anyhow::Error::new(e).context("send chat request (tools)")),
+                Err(_) => Err(anyhow!(LlmErrorKind::Timeout)),
+            }
+        }
+    };
+
+    let resp = match resp_result {
+        Ok(resp) => resp,
+        Err(e) => return Err(e),
     };
 
     if !resp.status().is_success() {
@@ -121,13 +152,27 @@ async fn chat_tools_once_inner(
         return Err(anyhow!("chat (tools) error: {} - {}", status, text));
     }
 
-    let response_text: String = tokio::select! {
+    // Set timeout for reading the response body
+    let response_text_fut = tokio::time::timeout(timeout_duration, resp.text());
+
+    let response_text_result: Result<String, anyhow::Error> = tokio::select! {
         biased;
         _ = cancel_token.cancelled() => {
             warn!("chat_tools_once cancelled during body read");
-            return Err(anyhow!(LlmErrorKind::Cancelled));
+            Err(anyhow!(LlmErrorKind::Cancelled))
         }
-        res = resp.text() => res?,
+        res = response_text_fut => {
+            match res {
+                Ok(Ok(text)) => Ok(text),
+                Ok(Err(e)) => Err(anyhow::Error::new(e).context("read chat response body (tools)")),
+                Err(_) => Err(anyhow!(LlmErrorKind::Timeout)),
+            }
+        }
+    };
+
+    let response_text: String = match response_text_result {
+        Ok(text) => text,
+        Err(e) => return Err(e),
     };
 
     debug!(response_body=%response_text, "llm chat_tools_once response");

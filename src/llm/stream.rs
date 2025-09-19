@@ -3,6 +3,7 @@ use futures::{Stream, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -161,19 +162,26 @@ impl OpenAIClient {
         let mut byte_stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
         let client = self.clone();
+        let timeout_duration = Duration::from_millis(self.llm_cfg.timeout_ms);
 
         let stream = async_stream::try_stream! {
             loop {
+                // Set timeout for reading each chunk from the byte stream
+                let chunk_fut = tokio::time::timeout(timeout_duration, byte_stream.next());
+
                 let chunk_res = tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
                         info!("chat_stream cancelled during byte stream read");
                         Err(anyhow::anyhow!(LlmErrorKind::Cancelled))
                     }
-                    chunk = byte_stream.next() => match chunk {
-                        Some(Ok(bytes)) => Ok(bytes),
-                        Some(Err(e)) => Err(anyhow::Error::new(e).context("byte stream read error")),
-                        None => break, // End of stream
+                    res = chunk_fut => {
+                        match res {
+                            Ok(Some(Ok(bytes))) => Ok(bytes),
+                            Ok(Some(Err(e))) => Err(anyhow::Error::new(e).context("byte stream read error")),
+                            Ok(None) => break, // End of stream
+                            Err(_) => Err(anyhow::anyhow!(LlmErrorKind::Timeout)),
+                        }
                     }
                 };
 

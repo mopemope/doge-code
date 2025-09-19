@@ -47,7 +47,7 @@ impl OpenAIClient {
         // Rebuild reqwest client with timeouts from cfg to ensure network layer reaches server in tests and prod.
         let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(cfg.connect_timeout_ms))
-            .timeout(Duration::from_millis(cfg.request_timeout_ms))
+            .timeout(Duration::from_millis(cfg.timeout_ms)) // Use timeout_ms for overall request timeout
             .read_timeout(Duration::from_millis(cfg.timeout_ms)); // Add timeout settings
         // If building fails, keep existing client to avoid panic; but in normal cases it should succeed.
         if let Ok(c) = builder.build() {
