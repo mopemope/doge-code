@@ -1,6 +1,7 @@
 use crate::analysis::{
     CExtractor, CSharpExtractor, CppExtractor, GoExtractor, JavaScriptExtractor,
-    LanguageSpecificExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor,
+    LanguageSpecificExtractor, MarkdownExtractor, PythonExtractor, RustExtractor,
+    TypeScriptExtractor,
 };
 use std::{collections::HashMap, sync::OnceLock};
 use tree_sitter::Language;
@@ -54,6 +55,11 @@ pub fn language_configs() -> &'static [LanguageConfig] {
                 language: tree_sitter_cpp::LANGUAGE.into(),
                 collector: Box::new(CppExtractor),
                 extensions: &["cpp", "cxx", "cc", "hpp", "hxx", "hh"],
+            },
+            LanguageConfig {
+                language: tree_sitter_md::LANGUAGE.into(),
+                collector: Box::new(MarkdownExtractor),
+                extensions: &["md"],
             },
         ]
     })
