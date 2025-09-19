@@ -38,23 +38,24 @@ impl TuiApp {
         // debug!("Main content area height: {}", main_content_height);
         // debug!("Total log lines: {}", self.log.len());
 
-        let plan = build_render_plan(
-            &self.title,
-            self.status,
-            &self.log,
-            &self.textarea, // Pass textarea
-            self.input_mode,
-            size.width,
-            size.height,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: &self.title,
+            status: self.status,
+            log: &self.log,
+            textarea: &self.textarea,
+            input_mode: self.input_mode,
+            width: size.width,
+            height: size.height,
             main_content_height,
             model,
-            self.spinner_state,
-            self.tokens_prompt_used,
-            self.tokens_total_used,
-            &self.scroll_state,
-            &self.todo_list,     // Pass todo_list
-            self.repomap_status, // Pass repomap_status
-        );
+            spinner_state: self.spinner_state,
+            prompt_tokens: self.tokens_prompt_used,
+            total_tokens: self.tokens_total_used,
+            scroll_state: &self.scroll_state,
+            todo_list: &self.todo_list,
+            repomap_status: self.repomap_status,
+        };
+        let plan = build_render_plan(params);
 
         // debug!(
         //     "Render plan: log_lines={}, scroll_info={:?}",

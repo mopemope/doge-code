@@ -46,23 +46,24 @@ mod tests {
         // Test scroll calculation with small viewport
         let scroll_state = &app.scroll_state;
         let textarea = TextArea::default();
-        let plan = build_render_plan(
-            "Test",
-            crate::tui::state::Status::Idle,
-            &app.log,
-            &textarea,
-            crate::tui::state::InputMode::Normal,
-            80,
-            8,
-            8_u16.saturating_sub(3),
-            None,
-            0,
-            0,
-            None,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: "Test",
+            status: crate::tui::state::Status::Idle,
+            log: &app.log,
+            textarea: &textarea,
+            input_mode: crate::tui::state::InputMode::Normal,
+            width: 80,
+            height: 8,
+            main_content_height: 8_u16.saturating_sub(3),
+            model: None,
+            spinner_state: 0,
+            prompt_tokens: 0,
+            total_tokens: None,
             scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Should show the most recent lines when auto-scrolling
         assert!(plan.log_lines.len() <= 5); // 8 - 3 = 5 max log rows

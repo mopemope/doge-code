@@ -68,24 +68,24 @@ pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
 
 /// Build a render plan. This function was moved from `state.rs` to avoid a very large
 /// `state.rs` file. It references the UI state types defined in `state.rs`.
-#[allow(clippy::too_many_arguments)]
 pub fn build_render_plan(
-    title: &str,
-    status: crate::tui::state::Status,
-    log: &[String],
-    _textarea: &tui_textarea::TextArea,
-    _input_mode: crate::tui::state::InputMode,
-    w: u16,
-    _h: u16, // Total height (not used directly, main_content_height is used instead)
-    main_content_height: u16, // Add actual main content area height
-    model: Option<&str>,
-    spinner_state: usize,                          // Add spinner_state parameter
-    _prompt_tokens: u32,                           // prompt tokens
-    _total_tokens: Option<u32>,                    // total tokens (if available)
-    scroll_state: &crate::tui::state::ScrollState, // Add scroll_state parameter
-    todo_list: &[crate::tui::state::TodoItem],     // Add todo_list parameter
-    _repomap_status: crate::tui::state::RepomapStatus, // Add repomap_status parameter
+    params: crate::tui::state::BuildRenderPlanParams,
 ) -> crate::tui::state::RenderPlan {
+    let title = params.title;
+    let status = params.status;
+    let log = params.log;
+    let _textarea = params.textarea;
+    let _input_mode = params.input_mode;
+    let w = params.width;
+    let _h = params.height;
+    let main_content_height = params.main_content_height;
+    let model = params.model;
+    let spinner_state = params.spinner_state;
+    let _prompt_tokens = params.prompt_tokens;
+    let _total_tokens = params.total_tokens;
+    let scroll_state = params.scroll_state;
+    let todo_list = params.todo_list;
+    let _repomap_status = params.repomap_status;
     let w_usize = w as usize;
     let status_str = match status {
         crate::tui::state::Status::Idle => "Ready".to_string(),
