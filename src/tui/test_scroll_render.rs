@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::{InputMode, ScrollState, Status, TuiApp, build_render_plan};
-    use tui_textarea::TextArea;
+    use crate::tui::state::{ScrollState, Status, TuiApp, build_render_plan};
+    // use tui_textarea::TextArea; // 不要
 
     fn create_test_app() -> TuiApp {
         TuiApp::new("test", None, "dark").unwrap()
@@ -27,23 +27,23 @@ mod tests {
             let main_content_height = height.saturating_sub(3); // header(2) + footer(1)
             let scroll_state = &app.scroll_state;
 
-            let textarea = TextArea::default();
+            // let textarea = TextArea::default(); // 不要
             let params = crate::tui::state::BuildRenderPlanParams {
                 title: "Test",
                 status: crate::tui::state::Status::Idle,
                 log: &app.log,
-                textarea: &textarea,
-                input_mode: crate::tui::state::InputMode::Normal,
+                // textarea: &textarea, // 削除
+                // input_mode: crate::tui::state::InputMode::Normal, // 削除
                 width,
-                height,
+                // height, // 削除
                 main_content_height,
                 model: None,
                 spinner_state: 0,
-                prompt_tokens: 0,
-                total_tokens: None,
+                // prompt_tokens: 0, // 削除
+                // total_tokens: None, // 削除
                 scroll_state,
                 todo_list: &[],
-                repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+                // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             };
             let plan = build_render_plan(params);
 
@@ -81,23 +81,23 @@ mod tests {
 
         // Test auto-scroll (should show latest)
         let scroll_state = &app.scroll_state;
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Idle,
             log: &app.log,
-            textarea: &textarea,
-            input_mode: crate::tui::state::InputMode::Normal,
+            // textarea: &textarea, // 削除
+            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            height: 13,
+            // height: 13, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            prompt_tokens: 0,
-            total_tokens: None,
+            // prompt_tokens: 0, // 削除
+            // total_tokens: None, // 削除
             scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
@@ -118,23 +118,23 @@ mod tests {
         scroll_state.offset = 20;
         scroll_state.auto_scroll = false;
 
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Idle,
             log: &app.log,
-            textarea: &textarea,
-            input_mode: crate::tui::state::InputMode::Normal,
+            // textarea: &textarea, // 削除
+            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            height: 13,
+            // height: 13, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            prompt_tokens: 0,
-            total_tokens: None,
+            // prompt_tokens: 0, // 削除
+            // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
@@ -193,23 +193,23 @@ mod tests {
         let main_content_height = 15;
         let scroll_state = &app.scroll_state;
 
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Idle,
             log: &app.log,
-            textarea: &textarea,
-            input_mode: crate::tui::state::InputMode::Normal,
+            // textarea: &textarea, // 削除
+            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            height: 18,
+            // height: 18, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            prompt_tokens: 0,
-            total_tokens: None,
+            // prompt_tokens: 0, // 削除
+            // total_tokens: None, // 削除
             scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
@@ -251,23 +251,23 @@ mod tests {
             println!("Testing screen {}x{}", width, total_height);
 
             let scroll_state = &app.scroll_state;
-            let textarea = TextArea::default();
+            // let textarea = TextArea::default(); // 不要
             let params = crate::tui::state::BuildRenderPlanParams {
                 title: "Test",
                 status: crate::tui::state::Status::Idle,
                 log: &app.log,
-                textarea: &textarea,
-                input_mode: crate::tui::state::InputMode::Normal,
+                // textarea: &textarea, // 削除
+                // input_mode: crate::tui::state::InputMode::Normal, // 削除
                 width,
-                height: total_height,
+                // height: total_height, // 削除
                 main_content_height: expected_main_height,
                 model: None,
                 spinner_state: 0,
-                prompt_tokens: 0,
-                total_tokens: None,
+                // prompt_tokens: 0, // 削除
+                // total_tokens: None, // 削除
                 scroll_state,
                 todo_list: &[],
-                repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+                // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             };
             let plan = build_render_plan(params);
 
@@ -309,23 +309,23 @@ mod tests {
         let main_content_height = 5;
         // let scroll_state = &app.scroll_state; // This variable is no longer used directly, as it's passed via params
 
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Idle,
             log: &app.log,
-            textarea: &textarea,
-            input_mode: crate::tui::state::InputMode::Normal,
+            // textarea: &textarea, // 削除
+            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            height: 8,
+            // height: 8, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            prompt_tokens: 0,
-            total_tokens: None,
+            // prompt_tokens: 0, // 削除
+            // total_tokens: None, // 削除
             scroll_state: &app.scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
@@ -375,32 +375,31 @@ mod tests {
             "line5".to_string(),
         ];
 
-        let input_mode = InputMode::Normal;
+        // let input_mode = InputMode::Normal; // 不要
         let w = 80;
         let h: u16 = 6; // Small height to force scrolling
         let model = None;
-        let spinner_state = 0;
-        let tokens_used = 0;
+        // let tokens_used = 0; // 不要
 
         // Test auto-scroll (show latest)
         let scroll_state = ScrollState::default();
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
             log: &log,
-            textarea: &textarea,
-            input_mode,
+            // textarea: &textarea, // 削除
+            // input_mode, // 削除
             width: w,
-            height: h,
+            // height: h, // 削除
             main_content_height: h.saturating_sub(3),
             model,
-            spinner_state,
-            prompt_tokens: tokens_used,
-            total_tokens: None,
+            spinner_state: 0,
+            // prompt_tokens: tokens_used, // 削除
+            // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
@@ -414,23 +413,23 @@ mod tests {
             ..Default::default()
         };
 
-        let textarea = TextArea::default();
+        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
             log: &log,
-            textarea: &textarea,
-            input_mode,
+            // textarea: &textarea, // 削除
+            // input_mode, // 削除
             width: w,
-            height: h,
+            // height: h, // 削除
             main_content_height: h.saturating_sub(3),
             model,
-            spinner_state,
-            prompt_tokens: tokens_used,
-            total_tokens: None,
+            spinner_state: 0,
+            // prompt_tokens: tokens_used, // 削除
+            // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             todo_list: &[],
-            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
         };
         let plan = build_render_plan(params);
 
