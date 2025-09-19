@@ -300,6 +300,7 @@ Repository analysis supports:
 - **Go** (.go) - Functions, types, methods, interfaces
 - **C#** (.cs) - Namespaces, classes/structs, interfaces, enums, methods/constructors, properties/fields
 - **Java** (.java) - Classes, methods, interfaces
+- **Markdown** (.md) - Headings as symbols (sections, subsections)
 
 The analysis extracts:
 - Symbol names and types
