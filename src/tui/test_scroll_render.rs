@@ -28,23 +28,24 @@ mod tests {
             let scroll_state = &app.scroll_state;
 
             let textarea = TextArea::default();
-            let plan = build_render_plan(
-                "Test",
-                crate::tui::state::Status::Idle,
-                &app.log,
-                &textarea,
-                crate::tui::state::InputMode::Normal,
+            let params = crate::tui::state::BuildRenderPlanParams {
+                title: "Test",
+                status: crate::tui::state::Status::Idle,
+                log: &app.log,
+                textarea: &textarea,
+                input_mode: crate::tui::state::InputMode::Normal,
                 width,
                 height,
                 main_content_height,
-                None,
-                0,
-                0,
-                None,
+                model: None,
+                spinner_state: 0,
+                prompt_tokens: 0,
+                total_tokens: None,
                 scroll_state,
-                &[],
-                crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-            );
+                todo_list: &[],
+                repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            };
+            let plan = build_render_plan(params);
 
             // Log lines should not exceed the actual main content area height
             assert!(
@@ -81,23 +82,24 @@ mod tests {
         // Test auto-scroll (should show latest)
         let scroll_state = &app.scroll_state;
         let textarea = TextArea::default();
-        let plan = build_render_plan(
-            "Test",
-            crate::tui::state::Status::Idle,
-            &app.log,
-            &textarea,
-            crate::tui::state::InputMode::Normal,
-            80,
-            13,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: "Test",
+            status: crate::tui::state::Status::Idle,
+            log: &app.log,
+            textarea: &textarea,
+            input_mode: crate::tui::state::InputMode::Normal,
+            width: 80,
+            height: 13,
             main_content_height,
-            None,
-            0,
-            0,
-            None,
+            model: None,
+            spinner_state: 0,
+            prompt_tokens: 0,
+            total_tokens: None,
             scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Should show exactly main_content_height lines
         assert_eq!(plan.log_lines.len(), main_content_height as usize);
@@ -117,23 +119,24 @@ mod tests {
         scroll_state.auto_scroll = false;
 
         let textarea = TextArea::default();
-        let plan = build_render_plan(
-            "Test",
-            crate::tui::state::Status::Idle,
-            &app.log,
-            &textarea,
-            crate::tui::state::InputMode::Normal,
-            80,
-            13,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: "Test",
+            status: crate::tui::state::Status::Idle,
+            log: &app.log,
+            textarea: &textarea,
+            input_mode: crate::tui::state::InputMode::Normal,
+            width: 80,
+            height: 13,
             main_content_height,
-            None,
-            0,
-            0,
-            None,
-            &scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            model: None,
+            spinner_state: 0,
+            prompt_tokens: 0,
+            total_tokens: None,
+            scroll_state: &scroll_state,
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Should not show the latest line when scrolled up
         assert!(!plan.log_lines.contains(&"Long content line 99".to_string()));
@@ -191,23 +194,24 @@ mod tests {
         let scroll_state = &app.scroll_state;
 
         let textarea = TextArea::default();
-        let plan = build_render_plan(
-            "Test",
-            crate::tui::state::Status::Idle,
-            &app.log,
-            &textarea,
-            crate::tui::state::InputMode::Normal,
-            80,
-            18,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: "Test",
+            status: crate::tui::state::Status::Idle,
+            log: &app.log,
+            textarea: &textarea,
+            input_mode: crate::tui::state::InputMode::Normal,
+            width: 80,
+            height: 18,
             main_content_height,
-            None,
-            0,
-            0,
-            None,
+            model: None,
+            spinner_state: 0,
+            prompt_tokens: 0,
+            total_tokens: None,
             scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         println!("Plan log_lines count: {}", plan.log_lines.len());
         println!("Last few lines in plan:");
@@ -248,23 +252,24 @@ mod tests {
 
             let scroll_state = &app.scroll_state;
             let textarea = TextArea::default();
-            let plan = build_render_plan(
-                "Test",
-                crate::tui::state::Status::Idle,
-                &app.log,
-                &textarea,
-                crate::tui::state::InputMode::Normal,
+            let params = crate::tui::state::BuildRenderPlanParams {
+                title: "Test",
+                status: crate::tui::state::Status::Idle,
+                log: &app.log,
+                textarea: &textarea,
+                input_mode: crate::tui::state::InputMode::Normal,
                 width,
-                total_height,
-                expected_main_height,
-                None,
-                0,
-                0,
-                None,
+                height: total_height,
+                main_content_height: expected_main_height,
+                model: None,
+                spinner_state: 0,
+                prompt_tokens: 0,
+                total_tokens: None,
                 scroll_state,
-                &[],
-                crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-            );
+                todo_list: &[],
+                repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+            };
+            let plan = build_render_plan(params);
 
             println!("  Expected main height: {}", expected_main_height);
             println!("  Plan log_lines count: {}", plan.log_lines.len());
@@ -302,26 +307,27 @@ mod tests {
 
         // Test with very small main content area
         let main_content_height = 5;
-        let scroll_state = &app.scroll_state;
+        // let scroll_state = &app.scroll_state; // This variable is no longer used directly, as it's passed via params
 
         let textarea = TextArea::default();
-        let plan = build_render_plan(
-            "Test",
-            crate::tui::state::Status::Idle,
-            &app.log,
-            &textarea,
-            crate::tui::state::InputMode::Normal,
-            80,
-            8,
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: "Test",
+            status: crate::tui::state::Status::Idle,
+            log: &app.log,
+            textarea: &textarea,
+            input_mode: crate::tui::state::InputMode::Normal,
+            width: 80,
+            height: 8,
             main_content_height,
-            None,
-            0,
-            0,
-            None,
-            scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            model: None,
+            spinner_state: 0,
+            prompt_tokens: 0,
+            total_tokens: None,
+            scroll_state: &app.scroll_state,
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         println!("Main content height: {}", main_content_height);
         println!("Plan log_lines count: {}", plan.log_lines.len());
@@ -379,23 +385,24 @@ mod tests {
         // Test auto-scroll (show latest)
         let scroll_state = ScrollState::default();
         let textarea = TextArea::default();
-        let plan = build_render_plan(
+        let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
-            &log,
-            &textarea,
+            log: &log,
+            textarea: &textarea,
             input_mode,
-            w,
-            h,
-            h.saturating_sub(3),
+            width: w,
+            height: h,
+            main_content_height: h.saturating_sub(3),
             model,
             spinner_state,
-            tokens_used,
-            None,
-            &scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            prompt_tokens: tokens_used,
+            total_tokens: None,
+            scroll_state: &scroll_state,
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Should show the last few lines
         assert!(plan.log_lines.contains(&"line5".to_string()));
@@ -408,23 +415,24 @@ mod tests {
         };
 
         let textarea = TextArea::default();
-        let plan = build_render_plan(
+        let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
-            &log,
-            &textarea,
+            log: &log,
+            textarea: &textarea,
             input_mode,
-            w,
-            h,
-            h.saturating_sub(3),
+            width: w,
+            height: h,
+            main_content_height: h.saturating_sub(3),
             model,
             spinner_state,
-            tokens_used,
-            None,
-            &scroll_state,
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            prompt_tokens: tokens_used,
+            total_tokens: None,
+            scroll_state: &scroll_state,
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Should not show the latest line
         assert!(!plan.log_lines.contains(&"line5".to_string()));

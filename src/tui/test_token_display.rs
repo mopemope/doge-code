@@ -18,23 +18,24 @@ mod tests {
             .unwrap()
             .textarea;
 
-        let plan = build_render_plan(
+        let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
-            &log,
-            &textarea,
+            log: &log,
+            textarea: &textarea,
             input_mode,
-            w,
-            h,
-            h - 3, // main_content_height
+            width: w,
+            height: h,
+            main_content_height: h - 3,
             model,
             spinner_state,
-            tokens_used,
-            None,
-            &crate::tui::state::ScrollState::default(),
-            &[],
-            crate::tui::state::RepomapStatus::NotStarted, // Add repomap_status parameter
-        );
+            prompt_tokens: tokens_used,
+            total_tokens: None,
+            scroll_state: &crate::tui::state::ScrollState::default(),
+            todo_list: &[],
+            repomap_status: crate::tui::state::RepomapStatus::NotStarted,
+        };
+        let plan = build_render_plan(params);
 
         // Check that the token count is not included in the title when it's 0
         assert!(!plan.footer_lines[0].contains("tokens:"));

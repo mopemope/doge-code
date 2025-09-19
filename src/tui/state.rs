@@ -66,6 +66,26 @@ pub enum RepomapStatus {
     Error,
 }
 
+/// Parameters for building a render plan.
+#[derive(Debug)]
+pub struct BuildRenderPlanParams<'a> {
+    pub title: &'a str,
+    pub status: Status,
+    pub log: &'a [String],
+    pub textarea: &'a TextArea<'a>,
+    pub input_mode: InputMode,
+    pub width: u16,
+    pub height: u16,
+    pub main_content_height: u16,
+    pub model: Option<&'a str>,
+    pub spinner_state: usize,
+    pub prompt_tokens: u32,
+    pub total_tokens: Option<u32>,
+    pub scroll_state: &'a ScrollState,
+    pub todo_list: &'a [TodoItem],
+    pub repomap_status: RepomapStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderPlan {
     pub footer_lines: Vec<String>,
