@@ -14,6 +14,7 @@ pub mod parser;
 pub mod python_collector;
 pub mod rust_collector;
 pub mod symbol;
+pub mod tests;
 pub mod ts_js_collector;
 
 pub use analyzer::Analyzer;

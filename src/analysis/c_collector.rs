@@ -78,6 +78,10 @@ fn visit_c_node(
         "struct_specifier" => {
             handle_struct_specifier(map, node, src, file, file_total_lines, comments)
         }
+        "union_specifier" => {
+            // Treat unions like structs for symbol extraction
+            handle_union_specifier(map, node, src, file, file_total_lines, comments)
+        }
         "enum_specifier" => handle_enum_specifier(map, node, src, file, file_total_lines, comments),
         "declaration" => handle_declaration(map, node, src, file, file_total_lines, comments),
         "comment" | "line_comment" | "block_comment" => {
@@ -165,6 +169,43 @@ fn handle_struct_specifier(
     }
 }
 
+fn handle_union_specifier(
+    map: &mut RepoMap,
+    node: Node,
+    src: &str,
+    file: &Path,
+    file_total_lines: usize,
+    comments: &[(usize, String)],
+) {
+    // Treat unions like structs for symbol extraction (tests expect unions to
+    // appear as Struct symbols).
+    let mut name = None;
+    if let Some(n) = node.child_by_field_name("name") {
+        name = Some(node_text(n, src).to_string());
+    }
+    if name.is_none() {
+        name = first_identifier(node, src);
+    }
+
+    if let Some(name) = name {
+        let keywords = find_associated_comments(node, comments);
+        let symbol_info = SymbolInfo {
+            name,
+            kind: SymbolKind::Struct,
+            file: file.to_path_buf(),
+            start_line: node.start_position().row + 1,
+            start_col: node.start_position().column + 1,
+            end_line: node.end_position().row + 1,
+            end_col: node.end_position().column + 1,
+            parent: None,
+            file_total_lines,
+            function_lines: None,
+            keywords,
+        };
+        map.symbols.push(symbol_info);
+    }
+}
+
 fn handle_enum_specifier(
     map: &mut RepoMap,
     node: Node,
@@ -208,36 +249,86 @@ fn handle_declaration(
     file_total_lines: usize,
     comments: &[(usize, String)],
 ) {
-    // Look for declarators inside the declaration
-    let mut c = node.walk();
-    if c.goto_first_child() {
-        loop {
-            let child = c.node();
-            if (child.kind() == "init_declarator" || child.kind() == "declarator")
-                && let Some(id) = first_identifier(child, src)
-            {
-                let keywords = find_associated_comments(child, comments);
-                let symbol_info = SymbolInfo {
-                    name: id,
-                    kind: SymbolKind::Variable,
-                    file: file.to_path_buf(),
-                    start_line: child.start_position().row + 1,
-                    start_col: child.start_position().column + 1,
-                    end_line: child.end_position().row + 1,
-                    end_col: child.end_position().column + 1,
-                    parent: None,
-                    file_total_lines,
-                    function_lines: None,
-                    keywords,
-                };
-                map.symbols.push(symbol_info);
-            }
-            if !c.goto_next_sibling() {
-                break;
-            }
+    // Recursively search for declarators (init_declarator or declarator)
+    // under this declaration node. Nested declarators (pointers, arrays,
+    // etc.) can be found deeper in the tree.
+    fn collect_identifiers(
+        map: &mut RepoMap,
+        n: Node,
+        src: &str,
+        file: &Path,
+        file_total_lines: usize,
+        comments: &[(usize, String)],
+    ) {
+        if n.kind() == "identifier" {
+            let name = node_text(n, src).to_string();
+            let keywords = find_associated_comments(n, comments);
+            let symbol_info = SymbolInfo {
+                name: name.clone(),
+                kind: SymbolKind::Variable,
+                file: file.to_path_buf(),
+                start_line: n.start_position().row + 1,
+                start_col: n.start_position().column + 1,
+                end_line: n.end_position().row + 1,
+                end_col: n.end_position().column + 1,
+                parent: None,
+                file_total_lines,
+                function_lines: None,
+                keywords,
+            };
+            map.symbols.push(symbol_info);
+            return;
         }
-        c.goto_parent();
+
+        let mut c = n.walk();
+        if c.goto_first_child() {
+            loop {
+                collect_identifiers(map, c.node(), src, file, file_total_lines, comments);
+                if !c.goto_next_sibling() {
+                    break;
+                }
+            }
+            c.goto_parent();
+        }
     }
+
+    fn recurse(
+        map: &mut RepoMap,
+        n: Node,
+        src: &str,
+        file: &Path,
+        file_total_lines: usize,
+        comments: &[(usize, String)],
+    ) {
+        // If this node looks like a declarator (including pointer/array variants),
+        // walk its descendants and collect any identifier nodes.
+        match n.kind() {
+            "init_declarator"
+            | "declarator"
+            | "pointer_declarator"
+            | "array_declarator"
+            | "parameter_declarator"
+            | "field_declarator"
+            | "direct_declarator" => {
+                collect_identifiers(map, n, src, file, file_total_lines, comments);
+            }
+            _ => {}
+        }
+
+        // Continue recursion to find nested declarators
+        let mut c = n.walk();
+        if c.goto_first_child() {
+            loop {
+                recurse(map, c.node(), src, file, file_total_lines, comments);
+                if !c.goto_next_sibling() {
+                    break;
+                }
+            }
+            c.goto_parent();
+        }
+    }
+
+    recurse(map, node, src, file, file_total_lines, comments);
 }
 
 fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_total_lines: usize) {
