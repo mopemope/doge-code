@@ -7,11 +7,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs; // Add
-use std::path::{Path, PathBuf}; // Add
-use tracing::{debug, info};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
 
-/// repomap cache metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepomapMetadata {
     pub version: String,
@@ -82,21 +81,49 @@ impl RepomapStore {
     /// Create a new RepomapStore
     pub async fn new(project_root: PathBuf) -> Result<Self> {
         let db_path = get_default_db_path(&project_root);
+        let db_path_str = db_path.clone();
 
         // Check if the parent directory `.doge` exists
-        if let Some(parent_dir) = Path::new(&db_path).parent() {
+        if let Some(parent_dir) = Path::new(&db_path_str).parent() {
             fs::create_dir_all(parent_dir)
                 .with_context(|| format!("Failed to create directory: {}", parent_dir.display()))?;
         }
 
-        let db_conn = connect_database(&db_path)
-            .await
-            .context("Failed to connect to database")?;
+        // Attempt to connect and run migrations with retry logic
+        #[allow(clippy::never_loop)]
+        let db_conn = loop {
+            let conn = match connect_database(&db_path_str).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("DB connection failed: {}. Deleting and retrying.", e);
+                    let _ = fs::remove_file(&db_path_str);
+                    match connect_database(&db_path_str).await {
+                        Ok(c) => break c,
+                        Err(_) => {
+                            return Err(anyhow::anyhow!("Failed to connect after deleting DB"));
+                        }
+                    }
+                }
+            };
 
-        // Run migrations
-        run_migrations(&db_conn)
-            .await
-            .context("Failed to run database migrations")?;
+            match run_migrations(&conn).await {
+                Ok(_) => break conn,
+                Err(e) => {
+                    warn!("Migration failed: {}. Deleting DB and retrying.", e);
+                    let _ = fs::remove_file(&db_path_str);
+                    match connect_database(&db_path_str).await {
+                        Ok(c) => break c,
+                        Err(_) => {
+                            return Err(anyhow::anyhow!(
+                                "Failed to reconnect after migration error"
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+
+        info!("Database connection and migrations completed successfully");
 
         Ok(Self {
             project_root,
@@ -210,6 +237,29 @@ mod tests {
     use super::*;
     use crate::analysis::symbol::{SymbolInfo, SymbolKind};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_repomap_store_new_with_corrupt_db() {
+        let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+        let project_root = tmp_dir.path().to_path_buf();
+
+        // Create a fake corrupt DB file
+        let db_path = get_default_db_path(&project_root);
+        fs::create_dir_all(Path::new(&db_path).parent().unwrap()).unwrap();
+        fs::write(&db_path, "corrupt data").unwrap(); // Make it invalid
+
+        // First attempt should fail connection or migration, delete, and succeed
+        let _store = RepomapStore::new(project_root.clone())
+            .await
+            .expect("Failed to create RepomapStore after retry");
+
+        // Verify DB is created fresh
+        assert!(fs::metadata(&db_path).is_ok());
+        assert_ne!(fs::read(&db_path).unwrap().len(), 12); // Not the corrupt data
+
+        // Cleanup
+        let _ = fs::remove_file(&db_path);
+    }
 
     #[tokio::test]
     async fn test_repomap_store_save_and_load() {
