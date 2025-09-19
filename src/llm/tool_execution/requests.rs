@@ -134,7 +134,7 @@ async fn chat_tools_once_inner(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp.text().await.unwrap_or_default().trim().to_owned();
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
 
         // Check if the error is due to context length exceeded
