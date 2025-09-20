@@ -238,7 +238,7 @@ impl FsTools {
             return Ok(serde_json::to_string(&result)?);
         }
 
-        match execute::execute_bash(command).await {
+        match execute::execute_bash(command, &self.config).await {
             Ok(result) => {
                 self.record_tool_call_success("execute_bash")?;
                 Ok(result)
