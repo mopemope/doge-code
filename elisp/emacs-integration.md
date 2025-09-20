@@ -1,77 +1,77 @@
 # Doge-Code Emacs Integration
 
-## 概要
+## Overview
 
-Doge-CodeはRustで構築されたインタラクティブなCLI/TUIコーディングエージェントで、OpenAI互換のLLMを使用してコードの読み取り、分析、検索、編集をサポートします。このドキュメントでは、Doge-CodeとEmacsの統合機能について説明します。この統合により、Emacs内でDoge-CodeのAI支援をシームレスに利用できます。
+Doge-Code is an interactive CLI/TUI coding agent built in Rust that uses OpenAI-compatible LLMs to assist with code reading, analysis, searching, and editing. This document explains the integration features between Doge-Code and Emacs, allowing seamless use of AI assistance within Emacs.
 
-統合は以下の2つの主要な部分で構成されます：
-1. **CLIベースの最小実行可能統合 (MVI)**: EmacsからDoge-Codeの`--exec`サブコマンドをサブプロセスとして呼び出し、コード分析やリファクタリングを実行。
-2. **MCPサーバーモード**: Doge-CodeをHTTPサーバーとして実行し、Emacsクライアントからツール（例: `search_repomap`、`fs_read`）をリアルタイムで呼び出し。
+The integration consists of two main components:
+1. **CLI-based Minimum Viable Integration (MVI)**: Calling Doge-Code's `--exec` subcommand as a subprocess from Emacs for code analysis and refactoring.
+2. **MCP Server Mode**: Running Doge-Code as an HTTP server and calling tools (e.g., `search_repomap`, `fs_read`) in real-time from the Emacs client.
 
-この統合はEmacsのプログラミングモードで自動的に有効化され、キーバインドで簡単に使用可能です。Doge-Codeのツールシステム（静的コード分析、ファイル操作など）を活用し、コードの分析、説明、リファクタリングを支援します。
+This integration is automatically enabled in Emacs programming modes with convenient keybindings. It leverages Doge-Code's tool system (static code analysis, file operations, etc.) to assist with code analysis, explanation, and refactoring.
 
-## 要件
+## Requirements
 
-- **Doge-Code**: ビルド済みバイナリ（`dgc`または`doge-code`）。Cargo.tomlに依存関係が定義されています。
-- **Emacs**: バージョン27.1以上。パッケージ: `json`, `async`, `request`, `popup` (MELPA経由でインストール)。
-- **APIキー**: `OPENAI_API_KEY`環境変数にOpenAI互換APIキーを設定。
-- **プロジェクトルート**: Doge-Codeはプロジェクトルート内で動作します。Emacsバッファのディレクトリがルートとなります。
+- **Doge-Code**: Built binary (`dgc` or `doge-code`). Dependencies are defined in Cargo.toml.
+- **Emacs**: Version 27.1 or higher. Packages: `json`, `async`, `request`, `popup` (install via MELPA).
+- **API Key**: Set OpenAI-compatible API key in `OPENAI_API_KEY` environment variable.
+- **Project Root**: Doge-Code operates within a project root. The directory of the Emacs buffer serves as the root.
 
-## インストールと具体的な設定方法
+## Installation and Setup
 
-### 1. Doge-Codeのビルドとセットアップ
-1. リポジトリをクローン:
+### 1. Build and Setup Doge-Code
+1. Clone the repository:
    ```
    git clone https://github.com/mopemope/doge-code.git
    cd doge-code
    ```
-2. Rustツールチェーンをインストール (rustup経由):
+2. Install the Rust toolchain (via rustup):
    ```
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source ~/.cargo/env
    ```
-3. 依存をインストールしビルド:
+3. Install dependencies and build:
    ```
    cargo build --release
    ```
-   - バイナリが生成されます: `target/release/dgc` (PATHに追加推奨、例: `export PATH="$PATH:$HOME/.cargo/bin:./target/release"`).
-4. APIキーを設定 (環境変数):
+   - Binary generated at: `target/release/dgc` (recommended to add to PATH, e.g., `export PATH="$PATH:$HOME/.cargo/bin:./target/release"`).
+4. Set API key (environment variable):
    ```
    export OPENAI_API_KEY="sk-your-key-here"
    ```
-   - 永続化: `~/.bashrc`または`~/.zshrc`に追加。
+   - For persistence: Add to `~/.bashrc` or `~/.zshrc`.
 
-### 2. Emacsパッケージのインストール
-#### オプション1: 手動インストール (推奨で簡単)
-1. 以下のファイルを`~/.emacs.d/lisp/`に保存:
-   - `doge-code.el` (CLI統合)。
-   - `doge-mcp.el` (MCPクライアント)。
-2. `init.el` (または`init.el`相当)に追加:
+### 2. Install Emacs Packages
+#### Option 1: Manual Installation (Recommended and Easy)
+1. Save the following files to `~/.emacs.d/lisp/`:
+   - `doge-code.el` (CLI integration).
+   - `doge-mcp.el` (MCP client).
+2. Add to `init.el` (or equivalent):
    ```elisp
-   ;; Doge-Code統合のロード
+   ;; Load Doge-Code integration
    (add-to-list 'load-path "~/.emacs.d/lisp/")
    (require 'doge-code)
    (require 'doge-mcp)
 
-   ;; モードをプログラミングモードで自動有効化
+   ;; Automatically enable mode in programming modes
    (add-hook 'prog-mode-hook 'doge-code-mode)
 
-   ;; バイナリパスをカスタマイズ (必要に応じて)
+   ;; Customize binary path (if needed)
    (setq doge-code-executable "/path/to/doge-code/target/release/dgc")
-   (setq doge-mcp-server-url "http://127.0.0.1:8000")  ; MCPサーバーURL
+   (setq doge-mcp-server-url "http://127.0.0.1:8000")  ; MCP server URL
 
-   ;; ポップアップ使用を有効化 (オプション)
+   ;; Enable popup display (optional)
    (setq doge-code-use-popup t)
    ```
-3. Emacsを再起動、または`M-x eval-buffer`でinit.elを評価。
-4. テスト: 新しいバッファで`M-x doge-code-mode`を実行 → モードラインに"Doge"表示。
+3. Restart Emacs or evaluate `init.el` with `M-x eval-buffer`.
+4. Test: Open a new buffer and run `M-x doge-code-mode` → "Doge" should appear in the mode line.
 
-#### オプション2: MELPA経由 (将来対応時)
-- パッケージとして公開する場合: MELPAレシピを追加。
-- 現在は手動推奨。
+#### Option 2: Via MELPA (When Available)
+- For package publication: Add MELPA recipe.
+- Currently recommended to use manual installation.
 
-#### オプション3: straight.el使用 (Emacs 27+)
-`init.el`に:
+#### Option 3: Using straight.el (Emacs 27+)
+In `init.el`:
 ```elisp
 (use-package straight
   :ensure t)
@@ -89,94 +89,98 @@ Doge-CodeはRustで構築されたインタラクティブなCLI/TUIコーディ
 (setq doge-mcp-server-url "http://127.0.0.1:8000")
 ```
 
-### 3. MCPサーバーの設定
-1. ターミナルでDoge-Code MCPサーバーを起動:
+### 3. MCP Server Setup
+1. Start the Doge-Code MCP server in terminal:
    ```
-   dgc --mcp-server  # デフォルト: http://127.0.0.1:8000
+   dgc --mcp-server  # Default: http://127.0.0.1:8000
    ```
-   - バックグラウンド: `dgc --mcp-server &`。
-   - カスタムポート: `dgc --mcp-server 127.0.0.1:9000`。
-2. Emacs側でURLを設定 (init.el):
+   - Background: `dgc --mcp-server &`.
+   - Custom port: `dgc --mcp-server 127.0.0.1:9000`.
+2. Set URL in Emacs (init.el):
    ```elisp
    (setq doge-mcp-server-url "http://127.0.0.1:9000")
    ```
-3. テスト: Emacsで`M-x doge-mcp-list-tools` → ツール一覧表示。
+3. Test: In Emacs, run `M-x doge-mcp-list-tools` → Tool list should be displayed.
 
-### 4. 基本設定の確認
-- **環境変数確認**: Emacsで`M-x shell-command` → `echo $OPENAI_API_KEY` (出力がキーならOK)。
-- **バイナリ確認**: `M-x shell-command` → `which dgc` (パス表示ならOK)。
-- **モード確認**: rust-modeバッファで`C-h m` → "Doge"キーバインド確認。
+### 4. Basic Setup Verification
+- **Environment Variable Check**: In Emacs, `M-x shell-command` → `echo $OPENAI_API_KEY` (should output the key).
+- **Binary Check**: `M-x shell-command` → `which dgc` (should display path).
+- **Mode Check**: In a rust-mode buffer, `C-h m` → Check for "Doge" keybindings.
 
-## 機能詳細
+## Detailed Features
 
-### 1. CLIベースの統合 (MVI)
-EmacsからDoge-Codeの`--exec`コマンドを非同期で呼び出し、選択したコード領域やバッファ全体を分析/リファクタリングします。JSON出力（`--json`フラグ）で構造化レスポンスを解析し、ポップアップまたはバッファに表示。
+### 1. CLI-based Integration (MVI)
+Asynchronously calls Doge-Code's `--exec` command from Emacs to analyze/refactor selected code regions or the entire buffer. Uses JSON output (`--json` flag) to parse structured responses and display in popup or buffer.
 
-#### コマンド
-- **doge-code-analyze-region** (C-c d a):
-  - 選択領域を分析し、改善提案を表示。
-  - 例: 選択した関数を分析 → ポップアップに「このコードの改善点: ...」を表示。
-- **doge-code-refactor-region** (C-c d r):
-  - 選択領域をリファクタリング。
-  - 例: コードをベストプラクティスに適合。
-- **doge-code-explain-region** (C-c d e):
-  - 選択領域の説明（プレーンテキスト出力）。
-- **doge-code-analyze-buffer** (C-c d b):
-  - 現在のバッファ全体を分析。
+#### Commands
+- **doge-code-analyze-region** (`C-c d a`):
+  - Analyze selected region and display improvement suggestions.
+  - Example: Select a function and analyze → Display "Code improvements: ..." in popup.
+- **doge-code-refactor-region** (`C-c d r`):
+  - Refactor selected region.
+  - Example: Refactor code to follow best practices.
+- **doge-code-explain-region** (`C-c d e`):
+  - Explain selected region (plain text output).
+- **doge-code-analyze-buffer** (`C-c d b`):
+  - Analyze the entire current buffer.
+- **doge-code-cancel** (`C-c d c`):
+  - Cancel the current Doge-Code process.
 
-#### 使用例
-1. Rustファイルを開く。
-2. 関数を選択。
-3. `C-c d a` を実行 → *doge-output*バッファまたはポップアップに分析結果を表示。
-4. JSONレスポンス: `{"success": true, "response": "分析結果", "tokens_used": 150}`。
-5. エラー時: メッセージバーに「Doge-Code Error: ...」を表示。
+#### Usage Example
+1. Open a Rust file.
+2. Select a function.
+3. Execute `C-c d a` → Display analysis results in *doge-output* buffer or popup.
+4. JSON response: `{"success": true, "response": "Analysis result", "tokens_used": 150}`.
+5. On error: Display "Doge-Code Error: ..." in message bar.
 
-#### カスタマイズ
-- `doge-code-executable`: バイナリパス（デフォルト: "dgc"）。
-- `doge-code-use-popup`: tでポップアップ表示、nilでバッファ表示。
+#### Customization
+- `doge-code-executable`: Binary path (default: "dgc").
+- `doge-code-use-popup`: Use popup display if t, else buffer display.
+- `doge-code-show-progress`: Show progress messages during execution.
+- `doge-code-timeout`: Timeout for Doge-Code execution in seconds.
 
-### 2. MCPサーバーモード
-Doge-CodeをHTTPサーバーとして実行（`dgc --mcp-server [address]`）。Emacsクライアントからツールを直接呼び出し、リアルタイム分析が可能。
+### 2. MCP Server Mode
+Run Doge-Code as an HTTP server (`dgc --mcp-server [address]`). Directly call tools from Emacs client for real-time analysis.
 
-#### サーバー起動
-- ターミナルで: `dgc --mcp-server` (デフォルト: http://127.0.0.1:8000)。
-- カスタムポート: `dgc --mcp-server 127.0.0.1:9000`。
+#### Server Startup
+- In terminal: `dgc --mcp-server` (default: http://127.0.0.1:8000).
+- Custom port: `dgc --mcp-server 127.0.0.1:9000`.
 
-#### Emacsクライアントコマンド
-- **doge-mcp-search-repomap** (C-c d m s):
-  - リポジトリマップをキーワードで検索（例: "function name"）。
-- **doge-mcp-fs-read** (C-c d m f):
-  - ファイルを読み取り（パス入力）。
-- **doge-mcp-list-tools** (M-x):
-  - 利用可能ツール一覧を表示。
+#### Emacs Client Commands
+- **doge-mcp-search-repomap** (`C-c d m s`):
+  - Search repository map with keywords (e.g., "function name").
+- **doge-mcp-fs-read** (`C-c d m f`):
+  - Read a file (enter path).
+- **doge-mcp-list-tools** (`C-c d m l`):
+  - Display list of available tools.
 
-#### 使用例
-1. MCPサーバーを起動。
-2. Emacsで: `M-x doge-mcp-search-repomap` → キーワード入力 → 結果バッファにシンボル/コードを表示。
-3. レスポンス: JSON形式の検索結果（ファイルパス、シンボル）。
+#### Usage Example
+1. Start the MCP server.
+2. In Emacs: `M-x doge-mcp-search-repomap` → Enter keywords → Display symbols/code in result buffer.
+3. Response: JSON format search results (file paths, symbols).
 
-#### MCPツール
-Doge-CodeのツールがMCP経由で利用可能:
-- `search_repomap`: シンボル検索。
-- `fs_read`: ファイル読み取り。
-- `fs_list`: ディレクトリ一覧。
-- など（rmcp経由で拡張可能）。
+#### MCP Tools
+Doge-Code tools available via MCP:
+- `search_repomap`: Symbol search.
+- `fs_read`: File reading.
+- `fs_list`: Directory listing.
+- etc. (extensible via rmcp).
 
-## トラブルシューティング
+## Troubleshooting
 
-- **APIキーエラー**: `OPENAI_API_KEY`を設定。JSON出力で`{"success": false, "error": "..."}`。
-- **サーバー接続失敗**: MCPサーバーが起動中か確認（ポート8000）。ファイアウォールチェック。
-- **Emacsエラー**: `M-x load-file`で手動ロード。`M-x toggle-debug-on-error`でデバッグ。
-- **出力表示**: *doge-output*バッファを確認、または`C-h v doge-code-use-popup`でポップアップ有効化。
+- **API Key Error**: Set `OPENAI_API_KEY`. JSON output shows `{"success": false, "error": "..."}`.
+- **Server Connection Failure**: Check if MCP server is running (port 8000). Check firewall.
+- **Emacs Errors**: Manually load with `M-x load-file`. Debug with `M-x toggle-debug-on-error`.
+- **Output Display**: Check *doge-output* buffer, or enable popup with `C-h v doge-code-use-popup`.
 
-## 将来の拡張
+## Future Enhancements
 
-- **LSPサポート**: Doge-CodeをLSPサーバーとして実行（lsp-mode統合）。
-- **ストリーミング**: MCP経由のリアルタイムストリーミング（WebSocket）。
-- **自動適用**: 分析結果をEmacsバッファに自動挿入/パッチ適用。
-- **バッファ統合**: インライン提案（Copilot風）。
+- **LSP Support**: Run Doge-Code as an LSP server (lsp-mode integration).
+- **Streaming**: Real-time streaming via MCP (WebSocket).
+- **Auto Apply**: Automatically insert/apply analysis results to Emacs buffers.
+- **Buffer Integration**: Inline suggestions (Copilot-style).
 
-詳細はソースコード（doge-code.el, doge-mcp.el）またはリポジトリを参照。問題があれば、Doge-Codeのissueを参照してください。
+For details, refer to the source code (doge-code.el, doge-mcp.el) or the repository. For issues, see Doge-Code's issue tracker.
 
 ---
 

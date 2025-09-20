@@ -23,6 +23,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - **Project Instructions** - Automatic loading of project-specific instructions from AGENTS.md, QWEN.md, or GEMINI.md
 - **Shell Mode** - Execute shell commands directly within the TUI using `!` or `/shell`.
 - **File Watch Mode** - Run in a non-interactive mode to watch for file changes and execute predefined tasks. When a file is modified, Doge-Code looks for comments with the pattern `// AI!: <instruction>` and automatically executes the instruction using the LLM.
+- **Emacs Integration** - Full integration with Emacs for in-editor AI assistance
 
 ### TUI Experience
 
@@ -37,6 +38,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - Rust toolchain (Edition 2024, stable)
 - Network access to an OpenAI-compatible endpoint (default: https://api.openai.com/v1)
 - An API key in `OPENAI_API_KEY` or provided via `--api-key`
+- *For Emacs integration*: Emacs 27.1+ with `json`, `async`, `request`, and `popup` packages
 
 ## Installation
 
@@ -49,6 +51,27 @@ The resulting binary will be at:
 ```
 target/release/doge-code
 ```
+
+### Emacs Integration Setup
+
+To use the Emacs integration:
+
+1. Copy the Emacs Lisp files from the `elisp/` directory to your Emacs load path
+2. Add the following to your Emacs configuration:
+
+```elisp
+(require 'doge-code)
+(require 'doge-mcp)
+(add-hook 'prog-mode-hook 'doge-code-mode)
+```
+
+3. Set the path to the Doge-Code binary:
+
+```elisp
+(setq doge-code-executable "/path/to/doge-code/target/release/dgc")
+```
+
+See `elisp/emacs-integration.md` for detailed installation instructions and usage.
 
 ## Configuration
 
@@ -256,14 +279,24 @@ Type `@` to trigger file completion based on the current project root:
 - Recent selections are prioritized
 - Works with relative paths resolved against project root
 
-### Editor Integration
+### Emacs Integration
 
-The `/open <path>` command:
-- Launches your editor and temporarily suspends TUI
-- Editor selection: `$EDITOR` → `$VISUAL` → `vi`
-- Supports both relative (to project root) and absolute paths
-- Safely returns to TUI after editor exit
-- Example: `/open @src/main.rs` (use @ completion to pick files)
+Doge-Code offers comprehensive integration with Emacs through two complementary approaches:
+
+### 1. CLI-based Integration (MVI)
+Direct integration with the Doge-Code CLI for:
+- Code analysis and suggestions (`C-c d a`)
+- Code refactoring (`C-c d r`)
+- Code explanations (`C-c d e`)
+- Buffer-wide analysis (`C-c d b`)
+
+### 2. MCP Server Integration
+Run Doge-Code as an MCP HTTP server for real-time tool access:
+- Symbol search with `search_repomap` (`C-c d m s`)
+- File reading with `fs_read` (`C-c d m f`)
+- Direct tool calling from Emacs
+
+See `elisp/emacs-integration.md` for detailed installation and usage instructions.
 
 ## Available Tools
 
