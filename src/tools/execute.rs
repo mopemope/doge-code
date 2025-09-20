@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -30,13 +31,22 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub async fn execute_bash(command: &str) -> Result<String> {
+pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<String> {
+    // Change to the project root directory before executing the command
+    let project_root = &config.project_root;
+
     let output = Command::new("bash")
         .arg("-c")
         .arg(command)
+        .current_dir(project_root)
         .output()
         .await
-        .with_context(|| format!("Failed to execute command: {command}"))?;
+        .with_context(|| {
+            format!(
+                "Failed to execute command: {command} in directory: {}",
+                project_root.display()
+            )
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -56,10 +66,17 @@ pub async fn execute_bash(command: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_execute_bash_success() {
-        let result_str = execute_bash("echo 'hello'").await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result_str = execute_bash("echo 'hello'", &config).await.unwrap();
         let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.stderr, "");
@@ -69,7 +86,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_bash_failure() {
-        let result = execute_bash("invalid_command").await;
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result = execute_bash("invalid_command", &config).await;
         assert!(result.is_ok()); // The function should return Ok with a JSON string even for command failures
         let result: ExecuteBashResult = serde_json::from_str(&result.unwrap()).unwrap();
         assert!(!result.success);
@@ -77,7 +99,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_bash_with_stderr() {
-        let result_str = execute_bash("echo 'test error' >&2; exit 1").await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result_str = execute_bash("echo 'test error' >&2; exit 1", &config)
+            .await
+            .unwrap();
         let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
         assert_eq!(result.stdout, "");
         assert!(result.stderr.contains("test error"));
@@ -87,7 +116,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_bash_with_exit_code_zero() {
-        let result_str = execute_bash("exit 0").await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result_str = execute_bash("exit 0", &config).await.unwrap();
         let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "");
@@ -97,7 +131,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_bash_with_non_zero_exit_code() {
-        let result_str = execute_bash("exit 42").await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result_str = execute_bash("exit 42", &config).await.unwrap();
         let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "");
