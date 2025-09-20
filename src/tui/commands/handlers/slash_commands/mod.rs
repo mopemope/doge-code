@@ -1,6 +1,7 @@
 pub mod cancel;
 pub mod clear;
 pub mod compact;
+pub mod git_worktree;
 pub mod help;
 pub mod map;
 pub mod open;

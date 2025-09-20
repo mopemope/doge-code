@@ -157,8 +157,10 @@ impl SessionStore {
 }
 
 fn default_store_dir() -> Result<PathBuf, SessionError> {
-    // Use .doge/sessions in the project directory
-    let project_dir = env::current_dir().map_err(SessionError::ReadError)?;
+    // Use .doge/sessions in the project directory or fallback to temp
+    let project_dir = env::current_dir()
+        .map_err(SessionError::ReadError)
+        .unwrap_or_else(|_| std::env::temp_dir());
     let base = project_dir.join(".doge/sessions");
     Ok(base)
 }

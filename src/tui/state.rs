@@ -213,6 +213,7 @@ impl TuiApp {
             "/tokens".to_string(),
             "/cancel".to_string(),
             "/compact".to_string(),
+            "/git-worktree".to_string(),
         ];
 
         // Get custom commands

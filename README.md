@@ -144,6 +144,7 @@ You can also start in watch mode to react to file system changes:
 - `/clear` - Clear the conversation and log area.
 - `/open <path>` - Open a file in your editor (respects `$EDITOR`, `$VISUAL`).
 - `/theme <name>` - Switch theme (dark/light).
+- `/git-worktree` - Create a new git worktree for parallel processing.
 - `/cancel` - Cancel the current operation.
 - `/quit` - Exit the application.
 

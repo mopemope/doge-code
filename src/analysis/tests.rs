@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod analysis_tests {
     use crate::analysis::{Analyzer, SymbolKind};
     use std::fs::File;
     use std::io::Write;
@@ -565,7 +565,7 @@ int small_buffer = 1;
         // Note: Currently the C collector doesn't extract #define as symbols,
         // but we should verify they don't interfere with other parsing
         let symbols_count = map.symbols.len();
-        assert!(symbols_count >= 0); // At minimum, should not crash
+        assert!(symbols_count > 0); // At minimum, should have some symbols
     }
 
     #[tokio::test]

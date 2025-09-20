@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod assets;
 pub mod config;
 pub mod exec;
+pub mod features;
 pub mod llm;
 pub mod logging;
 pub mod mcp;

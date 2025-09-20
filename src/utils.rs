@@ -87,9 +87,14 @@ mod tests {
 
     #[test]
     fn test_is_git_repository_with_git_dir() {
-        // Confirm that the current directory is a Git repository
-        let current_dir = env::current_dir().unwrap();
-        assert!(is_git_repository(&current_dir));
+        let temp = tempfile::tempdir().expect("Failed to create temp dir");
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
+        assert!(is_git_repository(temp.path()));
     }
 
     #[test]
@@ -126,25 +131,39 @@ mod tests {
 
     #[test]
     fn test_is_git_repository_in_subdirectory() {
-        // Confirm that the src directory is a subdirectory of a Git repository
-        let src_dir = env::current_dir().unwrap().join("src");
-        assert!(is_git_repository(&src_dir));
+        let temp = tempfile::tempdir().expect("Failed to create temp dir");
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
+        let sub_dir = temp.path().join("src");
+        std::fs::create_dir(&sub_dir).expect("Failed to create sub dir");
+        assert!(is_git_repository(&sub_dir));
     }
 
     #[test]
     fn test_get_git_repository_root() {
-        // Get the Git repository root of the current directory
-        let current_dir = env::current_dir().unwrap();
-        let root = get_git_repository_root(&current_dir);
-        assert!(root.is_some());
+        let temp = tempfile::tempdir().expect("Failed to create temp dir");
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
 
-        // Get the Git repository root of the src directory
-        let src_dir = current_dir.join("src");
-        let src_root = get_git_repository_root(&src_dir);
-        assert!(src_root.is_some());
+        // From repo root
+        let root1 = get_git_repository_root(temp.path());
+        assert!(root1.is_some());
+        assert_eq!(root1.unwrap(), temp.path());
 
-        // Confirm that both roots are the same
-        assert_eq!(root.unwrap(), src_root.unwrap());
+        // From sub dir
+        let sub_dir = temp.path().join("src");
+        std::fs::create_dir(&sub_dir).expect("Failed to create sub dir");
+        let root2 = get_git_repository_root(&sub_dir);
+        assert!(root2.is_some());
+        assert_eq!(root2.unwrap(), temp.path());
     }
 
     #[test]
