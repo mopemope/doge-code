@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use diffy::create_patch;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -35,6 +35,36 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
+    // Check if the path is within the project root or in allowed paths
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let temp_dir = std::env::temp_dir();
+    let canonical_path = p.canonicalize().unwrap_or_else(|_| {
+        // If canonicalization fails, try to get a relative path from the project root
+        if let Ok(relative_path) = p.strip_prefix(&project_root) {
+            project_root.join(relative_path)
+        } else {
+            p.to_path_buf()
+        }
+    });
+
+    // Check if the path is in allowed paths
+    let config = crate::config::AppConfig::default();
+    let is_allowed_path = config
+        .allowed_paths
+        .iter()
+        .any(|allowed_path| canonical_path.starts_with(allowed_path));
+
+    // Allow paths that are within the project root OR within the temp directory OR in allowed paths
+    if !canonical_path.starts_with(&project_root)
+        && !canonical_path.starts_with(&temp_dir)
+        && !is_allowed_path
+    {
+        anyhow::bail!(
+            "Access to files outside the project root is not allowed: {}",
+            path
+        );
+    }
+
     // Ensure parent directory exists; create if missing
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)
@@ -60,13 +90,23 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    use tempfile::tempdir;
+    fn create_temp_dir() -> PathBuf {
+        // Use the system temp directory directly
+        let temp_dir = std::env::temp_dir();
+        let dir = tempfile::Builder::new()
+            .prefix("test_")
+            .tempdir_in(&temp_dir)
+            .unwrap();
+        #[allow(deprecated)]
+        let path = dir.into_path();
+        path
+    }
 
     #[test]
     fn test_fs_write_success() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         let file_path = root.join("test_file.txt");
         let file_path_str = file_path.to_str().unwrap();
         let content = "Hello, Rust!";
@@ -91,9 +131,9 @@ mod tests {
 
     #[test]
     fn test_fs_write_path_escape_error() {
-        let dir = tempdir().unwrap();
+        let root = create_temp_dir();
         // Create a subdirectory to test path escaping
-        let subdir = dir.path().join("subdir");
+        let subdir = root.join("subdir");
         fs::create_dir(&subdir).unwrap();
 
         // Try to write to a path that escapes the subdir
@@ -113,7 +153,7 @@ mod tests {
         assert!(result.is_ok() || result.is_err());
 
         // Check if the file was written to the expected location after canonicalization
-        let expected_path = dir.path().join("escaping.txt");
+        let expected_path = root.join("escaping.txt");
         if expected_path.exists() {
             // File was written to the parent of subdir, which is the main temp dir
             assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test");
@@ -126,8 +166,7 @@ mod tests {
 
     #[test]
     fn test_fs_write_binary_content_error() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         let file_path = root.join("binary.txt");
         let file_path_str = file_path.to_str().unwrap();
         let content_with_null = "hello\0world";
@@ -138,8 +177,7 @@ mod tests {
 
     #[test]
     fn test_fs_write_diff_display() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         let file_path = root.join("diff_test.txt");
         let file_path_str = file_path.to_str().unwrap();
         let old_content = "Old content\n";

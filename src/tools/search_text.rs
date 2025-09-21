@@ -1,9 +1,15 @@
 use crate::llm::types::{ToolDef, ToolFunctionDef};
+
 use anyhow::{Context, Result};
+
 use glob::glob;
+
 use serde::Deserialize;
+
 use serde_json::json;
+
 use std::path::PathBuf;
+
 use std::process::Command;
 
 pub fn tool_def() -> ToolDef {
@@ -64,16 +70,20 @@ pub fn search_text(
 ) -> Result<Vec<(PathBuf, usize, String)>> {
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
-
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(glob_pattern) = file_glob {
         // Expand the glob pattern to get a list of files
         for entry in glob(glob_pattern).context("Failed to read glob pattern")? {
             match entry {
                 Ok(path) => {
-                    // Ensure the path is absolute
-                    let absolute_path = path.canonicalize().unwrap_or(path);
-                    // Add each file path as an argument to ripgrep
-                    cmd.arg(absolute_path);
+                    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if canonical_path.starts_with(&project_root) {
+                        // Ensure the path is absolute
+                        let absolute_path = path.canonicalize().unwrap_or(path);
+                        // Add each file path as an argument to ripgrep
+                        cmd.arg(absolute_path);
+                    }
+                    // If the path is outside the project root, we simply don't add it to the command
                 }
                 Err(e) => println!("Error reading glob entry: {e}"),
             }
@@ -82,7 +92,6 @@ pub fn search_text(
         // If no glob pattern is provided, search in the current directory
         cmd.arg(".");
     }
-
     // Spawn ripgrep and stream its stdout to avoid loading everything into memory
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
@@ -97,6 +106,7 @@ pub fn search_text(
         .stdout
         .take()
         .context("failed to capture ripgrep stdout")?;
+
     let reader = BufReader::new(stdout);
 
     let mut results = Vec::new();
@@ -137,16 +147,26 @@ pub fn search_text(
 mod tests {
     use crate::tools::search_text::search_text;
     use std::fs;
-    use tempfile::tempdir;
+    use std::path::PathBuf;
+
+    fn create_temp_dir() -> PathBuf {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("test_")
+            .tempdir_in(&temp_dir)
+            .unwrap();
+        #[allow(deprecated)]
+        dir.into_path()
+    }
 
     #[test]
     fn test_search_text_simple() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::write(root.join("test.txt"), "hello world\nsecond line").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let file_glob = format!("{}/*.txt", root_str);
         let results = search_text("hello", Some(&file_glob)).unwrap();
         assert_eq!(results.len(), 1);
         let (path, line, content) = &results[0];
@@ -157,13 +177,12 @@ mod tests {
 
     #[test]
     fn test_fs_search_with_glob() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::write(root.join("a.txt"), "find me").unwrap();
         fs::write(root.join("b.log"), "find me").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let file_glob = format!("{}/*.txt", root_str);
         let results = search_text("find me", Some(&file_glob)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, root.join("a.txt"));
@@ -171,12 +190,11 @@ mod tests {
 
     #[test]
     fn test_fs_search_no_match() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::write(root.join("test.txt"), "some content").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let file_glob = format!("{}/{}.txt", root_str, "*");
+        let file_glob = format!("{}/*.txt", root_str);
         let results = search_text("nonexistent", Some(&file_glob)).unwrap();
         assert!(results.is_empty());
     }

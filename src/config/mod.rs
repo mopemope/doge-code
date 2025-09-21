@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub show_diff: bool,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Vec<String>,
+    // Allowed paths for file access
+    pub allowed_paths: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -64,6 +66,7 @@ impl Default for AppConfig {
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
             allowed_commands: vec![],
+            allowed_paths: vec![],
             mcp_servers: vec![McpServerConfig::default()],
         }
     }
@@ -118,6 +121,8 @@ pub struct FileConfig {
     pub show_diff: Option<bool>,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Option<Vec<String>>,
+    // Allowed paths for file access
+    pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
 }
 
@@ -338,6 +343,10 @@ impl AppConfig {
             allowed_commands: project_cfg
                 .allowed_commands
                 .or(file_cfg.allowed_commands)
+                .unwrap_or_default(),
+            allowed_paths: project_cfg
+                .allowed_paths
+                .or(file_cfg.allowed_paths)
                 .unwrap_or_default(),
             mcp_servers,
         })
