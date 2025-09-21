@@ -230,6 +230,7 @@ mod tests {
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
+            allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
         };
@@ -261,6 +262,7 @@ mod tests {
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             show_diff: true,
+            allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
         };

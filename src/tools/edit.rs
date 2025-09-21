@@ -2,7 +2,7 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 pub fn tool_def() -> ToolDef {
@@ -11,7 +11,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "edit".to_string(),
             description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
-strict: None,
+            strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -52,6 +52,23 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
     let path = Path::new(file_path);
     if !path.is_absolute() {
         anyhow::bail!("File path must be absolute: {}", file_path);
+    }
+
+    // Check if the path is within the project root or in allowed paths
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    let config = crate::config::AppConfig::default();
+    let is_allowed_path = config
+        .allowed_paths
+        .iter()
+        .any(|allowed_path| canonical_path.starts_with(allowed_path));
+
+    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+        anyhow::bail!(
+            "Access to files outside the project root is not allowed: {}",
+            file_path
+        );
     }
 
     // 1. Read file content
@@ -128,15 +145,26 @@ fn count_lines_in_diff(diff_text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    fn create_temp_file(content: &str) -> (NamedTempFile, String) {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_file = tempfile::Builder::new()
+            .prefix("test_")
+            .suffix(".txt")
+            .tempfile_in(&temp_dir)
+            .unwrap();
+        let file_path = temp_file.path().to_str().unwrap().to_string();
+        std::fs::write(&file_path, content).unwrap();
+        (temp_file, file_path.clone())
+    }
 
     #[tokio::test]
     async fn test_edit_success() {
         let original_content = "Hello, world!\nThis is a test.";
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "{original_content}").unwrap();
-        let file_path = file.path().to_str().unwrap().to_string();
+        let (_temp_file, file_path) = create_temp_file(original_content);
 
         let params = EditParams {
             file_path: file_path.clone(),
@@ -157,9 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_edit_dry_run() {
         let original_content = "Dry run test.";
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "{original_content}").unwrap();
-        let file_path = file.path().to_str().unwrap().to_string();
+        let (_temp_file, file_path) = create_temp_file(original_content);
 
         let params = EditParams {
             file_path: file_path.clone(),
@@ -180,9 +206,7 @@ mod tests {
     #[tokio::test]
     async fn test_edit_no_hash_provided() {
         let original_content = "No hash provided test.";
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "{original_content}").unwrap();
-        let file_path = file.path().to_str().unwrap().to_string();
+        let (_temp_file, file_path) = create_temp_file(original_content);
 
         let params = EditParams {
             file_path: file_path.clone(),
@@ -202,39 +226,19 @@ mod tests {
     #[tokio::test]
     async fn test_count_lines_in_diff() {
         // Test case 1: Simple addition
-        let diff_text = "---
-+++
-@@ -1,1 +1,2 @@
- Line 1
-+Line 2";
+        let diff_text = "---\n+++\n@@ -1,1 +1,2 @@\n Line 1\n+Line 2";
         assert_eq!(count_lines_in_diff(diff_text), 1);
 
         // Test case 2: Simple deletion
-        let diff_text = "---
-+++
-@@ -1,2 +1,1 @@
- Line 1
--Line 2";
+        let diff_text = "---\n+++\n@@ -1,2 +1,1 @@\n Line 1\n-Line 2";
         assert_eq!(count_lines_in_diff(diff_text), 1);
 
         // Test case 3: Modification (delete + add)
-        let diff_text = "---
-+++
-@@ -1,2 +1,2 @@
- Line 1
--Line 2
-+Line Two";
+        let diff_text = "---\n+++\n@@ -1,2 +1,2 @@\n Line 1\n-Line 2\n+Line Two";
         assert_eq!(count_lines_in_diff(diff_text), 2);
 
         // Test case 4: Multiple changes
-        let diff_text = "---
-+++
-@@ -1,3 +1,3 @@
- Line 1
--Line 2
-+Line Two
- Line 3
-+Line 4";
+        let diff_text = "---\n+++\n@@ -1,3 +1,3 @@\n Line 1\n-Line 2\n+Line Two\n Line 3\n+Line 4";
         assert_eq!(count_lines_in_diff(diff_text), 3);
     }
 }

@@ -47,6 +47,31 @@ pub fn fs_list(path: &str, max_depth: Option<usize>, pattern: Option<&str>) -> R
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
+    // Check if the path exists
+    if !full_path.exists() {
+        // If the path doesn't exist, return an empty list instead of an error
+        return Ok(Vec::new());
+    }
+
+    // Check if the path is within the project root or in allowed paths
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let canonical_path = full_path
+        .canonicalize()
+        .unwrap_or_else(|_| full_path.to_path_buf());
+
+    let config = crate::config::AppConfig::default();
+    let is_allowed_path = config
+        .allowed_paths
+        .iter()
+        .any(|allowed_path| canonical_path.starts_with(allowed_path));
+
+    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+        anyhow::bail!(
+            "Access to files outside the project root is not allowed: {}",
+            path
+        );
+    }
+
     let git_root = get_git_repository_root(path).unwrap_or(PathBuf::from(path));
 
     let mut files = Vec::new();
@@ -85,12 +110,22 @@ pub fn fs_list(path: &str, max_depth: Option<usize>, pattern: Option<&str>) -> R
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::tempdir;
+    use std::path::PathBuf;
+
+    fn create_temp_dir() -> PathBuf {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("test_")
+            .tempdir_in(&temp_dir)
+            .unwrap();
+        #[allow(deprecated)]
+        dir.into_path()
+    }
 
     #[test]
     fn test_fs_list_simple() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::create_dir(root.join("a")).unwrap();
         fs::write(root.join("a/b.txt"), "").unwrap();
         fs::write(root.join("c.txt"), "").unwrap();
@@ -112,8 +147,7 @@ mod tests {
 
     #[test]
     fn test_fs_list_with_depth() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::create_dir_all(root.join("a/b")).unwrap();
         fs::write(root.join("a/b/c.txt"), "").unwrap();
 
@@ -132,8 +166,7 @@ mod tests {
 
     #[test]
     fn test_fs_list_with_pattern() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
+        let root = create_temp_dir();
         fs::write(root.join("a.txt"), "").unwrap();
         fs::write(root.join("b.log"), "").unwrap();
 
