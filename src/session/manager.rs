@@ -1,8 +1,7 @@
 use crate::session::{SessionData, SessionStore};
 use anyhow::Result;
-use tracing::debug;
+use tracing::{debug, error as tracing_error};
 
-/// Session management for TUI
 #[derive(Debug)]
 pub struct SessionManager {
     pub store: SessionStore,
@@ -35,7 +34,7 @@ impl SessionManager {
             // Mark that the title is user-provided
             session.meta.title_is_default = false;
             if let Err(e) = self.store.save(&session) {
-                tracing::error!(
+                tracing_error!(
                     ?e,
                     "Failed to save session data after setting initial prompt"
                 );
@@ -119,13 +118,13 @@ impl SessionManager {
                 session.set_initial_prompt(&prompt);
                 // Mark that the title is now user-provided
                 session.meta.title_is_default = false;
-                tracing::debug!(
+                debug!(
                     "Overrode default session title with first user prompt (truncated to 30 chars)"
                 );
             }
 
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -137,7 +136,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.increment_token_count(token_count);
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -149,7 +148,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.increment_requests();
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -161,7 +160,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.increment_tool_calls();
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -173,7 +172,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.record_tool_call_success(tool_name);
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -185,7 +184,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.record_tool_call_failure(tool_name);
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());
             }
         }
@@ -197,7 +196,59 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.set_initial_prompt(prompt);
             if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session data");
+                tracing_error!(?e, "Failed to save session data");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Update the current session with a changed file path
+    pub fn update_current_session_with_changed_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.add_changed_file(path);
+            if let Err(e) = self.store.save(session) {
+                tracing_error!(?e, "Failed to save session data after adding changed file");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if the current session has any changed files
+    pub fn current_session_has_changed_files(&self) -> bool {
+        if let Some(ref session) = self.current_session {
+            session.has_changed_files()
+        } else {
+            false
+        }
+    }
+
+    /// Get changed files from the current session
+    pub fn get_changed_files_from_current_session(&self) -> Vec<std::path::PathBuf> {
+        if let Some(ref session) = self.current_session {
+            session
+                .changed_files
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Clear changed files from the current session
+    pub fn clear_changed_files_from_current_session(&mut self) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.clear_changed_files();
+            if let Err(e) = self.store.save(session) {
+                tracing_error!(
+                    ?e,
+                    "Failed to save session data after clearing changed files"
+                );
                 return Err(e.into());
             }
         }
@@ -208,7 +259,7 @@ impl SessionManager {
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
             format!(
-                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}",
+                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}\n  Changed files count: {}",
                 session.meta.id,
                 session.meta.title,
                 session.meta.created_at,
@@ -216,7 +267,8 @@ impl SessionManager {
                 session.conversation.len(),
                 session.token_count,
                 session.requests,
-                session.tool_calls
+                session.tool_calls,
+                session.changed_files.len()
             )
         })
     }
@@ -233,7 +285,8 @@ impl SessionManager {
                  Requests: {}\n\
                  Token count: {}\n\
                  Tool calls: {}\n\
-                 Lines edited: {}",
+                 Lines edited: {}\n\
+                 Changed files: {}",
                 session.meta.id,
                 session.meta.title,
                 session.meta.created_at,
@@ -241,7 +294,8 @@ impl SessionManager {
                 session.requests,
                 session.token_count,
                 session.tool_calls,
-                session.lines_edited
+                session.lines_edited,
+                session.changed_files.len()
             );
 
             // Add tool call success statistics
@@ -270,5 +324,134 @@ impl SessionManager {
             .as_ref()
             .map(|session| session.meta.id.clone())
             .ok_or_else(|| anyhow::anyhow!("No current session"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_new_default() {
+        let store = SessionStore::new_default().expect("Failed to create default session store");
+        assert!(
+            store.root.exists(),
+            "Session store root directory should exist"
+        );
+    }
+
+    #[test]
+    fn test_new() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        assert_eq!(
+            store.root,
+            dir.path(),
+            "Session store root should match the provided path"
+        );
+    }
+
+    #[test]
+    fn test_current_session_has_changed_files() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        let mut session_manager = SessionManager {
+            store,
+            current_session: None,
+        };
+
+        // No current session
+        assert!(!session_manager.current_session_has_changed_files());
+
+        // Create a session with no changed files
+        session_manager
+            .create_session(None)
+            .expect("Failed to create session");
+        assert!(!session_manager.current_session_has_changed_files());
+
+        // Add a changed file
+        let path = PathBuf::from("/path/to/file.rs");
+        session_manager
+            .update_current_session_with_changed_file(path)
+            .expect("Failed to update session with changed file");
+        assert!(session_manager.current_session_has_changed_files());
+    }
+
+    #[test]
+    fn test_get_changed_files_from_current_session() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        let mut session_manager = SessionManager {
+            store,
+            current_session: None,
+        };
+
+        // No current session
+        assert_eq!(
+            session_manager
+                .get_changed_files_from_current_session()
+                .len(),
+            0
+        );
+
+        // Create a session and add changed files
+        session_manager
+            .create_session(None)
+            .expect("Failed to create session");
+        let path1 = PathBuf::from("/path/to/file1.rs");
+        let path2 = PathBuf::from("/path/to/file2.rs");
+        session_manager
+            .update_current_session_with_changed_file(path1)
+            .expect("Failed to update session with changed file");
+        session_manager
+            .update_current_session_with_changed_file(path2)
+            .expect("Failed to update session with changed file");
+
+        let changed_files = session_manager.get_changed_files_from_current_session();
+        assert_eq!(changed_files.len(), 2);
+        assert!(changed_files.contains(&PathBuf::from("/path/to/file1.rs")));
+        assert!(changed_files.contains(&PathBuf::from("/path/to/file2.rs")));
+    }
+
+    #[test]
+    fn test_clear_changed_files_from_current_session() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        let mut session_manager = SessionManager {
+            store,
+            current_session: None,
+        };
+
+        // Create a session and add changed files
+        session_manager
+            .create_session(None)
+            .expect("Failed to create session");
+        let path1 = PathBuf::from("/path/to/file1.rs");
+        let path2 = PathBuf::from("/path/to/file2.rs");
+        session_manager
+            .update_current_session_with_changed_file(path1)
+            .expect("Failed to update session with changed file");
+        session_manager
+            .update_current_session_with_changed_file(path2)
+            .expect("Failed to update session with changed file");
+        assert_eq!(
+            session_manager
+                .get_changed_files_from_current_session()
+                .len(),
+            2
+        );
+
+        // Clear changed files
+        session_manager
+            .clear_changed_files_from_current_session()
+            .expect("Failed to clear changed files from session");
+        assert_eq!(
+            session_manager
+                .get_changed_files_from_current_session()
+                .len(),
+            0
+        );
     }
 }

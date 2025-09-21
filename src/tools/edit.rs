@@ -115,9 +115,19 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
     }
 
     // 6. Write the modified content back to the file
-    fs::write(path, modified_content)
+    let result = fs::write(path, modified_content)
         .await
-        .with_context(|| format!("Failed to write to file: {}", path.display()))?;
+        .with_context(|| format!("Failed to write to file: {}", path.display()));
+
+    if result.is_ok() {
+        // Update session with changed file
+        if let Ok(current_dir) = std::env::current_dir()
+            && let Ok(relative_path) = path.strip_prefix(current_dir)
+        {
+            let fs_tools = crate::tools::FsTools::default();
+            let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
+        }
+    }
 
     Ok(EditResult {
         success: true,

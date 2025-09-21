@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Serialize fields as RFC3339 strings and accept both integer epoch seconds and
-/// RFC3339 strings when deserializing for backward compatibility.
 fn serialize_rfc3339<S>(val: &str, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -108,6 +106,8 @@ pub struct SessionData {
     pub tool_call_successes: HashMap<String, u64>,
     /// Tool call failure counts by tool name
     pub tool_call_failures: HashMap<String, u64>,
+    /// Changed files during the session for repomap update
+    pub changed_files: Vec<String>,
 }
 
 impl SessionData {
@@ -131,6 +131,7 @@ impl SessionData {
             lines_edited: 0,
             tool_call_successes: HashMap::new(),
             tool_call_failures: HashMap::new(),
+            changed_files: Vec::new(),
         }
     }
 
@@ -196,6 +197,26 @@ impl SessionData {
         self.meta.title = prompt.chars().take(30).collect();
         self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
     }
+
+    /// Add a changed file to the session.
+    pub fn add_changed_file(&mut self, path: std::path::PathBuf) {
+        let path_str = path.to_string_lossy().to_string();
+        if !self.changed_files.contains(&path_str) {
+            self.changed_files.push(path_str);
+        }
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
+    }
+
+    /// Check if there are any changed files in the session.
+    pub fn has_changed_files(&self) -> bool {
+        !self.changed_files.is_empty()
+    }
+
+    /// Clear the changed files list.
+    pub fn clear_changed_files(&mut self) {
+        self.changed_files.clear();
+        self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +224,7 @@ mod tests {
     use super::*;
     use chrono::DateTime;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn test_new() {
@@ -223,6 +245,10 @@ mod tests {
             "Conversation should be empty initially"
         );
         assert!(
+            session_data.changed_files.is_empty(),
+            "Changed files should be empty initially"
+        );
+        assert!(
             !session_data.timestamp.is_empty(),
             "Timestamp should be set"
         );
@@ -239,6 +265,46 @@ mod tests {
             session_data.tool_call_failures.is_empty(),
             "Tool call failures should be empty"
         );
+    }
+
+    #[test]
+    fn test_add_changed_file() {
+        let mut session_data = SessionData::new();
+        let path = PathBuf::from("/path/to/file.rs");
+        session_data.add_changed_file(path.clone());
+
+        assert_eq!(session_data.changed_files.len(), 1);
+        assert_eq!(session_data.changed_files[0], "/path/to/file.rs");
+
+        // Add the same path again to test deduplication
+        session_data.add_changed_file(path.clone());
+        assert_eq!(session_data.changed_files.len(), 1);
+    }
+
+    #[test]
+    fn test_has_changed_files() {
+        let mut session_data = SessionData::new();
+        assert!(!session_data.has_changed_files());
+
+        let path = PathBuf::from("/path/to/file.rs");
+        session_data.add_changed_file(path);
+        assert!(session_data.has_changed_files());
+    }
+
+    #[test]
+    fn test_clear_changed_files() {
+        let mut session_data = SessionData::new();
+        let path1 = PathBuf::from("/path/to/file1.rs");
+        let path2 = PathBuf::from("/path/to/file2.rs");
+
+        session_data.add_changed_file(path1);
+        session_data.add_changed_file(path2);
+        assert_eq!(session_data.changed_files.len(), 2);
+        assert!(session_data.has_changed_files());
+
+        session_data.clear_changed_files();
+        assert_eq!(session_data.changed_files.len(), 0);
+        assert!(!session_data.has_changed_files());
     }
 
     #[test]
