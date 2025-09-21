@@ -84,7 +84,18 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
         // println!("Diff for {path}:\n{patch}");
     }
 
-    fs::write(p, content).with_context(|| format!("write {}", p.display()))
+    let result = fs::write(p, content).with_context(|| format!("write {}", p.display()));
+
+    // Update session with changed file
+    if result.is_ok()
+        && let Ok(current_dir) = std::env::current_dir()
+        && let Ok(relative_path) = p.strip_prefix(current_dir)
+    {
+        let fs_tools = crate::tools::FsTools::default();
+        let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
+    }
+
+    result
 }
 
 #[cfg(test)]

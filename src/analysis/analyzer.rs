@@ -453,4 +453,66 @@ mod tests {
             println!("  {}", file.display());
         }
     }
+
+    #[tokio::test]
+    async fn test_build_incremental_with_changes() {
+        use crate::analysis::hash::calculate_file_hashes;
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        // Create a temporary directory for testing
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create an initial source file
+        let initial_file = root.join("lib.rs");
+        let initial_content = r#"
+            fn main() {
+                println!("Hello, world!");
+            }
+        "#;
+        std::fs::write(&initial_file, initial_content).unwrap();
+
+        // Create an Analyzer and build initial repomap
+        let mut analyzer = Analyzer::new(root).await.unwrap();
+        let initial_repomap = analyzer.build().await.unwrap();
+
+        // Modify the source file
+        let modified_content = r#"
+            fn main() {
+                println!("Hello, modified world!");
+            }
+
+            fn new_function() {
+                println!("This is a new function.");
+            }
+        "#;
+        std::fs::write(&initial_file, modified_content).unwrap();
+
+        // Calculate new hashes
+        let files = vec![initial_file.clone()];
+        let new_hashes = calculate_file_hashes(&files).await;
+
+        // Perform incremental update
+        let updated_repomap = analyzer
+            .build_incremental(
+                crate::analysis::cache::RepomapCache::new(
+                    root.to_path_buf(),
+                    initial_repomap.clone(),
+                    HashMap::new(), // Empty initial hashes for test simplicity
+                ),
+                &new_hashes,
+            )
+            .await
+            .unwrap();
+
+        // Verify that the repomap has been updated
+        assert_ne!(initial_repomap.symbols.len(), updated_repomap.symbols.len());
+        assert!(
+            updated_repomap
+                .symbols
+                .iter()
+                .any(|s| s.name == "new_function")
+        );
+    }
 }

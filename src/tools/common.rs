@@ -101,6 +101,15 @@ impl FsTools {
         Ok(())
     }
 
+    /// Update the current session with a changed file path
+    pub fn update_session_with_changed_file(&self, path: std::path::PathBuf) -> Result<()> {
+        if let Some(session_manager) = &self.session_manager {
+            let mut session_mgr = session_manager.lock().unwrap();
+            session_mgr.update_current_session_with_changed_file(path)?;
+        }
+        Ok(())
+    }
+
     /// Get current session data
     pub fn get_current_session(&self) -> Option<SessionData> {
         if let Some(session_manager) = &self.session_manager {

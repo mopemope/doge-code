@@ -143,6 +143,46 @@ impl TuiExecutor {
                                 if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
                                     tracing::error!(?e, "Failed to update session with token count");
                                 }
+
+                                // Check for changed files and trigger repomap update if needed
+                                if sm.current_session_has_changed_files() {
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send("::status:updating_repomap".to_string());
+                                    }
+                                    
+                                    // Get changed files
+                                    let changed_files = sm.get_changed_files_from_current_session();
+                                    
+                                    // Update repomap with changed files using incremental update
+                                    if let Ok(mut repomap_guard) = self.repomap.write() {
+                                        if let Some(ref mut repomap) = *repomap_guard {
+                                            // Use Analyzer to perform incremental update
+                                            if let Ok(mut analyzer) = crate::analysis::Analyzer::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))) {
+                                                // Perform incremental update using Analyzer
+                                                match analyzer.build_with_cache().await {
+                                                    Ok(new_repomap) => {
+                                                        *repomap = new_repomap;
+                                                        tracing::info!("Successfully updated repomap with incremental changes for {} files", changed_files.len());
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!(?e, "Failed to incrementally update repomap");
+                                                    }
+                                                }
+                                            } else {
+                                                tracing::error!("Failed to create Analyzer for repomap update");
+                                            }
+                                            
+                                            // Clear changed files from session
+                                            if let Err(e) = sm.clear_changed_files_from_current_session() {
+                                                tracing::error!(?e, "Failed to clear changed files from session");
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send("::status:repomap_updated".to_string());
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -195,6 +235,46 @@ impl TuiExecutor {
                                 // Update token count in session even on error
                                 if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
                                     tracing::error!(?e, "Failed to update session with token count on error");
+                                }
+
+                                // Check for changed files and trigger repomap update if needed (even on error)
+                                if sm.current_session_has_changed_files() {
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send("::status:updating_repomap".to_string());
+                                    }
+                                    
+                                    // Get changed files
+                                    let changed_files = sm.get_changed_files_from_current_session();
+                                    
+                                    // Update repomap with changed files using incremental update
+                                    if let Ok(mut repomap_guard) = self.repomap.write() {
+                                        if let Some(ref mut repomap) = *repomap_guard {
+                                            // Use Analyzer to perform incremental update
+                                            if let Ok(mut analyzer) = crate::analysis::Analyzer::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))) {
+                                                // Perform incremental update using Analyzer
+                                                match analyzer.build_with_cache().await {
+                                                    Ok(new_repomap) => {
+                                                        *repomap = new_repomap;
+                                                        tracing::info!("Successfully updated repomap with incremental changes for {} files (after error)", changed_files.len());
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!(?e, "Failed to incrementally update repomap (after error)");
+                                                    }
+                                                }
+                                            } else {
+                                                tracing::error!("Failed to create Analyzer for repomap update (after error)");
+                                            }
+                                            
+                                            // Clear changed files from session
+                                            if let Err(e) = sm.clear_changed_files_from_current_session() {
+                                                tracing::error!(?e, "Failed to clear changed files from session");
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send("::status:repomap_updated".to_string());
+                                    }
                                 }
                             }
                         }
