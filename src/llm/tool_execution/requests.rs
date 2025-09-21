@@ -88,7 +88,7 @@ async fn chat_tools_once_inner(
 
     let mut headers = HeaderMap::new();
     headers.insert(
-        "HTTP-Refer",
+        "HTTP-Referer",
         "https://github.com/mopemope/doge-code".parse().unwrap(),
     );
     headers.insert("X-Title", "Doge-Code".parse().unwrap());
