@@ -14,6 +14,18 @@ pub struct ChatRequestWithTools {
     pub tool_choice: Option<serde_json::Value>, // {"type":"auto"}
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>, // OpenRouter reasoning parameter
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>, // "high"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
