@@ -1,6 +1,6 @@
 use crate::llm::LlmErrorKind;
 use crate::llm::chat_with_tools::{
-    ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools,
+    ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools, Reasoning,
 };
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::types::ChatMessage;
@@ -77,6 +77,16 @@ async fn chat_tools_once_inner(
     } else {
         None
     };
+
+    let reasoning = if model.contains("grok-4-fast") {
+        Some(Reasoning {
+            effort: None,
+            max_tokens: None,
+            enabled: Some(true),
+        })
+    } else {
+        None
+    };
     let req = ChatRequestWithTools {
         model: model.to_string(),
         messages,
@@ -84,6 +94,7 @@ async fn chat_tools_once_inner(
         tools: Some(tools.to_vec()),
         tool_choice: None,
         reasoning_effort,
+        reasoning,
     };
 
     let mut headers = HeaderMap::new();
