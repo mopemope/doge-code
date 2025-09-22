@@ -33,7 +33,6 @@ Arguments:
   +line 2 to be added
    line 3
   ```
-- `dry_run` (boolean, optional): If `true`, the tool will check if the patch can be applied cleanly and show the potential result without actually modifying the file. Defaults to `false`.
 
 Returns a detailed result object, indicating success or failure with a descriptive message.".to_string(),
             strict: None,
@@ -42,7 +41,6 @@ Returns a detailed result object, indicating success or failure with a descripti
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file."},
                     "patch_content": {"type": "string", "description": "The patch content in the unified diff format."},
-                    "dry_run": {"type": "boolean", "description": "If true, checks if the patch can be applied cleanly without modifying the file."}
                 },
                 "required": ["file_path", "patch_content"]
             }),
@@ -54,7 +52,6 @@ Returns a detailed result object, indicating success or failure with a descripti
 pub struct ApplyPatchParams {
     pub file_path: String,
     pub patch_content: String,
-    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,7 +71,6 @@ pub async fn apply_patch(
     // Update session with changed file if the patch was applied successfully
     if let Ok(ref res) = result
         && res.success
-        && !res.message.contains("Dry run")
         && let Ok(current_dir) = std::env::current_dir()
     {
         // Bind String::new() to a variable to avoid temporary value borrowing
@@ -136,7 +132,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -145,35 +140,6 @@ mod tests {
 
         let final_content = fs::read_to_string(file_path).await.unwrap();
         assert_eq!(final_content, modified_content);
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_dry_run() {
-        let original_content = "Line 1\nLine 2\n";
-        let modified_content = "Line 1\nLine Two\n";
-
-        let (_temp_file, file_path) = create_temp_file(original_content);
-
-        let patch_content = create_patch_content(original_content, modified_content);
-
-        let params = ApplyPatchParams {
-            file_path: file_path.clone(),
-            patch_content,
-            dry_run: Some(true),
-        };
-
-        let result = apply_patch(params).await.unwrap();
-        assert!(result.success);
-        assert_eq!(
-            result.message,
-            "Dry run successful. Patch can be applied cleanly."
-        );
-        assert_eq!(result.original_content.unwrap(), original_content);
-        assert_eq!(result.modified_content.unwrap(), modified_content);
-
-        // Ensure the original file was not changed
-        let final_content = fs::read_to_string(file_path).await.unwrap();
-        assert_eq!(final_content, original_content);
     }
 
     #[tokio::test]
@@ -193,7 +159,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
 
@@ -220,7 +185,6 @@ mod tests {
             file_path: file_path.clone(),
             patch_content,
             // Note: We use the hash of the *actual* content for the check to pass
-            dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
 
@@ -238,7 +202,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: "relative/path/to/file.txt".to_string(),
             patch_content: "any patch".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -267,7 +230,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -293,7 +255,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -315,7 +276,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -333,7 +293,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -349,7 +308,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: temp_dir.to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -372,7 +330,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -405,7 +362,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path,
             patch_content: "this is not a valid patch".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -428,7 +384,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -449,7 +404,6 @@ mod tests {
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
