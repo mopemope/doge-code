@@ -24,7 +24,7 @@ pub async fn edit(
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    match crate::tools::edit::edit(params).await {
+    match crate::tools::edit::edit(params, &runtime.fs.config).await {
         Ok(res) => {
             // Record success/failure for this tool call
             if res.success {
@@ -68,7 +68,7 @@ pub async fn apply_patch(
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    match crate::tools::apply_patch::apply_patch(params).await {
+    match crate::tools::apply_patch::apply_patch(params, &runtime.fs.config).await {
         Ok(res) => {
             // Record success/failure for this tool call
             if res.success {

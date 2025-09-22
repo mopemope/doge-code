@@ -1,4 +1,5 @@
 use crate::analysis::RepoMap;
+use crate::config::AppConfig;
 use crate::tools::search_repomap::RepomapSearchTools;
 use crate::tools::search_repomap::repomap::SearchRepomapArgs;
 use rmcp::{
@@ -68,20 +69,22 @@ pub struct DogeMcpService {
     pub tool_router: ToolRouter<DogeMcpService>,
     repomap: Arc<RwLock<Option<RepoMap>>>,
     search_repomap_tools: RepomapSearchTools,
+    config: Arc<AppConfig>,
 }
 
 impl Default for DogeMcpService {
     fn default() -> Self {
-        Self::new()
+        Self::new(AppConfig::default())
     }
 }
 
 impl DogeMcpService {
-    pub fn new() -> Self {
+    pub fn new(config: AppConfig) -> Self {
         Self {
             tool_router: Self::tool_router(),
             repomap: Arc::new(RwLock::new(None)),
             search_repomap_tools: RepomapSearchTools::new(),
+            config: Arc::new(config),
         }
     }
 
@@ -90,6 +93,7 @@ impl DogeMcpService {
             tool_router: self.tool_router,
             repomap,
             search_repomap_tools: self.search_repomap_tools,
+            config: self.config,
         }
     }
 
@@ -173,7 +177,12 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<FsReadParams>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::read::fs_read(&params.path, params.start_line, params.limit) {
+        match crate::tools::read::fs_read(
+            &params.path,
+            params.start_line,
+            params.limit,
+            &self.config,
+        ) {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
             Err(e) => Err(self.format_error("Failed to read file ", Some(json!(e.to_string())))),
         }
@@ -188,6 +197,7 @@ impl DogeMcpService {
             params.paths,
             params.exclude,
             params.recursive,
+            &self.config,
         ) {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
             Err(e) => Err(self.format_error("Failed to read files ", Some(json!(e.to_string())))),
@@ -202,6 +212,7 @@ impl DogeMcpService {
         match crate::tools::search_text::search_text(
             &params.search_pattern,
             params.file_glob.as_deref(),
+            &self.config,
         ) {
             Ok(results) => {
                 let formatted_results: Vec<String> = results
@@ -223,8 +234,12 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<FsListParams>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::list::fs_list(&params.path, params.max_depth, params.pattern.as_deref())
-        {
+        match crate::tools::list::fs_list(
+            &params.path,
+            params.max_depth,
+            params.pattern.as_deref(),
+            &self.config,
+        ) {
             Ok(files) => self.format_json_result(files),
             Err(e) => Err(self.format_error("Failed to list files ", Some(json!(e.to_string())))),
         }
@@ -235,9 +250,12 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<FindFileParams>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::find_file::find_file(crate::tools::find_file::FindFileArgs {
-            filename: params.filename,
-        })
+        match crate::tools::find_file::find_file(
+            crate::tools::find_file::FindFileArgs {
+                filename: params.filename,
+            },
+            &self.config,
+        )
         .await
         {
             Ok(result) => self.format_json_result(result),

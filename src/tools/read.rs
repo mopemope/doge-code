@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -25,7 +26,12 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub fn fs_read(path: &str, start_line: Option<usize>, limit: Option<usize>) -> Result<String> {
+pub fn fs_read(
+    path: &str,
+    start_line: Option<usize>,
+    limit: Option<usize>,
+    config: &AppConfig,
+) -> Result<String> {
     let p = Path::new(path);
 
     // Ensure the path is absolute
@@ -37,7 +43,6 @@ pub fn fs_read(path: &str, start_line: Option<usize>, limit: Option<usize>) -> R
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let canonical_path = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
 
-    let config = crate::config::AppConfig::default();
     let is_allowed_path = config
         .allowed_paths
         .iter()
@@ -96,14 +101,14 @@ mod tests {
     #[test]
     fn test_fs_read_full_file() {
         let (_temp_file, file_path) = create_temp_file("line1\nline2\nline3");
-        let content = fs_read(&file_path, None, None).unwrap();
+        let content = fs_read(&file_path, None, None, &AppConfig::default()).unwrap();
         assert_eq!(content, "line1\nline2\nline3");
     }
 
     #[test]
     fn test_fs_read_with_start_line_limit() {
         let (_temp_file, file_path) = create_temp_file("line1\nline2\nline3\nline4");
-        let content = fs_read(&file_path, Some(1), Some(2)).unwrap();
+        let content = fs_read(&file_path, Some(1), Some(2), &AppConfig::default()).unwrap();
         assert_eq!(content, "line2\nline3");
     }
 
@@ -112,7 +117,7 @@ mod tests {
         let temp_dir = create_temp_dir();
         let file_path = temp_dir.join("../some_file");
         let file_path_str = file_path.to_str().unwrap();
-        let result = fs_read(file_path_str, None, None);
+        let result = fs_read(file_path_str, None, None, &AppConfig::default());
         // Since we're now allowing absolute paths, this test might need to be adjusted
         // depending on the environment. For now, let's just check it's an error.
         assert!(result.is_err());
@@ -122,7 +127,7 @@ mod tests {
     fn test_fs_read_not_a_file() {
         let temp_dir = create_temp_dir();
         let dir_path = temp_dir.to_str().unwrap();
-        let result = fs_read(dir_path, None, None);
+        let result = fs_read(dir_path, None, None, &AppConfig::default());
         assert!(result.is_err());
     }
 }

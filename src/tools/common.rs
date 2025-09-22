@@ -1,8 +1,3 @@
-use anyhow::Result;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
-
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
 use crate::session::{SessionData, SessionManager};
@@ -16,6 +11,10 @@ use crate::tools::search_text;
 use crate::tools::todo_read;
 use crate::tools::todo_write;
 use crate::tools::write;
+use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct FsTools {
@@ -139,7 +138,7 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match list::fs_list(path, max_depth, pattern) {
+        match list::fs_list(path, max_depth, pattern, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_list")?;
                 Ok(result)
@@ -160,7 +159,7 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match read::fs_read(path, start_line, limit) {
+        match read::fs_read(path, start_line, limit, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read")?;
                 Ok(result)
@@ -181,7 +180,7 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match read_many::fs_read_many_files(paths, exclude, recursive) {
+        match read_many::fs_read_many_files(paths, exclude, recursive, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read_many_files")?;
                 Ok(result)
@@ -201,7 +200,7 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match search_text::search_text(search_pattern, file_glob) {
+        match search_text::search_text(search_pattern, file_glob, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("search_text")?;
                 Ok(result)
@@ -217,7 +216,7 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match write::fs_write(path, content) {
+        match write::fs_write(path, content, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_write")?;
                 Ok(result)
@@ -302,9 +301,12 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match find_file::find_file(find_file::FindFileArgs {
-            filename: filename.to_string(),
-        })
+        match find_file::find_file(
+            find_file::FindFileArgs {
+                filename: filename.to_string(),
+            },
+            &self.config,
+        )
         .await
         {
             Ok(result) => {
@@ -352,7 +354,7 @@ impl FsTools {
             .map(|session| session.meta.id)
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
-        match todo_write::todo_write(todos, &session_id) {
+        match todo_write::todo_write(todos, &session_id, &self.config) {
             Ok(res) => {
                 self.record_tool_call_success("todo_write")?;
                 Ok(res)
@@ -374,7 +376,7 @@ impl FsTools {
             .map(|session| session.meta.id)
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
-        match todo_read::todo_read_from_base_path(&session_id, ".") {
+        match todo_read::todo_read_from_base_path(&session_id, ".", &self.config) {
             Ok(todo_list) => {
                 self.record_tool_call_success("todo_read")?;
                 Ok(todo_list)

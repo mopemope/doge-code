@@ -1,10 +1,11 @@
+use crate::config::AppConfig;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use super::{ApplyPatchParams, ApplyPatchResult};
 
-pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
+pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result<ApplyPatchResult> {
     let file_path = &params.file_path;
     let patch_content = &params.patch_content;
     let dry_run = params.dry_run.unwrap_or(false);
@@ -18,7 +19,6 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
-    let config = crate::config::AppConfig::default();
     let is_allowed_path = config
         .allowed_paths
         .iter()
@@ -115,7 +115,14 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use std::path::PathBuf;
+
+    async fn apply_patch(
+        params: super::ApplyPatchParams,
+    ) -> anyhow::Result<super::ApplyPatchResult> {
+        super::apply_patch(params, &AppConfig::default()).await
+    }
 
     fn create_temp_file(content: &str) -> (PathBuf, String) {
         let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");

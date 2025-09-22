@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use glob::glob;
@@ -33,11 +34,11 @@ pub fn fs_read_many_files(
     paths: Vec<String>,
     exclude: Option<Vec<String>>,
     recursive: Option<bool>,
+    config: &AppConfig,
 ) -> Result<String> {
     let mut content = String::new();
     let mut all_paths = Vec::new();
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let config = crate::config::AppConfig::default();
 
     for path_pattern in paths {
         for entry in glob(&path_pattern)? {
@@ -128,8 +129,13 @@ mod tests {
         let (_temp_file1, file1_path) = create_temp_file("content1");
         let (_temp_file2, file2_path) = create_temp_file("content2");
 
-        let content =
-            fs_read_many_files(vec![file1_path.clone(), file2_path.clone()], None, None).unwrap();
+        let content = fs_read_many_files(
+            vec![file1_path.clone(), file2_path.clone()],
+            None,
+            None,
+            &AppConfig::default(),
+        )
+        .unwrap();
 
         assert!(content.contains(&format!("--- {file1_path}---")));
         assert!(content.contains("content1"));
@@ -163,6 +169,7 @@ mod tests {
             vec![format!("{}/**/*", temp_dir.to_str().unwrap())],
             None,
             Some(true),
+            &AppConfig::default(),
         )
         .unwrap();
         assert!(content.contains(&file1_path));

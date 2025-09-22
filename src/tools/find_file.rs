@@ -25,6 +25,7 @@
 //! let result = find_file(args).await?;
 //! ```
 
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use glob::glob;
@@ -99,7 +100,7 @@ pub struct FindFileResult {
 /// let result = find_file(args).await?;
 /// assert_eq!(result.files, vec!["/path/to/project/src/lib.rs"]);
 /// ```
-pub async fn find_file(args: FindFileArgs) -> Result<FindFileResult> {
+pub async fn find_file(args: FindFileArgs, _config: &AppConfig) -> Result<FindFileResult> {
     // If the filename is an absolute path and it's a file, return it directly.
     let path = Path::new(&args.filename);
     if path.is_absolute() && path.is_file() {

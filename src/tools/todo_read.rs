@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -33,11 +34,15 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub fn todo_read(session_id: &str) -> Result<TodoList> {
-    todo_read_from_base_path(session_id, ".")
+pub fn todo_read(session_id: &str, _config: &AppConfig) -> Result<TodoList> {
+    todo_read_from_base_path(session_id, ".", _config)
 }
 
-pub fn todo_read_from_base_path(session_id: &str, base_path: &str) -> Result<TodoList> {
+pub fn todo_read_from_base_path(
+    session_id: &str,
+    base_path: &str,
+    _config: &AppConfig,
+) -> Result<TodoList> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");
     let todo_file_path = todo_dir.join(format!("{}.json", session_id));
@@ -98,7 +103,11 @@ mod tests {
         fs::write(&todo_file_path, json_content).unwrap();
 
         // Call todo_read function
-        let result = todo_read_from_base_path(session_id, temp_path.to_str().unwrap());
+        let result = todo_read_from_base_path(
+            session_id,
+            temp_path.to_str().unwrap(),
+            &AppConfig::default(),
+        );
 
         // Check the result
         assert!(result.is_ok());
@@ -122,7 +131,11 @@ mod tests {
         let session_id = "non-existent-session-id";
 
         // Call todo_read function
-        let result = todo_read_from_base_path(session_id, temp_dir.path().to_str().unwrap());
+        let result = todo_read_from_base_path(
+            session_id,
+            temp_dir.path().to_str().unwrap(),
+            &AppConfig::default(),
+        );
 
         // Check the result
         assert!(result.is_ok());

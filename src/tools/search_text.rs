@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 
 use anyhow::{Context, Result};
@@ -67,6 +68,7 @@ struct RipgrepText {
 pub fn search_text(
     search_pattern: &str,
     file_glob: Option<&str>,
+    _config: &AppConfig, // Added unused parameter to match the pattern
 ) -> Result<Vec<(PathBuf, usize, String)>> {
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
@@ -145,6 +147,7 @@ pub fn search_text(
 
 #[cfg(test)]
 mod tests {
+    use crate::config::AppConfig;
     use crate::tools::search_text::search_text;
     use std::fs;
     use std::path::PathBuf;
@@ -167,7 +170,7 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("hello", Some(&file_glob)).unwrap();
+        let results = search_text("hello", Some(&file_glob), &AppConfig::default()).unwrap();
         assert_eq!(results.len(), 1);
         let (path, line, content) = &results[0];
         assert_eq!(path, &root.join("test.txt"));
@@ -183,7 +186,7 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("find me", Some(&file_glob)).unwrap();
+        let results = search_text("find me", Some(&file_glob), &AppConfig::default()).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, root.join("a.txt"));
     }
@@ -195,7 +198,7 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("nonexistent", Some(&file_glob)).unwrap();
+        let results = search_text("nonexistent", Some(&file_glob), &AppConfig::default()).unwrap();
         assert!(results.is_empty());
     }
 }
