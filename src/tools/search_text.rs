@@ -68,18 +68,18 @@ struct RipgrepText {
 pub fn search_text(
     search_pattern: &str,
     file_glob: Option<&str>,
-    _config: &AppConfig, // Added unused parameter to match the pattern
+    config: &AppConfig,
 ) -> Result<Vec<(PathBuf, usize, String)>> {
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = &config.project_root;
     if let Some(glob_pattern) = file_glob {
         // Expand the glob pattern to get a list of files
         for entry in glob(glob_pattern).context("Failed to read glob pattern")? {
             match entry {
                 Ok(path) => {
                     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    if canonical_path.starts_with(&project_root) {
+                    if canonical_path.starts_with(project_root) {
                         // Ensure the path is absolute
                         let absolute_path = path.canonicalize().unwrap_or(path);
                         // Add each file path as an argument to ripgrep
@@ -170,7 +170,11 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("hello", Some(&file_glob), &AppConfig::default()).unwrap();
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+        let results = search_text("hello", Some(&file_glob), &config).unwrap();
         assert_eq!(results.len(), 1);
         let (path, line, content) = &results[0];
         assert_eq!(path, &root.join("test.txt"));
@@ -186,7 +190,11 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("find me", Some(&file_glob), &AppConfig::default()).unwrap();
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+        let results = search_text("find me", Some(&file_glob), &config).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, root.join("a.txt"));
     }
@@ -198,7 +206,11 @@ mod tests {
 
         let root_str = root.to_str().unwrap();
         let file_glob = format!("{}/*.txt", root_str);
-        let results = search_text("nonexistent", Some(&file_glob), &AppConfig::default()).unwrap();
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+        let results = search_text("nonexistent", Some(&file_glob), &config).unwrap();
         assert!(results.is_empty());
     }
 }
