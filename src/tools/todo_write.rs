@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -204,8 +205,8 @@ pub fn tool_def() -> ToolDef {
 /// This function will create `.doge/todos/<session_id>.json` if it doesn't
 /// exist. If it does exist the function will update existing todo items by
 /// matching on `id`. Items that do not exist will be appended.
-pub fn todo_write(todos: Vec<TodoItem>, session_id: &str) -> Result<TodoList> {
-    todo_write_from_base_path(todos, session_id, ".")
+pub fn todo_write(todos: Vec<TodoItem>, session_id: &str, _config: &AppConfig) -> Result<TodoList> {
+    todo_write_from_base_path(todos, session_id, ".", _config)
 }
 
 /// Helper that allows tests to specify a base path.
@@ -213,6 +214,7 @@ pub fn todo_write_from_base_path(
     todos: Vec<TodoItem>,
     session_id: &str,
     base_path: &str,
+    _config: &AppConfig, // Added unused parameter to match the pattern
 ) -> Result<TodoList> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");
@@ -273,7 +275,8 @@ mod tests {
         ];
 
         // Create file
-        todo_write_from_base_path(initial.clone(), session_id, base).unwrap();
+        todo_write_from_base_path(initial.clone(), session_id, base, &AppConfig::default())
+            .unwrap();
 
         let todo_file_path = std::path::Path::new(base)
             .join(".doge")
@@ -303,7 +306,7 @@ mod tests {
             },
         ];
 
-        todo_write_from_base_path(update.clone(), session_id, base).unwrap();
+        todo_write_from_base_path(update.clone(), session_id, base, &AppConfig::default()).unwrap();
 
         let content2 = fs::read_to_string(&todo_file_path).unwrap();
         let read2: TodoList = serde_json::from_str(&content2).unwrap();

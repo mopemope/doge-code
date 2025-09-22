@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -64,8 +65,11 @@ pub struct ApplyPatchResult {
     pub modified_content: Option<String>,
 }
 
-pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
-    let result = apply_impl(params).await;
+pub async fn apply_patch(
+    params: ApplyPatchParams,
+    _config: &AppConfig,
+) -> Result<ApplyPatchResult> {
+    let result = apply_impl(params, _config).await;
 
     // Update session with changed file if the patch was applied successfully
     if let Ok(ref res) = result
@@ -89,8 +93,15 @@ pub async fn apply_patch(params: ApplyPatchParams) -> Result<ApplyPatchResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use std::path::PathBuf;
     use tokio::fs;
+
+    async fn apply_patch(
+        params: super::ApplyPatchParams,
+    ) -> anyhow::Result<super::ApplyPatchResult> {
+        super::apply_patch(params, &AppConfig::default()).await
+    }
 
     fn create_temp_file(content: &str) -> (PathBuf, String) {
         let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");

@@ -4,8 +4,8 @@ pub mod service;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::McpServerConfig;
+    use crate::mcp::{server, service};
     use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -34,7 +34,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_doge_mcp_service_creation() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         assert!(service.tool_router.has_route("say_hello"));
         assert!(service.tool_router.has_route("search_repomap"));
         assert!(service.tool_router.has_route("fs_read"));
@@ -46,7 +46,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_say_hello_tool() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let result = service.say_hello();
         assert!(result.is_ok());
 
@@ -61,7 +61,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_read_tool() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let params = service::FsReadParams {
             path: "/nonexistent/file.txt".to_string(),
             start_line: None,
@@ -75,7 +75,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fs_list_tool() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let params = service::FsListParams {
             path: "/nonexistent/directory".to_string(),
             max_depth: None,
@@ -92,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_text_tool() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let params = service::SearchTextParams {
             search_pattern: "test".to_string(),
             file_glob: Some("*.txt".to_string()),
@@ -106,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_file_tool() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let params = service::FindFileParams {
             filename: "nonexistent.txt".to_string(),
         };
@@ -118,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_repomap_tool_without_repomap() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let params = service::SearchRepomapParams {
             max_file_lines: None,
             max_function_lines: None,
@@ -142,7 +142,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_json_result() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let test_data = vec!["item1".to_string(), "item2".to_string()];
         let result = service.format_json_result(test_data);
 
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_error() {
-        let service = service::DogeMcpService::new();
+        let service = service::DogeMcpService::default();
         let error = service.format_error("Test error", Some(serde_json::json!("details")));
         assert_eq!(error.message, "Test error");
     }
@@ -162,7 +162,6 @@ mod tests {
 
 #[cfg(test)]
 mod client_tests {
-    use super::*;
     use crate::config::McpServerConfig;
 
     #[tokio::test]
@@ -174,7 +173,7 @@ mod client_tests {
             transport: "invalid".to_string(),
         };
 
-        let result = client::McpClient::from_config(&_config).await;
+        let result = crate::mcp::client::McpClient::from_config(&_config).await;
         assert!(result.is_err());
 
         if let Err(rmcp::RmcpError::TransportCreation { .. }) = result {
@@ -193,7 +192,7 @@ mod client_tests {
             transport: "stdio".to_string(),
         };
 
-        let result = client::McpClient::from_config(&_config).await;
+        let result = crate::mcp::client::McpClient::from_config(&_config).await;
         assert!(result.is_err());
 
         if let Err(rmcp::RmcpError::TransportCreation { .. }) = result {

@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,7 @@ pub struct EditResult {
     pub lines_edited: Option<u64>,
 }
 
-pub async fn edit(params: EditParams) -> Result<EditResult> {
+pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> {
     let file_path = &params.file_path;
     let target_block = &params.target_block;
     let new_block = &params.new_block;
@@ -58,7 +59,6 @@ pub async fn edit(params: EditParams) -> Result<EditResult> {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
-    let config = crate::config::AppConfig::default();
     let is_allowed_path = config
         .allowed_paths
         .iter()
@@ -155,8 +155,13 @@ fn count_lines_in_diff(diff_text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    async fn edit(params: super::EditParams) -> anyhow::Result<super::EditResult> {
+        super::edit(params, &AppConfig::default()).await
+    }
 
     fn create_temp_file(content: &str) -> (NamedTempFile, String) {
         let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");

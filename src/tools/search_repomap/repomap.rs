@@ -1,4 +1,6 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
+use anyhow::Result;
 use serde_json::json;
 
 mod repomap_filter;
@@ -51,6 +53,17 @@ The tool returns a list of `RepomapSearchResult` objects, each containing file a
 The `code_snippet` allows you to understand the code immediately without a followup `fs_read` call.
 Each result also includes a `file_match_score` which indicates the relevance of the file based on the symbols it contains and the chosen `ranking_strategy`.
 "#;
+
+/// Placeholder function to match the required function signature for search_repomap
+/// The actual implementation is in the RepomapSearchTools struct
+pub fn search_repomap(
+    _args: SearchRepomapArgs,
+    _config: &AppConfig,
+) -> Result<Vec<RepomapSearchResult>> {
+    // This is a placeholder implementation to match the required function signature
+    // The actual implementation is in the RepomapSearchTools struct
+    todo!("This function is not meant to be called directly. Use FsTools::search_repomap instead.")
+}
 
 pub fn tool_def() -> ToolDef {
     ToolDef {

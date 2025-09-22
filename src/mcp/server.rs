@@ -24,7 +24,7 @@ pub fn start_mcp_server(
 
         let service = StreamableHttpService::new(
             move || {
-                let service = DogeMcpService::new().with_repomap(repomap.clone());
+                let service = DogeMcpService::default().with_repomap(repomap.clone());
                 Ok(service)
             },
             LocalSessionManager::default().into(),

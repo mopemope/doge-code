@@ -6,7 +6,6 @@ pub mod features;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
-
 pub mod session;
 pub mod tools;
 mod tui;
@@ -20,7 +19,6 @@ use crate::watch::run_watch_mode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
-use tracing::info;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -92,7 +90,7 @@ async fn main() -> Result<()> {
     logging::init_logging()?;
 
     let cfg = AppConfig::from_cli(cli.clone())?;
-    info!(?cfg, "app config");
+    // info!(?cfg, "app config");
 
     // Initialize repomap
     let (repomap, status_rx) = if !cfg.no_repomap {

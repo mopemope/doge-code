@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result, bail};
 use diffy::create_patch;
@@ -24,7 +25,7 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub fn fs_write(path: &str, content: &str) -> Result<()> {
+pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
     if content.as_bytes().contains(&0) {
         bail!("binary content is not allowed");
     }
@@ -48,7 +49,6 @@ pub fn fs_write(path: &str, content: &str) -> Result<()> {
     });
 
     // Check if the path is in allowed paths
-    let config = crate::config::AppConfig::default();
     let is_allowed_path = config
         .allowed_paths
         .iter()
@@ -123,7 +123,7 @@ mod tests {
         let content = "Hello, Rust!";
 
         fs::write(&file_path, "").unwrap(); // Create the file first
-        fs_write(file_path_str, content).unwrap();
+        fs_write(file_path_str, content, &AppConfig::default()).unwrap();
 
         let read_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(read_content, content);
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn test_fs_write_absolute_path_error() {
         let absolute_path = "/tmp/abs_path.txt";
-        let result = fs_write(absolute_path, "test");
+        let result = fs_write(absolute_path, "test", &AppConfig::default());
         // Since we removed the absolute path check, this test needs to be adjusted.
         // We'll check that it's an error for a different reason (e.g., permissions or non-existent directory)
         // In a test environment, /tmp might be writable, so this test might need further adjustment.
@@ -150,7 +150,7 @@ mod tests {
         // Try to write to a path that escapes the subdir
         let file_path_str = subdir.join("../escaping.txt").to_str().unwrap().to_string();
 
-        let result = fs_write(&file_path_str, "test");
+        let result = fs_write(&file_path_str, "test", &AppConfig::default());
         // After canonicalization, the path should be within the temp directory
         // and the write should succeed. The test expectation might need to be
         // adjusted based on the desired behavior.
@@ -182,7 +182,7 @@ mod tests {
         let file_path_str = file_path.to_str().unwrap();
         let content_with_null = "hello\0world";
 
-        let result = fs_write(file_path_str, content_with_null);
+        let result = fs_write(file_path_str, content_with_null, &AppConfig::default());
         assert!(result.is_err());
     }
 
@@ -199,6 +199,6 @@ mod tests {
         // Here we observe that diff is printed during test execution.
         // In real tests, verifying diff content is difficult, so this test
         // primarily ensures there are no compilation errors.
-        fs_write(file_path_str, new_content).unwrap();
+        fs_write(file_path_str, new_content, &AppConfig::default()).unwrap();
     }
 }
