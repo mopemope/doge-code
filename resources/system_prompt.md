@@ -229,7 +229,7 @@ The tool returns a list of `RepomapSearchResult` objects, each representing a fi
 
 ### Utility Tools
 
-- **execute_bash**: Executes an arbitrary bash command within the project root directory. It captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system and consider their impact beforehand. Interactive commands are not supported.
+- **execute_bash**: Executes an arbitrary bash command with the project root directory as the working directory. It captures and returns both standard output (stdout) and standard error (stderr). Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system and consider their impact beforehand. Interactive commands are not supported.
 
 
 # Examples (Illustrating Tone and Workflow)

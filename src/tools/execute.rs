@@ -18,7 +18,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "execute_bash".to_string(),
-            description: "Executes an arbitrary bash command within the project root directory. It captures and returns both standard output (stdout) and standard error (stderr), as well as the exit code. Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system (e.g., `rm`, `mv`) and consider their impact beforehand. Interactive commands are not supported.".to_string(),
+            description: "Executes an arbitrary bash command with the project root directory set as the working directory. It captures and returns both standard output (stdout) and standard error (stderr), as well as the exit code. Use this for tasks that require shell interaction, such as running build commands (`cargo build`), tests (`cargo test`), or external utilities (`git status`). Be cautious with commands that modify the file system (e.g., `rm`, `mv`) and consider their impact beforehand. Interactive commands are not supported.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
