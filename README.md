@@ -314,7 +314,7 @@ The LLM has access to comprehensive tools for autonomous operation:
 - `search_repomap` - Search analyzed code symbols with filtering
 
 ### Development Tools
-- `execute_bash` - Execute shell commands safely
+- `execute_bash` - Execute shell commands safely in the project root directory
 - `apply_patch` - Apply patches to files
 - `edit` - Advanced file editing with search/replace operations
 - `todo_write` - Create and manage a structured task list for the current coding session
