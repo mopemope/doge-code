@@ -210,7 +210,8 @@ async fn run_tui(
         &cfg.theme, // pass theme name
     )?;
     // Set auto-compact threshold in the UI from configuration
-    app.auto_compact_prompt_token_threshold = cfg.auto_compact_prompt_token_threshold;
+    app.auto_compact_prompt_token_threshold =
+        cfg.auto_compact_prompt_token_threshold_for_current_model();
 
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");

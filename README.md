@@ -97,6 +97,10 @@ log_level = "info"
 theme = "dark"
 # Auto-compact threshold (prompt tokens). When the prompt token count reaches this number, the TUI will automatically trigger a conversation compaction (/compact).
 auto_compact_prompt_token_threshold = 250000
+# Optional per-model overrides. Keys are model names; values override the global threshold above.
+[auto_compact_prompt_token_thresholds]
+"gpt-4o-mini" = 180000
+"gpt-4.1" = 220000
 # Show diff when applying patches
 show_diff = true
 
@@ -114,6 +118,8 @@ show_diff = true
 allowed_commands = []
 
 ```
+
+The optional `[auto_compact_prompt_token_thresholds]` table lets you override the threshold on a per-model basis when different models have different context limits.
 
 ### Environment Variables and CLI Options
 

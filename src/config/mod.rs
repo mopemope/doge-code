@@ -1,6 +1,7 @@
 use crate::utils::get_git_repository_root;
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -22,6 +23,8 @@ pub struct AppConfig {
     pub resume: bool,                              // newly added
     // Auto-compact threshold (configurable via env or config file)
     pub auto_compact_prompt_token_threshold: u32,
+    // Per-model overrides for auto-compact threshold
+    pub auto_compact_prompt_token_threshold_overrides: HashMap<String, u32>,
     pub show_diff: bool,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Vec<String>,
@@ -64,6 +67,7 @@ impl Default for AppConfig {
             no_repomap: false,
             resume: false,
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            auto_compact_prompt_token_threshold_overrides: HashMap::new(),
             show_diff: true,
             allowed_commands: vec![],
             allowed_paths: vec![],
@@ -118,6 +122,8 @@ pub struct FileConfig {
     pub resume: Option<bool>,                      // newly added
     // Auto-compact threshold (optional in config file)
     pub auto_compact_prompt_token_threshold: Option<u32>,
+    // Auto-compact threshold overrides keyed by model name
+    pub auto_compact_prompt_token_thresholds: Option<HashMap<String, u32>>,
     pub show_diff: Option<bool>,
     // Allowed commands for execute_bash tool
     pub allowed_commands: Option<Vec<String>>,
@@ -147,6 +153,17 @@ pub struct PartialLlmConfig {
 }
 
 impl AppConfig {
+    pub fn auto_compact_prompt_token_threshold_for_model(&self, model: &str) -> u32 {
+        self.auto_compact_prompt_token_threshold_overrides
+            .get(model)
+            .copied()
+            .unwrap_or(self.auto_compact_prompt_token_threshold)
+    }
+
+    pub fn auto_compact_prompt_token_threshold_for_current_model(&self) -> u32 {
+        self.auto_compact_prompt_token_threshold_for_model(&self.model)
+    }
+
     pub fn from_cli(cli: crate::Cli) -> Result<Self> {
         let project_root = std::env::current_dir().context("resolve current dir")?;
         let git_root = get_git_repository_root(&project_root);
@@ -319,6 +336,16 @@ impl AppConfig {
                 .or(file_cfg.auto_compact_prompt_token_threshold)
                 .unwrap_or(DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD);
 
+        let mut auto_compact_prompt_token_threshold_overrides = file_cfg
+            .auto_compact_prompt_token_thresholds
+            .clone()
+            .unwrap_or_default();
+        if let Some(project_overrides) = project_cfg.auto_compact_prompt_token_thresholds.clone() {
+            for (model, threshold) in project_overrides {
+                auto_compact_prompt_token_threshold_overrides.insert(model, threshold);
+            }
+        }
+
         Ok(Self {
             base_url,
             model,
@@ -339,6 +366,7 @@ impl AppConfig {
                 || file_cfg.no_repomap.unwrap_or(false),
             resume: cli.resume,
             auto_compact_prompt_token_threshold,
+            auto_compact_prompt_token_threshold_overrides,
             show_diff: project_cfg.show_diff.or(file_cfg.show_diff).unwrap_or(true),
             allowed_commands: project_cfg
                 .allowed_commands
