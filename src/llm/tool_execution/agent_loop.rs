@@ -155,23 +155,45 @@ pub async fn run_agent_loop(
                     for key in ["path", "paths", "file_path", "filename"].iter() {
                         if let Some(value) = obj.get_mut(*key) {
                             if value.is_string() {
-                                if let Some(path_str) = value.as_str()
-                                    && let Some(file_name) = std::path::Path::new(path_str)
-                                        .file_name()
-                                        .and_then(|s| s.to_str())
-                                {
-                                    *value = file_name.to_string().into();
+                                if let Some(path_str) = value.as_str() {
+                                    // Convert to relative path from project root
+                                    let project_root = std::env::current_dir()
+                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    if let Ok(relative_path) =
+                                        std::path::Path::new(path_str).strip_prefix(&project_root)
+                                    {
+                                        *value = format!("@{}", relative_path.display()).into();
+                                    } else {
+                                        // If we can't get a relative path, at least show the file name
+                                        if let Some(file_name) = std::path::Path::new(path_str)
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                        {
+                                            *value = file_name.to_string().into();
+                                        }
+                                    }
                                 }
                             } else if value.is_array()
                                 && let Some(arr) = value.as_array_mut()
                             {
                                 for item in arr.iter_mut() {
-                                    if let Some(path_str) = item.as_str()
-                                        && let Some(file_name) = std::path::Path::new(path_str)
-                                            .file_name()
-                                            .and_then(|s| s.to_str())
-                                    {
-                                        *item = file_name.to_string().into();
+                                    if let Some(path_str) = item.as_str() {
+                                        // Convert to relative path from project root
+                                        let project_root = std::env::current_dir()
+                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                        if let Ok(relative_path) = std::path::Path::new(path_str)
+                                            .strip_prefix(&project_root)
+                                        {
+                                            *item = format!("@{}", relative_path.display()).into();
+                                        } else {
+                                            // If we can't get a relative path, at least show the file name
+                                            if let Some(file_name) = std::path::Path::new(path_str)
+                                                .file_name()
+                                                .and_then(|s| s.to_str())
+                                            {
+                                                *item = file_name.to_string().into();
+                                            }
+                                        }
                                     }
                                 }
                             }
