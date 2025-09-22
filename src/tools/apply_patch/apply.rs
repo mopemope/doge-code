@@ -6,11 +6,10 @@ use tokio::fs;
 use super::{ApplyPatchParams, ApplyPatchResult};
 
 pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result<ApplyPatchResult> {
-    let file_path = &params.file_path;
-    let patch_content = &params.patch_content;
-    let dry_run = params.dry_run.unwrap_or(false);
+    let file_path = params.file_path;
+    let patch_content = params.patch_content;
 
-    let path = Path::new(file_path);
+    let path = Path::new(&file_path);
     if !path.is_absolute() {
         anyhow::bail!("File path must be absolute: {}", file_path);
     }
@@ -54,7 +53,7 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
     let has_crlf = original_content_raw.contains("\r\n");
     let original_content = original_content_raw.replace("\r\n", "\n");
 
-    let patch = match diffy::Patch::from_str(patch_content) {
+    let patch = match diffy::Patch::from_str(&patch_content) {
         Ok(patch) => patch,
         Err(e) => {
             return Ok(ApplyPatchResult {
@@ -91,15 +90,6 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
         patched_content_lf = patched_content_lf.replace('\n', "\r\n");
     }
 
-    if dry_run {
-        return Ok(ApplyPatchResult {
-            success: true,
-            message: "Dry run successful. Patch can be applied cleanly.".to_string(),
-            original_content: Some(original_content_raw),
-            modified_content: Some(patched_content_lf),
-        });
-    }
-
     fs::write(path, &patched_content_lf)
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
@@ -107,8 +97,8 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
     Ok(ApplyPatchResult {
         success: true,
         message: "File patched successfully.".to_string(),
-        original_content: Some(original_content_raw),
-        modified_content: Some(patched_content_lf),
+        original_content: None,
+        modified_content: None,
     })
 }
 
@@ -161,7 +151,6 @@ This is the modified file.
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -170,39 +159,6 @@ This is the modified file.
 
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, modified_content);
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_dry_run() {
-        let original_content = r#"Line 1
-Line 2
-"#;
-        let modified_content = r#"Line 1
-Line Two
-"#;
-
-        let (_temp_file, file_path) = create_temp_file(original_content);
-
-        let patch_content = create_patch_content(original_content, modified_content);
-
-        let params = ApplyPatchParams {
-            file_path: file_path.clone(),
-            patch_content,
-            dry_run: Some(true),
-        };
-
-        let result = apply_patch(params).await.unwrap();
-        assert!(result.success);
-        assert_eq!(
-            result.message,
-            "Dry run successful. Patch can be applied cleanly."
-        );
-        assert_eq!(result.original_content.unwrap(), original_content);
-        assert_eq!(result.modified_content.unwrap(), modified_content);
-
-        // Ensure the original file was not changed
-        let final_content = std::fs::read_to_string(file_path).unwrap();
-        assert_eq!(final_content, original_content);
     }
 
     #[tokio::test]
@@ -228,7 +184,6 @@ line 3
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
 
@@ -264,7 +219,6 @@ line C
             file_path: file_path.clone(),
             patch_content,
             // Note: We use the hash of the *actual* content for the check to pass
-            dry_run: Some(false),
         };
         let result = apply_patch(params).await.unwrap();
 
@@ -282,7 +236,6 @@ line C
         let params = ApplyPatchParams {
             file_path: "relative/path/to/file.txt".to_string(),
             patch_content: "any patch".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -317,7 +270,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -343,7 +295,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -365,7 +316,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -383,7 +333,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -399,7 +348,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: temp_dir.to_str().unwrap().to_string(),
             patch_content: "... a patch ...".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -422,7 +370,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await;
@@ -455,7 +402,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path,
             patch_content: "this is not a valid patch".to_string(),
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -478,7 +424,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();
@@ -499,7 +444,6 @@ second line modified
         let params = ApplyPatchParams {
             file_path: file_path.clone(),
             patch_content,
-            dry_run: Some(false),
         };
 
         let result = apply_patch(params).await.unwrap();

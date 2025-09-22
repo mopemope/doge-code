@@ -11,7 +11,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "edit".to_string(),
-            description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error. You can use `dry_run: true` to preview the changes as a diff without modifying the file.".to_string(),
+            description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
@@ -19,7 +19,6 @@ pub fn tool_def() -> ToolDef {
                     "file_path": {"type": "string", "description": "Absolute path to the file."},
                     "target_block": {"type": "string", "description": "The exact, unique text block to be replaced."},
                     "new_block": {"type": "string", "description": "The new text block to replace the target."},
-                    "dry_run": {"type": "boolean", "description": "If true, returns the diff of the proposed change without modifying the file."}
                 },
                 "required": ["file_path", "target_block", "new_block"]
             }),
@@ -32,7 +31,6 @@ pub struct EditParams {
     pub file_path: String,
     pub target_block: String,
     pub new_block: String,
-    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,13 +42,12 @@ pub struct EditResult {
 }
 
 pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> {
-    let file_path = &params.file_path;
-    let target_block = &params.target_block;
-    let new_block = &params.new_block;
-    let dry_run = params.dry_run.unwrap_or(false);
+    let file_path = params.file_path;
+    let target_block = params.target_block;
+    let new_block = params.new_block;
 
     // Ensure the path is absolute
-    let path = Path::new(file_path);
+    let path = Path::new(&file_path);
     if !path.is_absolute() {
         anyhow::bail!("File path must be absolute: {}", file_path);
     }
@@ -77,7 +74,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
     // 2. Find the target block
-    let occurrences = original_content.matches(target_block).count();
+    let occurrences = original_content.matches(&target_block).count();
     if occurrences == 0 {
         return Ok(EditResult {
             success: false,
@@ -96,26 +93,17 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
     }
 
     // 3. Perform the replacement
-    let modified_content = original_content.replace(target_block, new_block);
+    let modified_content = original_content.replace(&target_block, &new_block);
 
-    // 4. Generate diff for dry_run or successful operation
+    // 4. Generate diff for successful operation
     let diff = diffy::create_patch(&original_content, &modified_content);
     let diff_text = diff.to_string();
 
     // 5. Count actual lines edited by comparing the diff
     let lines_edited = count_lines_in_diff(&diff_text);
 
-    if dry_run {
-        return Ok(EditResult {
-            success: true,
-            message: "Dry run successful. No changes were made.".to_string(),
-            diff: Some(diff_text),
-            lines_edited: Some(lines_edited),
-        });
-    }
-
     // 6. Write the modified content back to the file
-    let result = fs::write(path, modified_content)
+    let result = fs::write(path, &modified_content)
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()));
 
@@ -185,7 +173,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "world".to_string(),
             new_block: "Rust".to_string(),
-            dry_run: Some(false),
         };
 
         let result = edit(params).await.unwrap();
@@ -198,27 +185,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_dry_run() {
-        let original_content = "Dry run test.";
-        let (_temp_file, file_path) = create_temp_file(original_content);
-
-        let params = EditParams {
-            file_path: file_path.clone(),
-            target_block: "run".to_string(),
-            new_block: "RUN".to_string(),
-            dry_run: Some(true),
-        };
-
-        let result = edit(params).await.unwrap();
-        assert!(result.success);
-        assert!(result.diff.is_some());
-        assert!(result.lines_edited.is_some());
-
-        let content_after = tokio::fs::read_to_string(file_path).await.unwrap();
-        assert_eq!(content_after, original_content);
-    }
-
-    #[tokio::test]
     async fn test_edit_no_hash_provided() {
         let original_content = "No hash provided test.";
         let (_temp_file, file_path) = create_temp_file(original_content);
@@ -227,7 +193,6 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "provided".to_string(),
             new_block: "PROVIDED".to_string(),
-            dry_run: Some(false),
         };
 
         let result = edit(params).await.unwrap();
