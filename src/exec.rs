@@ -406,6 +406,7 @@ pub async fn run_rewrite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -428,6 +429,7 @@ mod tests {
             resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            auto_compact_prompt_token_threshold_overrides: HashMap::new(),
             show_diff: true,
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
@@ -460,6 +462,7 @@ mod tests {
             resume: false,    // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
+            auto_compact_prompt_token_threshold_overrides: HashMap::new(),
             show_diff: true,
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
