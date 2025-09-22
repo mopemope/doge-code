@@ -81,6 +81,23 @@ pub enum Commands {
         /// MCP server address (e.g., 127.0.0.1:8000)
         address: Option<String>,
     },
+
+    /// Rewrite a snippet of code using the LLM based on a user prompt
+    #[command()]
+    Rewrite {
+        /// Prompt describing the desired transformation
+        #[arg(long)]
+        prompt: String,
+        /// Path to a temporary file containing the snippet to rewrite
+        #[arg(long, value_name = "FILE")]
+        code_file: std::path::PathBuf,
+        /// Optional original file path hint for additional context
+        #[arg(long)]
+        file_path: Option<String>,
+        /// Output structured JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -159,6 +176,12 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
         Some(Commands::Exec { instruction, json }) => run_exec(cfg, instruction, *json).await,
+        Some(Commands::Rewrite {
+            prompt,
+            code_file,
+            file_path,
+            json,
+        }) => run_rewrite(cfg, prompt, code_file, file_path.as_deref(), *json).await,
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
@@ -263,4 +286,14 @@ async fn run_exec(
 ) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg)?;
     executor.run(instruction, json).await
+}
+
+async fn run_rewrite(
+    cfg: crate::config::AppConfig,
+    prompt: &str,
+    code_file: &std::path::Path,
+    file_path: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    crate::exec::run_rewrite(cfg, prompt, code_file, file_path, json).await
 }

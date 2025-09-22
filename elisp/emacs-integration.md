@@ -110,15 +110,15 @@ In `init.el`:
 ## Detailed Features
 
 ### 1. CLI-based Integration (MVI)
-Asynchronously calls Doge-Code's `--exec` command from Emacs to analyze/refactor selected code regions or the entire buffer. Uses JSON output (`--json` flag) to parse structured responses and display in popup or buffer.
+Asynchronously calls Doge-Code's CLI from Emacs: analysis/explanation flows use the `exec` subcommand, while inline rewrites invoke the dedicated `rewrite` subcommand. Results are parsed from JSON (`--json`) and either displayed or applied directly in the buffer as appropriate.
 
 #### Commands
 - **doge-code-analyze-region** (`C-c d a`):
   - Analyze selected region and display improvement suggestions.
   - Example: Select a function and analyze → Display "Code improvements: ..." in popup.
 - **doge-code-refactor-region** (`C-c d r`):
-  - Refactor selected region.
-  - Example: Refactor code to follow best practices.
+  - Prompt for a rewrite instruction, send the selected region (or whole buffer if no region) to Doge-Code, and replace the text with the rewritten snippet returned from the CLI.
+  - Example: Highlight a function, supply "Convert to async/await" as the prompt, and the region is replaced with the rewritten implementation.
 - **doge-code-explain-region** (`C-c d e`):
   - Explain selected region (plain text output).
 - **doge-code-analyze-buffer** (`C-c d b`):
@@ -130,8 +130,9 @@ Asynchronously calls Doge-Code's `--exec` command from Emacs to analyze/refactor
 1. Open a Rust file.
 2. Select a function.
 3. Execute `C-c d a` → Display analysis results in *doge-output* buffer or popup.
-4. JSON response: `{"success": true, "response": "Analysis result", "tokens_used": 150}`.
-5. On error: Display "Doge-Code Error: ..." in message bar.
+4. Execute `C-c d r`, enter an instruction such as "Replace indexing with iterator APIs", and the region is rewritten inline when the CLI returns `rewritten_code`.
+5. JSON response for rewrites: `{"success": true, "mode": "rewrite", "rewritten_code": "...", "tokens_used": 98}`.
+6. On error: Display "Doge-Code Error: ..." in message bar.
 
 #### Customization
 - `doge-code-executable`: Binary path (default: "dgc").

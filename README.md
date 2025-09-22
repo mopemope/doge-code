@@ -286,7 +286,7 @@ Doge-Code offers comprehensive integration with Emacs through two complementary 
 ### 1. CLI-based Integration (MVI)
 Direct integration with the Doge-Code CLI for:
 - Code analysis and suggestions (`C-c d a`)
-- Code refactoring (`C-c d r`)
+- Prompt-driven region/buffer rewrites applied inline (`C-c d r`)
 - Code explanations (`C-c d e`)
 - Buffer-wide analysis (`C-c d b`)
 
