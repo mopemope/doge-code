@@ -205,8 +205,8 @@ pub fn tool_def() -> ToolDef {
 /// This function will create `.doge/todos/<session_id>.json` if it doesn't
 /// exist. If it does exist the function will update existing todo items by
 /// matching on `id`. Items that do not exist will be appended.
-pub fn todo_write(todos: Vec<TodoItem>, session_id: &str, _config: &AppConfig) -> Result<TodoList> {
-    todo_write_from_base_path(todos, session_id, ".", _config)
+pub fn todo_write(todos: Vec<TodoItem>, session_id: &str, config: &AppConfig) -> Result<TodoList> {
+    todo_write_from_base_path(todos, session_id, ".", config)
 }
 
 /// Helper that allows tests to specify a base path.
@@ -214,7 +214,7 @@ pub fn todo_write_from_base_path(
     todos: Vec<TodoItem>,
     session_id: &str,
     base_path: &str,
-    _config: &AppConfig, // Added unused parameter to match the pattern
+    config: &AppConfig,
 ) -> Result<TodoList> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");

@@ -86,6 +86,7 @@ pub struct FindFileResult {
 /// # Arguments
 ///
 /// * `args` - The arguments for the search, including the filename or pattern.
+/// * `config` - The application configuration.
 ///
 /// # Returns
 ///
@@ -100,7 +101,7 @@ pub struct FindFileResult {
 /// let result = find_file(args).await?;
 /// assert_eq!(result.files, vec!["/path/to/project/src/lib.rs"]);
 /// ```
-pub async fn find_file(args: FindFileArgs, _config: &AppConfig) -> Result<FindFileResult> {
+pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFileResult> {
     // If the filename is an absolute path and it's a file, return it directly.
     let path = Path::new(&args.filename);
     if path.is_absolute() && path.is_file() {
@@ -112,10 +113,19 @@ pub async fn find_file(args: FindFileArgs, _config: &AppConfig) -> Result<FindFi
     // Otherwise, treat the filename as a glob pattern and search for matching files.
     // If it's not a glob pattern, this will still work for exact filename matches.
     let pattern = &args.filename;
+    let project_root = &config.project_root;
     let paths = glob(pattern)?
         .filter_map(Result::ok)
         .filter(|p| p.is_file())
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| {
+            // Ensure the path is within the project root
+            if p.starts_with(project_root) {
+                p.to_string_lossy().to_string()
+            } else {
+                String::new() // Return an empty string for paths outside the project root
+            }
+        })
+        .filter(|s| !s.is_empty()) // Filter out empty strings
         .collect();
 
     Ok(FindFileResult { files: paths })
