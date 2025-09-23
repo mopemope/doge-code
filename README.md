@@ -86,12 +86,67 @@ You can configure via TOML config file, CLI flags, or environment variables (dot
 4. Each dir in `$XDG_CONFIG_DIRS` (colon-separated): `dir/doge-code/config.toml`
 5. Project-specific config: `<project-root>/.doge/config.toml` (loaded first with highest precedence among config files)
 
+### Configuration File Structure
+
+Doge-Code uses TOML configuration files with the following structure:
+
+```toml
+# Base URL for the OpenAI-compatible API
+base_url = "https://api.openai.com/v1"
+
+# Model to use for completions
+model = "gpt-4o-mini"
+
+# API key for authentication
+api_key = "sk-..."
+
+# Log level (trace, debug, info, warn, error)
+log_level = "info"
+
+# Theme (dark or light)
+theme = "dark"
+
+# Auto-compact threshold (prompt tokens)
+# When the prompt token count reaches this number, the TUI will automatically 
+# trigger a conversation compaction (/compact)
+auto_compact_prompt_token_threshold = 250000
+
+# Show diff when applying patches
+show_diff = true
+
+# Allowed commands for execute_bash tool
+# You can specify commands that are allowed to be executed
+# Only exact matches or prefix matches (with a space) are allowed
+# For example, if you allow "cargo", then "cargo build" and "cargo test" will be allowed
+# but "carg" or "cargox" will not be allowed
+allowed_commands = []
+
+# Optional per-model overrides for auto-compact threshold
+[auto_compact_prompt_token_thresholds]
+"gpt-4o-mini" = 180000
+"gpt-4.1" = 220000
+```
+
+### Configuration Types
+
+1. **Global Configuration**: Located at `~/.config/doge-code/config.toml`, this configuration applies to all projects.
+
+2. **Project-specific Configuration**: Located at `<project-root>/.doge/config.toml`, this configuration applies only to the specific project and overrides global settings.
+
+3. **Environment Variables**: Configuration can also be specified through environment variables:
+   - `OPENAI_BASE_URL` - Base URL for the API
+   - `OPENAI_MODEL` - Model to use
+   - `OPENAI_API_KEY` - API key for authentication
+   - `DOGE_LOG` - Log level
+
+4. **CLI Flags**: Command-line flags have the highest priority and override all other configuration methods.
+
 ### Sample Configuration
 
 ```toml
 # ~/.config/doge-code/config.toml
 base_url = "https://api.openai.com/v1"
-model = "gpt-5-mini"
+model = "gpt-4o-mini"
 api_key = "sk-..."
 log_level = "info"
 theme = "dark"
