@@ -5,7 +5,7 @@ use glob::glob;
 use serde_json::json;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -38,7 +38,7 @@ pub fn fs_read_many_files(
 ) -> Result<String> {
     let mut content = String::new();
     let mut all_paths = Vec::new();
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = &config.project_root;
 
     for path_pattern in paths {
         for entry in glob(&path_pattern)? {
@@ -51,7 +51,7 @@ pub fn fs_read_many_files(
                         .iter()
                         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
-                    if canonical_path.starts_with(&project_root) || is_allowed_path {
+                    if canonical_path.starts_with(project_root) || is_allowed_path {
                         all_paths.push(path);
                     } else {
                         // Optionally, you can log or handle paths outside the project root

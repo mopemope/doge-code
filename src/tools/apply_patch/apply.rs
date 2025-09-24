@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::fs;
 
 use super::{ApplyPatchParams, ApplyPatchResult};
@@ -15,7 +15,7 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
     }
 
     // Check if the path is within the project root or in allowed paths
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = &config.project_root;
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let is_allowed_path = config
@@ -23,7 +23,7 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
         .iter()
         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
-    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+    if !canonical_path.starts_with(project_root) && !is_allowed_path {
         anyhow::bail!(
             "Access to files outside the project root is not allowed: {}",
             file_path
