@@ -96,7 +96,8 @@ mod tests {
     async fn apply_patch(
         params: super::ApplyPatchParams,
     ) -> anyhow::Result<super::ApplyPatchResult> {
-        super::apply_patch(params, &AppConfig::default()).await
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        super::apply_patch(params, &config).await
     }
 
     fn create_temp_file(content: &str) -> (PathBuf, String) {

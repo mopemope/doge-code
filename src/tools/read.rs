@@ -101,14 +101,14 @@ mod tests {
     #[test]
     fn test_fs_read_full_file() {
         let (_temp_file, file_path) = create_temp_file("line1\nline2\nline3");
-        let content = fs_read(&file_path, None, None, &AppConfig::default()).unwrap();
+        let content = crate::tools::test_utils::test_fs_read(&file_path, None, None).unwrap();
         assert_eq!(content, "line1\nline2\nline3");
     }
 
     #[test]
     fn test_fs_read_with_start_line_limit() {
         let (_temp_file, file_path) = create_temp_file("line1\nline2\nline3\nline4");
-        let content = fs_read(&file_path, Some(1), Some(2), &AppConfig::default()).unwrap();
+        let content = crate::tools::test_utils::test_fs_read(&file_path, Some(1), Some(2)).unwrap();
         assert_eq!(content, "line2\nline3");
     }
 

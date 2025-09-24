@@ -17,3 +17,6 @@ pub use common::FsTools;
 
 #[cfg(test)]
 mod common_test;
+
+#[cfg(test)]
+mod test_utils;

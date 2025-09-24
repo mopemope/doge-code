@@ -129,11 +129,13 @@ mod tests {
         let (_temp_file1, file1_path) = create_temp_file("content1");
         let (_temp_file2, file2_path) = create_temp_file("content2");
 
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+
         let content = fs_read_many_files(
             vec![file1_path.clone(), file2_path.clone()],
             None,
             None,
-            &AppConfig::default(),
+            &config,
         )
         .unwrap();
 
@@ -165,11 +167,13 @@ mod tests {
         write!(file2, "content2").unwrap();
         let file2_path = file2.path().to_str().unwrap().to_string();
 
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+
         let content = fs_read_many_files(
             vec![format!("{}/**/*", temp_dir.to_str().unwrap())],
             None,
             Some(true),
-            &AppConfig::default(),
+            &config,
         )
         .unwrap();
         assert!(content.contains(&file1_path));

@@ -132,8 +132,9 @@ mod tests {
         fs::write(root.join("c.txt"), "").unwrap();
 
         let root_str = root.to_str().unwrap();
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
         // With max_depth=1, we should only see direct children of the root.
-        let result = fs_list(root_str, Some(1), None, &AppConfig::default()).unwrap();
+        let result = fs_list(root_str, Some(1), None, &config).unwrap();
         let mut expected = vec![
             format!("{}", root_str),
             format!("{}/a", root_str),
@@ -153,7 +154,8 @@ mod tests {
         fs::write(root.join("a/b/c.txt"), "").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let result = fs_list(root_str, Some(3), None, &AppConfig::default()).unwrap();
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        let result = fs_list(root_str, Some(3), None, &config).unwrap();
         assert_eq!(
             result,
             vec![
@@ -172,7 +174,8 @@ mod tests {
         fs::write(root.join("b.log"), "").unwrap();
 
         let root_str = root.to_str().unwrap();
-        let result = fs_list(root_str, None, Some("*.txt"), &AppConfig::default()).unwrap();
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        let result = fs_list(root_str, None, Some("*.txt"), &config).unwrap();
         assert_eq!(
             result,
             vec![format!("{root_str}"), format!("{root_str}/a.txt"),]
