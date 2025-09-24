@@ -45,31 +45,28 @@ pub fn fs_list(
     pattern: Option<&str>,
     config: &AppConfig,
 ) -> Result<Vec<String>> {
-    let full_path = Path::new(path);
+    let p = Path::new(path);
 
     // Ensure the path is absolute
-    if !full_path.is_absolute() {
+    if !p.is_absolute() {
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
     // Check if the path exists
-    if !full_path.exists() {
+    if !p.exists() {
         // If the path doesn't exist, return an empty list instead of an error
         return Ok(Vec::new());
     }
 
     // Check if the path is within the project root or in allowed paths
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let canonical_path = full_path
-        .canonicalize()
-        .unwrap_or_else(|_| full_path.to_path_buf());
-
+    let project_root = &config.project_root;
+    let canonical_path = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let is_allowed_path = config
         .allowed_paths
         .iter()
         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
-    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+    if !canonical_path.starts_with(project_root) && !is_allowed_path {
         anyhow::bail!(
             "Access to files outside the project root is not allowed: {}",
             path

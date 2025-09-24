@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -40,7 +40,7 @@ pub fn fs_read(
     }
 
     // Check if the path is within the project root or in allowed paths
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = &config.project_root;
     let canonical_path = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
 
     let is_allowed_path = config
@@ -48,7 +48,7 @@ pub fn fs_read(
         .iter()
         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
-    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+    if !canonical_path.starts_with(project_root) && !is_allowed_path {
         anyhow::bail!(
             "Access to files outside the project root is not allowed: {}",
             path

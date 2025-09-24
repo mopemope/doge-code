@@ -3,7 +3,7 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::fs;
 
 pub fn tool_def() -> ToolDef {
@@ -53,7 +53,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
     }
 
     // Check if the path is within the project root or in allowed paths
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = &config.project_root;
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let is_allowed_path = config
@@ -61,7 +61,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         .iter()
         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
-    if !canonical_path.starts_with(&project_root) && !is_allowed_path {
+    if !canonical_path.starts_with(project_root) && !is_allowed_path {
         anyhow::bail!(
             "Access to files outside the project root is not allowed: {}",
             file_path
