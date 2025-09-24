@@ -148,7 +148,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     async fn edit(params: super::EditParams) -> anyhow::Result<super::EditResult> {
-        super::edit(params, &AppConfig::default()).await
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        super::edit(params, &config).await
     }
 
     fn create_temp_file(content: &str) -> (NamedTempFile, String) {
