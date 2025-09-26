@@ -1,13 +1,24 @@
-use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use anyhow::{Context, Result, anyhow};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
+use std::fs;
+use std::io::ErrorKind;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+use crate::diff_review::DiffReviewPayload;
+use crate::tui::diff_review::DiffReviewState;
 use crate::tui::event_handlers::{
     handle_normal_mode_key, handle_session_list_key, handle_shell_mode_key,
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct DiffReviewError {
+    error: String,
+}
 
 impl TuiApp {
     pub fn event_loop(
@@ -62,9 +73,44 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(payload) = msg.strip_prefix("::diff_review:") {
+                        if let Ok(payload) = serde_json::from_str::<DiffReviewPayload>(payload) {
+                            let review_state = DiffReviewState::from_payload(payload);
+                            let file_count = review_state.files.len();
+                            self.diff_review = Some(review_state);
+                            self.dirty = true;
+                            self.push_log(format!(
+                                "[diff] Ready for review: {} file(s) changed. Use a=accept, r=reject.",
+                                file_count
+                            ));
+                        } else if let Ok(err_payload) =
+                            serde_json::from_str::<DiffReviewError>(payload)
+                        {
+                            self.push_log(format!("[diff][error] {}", err_payload.error));
+                            self.diff_review = None;
+                            self.dirty = true;
+                        } else {
+                            self.push_log(format!(
+                                "[diff][warn] Received unexpected diff payload: {}",
+                                payload
+                            ));
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
+
                     if let Some(output) = msg.strip_prefix("::diff_output:") {
-                        self.diff_output = Some(output.to_string());
+                        let payload = DiffReviewPayload {
+                            diff: output.to_string(),
+                            files: vec![],
+                        };
+                        let review_state = DiffReviewState::from_payload(payload);
+                        self.diff_review = Some(review_state);
                         self.dirty = true;
+                        self.push_log(
+                            "[diff] Received legacy diff payload. Review with a=accept, r=reject."
+                                .to_string(),
+                        );
                         continue;
                     }
 
@@ -359,35 +405,8 @@ impl TuiApp {
             if event::poll(Duration::from_millis(50))?
                 && let Event::Key(k) = event::read()?
             {
-                if self.diff_output.is_some() {
-                    // Use a larger scroll step based on popup height so a single key press
-                    // moves more quickly through large diffs. This improves usability when
-                    // holding keys is unreliable across terminals. The step is at least 1.
-                    let popup_height = terminal.size().map(|s| s.height).unwrap_or(20);
-                    let mut step = popup_height.saturating_sub(1) / 6; // ~6 steps per popup
-                    if step == 0 {
-                        step = 1;
-                    }
-
-                    match k.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            self.diff_output = None;
-                            self.diff_scroll = 0;
-                            self.dirty = true;
-                            continue;
-                        }
-                        KeyCode::Down => {
-                            self.diff_scroll = self.diff_scroll.saturating_add(step);
-                            self.dirty = true;
-                            continue;
-                        }
-                        KeyCode::Up => {
-                            self.diff_scroll = self.diff_scroll.saturating_sub(step);
-                            self.dirty = true;
-                            continue;
-                        }
-                        _ => {}
-                    }
+                if self.process_diff_review_key(k)? {
+                    continue;
                 }
 
                 // Global key handlers
@@ -430,4 +449,216 @@ impl TuiApp {
             }
         }
     }
+}
+
+impl TuiApp {
+    fn process_diff_review_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.diff_review.is_none() {
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.dismiss_diff_review();
+                Ok(true)
+            }
+            KeyCode::Char('a') => {
+                self.accept_diff_review();
+                Ok(true)
+            }
+            KeyCode::Char('r') => {
+                self.reject_diff_review()?;
+                Ok(true)
+            }
+            KeyCode::Left => {
+                self.move_diff_selection(-1);
+                Ok(true)
+            }
+            KeyCode::Right => {
+                self.move_diff_selection(1);
+                Ok(true)
+            }
+            KeyCode::Up => {
+                self.adjust_diff_scroll(-1);
+                Ok(true)
+            }
+            KeyCode::Down => {
+                self.adjust_diff_scroll(1);
+                Ok(true)
+            }
+            KeyCode::PageUp => {
+                self.adjust_diff_scroll(-20);
+                Ok(true)
+            }
+            KeyCode::PageDown => {
+                self.adjust_diff_scroll(20);
+                Ok(true)
+            }
+            KeyCode::Home => {
+                self.set_diff_scroll(0);
+                Ok(true)
+            }
+            KeyCode::End => {
+                self.jump_diff_scroll_to_end();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn dismiss_diff_review(&mut self) {
+        if self.diff_review.take().is_some() {
+            self.push_log("[diff] Closed diff preview. Changes remain applied.".to_string());
+            self.dirty = true;
+        }
+    }
+
+    fn accept_diff_review(&mut self) {
+        if let Some(review) = self.diff_review.take() {
+            let file_count = review.files.len();
+            self.push_log(format!("[diff] Accepted {} file change(s).", file_count));
+            self.dirty = true;
+        }
+    }
+
+    fn reject_diff_review(&mut self) -> Result<()> {
+        let Some(review) = self.diff_review.take() else {
+            return Ok(());
+        };
+
+        let paths: Vec<String> = review.files.iter().map(|f| f.path.clone()).collect();
+
+        if let Err(e) = revert_paths(&paths) {
+            self.push_log(format!("[diff][error] Failed to revert changes: {}", e));
+            self.diff_review = Some(review);
+            self.dirty = true;
+            return Err(e);
+        }
+
+        self.push_log("[diff] Rejected changes and restored files.".to_string());
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn move_diff_selection(&mut self, delta: isize) {
+        if let Some(review) = self.diff_review.as_mut() {
+            if review.files.is_empty() {
+                return;
+            }
+
+            let current = review.selected as isize;
+            let max_index = review.files.len() as isize - 1;
+            let mut next = current + delta;
+            if next < 0 {
+                next = 0;
+            } else if next > max_index {
+                next = max_index;
+            }
+
+            if next != current {
+                review.selected = next as usize;
+                if let Some(file) = review.files.get_mut(review.selected) {
+                    file.scroll = 0;
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn adjust_diff_scroll(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            if file.lines.is_empty() {
+                return;
+            }
+
+            let max_scroll = file.lines.len().saturating_sub(1) as isize;
+            let current = file.scroll as isize;
+            let mut next = current + delta;
+            if next < 0 {
+                next = 0;
+            } else if next > max_scroll {
+                next = max_scroll;
+            }
+
+            file.scroll = next as usize;
+            self.dirty = true;
+        }
+    }
+
+    fn set_diff_scroll(&mut self, position: usize) {
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            let max_scroll = file.lines.len().saturating_sub(1);
+            file.scroll = position.min(max_scroll);
+            self.dirty = true;
+        }
+    }
+
+    fn jump_diff_scroll_to_end(&mut self) {
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            if file.lines.is_empty() {
+                return;
+            }
+            file.scroll = file.lines.len().saturating_sub(1);
+            self.dirty = true;
+        }
+    }
+}
+
+fn revert_paths(paths: &[String]) -> Result<()> {
+    for path in paths {
+        if path.trim().is_empty() || path == "workspace" {
+            continue;
+        }
+
+        let tracked = Command::new("git")
+            .arg("ls-files")
+            .arg("--error-unmatch")
+            .arg(path)
+            .status()
+            .with_context(|| format!("checking tracking status for {}", path))?
+            .success();
+
+        if tracked {
+            let output = Command::new("git")
+                .arg("restore")
+                .arg("--worktree")
+                .arg("--")
+                .arg(path)
+                .output()
+                .with_context(|| format!("running git restore for {}", path))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!(
+                    "git restore failed for {}: {}",
+                    path,
+                    stderr.trim()
+                ));
+            }
+        } else {
+            match fs::remove_file(path) {
+                Ok(_) => {}
+                Err(e) => {
+                    if e.kind() == ErrorKind::IsADirectory {
+                        fs::remove_dir_all(path)
+                            .with_context(|| format!("failed to remove directory {}", path))?;
+                    } else if e.kind() != ErrorKind::NotFound {
+                        return Err(anyhow!("failed to remove {}: {}", path, e));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

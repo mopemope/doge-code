@@ -1,9 +1,9 @@
+use crate::tui::diff_review::DiffLineKind;
 use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
-use ansi_to_tui::IntoText;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use std::fmt::Write;
 // use tracing::debug;
@@ -69,10 +69,6 @@ impl TuiApp {
             // This section is intentionally left empty to remove the separate panel rendering
         }
 
-        if let Some(diff_output) = &self.diff_output.clone() {
-            self.render_diff_popup(f, size, diff_output);
-        }
-
         // The cursor is now handled by the TextArea widget, so no need to set it manually.
     }
 
@@ -121,24 +117,6 @@ impl TuiApp {
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        // debug!(
-        //     "render_main_content: area={}x{} (x={}, y={}), plan.log_lines={}",
-        //     area.width,
-        //     area.height,
-        //     area.x,
-        //     area.y,
-        //     plan.log_lines.len()
-        // );
-
-        // Check if we have more lines than the area can display
-        if plan.log_lines.len() > area.height as usize {
-            // debug!(
-            //     "WARNING: More lines ({}) than area height ({})",
-            //     plan.log_lines.len(), area.height
-            // );
-        }
-
-        // If in session list mode, render the session list instead of log
         if self.input_mode == crate::tui::state::InputMode::SessionList
             && let Some(session_list_state) = &self.session_list_state
         {
@@ -146,25 +124,32 @@ impl TuiApp {
             return;
         }
 
+        if self.diff_review.is_some() {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(area);
+
+            self.render_log_panel(f, columns[0], plan, theme);
+            self.render_diff_review(f, columns[1], theme);
+        } else {
+            self.render_log_panel(f, area, plan, theme);
+        }
+    }
+
+    fn render_log_panel(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        if plan.log_lines.len() > area.height as usize {
+            // retain silent overflow awareness for future enhancements
+        }
+
         let mut lines: Vec<Line> = Vec::new();
         let mut is_in_code_block = false;
-
-        // Ensure we don't try to render more lines than the area can display
         let max_displayable = area.height as usize;
         let lines_to_render = plan.log_lines.len().min(max_displayable);
 
-        // debug!(
-        //     "Rendering {} lines (max displayable: {})",
-        //     lines_to_render, max_displayable
-        // );
-
         for (i, log_line) in plan.log_lines.iter().take(lines_to_render).enumerate() {
             if i < 5 || i >= lines_to_render.saturating_sub(5) {
-                // debug!(
-                //     "Line {}: '{}'",
-                //     i,
-                //     log_line.chars().take(50).collect::<String>()
-                // );
+                // reserved for verbose debug logging when needed
             }
 
             if log_line.starts_with("```") || log_line.trim_start().starts_with("```") {
@@ -199,8 +184,6 @@ impl TuiApp {
                     Style::default().fg(Color::Cyan),
                 )));
             } else if log_line.starts_with("[tool]") {
-                // Expect format: [tool] name({...}) => OK|ERR
-                // Color green for OK, red for ERR, yellow otherwise
                 let mut style = Style::default().fg(Color::Yellow);
                 if log_line.contains("=> ERR") {
                     style = Style::default().fg(Color::Red);
@@ -209,7 +192,6 @@ impl TuiApp {
                 }
                 lines.push(Line::from(Span::styled(log_line.clone(), style)));
             } else if log_line.starts_with("  ") {
-                // LLM response with margin - use special styling
                 lines.push(Line::from(Span::styled(
                     log_line.clone(),
                     theme.llm_response_style,
@@ -219,17 +201,105 @@ impl TuiApp {
             }
         }
 
-        // debug!("Created {} lines for Paragraph widget", lines.len());
-
         let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
-            .block(Block::default()); // Add block to ensure proper boundaries
+            .block(Block::default());
         f.render_widget(paragraph, area);
+    }
 
-        // debug!(
-        //     "Paragraph widget rendered {} lines in area {}x{}",
-        //     lines_to_render, area.width, area.height
-        // );
+    fn render_diff_review(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(review) = &self.diff_review else {
+            return;
+        };
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(5),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        // file list
+        let items: Vec<ListItem> = review
+            .files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| {
+                let mut label = file.path.clone();
+                let additions = file
+                    .lines
+                    .iter()
+                    .filter(|line| matches!(line.kind, DiffLineKind::Addition))
+                    .count();
+                let removals = file
+                    .lines
+                    .iter()
+                    .filter(|line| matches!(line.kind, DiffLineKind::Removal))
+                    .count();
+                if additions > 0 || removals > 0 {
+                    label.push_str(&format!(" (+{}/-{})", additions, removals));
+                }
+
+                let style = if idx == review.selected {
+                    theme.completion_selected_style
+                } else {
+                    theme.completion_style
+                };
+
+                ListItem::new(label).style(style)
+            })
+            .collect();
+
+        let files_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Changed Files (←/→ to focus)");
+        let files_list = List::new(items).block(files_block);
+        f.render_widget(files_list, layout[0]);
+
+        // diff content
+        let diff_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Diff Preview (↑/↓ scroll)");
+
+        if let Some(file) = review.files.get(review.selected) {
+            let diff_lines: Vec<Line> = file
+                .lines
+                .iter()
+                .map(|diff_line| {
+                    let style = match diff_line.kind {
+                        DiffLineKind::Header => Style::default().fg(Color::Cyan),
+                        DiffLineKind::FileMeta => Style::default().fg(Color::Magenta),
+                        DiffLineKind::HunkHeader => Style::default().fg(Color::Yellow),
+                        DiffLineKind::Addition => Style::default().fg(Color::Green),
+                        DiffLineKind::Removal => Style::default().fg(Color::Red),
+                        DiffLineKind::Context => Style::default().fg(Color::DarkGray),
+                        DiffLineKind::Other => Style::default(),
+                    };
+                    Line::from(Span::styled(diff_line.content.clone(), style))
+                })
+                .collect();
+
+            let scroll = file.scroll.min(u16::MAX as usize) as u16;
+            let paragraph = Paragraph::new(diff_lines)
+                .block(diff_block)
+                .scroll((scroll, 0));
+            f.render_widget(paragraph, layout[1]);
+        } else {
+            let paragraph = Paragraph::new("No diff available")
+                .block(diff_block)
+                .style(theme.log_style);
+            f.render_widget(paragraph, layout[1]);
+        }
+
+        // instructions footer for diff
+        let instructions = Paragraph::new(
+            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss",
+        )
+        .style(theme.footer_style)
+        .block(Block::default().borders(Borders::ALL));
+        f.render_widget(instructions, layout[2]);
     }
 
     fn render_session_list(
@@ -348,43 +418,6 @@ impl TuiApp {
         }
     }
 
-    fn render_diff_popup(&mut self, f: &mut Frame, area: Rect, diff_content: &str) {
-        let text = match diff_content.as_bytes().into_text() {
-            Ok(text) => text,
-            Err(_) => diff_content.into(), // Fallback to plain text
-        };
-
-        let block = Block::default()
-            .title("Git Diff (Press ESC or q to close)")
-            .borders(Borders::ALL);
-
-        let line_count = text.height();
-
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .scroll((self.diff_scroll, 0));
-
-        // Create a centered popup area
-        let popup_area = centered_rect(80, 90, area);
-        f.render_widget(Clear, popup_area); // Clear the background
-        f.render_widget(paragraph, popup_area);
-
-        if line_count > popup_area.height as usize {
-            let mut scrollbar_state =
-                ratatui::widgets::ScrollbarState::new(line_count - popup_area.height as usize)
-                    .position(self.diff_scroll as usize);
-
-            f.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight),
-                popup_area.inner(Margin {
-                    vertical: 1,
-                    horizontal: 0,
-                }),
-                &mut scrollbar_state,
-            );
-        }
-    }
-
     fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         // Single line footer: combine version, tokens, repomap, mode, elapsed
         let mut footer_text = String::with_capacity(150);
@@ -433,25 +466,4 @@ impl TuiApp {
             .alignment(Alignment::Left);
         f.render_widget(footer_paragraph, area);
     }
-}
-
-/// helper function to create a centered rect using up certain percentage of the available rect `r`
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }

@@ -32,6 +32,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - Automatic log truncation with configurable limits
 - Input history persistence across sessions
 - Safe filesystem operations confined to project root
+- Inline diff review panel with accept/reject controls before applying LLM-generated edits
 
 ## Requirements
 
@@ -360,6 +361,15 @@ Use positional arguments when:
 - **Double `Ctrl+C`** within 3s - Exit application
 - **Up/Down** - Navigate input history
 - **@** - Trigger file completion for project files
+
+#### Diff Review Controls
+
+- **a** - Accept all pending changes and close the review panel
+- **r** - Reject changes and restore files to their previous state
+- **q / Esc** - Dismiss the diff panel without altering files
+- **←/→** - Switch between files when multiple paths were edited
+- **↑/↓ / PgUp / PgDn** - Scroll within the active diff hunk
+- **Home / End** - Jump to the top or bottom of the diff
 
 ### File Completion
 
