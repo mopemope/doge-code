@@ -373,6 +373,8 @@ The LLM has access to comprehensive tools for autonomous operation:
 ### Code Analysis Tools
 
 - `search_repomap` - Search analyzed code symbols with filtering
+  - Supports `keyword_search`, `name`, `file_pattern`, `exclude_patterns`, `language_filters`, and symbol kind filters to narrow results
+  - Cap per-file noise with `max_symbols_per_file`, enforce match quality via `match_score_threshold`, and adjust the `limit` (default 50) for broader or tighter result sets
 
 ### Development Tools
 - `execute_bash` - Execute shell commands safely in the project root directory

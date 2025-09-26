@@ -349,3 +349,114 @@ fn test_code_doc_field_matching() {
     assert!(!sym_code.matches.is_empty());
     assert_eq!(sym_code.matches[0].field, "code");
 }
+
+#[test]
+fn test_exclude_patterns_skip_files() {
+    let symbols = vec![
+        create_test_symbol(
+            "keep_me",
+            SymbolKind::Function,
+            "src/keep.rs",
+            120,
+            Some(12),
+        ),
+        create_test_symbol(
+            "skip_me",
+            SymbolKind::Function,
+            "src/generated/skip.rs",
+            200,
+            Some(20),
+        ),
+    ];
+
+    let args = SearchRepomapArgs {
+        exclude_patterns: Some(vec!["generated".to_string()]),
+        include_snippets: Some(false),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(&symbols, args);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].file, PathBuf::from("src/keep.rs"));
+}
+
+#[test]
+fn test_language_filters_by_extension() {
+    let symbols = vec![
+        create_test_symbol("rust_func", SymbolKind::Function, "lib.rs", 80, Some(8)),
+        create_test_symbol(
+            "python_func",
+            SymbolKind::Function,
+            "script.py",
+            60,
+            Some(6),
+        ),
+    ];
+
+    let args = SearchRepomapArgs {
+        language_filters: Some(vec!["rust".to_string()]),
+        include_snippets: Some(false),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(&symbols, args);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].file, PathBuf::from("lib.rs"));
+}
+
+#[test]
+fn test_match_score_threshold_filters_symbols() {
+    let symbols = vec![
+        create_test_symbol_with_keywords(
+            "match_symbol",
+            SymbolKind::Function,
+            "match.rs",
+            100,
+            Some(10),
+            vec!["alpha".to_string()],
+        ),
+        create_test_symbol_with_keywords(
+            "no_match_symbol",
+            SymbolKind::Function,
+            "match.rs",
+            100,
+            Some(10),
+            vec!["beta".to_string()],
+        ),
+    ];
+
+    let args = SearchRepomapArgs {
+        keyword_search: Some(vec!["alpha".to_string()]),
+        match_score_threshold: Some(0.15),
+        include_snippets: Some(false),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(&symbols, args);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].symbols.len(), 1);
+    assert_eq!(results[0].symbols[0].name, "match_symbol");
+}
+
+#[test]
+fn test_max_symbols_per_file_caps_results() {
+    let mut sym_a = create_test_symbol("alpha", SymbolKind::Function, "cap.rs", 150, Some(12));
+    sym_a.start_line = 5;
+    let mut sym_b = create_test_symbol("beta", SymbolKind::Function, "cap.rs", 150, Some(14));
+    sym_b.start_line = 30;
+    let mut sym_c = create_test_symbol("gamma", SymbolKind::Function, "cap.rs", 150, Some(16));
+    sym_c.start_line = 60;
+
+    let symbols = vec![sym_a, sym_b, sym_c];
+
+    let args = SearchRepomapArgs {
+        max_symbols_per_file: Some(2),
+        include_snippets: Some(false),
+        ..Default::default()
+    };
+
+    let results = filter_and_group_symbols(&symbols, args);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].symbols.len(), 2);
+    assert_eq!(results[0].symbol_count, 2);
+}

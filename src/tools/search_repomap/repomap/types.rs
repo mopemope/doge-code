@@ -11,11 +11,17 @@ pub struct SearchRepomapArgs {
     pub max_function_lines: Option<usize>,
     pub symbol_kinds: Option<Vec<String>>,
     pub file_pattern: Option<String>,
+    /// File path substrings/glob-like tokens to exclude (applied before other filters)
+    pub exclude_patterns: Option<Vec<String>>,
+    /// Language or file-extension filters (e.g. "rust", "ts", "py", "md", "tsx")
+    pub language_filters: Option<Vec<String>>,
     pub min_symbols_per_file: Option<usize>,
     pub max_symbols_per_file: Option<usize>,
     pub sort_by: Option<String>,
     pub sort_desc: Option<bool>,
     pub limit: Option<usize>,
+    /// Minimum symbol match_score (0.0 - 1.0) required to include a symbol/result
+    pub match_score_threshold: Option<f64>,
     /// Search for symbols containing specific keywords
     pub keyword_search: Option<Vec<String>>,
     /// Search for symbols containing symbol name

@@ -20,6 +20,8 @@ pub struct SearchRepomapParams {
     pub max_file_lines: Option<u32>,
     pub max_function_lines: Option<u32>,
     pub file_pattern: Option<String>,
+    pub exclude_patterns: Option<Vec<String>>,
+    pub language_filters: Option<Vec<String>>,
     pub symbol_kinds: Option<Vec<String>>,
     pub sort_by: Option<String>,
     pub sort_desc: Option<bool>,
@@ -30,6 +32,8 @@ pub struct SearchRepomapParams {
     pub include_snippets: Option<bool>,
     pub context_lines: Option<u32>,
     pub snippet_max_chars: Option<u32>,
+    pub max_symbols_per_file: Option<u32>,
+    pub match_score_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -144,8 +148,10 @@ impl DogeMcpService {
                 max_function_lines: params.max_function_lines.map(|v| v as usize),
                 symbol_kinds: params.symbol_kinds,
                 file_pattern: params.file_pattern,
+                exclude_patterns: params.exclude_patterns,
+                language_filters: params.language_filters,
                 min_symbols_per_file: None,
-                max_symbols_per_file: None,
+                max_symbols_per_file: params.max_symbols_per_file.map(|v| v as usize),
                 sort_by: params.sort_by,
                 sort_desc: params.sort_desc,
                 limit: params.limit.map(|v| v as usize),
@@ -156,6 +162,7 @@ impl DogeMcpService {
                 context_lines: params.context_lines.map(|v| v as usize),
                 snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
                 ranking_strategy: None,
+                match_score_threshold: params.match_score_threshold,
             };
 
             match self.search_repomap_tools.search_repomap(map, args) {

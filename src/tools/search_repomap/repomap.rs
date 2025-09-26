@@ -39,6 +39,15 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
 - `fields`:
   - Optional list of fields to search in. Supported values: `name`, `keyword`, `code`, `doc`.
   - If omitted, all fields are searched. Use `fields` to narrow scope and save tokens (e.g., `fields:["name","doc"]`).
+- `exclude_patterns` / `file_pattern`:
+  - `exclude_patterns` lets you drop paths matching substrings or simple glob-like tokens (e.g., `"tests/"`, `"generated"`).
+  - Pair with `file_pattern` when you need both allow- and deny-lists for file paths.
+- `language_filters`:
+  - Restrict results to specific languages or extensions (`"rust"`, `"py"`, `"ts"`, `.tsx`). Mixed forms are accepted.
+- `max_symbols_per_file`:
+  - Caps how many symbols are returned for a single file. The most relevant matches are kept.
+- `match_score_threshold`:
+  - Require a minimum per-symbol `match_score` (0.0–1.0) to filter out weaker matches.
 - `max_file_lines` / `max_function_lines`:
   - Use these to filter for code that might be too complex or require refactoring.
 - `ranking_strategy`:
@@ -86,6 +95,16 @@ pub fn tool_def() -> ToolDef {
                     "file_pattern": {
                         "type": ["string", "null"],
                         "description": "File path pattern to match (substring match)"
+                    },
+                    "exclude_patterns": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": "Paths to exclude (substring or glob-like tokens such as 'tests/' or 'generated')"
+                    },
+                    "language_filters": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": "Filter by language or file extension (e.g. 'rust', 'py', 'ts', '.rs', '.tsx')"
                     },
                     "symbol_kinds": {
                         "type": ["array", "null"],
@@ -136,6 +155,10 @@ pub fn tool_def() -> ToolDef {
                         "type": ["string", "null"],
                         "enum": ["max_score", "avg_score", "sum_score", "hybrid"],
                         "description": "Strategy for calculating file-level match score (default: max_score)"
+                    },
+                    "match_score_threshold": {
+                        "type": ["number", "null"],
+                        "description": "Minimum match_score (0.0-1.0) a symbol must meet to be returned"
                     }
                 },
                 "additionalProperties": false
