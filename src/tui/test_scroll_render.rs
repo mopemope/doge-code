@@ -1,10 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::{ScrollState, Status, TuiApp, build_render_plan};
+    use crate::tui::state::{LogEntry, ScrollState, Status, TuiApp, build_render_plan};
     // use tui_textarea::TextArea; // 不要
 
     fn create_test_app() -> TuiApp {
         TuiApp::new("test", None, "dark").unwrap()
+    }
+
+    fn extract_texts(plan: &crate::tui::state::RenderPlan) -> Vec<String> {
+        plan.log_lines.iter().map(|line| line.text()).collect()
     }
 
     #[test]
@@ -44,6 +48,7 @@ mod tests {
                 scroll_state,
                 todo_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+                theme: &app.theme,
             };
             let plan = build_render_plan(params);
 
@@ -58,8 +63,9 @@ mod tests {
             );
 
             // Should show the most recent lines when auto-scrolling
+            let texts = extract_texts(&plan);
             assert!(
-                plan.log_lines.contains(&"Log line 19".to_string()),
+                texts.contains(&"Log line 19".to_string()),
                 "Screen {}x{}: Should contain the most recent log line",
                 width,
                 height
@@ -98,6 +104,7 @@ mod tests {
             scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &app.theme,
         };
         let plan = build_render_plan(params);
 
@@ -105,7 +112,8 @@ mod tests {
         assert_eq!(plan.log_lines.len(), main_content_height as usize);
 
         // Should show the most recent lines
-        assert!(plan.log_lines.contains(&"Long content line 99".to_string()));
+        let texts = extract_texts(&plan);
+        assert!(texts.contains(&"Long content line 99".to_string()));
 
         // Should have scroll info indicating scrolling is possible
         assert!(plan.scroll_info.is_some());
@@ -135,18 +143,16 @@ mod tests {
             scroll_state: &scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &app.theme,
         };
         let plan = build_render_plan(params);
 
         // Should not show the latest line when scrolled up
-        assert!(!plan.log_lines.contains(&"Long content line 99".to_string()));
+        let texts = extract_texts(&plan);
+        assert!(!texts.contains(&"Long content line 99".to_string()));
 
         // Should show older content
-        assert!(
-            plan.log_lines
-                .iter()
-                .any(|line| line.contains("Long content line"))
-        );
+        assert!(texts.iter().any(|line| line.contains("Long content line")));
 
         // Should indicate scrolling
         assert!(plan.scroll_info.is_some());
@@ -210,18 +216,20 @@ mod tests {
             scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &app.theme,
         };
         let plan = build_render_plan(params);
 
         println!("Plan log_lines count: {}", plan.log_lines.len());
         println!("Last few lines in plan:");
         for (i, line) in plan.log_lines.iter().rev().take(5).enumerate() {
-            println!("  -{}: {}", i, line);
+            println!("  -{}: {}", i, line.text());
         }
 
         // The last line should be visible
+        let texts = extract_texts(&plan);
         assert!(
-            plan.log_lines
+            texts
                 .iter()
                 .any(|line| line.contains("Final response line 99")),
             "Last line should be visible in auto-scroll mode"
@@ -268,6 +276,7 @@ mod tests {
                 scroll_state,
                 todo_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+                theme: &app.theme,
             };
             let plan = build_render_plan(params);
 
@@ -285,10 +294,9 @@ mod tests {
             );
 
             // Should show the most recent content when auto-scrolling
+            let texts = extract_texts(&plan);
             assert!(
-                plan.log_lines
-                    .iter()
-                    .any(|line| line.contains("Content line 49")),
+                texts.iter().any(|line| line.contains("Content line 49")),
                 "Screen {}x{}: Should show the most recent line",
                 width,
                 total_height
@@ -326,6 +334,7 @@ mod tests {
             scroll_state: &app.scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &app.theme,
         };
         let plan = build_render_plan(params);
 
@@ -333,7 +342,7 @@ mod tests {
         println!("Plan log_lines count: {}", plan.log_lines.len());
         println!("Lines in plan:");
         for (i, line) in plan.log_lines.iter().enumerate() {
-            println!("  {}: {}", i, line);
+            println!("  {}: {}", i, line.text());
         }
 
         // Should show exactly the main content height or less
@@ -353,12 +362,13 @@ mod tests {
         );
 
         // Should show the most recent lines
+        let texts = extract_texts(&plan);
         assert!(
-            plan.log_lines.contains(&"Line 99".to_string()),
+            texts.contains(&"Line 99".to_string()),
             "Should contain the most recent line"
         );
         assert!(
-            plan.log_lines.contains(&"Line 95".to_string()),
+            texts.contains(&"Line 95".to_string()),
             "Should contain line from 5 lines ago"
         );
     }
@@ -367,13 +377,10 @@ mod tests {
     fn test_build_render_plan_with_scroll() {
         let title = "Test";
         let status = Status::Idle;
-        let log = vec![
-            "line1".to_string(),
-            "line2".to_string(),
-            "line3".to_string(),
-            "line4".to_string(),
-            "line5".to_string(),
-        ];
+        let log: Vec<LogEntry> = vec!["line1", "line2", "line3", "line4", "line5"]
+            .into_iter()
+            .map(|line| LogEntry::Plain(line.to_string()))
+            .collect();
 
         // let input_mode = InputMode::Normal; // 不要
         let w = 80;
@@ -383,6 +390,7 @@ mod tests {
 
         // Test auto-scroll (show latest)
         let scroll_state = ScrollState::default();
+        let theme = crate::tui::theme::Theme::dark();
         // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title,
@@ -400,11 +408,13 @@ mod tests {
             scroll_state: &scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &theme,
         };
         let plan = build_render_plan(params);
 
         // Should show the last few lines
-        assert!(plan.log_lines.contains(&"line5".to_string()));
+        let texts = extract_texts(&plan);
+        assert!(texts.contains(&"line5".to_string()));
 
         // Test scrolled up
         let scroll_state = ScrollState {
@@ -430,11 +440,13 @@ mod tests {
             scroll_state: &scroll_state,
             todo_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            theme: &theme,
         };
         let plan = build_render_plan(params);
 
         // Should not show the latest line
-        assert!(!plan.log_lines.contains(&"line5".to_string()));
+        let texts = extract_texts(&plan);
+        assert!(!texts.contains(&"line5".to_string()));
 
         // Should have scroll info
         assert!(plan.scroll_info.is_some());
