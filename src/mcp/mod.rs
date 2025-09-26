@@ -123,6 +123,8 @@ mod tests {
             max_file_lines: None,
             max_function_lines: None,
             file_pattern: None,
+            exclude_patterns: None,
+            language_filters: None,
             symbol_kinds: None,
             sort_by: None,
             sort_desc: None,
@@ -133,6 +135,8 @@ mod tests {
             include_snippets: None,
             context_lines: None,
             snippet_max_chars: None,
+            max_symbols_per_file: None,
+            match_score_threshold: None,
         };
 
         let result = service.search_repomap(Parameters(params)).await;

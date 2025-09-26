@@ -170,12 +170,16 @@ Using `search_text` before `search_repomap` is inefficient and will lead to poor
   - `max_file_lines`: Maximum number of lines in the file
   - `max_function_lines`: Maximum number of lines in functions
   - `file_pattern`: File path pattern to match (substring match)
+  - `exclude_patterns`: Paths to skip (substring or simple glob-like tokens such as `tests/`, `generated`)
+  - `language_filters`: Filter to specific languages/extensions (`rust`, `py`, `ts`, `.tsx`, etc.)
   - `symbol_kinds`: Filter results by symbol kind (e.g., 'Function', 'Struct', 'Trait').
+  - `max_symbols_per_file`: Cap how many symbols are returned for each file (keeps the most relevant ones)
   - `sort_by`: Sort results by specified criteria (file_lines, function_lines, symbol_count, file_path, file_match_score)
   - `sort_desc`: Sort in descending order (default: true)
   - `limit`: Maximum number of results to return (default: 50)
   - `keyword_search`: A list of search terms for symbols containing specific keywords in their associated comments. This is especially useful when the user asks about a feature or functionality without specifying a symbol name.
   - `name`: A list of search terms for symbols containing symbol names
+  - `match_score_threshold`: Require a minimum per-symbol match score (0.0–1.0) to filter out weak matches
   - `ranking_strategy`: Strategy for calculating file-level match score (`file_match_score`). Options: `max_score` (default), `avg_score`, `sum_score`, `hybrid`.
 Return Value:
 The tool returns a list of `RepomapSearchResult` objects, each representing a file that matches the search criteria. Each object has the following structure:

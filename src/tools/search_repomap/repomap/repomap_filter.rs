@@ -1,9 +1,74 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::{fs, str};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::{MatchSpan, RepomapSearchResult, SearchRepomapArgs, SymbolSearchResult};
 use crate::analysis::SymbolInfo;
+
+fn normalize_filter_value(raw: &str) -> String {
+    let mut value = raw.trim().to_lowercase();
+    for prefix in ["lang:", "language:", "ext:"] {
+        if let Some(stripped) = value.strip_prefix(prefix) {
+            value = stripped.to_string();
+            break;
+        }
+    }
+    value = value.trim_start_matches('.').to_string();
+    value
+}
+
+fn matches_filter_against_extension(filter: &str, ext: &str) -> bool {
+    if filter.is_empty() {
+        return false;
+    }
+
+    match filter {
+        "rust" => ext == "rs",
+        "typescript" | "ts" => matches!(ext, "ts" | "tsx"),
+        "tsx" => ext == "tsx",
+        "javascript" | "js" => matches!(ext, "js" | "mjs" | "cjs"),
+        "mjs" => ext == "mjs",
+        "cjs" => ext == "cjs",
+        "python" | "py" => ext == "py",
+        "go" | "golang" => ext == "go",
+        "csharp" | "c#" | "cs" => ext == "cs",
+        "c" => matches!(ext, "c" | "h"),
+        "cpp" | "c++" => matches!(ext, "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh"),
+        "java" => ext == "java",
+        "markdown" | "md" => ext == "md",
+        _ => filter == ext,
+    }
+}
+
+fn matches_language_filters(path: &Path, filters: &[String]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+
+    let file_str = path.to_string_lossy().to_lowercase();
+    let ext_lower = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase());
+
+    filters.iter().any(|raw_filter| {
+        let trimmed = raw_filter.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let normalized = normalize_filter_value(trimmed);
+        if let Some(ext) = ext_lower.as_deref()
+            && matches_filter_against_extension(&normalized, ext)
+        {
+            return true;
+        }
+
+        let lowered_original = trimmed.to_lowercase();
+        file_str.contains(&lowered_original)
+    })
+}
 
 pub(super) fn filter_and_group_symbols(
     symbols: &[SymbolInfo],
@@ -41,6 +106,24 @@ pub(super) fn filter_and_group_symbols(
 
         if let Some(pattern) = &args.file_pattern
             && !file_path.to_string_lossy().contains(pattern)
+        {
+            continue;
+        }
+
+        if let Some(patterns) = &args.exclude_patterns
+            && !patterns.is_empty()
+        {
+            let file_str = file_path.to_string_lossy();
+            if patterns.iter().any(|p| {
+                let trimmed = p.trim();
+                !trimmed.is_empty() && file_str.contains(trimmed)
+            }) {
+                continue;
+            }
+        }
+
+        if let Some(filters) = &args.language_filters
+            && !matches_language_filters(&file_path, filters)
         {
             continue;
         }
@@ -268,9 +351,22 @@ pub(super) fn filter_and_group_symbols(
             }
 
             // Build the SymbolSearchResult from the symbol and attach match info
+            let computed_match_score = if match_spans.is_empty() {
+                None
+            } else {
+                Some(score.min(1.0))
+            };
+
+            if let Some(threshold) = args.match_score_threshold {
+                let passes = computed_match_score.unwrap_or(0.0) >= threshold;
+                if !passes {
+                    continue;
+                }
+            }
+
             let mut sres = SymbolSearchResult::from(symbol);
-            if !match_spans.is_empty() {
-                sres.match_score = Some(score.min(1.0));
+            if let Some(match_score) = computed_match_score {
+                sres.match_score = Some(match_score);
                 sres.matches = match_spans;
             }
 
@@ -278,7 +374,7 @@ pub(super) fn filter_and_group_symbols(
         }
 
         // Apply symbol count filters
-        let symbol_count = filtered_symbol_results.len();
+        let mut symbol_count = filtered_symbol_results.len();
 
         // Skip files with no matching symbols
         if symbol_count == 0 {
@@ -290,10 +386,25 @@ pub(super) fn filter_and_group_symbols(
         {
             continue;
         }
+
         if let Some(max_symbols) = args.max_symbols_per_file
             && symbol_count > max_symbols
         {
-            continue;
+            filtered_symbol_results.sort_by(|a, b| {
+                let score_a = a.match_score.unwrap_or(0.0);
+                let score_b = b.match_score.unwrap_or(0.0);
+                let score_order = score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal);
+                if score_order == Ordering::Equal {
+                    a.start_line
+                        .cmp(&b.start_line)
+                        .then_with(|| a.name.cmp(&b.name))
+                } else {
+                    score_order
+                }
+            });
+            filtered_symbol_results.truncate(max_symbols);
+            filtered_symbol_results.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+            symbol_count = filtered_symbol_results.len();
         }
 
         // Add code snippets if requested
@@ -472,7 +583,7 @@ pub(super) fn filter_and_group_symbols(
     }
 
     // Apply limit
-    let limit = args.limit.unwrap_or(20);
+    let limit = args.limit.unwrap_or(50);
     results.truncate(limit);
 
     results
