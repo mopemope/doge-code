@@ -1,4 +1,4 @@
-use crate::{config::IGNORE_FILE, tui::theme::Theme};
+use crate::{config::IGNORE_FILE, tui::diff_review::DiffReviewState, tui::theme::Theme};
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -177,8 +177,7 @@ pub struct TuiApp {
     // auto-compact flag to avoid duplicate triggers
     pub auto_compact_pending: bool,
     pub pending_instructions: VecDeque<String>,
-    pub diff_output: Option<String>,
-    pub diff_scroll: u16,
+    pub diff_review: Option<DiffReviewState>,
     // todo list
     pub todo_list: Vec<TodoItem>,
     /// If true, the todo list received from `todo_write` that contained only
@@ -367,8 +366,7 @@ impl TuiApp {
             // auto-compact starts not pending
             auto_compact_pending: false,
             pending_instructions: VecDeque::new(),
-            diff_output: None,
-            diff_scroll: 0,
+            diff_review: None,
             // todo list
             todo_list: Vec::new(),
             hide_todo_on_next_instruction: false,

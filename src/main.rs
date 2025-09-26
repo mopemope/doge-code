@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod assets;
 pub mod config;
+pub mod diff_review;
 pub mod exec;
 pub mod features;
 pub mod llm;
