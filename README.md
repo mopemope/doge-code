@@ -38,7 +38,7 @@ An interactive TUI coding agent written in Rust (Edition 2024). It leverages Ope
 - Rust toolchain (Edition 2024, stable)
 - Network access to an OpenAI-compatible endpoint (default: https://api.openai.com/v1)
 - An API key in `OPENAI_API_KEY` or provided via `--api-key`
-- *For Emacs integration*: Emacs 27.1+ with `json`, `async`, `request`, and `popup` packages
+- *For Emacs integration*: Emacs 27.1+ with `json`, `async`, `popup`, `request`, and `deferred` packages
 
 ## Installation
 
@@ -54,24 +54,53 @@ target/release/doge-code
 
 ### Emacs Integration Setup
 
-To use the Emacs integration:
+The Emacs side consists of two optional layers: the CLI helper (`doge-code.el`) and the MCP client (`doge-mcp.el`). Install both to unlock the complete experience.
 
-1. Copy the Emacs Lisp files from the `elisp/` directory to your Emacs load path
-2. Add the following to your Emacs configuration:
+1. **Install the Lisp files**
+   - Copy `elisp/doge-code.el` and `elisp/doge-mcp.el` into a directory on your Emacs `load-path` (e.g. `~/.emacs.d/lisp/`).
+   - In `init.el` (or equivalent) add:
 
-```elisp
-(require 'doge-code)
-(require 'doge-mcp)
-(add-hook 'prog-mode-hook 'doge-code-mode)
-```
+     ```elisp
+     (add-to-list 'load-path "~/.emacs.d/lisp/")
+     (require 'doge-code)
+     (require 'doge-mcp)
+     (add-hook 'prog-mode-hook #'doge-code-mode)
+     ```
 
-3. Set the path to the Doge-Code binary:
+2. **Point Emacs at the Doge-Code binary**
 
-```elisp
-(setq doge-code-executable "/path/to/doge-code/target/release/dgc")
-```
+   ```elisp
+   (setq doge-code-executable "/path/to/doge-code/target/release/dgc")
+   ```
 
-See `elisp/emacs-integration.md` for detailed installation instructions and usage.
+   Optionally toggle presentation defaults:
+
+   ```elisp
+   (setq doge-code-use-popup t
+         doge-code-show-progress t
+         doge-code-timeout 300)
+   ```
+
+3. **Configure the MCP client (optional but recommended)**
+   - Start the server in a shell: `dgc --mcp-server` (default `http://127.0.0.1:8000`).
+   - Tell Emacs where to connect:
+
+     ```elisp
+     (setq doge-mcp-server-url "http://127.0.0.1:8000")
+     (setq doge-mcp-default-tools '("search_repomap" "fs_read"))
+     ```
+
+   - Keybindings provided by `doge-mcp.el` (loaded after `doge-code.el`):
+     - `C-c d m s` → `doge-mcp-search-repomap`
+     - `C-c d m f` → `doge-mcp-fs-read`
+     - `C-c d m l` → `doge-mcp-list-tools`
+
+4. **Verify the setup**
+   - `M-x doge-code-mode` should display "Doge" in the mode line.
+   - Run `M-x doge-code-analyze-region` over a snippet and confirm a response buffer or popup appears.
+   - With the MCP server running, invoke `M-x doge-mcp-list-tools`; a buffer should list available tools.
+
+See `elisp/emacs-integration.md` for deeper customization tips and troubleshooting.
 
 ## Configuration
 

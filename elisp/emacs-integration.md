@@ -8,12 +8,14 @@ The integration consists of two main components:
 1. **CLI-based Minimum Viable Integration (MVI)**: Calling Doge-Code's `--exec` subcommand as a subprocess from Emacs for code analysis and refactoring.
 2. **MCP Server Mode**: Running Doge-Code as an HTTP server and calling tools (e.g., `search_repomap`, `fs_read`) in real-time from the Emacs client.
 
-This integration is automatically enabled in Emacs programming modes with convenient keybindings. It leverages Doge-Code's tool system (static code analysis, file operations, etc.) to assist with code analysis, explanation, and refactoring.
+After installation you can enable the minor mode wherever you want (e.g. by adding it to `prog-mode-hook`). The keybindings described below become available whenever `doge-code-mode` is active. The integration leverages Doge-Code's tool system (static code analysis, file operations, etc.) to assist with code analysis, explanation, and refactoring.
 
 ## Requirements
 
 - **Doge-Code**: Built binary (`dgc` or `doge-code`). Dependencies are defined in Cargo.toml.
-- **Emacs**: Version 27.1 or higher. Packages: `json`, `async`, `request`, `popup` (install via MELPA).
+- **Emacs**: Version 27.1 or higher.
+  - CLI helper (`doge-code.el`): depends on the built-in `json`, `async`, and the third-party `popup` package.
+  - MCP client (`doge-mcp.el`): depends on `request`, `json`, and `deferred`.
 - **API Key**: Set OpenAI-compatible API key in `OPENAI_API_KEY` environment variable.
 - **Project Root**: Doge-Code operates within a project root. The directory of the Emacs buffer serves as the root.
 
