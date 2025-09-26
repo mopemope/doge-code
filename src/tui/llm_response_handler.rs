@@ -31,6 +31,10 @@ impl TuiApp {
         self.llm_parsing_buffer.push_str(&clean);
         debug!(appended_content = %clean, "Appended token to llm_parsing_buffer");
 
+        if self.current_stream_start.is_none() {
+            self.current_stream_start = Some(self.log.len());
+        }
+
         // Accumulate content in last_llm_response_content for duplicate checking
         let accumulated_content = match &self.last_llm_response_content {
             Some(existing) => format!("{}{}", existing, clean),
@@ -77,13 +81,13 @@ impl TuiApp {
 
         // Add the first part as a new line (with margin)
         let first_line_with_margin = format!("{}{}", margin_str, parts[0]);
-        self.log.push(first_line_with_margin);
+        self.push_log(first_line_with_margin);
 
         // Parts from the second onward are added as new lines (with margin)
         for seg in parts.iter().skip(1) {
             // Adjust condition if you want to skip empty lines; here we keep margin even for empty lines
             let line_with_margin = format!("{}{}", margin_str, seg);
-            self.log.push(line_with_margin);
+            self.push_log(line_with_margin);
         }
     }
 
@@ -120,63 +124,17 @@ impl TuiApp {
         if should_add_content {
             debug!(provided_content = %content, "Adding content");
 
-            // Parse content for code blocks and add with proper formatting
-            let re = Regex::new(r"(?s)```(\w*)\n(.*?)```").unwrap();
-            let mut last_end = 0;
-            let captures: Vec<_> = re.captures_iter(content).collect();
-
-            if !captures.is_empty() {
-                for cap in captures {
-                    debug!("Found codeblock cap: {:?}", cap);
-                    let whole_match = cap.get(0).unwrap();
-                    let lang = cap.get(1).map_or("", |m| m.as_str());
-                    let code_content = cap.get(2).map_or("", |m| m.as_str());
-
-                    // Add text before the code block
-                    if whole_match.start() > last_end {
-                        let text_content = &content[last_end..whole_match.start()];
-                        if !text_content.is_empty() {
-                            for line in text_content.lines() {
-                                let line_with_margin = format!("  {}", line);
-                                self.push_log(line_with_margin);
-                            }
-                        }
-                    }
-
-                    // Add the code block
-                    self.push_log(format!("  ```{}", lang));
-                    for line in code_content.lines() {
-                        let line_with_margin = format!("    {}", line);
-                        self.push_log(line_with_margin);
-                    }
-                    self.push_log("  ```".to_string());
-
-                    last_end = whole_match.end();
-                }
-
-                // Add any text after the last code block
-                if last_end < content.len() {
-                    let text_content = &content[last_end..];
-                    if !text_content.is_empty() {
-                        for line in text_content.lines() {
-                            let line_with_margin = format!("  {}", line);
-                            self.push_log(line_with_margin);
-                        }
-                    }
-                }
-            } else {
-                // If no code blocks, treat as plain text
-                for line in content.lines() {
-                    let line_with_margin = format!("  {}", line);
-                    debug!("line_with_margin: {}", line_with_margin);
-                    self.push_log(line_with_margin);
-                }
+            if let Some(start) = self.current_stream_start.take()
+                && start <= self.log.len()
+            {
+                self.log.truncate(start);
             }
 
-            // Update last_llm_response_content to the new content
+            self.push_markdown_response(content);
             self.last_llm_response_content = Some(content.to_string());
         } else {
             debug!("Skipping content addition due to duplicate check");
+            self.current_stream_start = None;
         }
 
         // Reset the flag after the response has been fully added

@@ -48,6 +48,7 @@ impl TuiApp {
             spinner_state: self.spinner_state,
             scroll_state: &self.scroll_state,
             todo_list: &self.todo_list,
+            theme: &self.theme,
         };
         let plan = build_render_plan(params);
 
@@ -143,61 +144,19 @@ impl TuiApp {
         }
 
         let mut lines: Vec<Line> = Vec::new();
-        let mut is_in_code_block = false;
         let max_displayable = area.height as usize;
         let lines_to_render = plan.log_lines.len().min(max_displayable);
 
-        for (i, log_line) in plan.log_lines.iter().take(lines_to_render).enumerate() {
-            if i < 5 || i >= lines_to_render.saturating_sub(5) {
-                // reserved for verbose debug logging when needed
-            }
-
-            if log_line.starts_with("```") || log_line.trim_start().starts_with("```") {
-                is_in_code_block = !is_in_code_block;
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    theme.code_block_style,
-                )));
-            } else if is_in_code_block {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    theme.code_block_style,
-                )));
-            } else if log_line.starts_with("[shell]$") {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    Style::default().fg(Color::Yellow),
-                )));
-            } else if log_line.starts_with("[stdout]") {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    Style::default().fg(Color::White),
-                )));
-            } else if log_line.starts_with("[stderr]") {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    Style::default().fg(Color::Red),
-                )));
-            } else if log_line.starts_with("> ") {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    Style::default().fg(Color::Cyan),
-                )));
-            } else if log_line.starts_with("[tool]") {
-                let mut style = Style::default().fg(Color::Yellow);
-                if log_line.contains("=> ERR") {
-                    style = Style::default().fg(Color::Red);
-                } else if log_line.contains("=> OK") {
-                    style = Style::default().fg(Color::Green);
-                }
-                lines.push(Line::from(Span::styled(log_line.clone(), style)));
-            } else if log_line.starts_with("  ") {
-                lines.push(Line::from(Span::styled(
-                    log_line.clone(),
-                    theme.llm_response_style,
-                )));
+        for styled_line in plan.log_lines.iter().take(lines_to_render) {
+            let spans: Vec<Span> = styled_line
+                .spans
+                .iter()
+                .map(|segment| Span::styled(segment.content.clone(), segment.style))
+                .collect();
+            if spans.is_empty() {
+                lines.push(Line::default());
             } else {
-                lines.push(Line::from(log_line.as_str()));
+                lines.push(Line::from(spans));
             }
         }
 

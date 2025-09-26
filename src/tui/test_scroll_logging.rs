@@ -1,9 +1,19 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::TuiApp;
+    use crate::tui::state::{LogEntry, TuiApp};
 
     fn create_test_app() -> TuiApp {
         TuiApp::new("test", None, "dark").unwrap()
+    }
+
+    fn log_texts(app: &TuiApp) -> Vec<String> {
+        app.log
+            .iter()
+            .map(|entry| match entry {
+                LogEntry::Plain(text) => text.clone(),
+                LogEntry::Markdown(text) => text.clone(),
+            })
+            .collect()
     }
 
     #[test]
@@ -103,9 +113,10 @@ mod tests {
         assert_eq!(app.scroll_state.new_messages, 3);
 
         // Verify the lines were actually added
-        assert!(app.log.contains(&"Line 1".to_string()));
-        assert!(app.log.contains(&"Line 2".to_string()));
-        assert!(app.log.contains(&"Line 3".to_string()));
+        let texts = log_texts(&app);
+        assert!(texts.contains(&"Line 1".to_string()));
+        assert!(texts.contains(&"Line 2".to_string()));
+        assert!(texts.contains(&"Line 3".to_string()));
     }
 
     #[test]
@@ -116,8 +127,9 @@ mod tests {
         app.push_log("  Indented text");
         app.push_log("    Code block");
 
-        assert!(app.log.contains(&"  Indented text".to_string()));
-        assert!(app.log.contains(&"    Code block".to_string()));
+        let texts = log_texts(&app);
+        assert!(texts.contains(&"  Indented text".to_string()));
+        assert!(texts.contains(&"    Code block".to_string()));
     }
 
     #[test]
@@ -132,9 +144,10 @@ mod tests {
         app.append_stream_token_structured("!\nNext line");
 
         // Check that streaming content was added to log immediately
-        assert!(app.log.iter().any(|line| line.contains("Hello")));
-        assert!(app.log.iter().any(|line| line.contains("world")));
-        assert!(app.log.iter().any(|line| line.contains("Next line")));
+        let texts = log_texts(&app);
+        assert!(texts.iter().any(|line| line.contains("Hello")));
+        assert!(texts.iter().any(|line| line.contains("world")));
+        assert!(texts.iter().any(|line| line.contains("Next line")));
 
         // Check that new messages were counted
         assert!(app.scroll_state.new_messages > 0);

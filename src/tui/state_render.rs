@@ -21,51 +21,6 @@ pub fn truncate_display(s: &str, max: usize) -> String {
     out
 }
 
-pub fn wrap_display(s: &str, max: usize) -> Vec<String> {
-    if max == 0 {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    let mut width = 0usize;
-
-    for ch in s.chars() {
-        let ch_w = ch.width().unwrap_or(0);
-
-        // Handle newline characters explicitly
-        if ch == '\n' {
-            lines.push(cur);
-            cur = String::new();
-            width = 0;
-            continue;
-        }
-
-        // Skip zero-width characters
-        if ch_w == 0 {
-            cur.push(ch);
-            continue;
-        }
-
-        // If adding this character would exceed the max width, wrap the line
-        if width + ch_w > max {
-            lines.push(cur);
-            cur = String::new();
-            width = 0;
-        }
-
-        cur.push(ch);
-        width += ch_w;
-    }
-
-    // Add the final line if it's not empty
-    if !cur.is_empty() || lines.is_empty() {
-        lines.push(cur);
-    }
-
-    lines
-}
-
 /// Build a render plan. This function was moved from `state.rs` to avoid a very large
 /// `state.rs` file. It references the UI state types defined in `state.rs`.
 pub fn build_render_plan(
@@ -133,21 +88,18 @@ pub fn build_render_plan(
 
     // Build wrapped physical lines from logs with scroll support
     let max_log_rows = main_content_height as usize;
-    let mut all_phys_lines: Vec<String> = Vec::new();
+    let mut all_phys_lines: Vec<crate::tui::state::StyledLine> = Vec::new();
 
-    // Build all physical lines first
-    for line in log.iter() {
-        let line = line.trim_end_matches('\n');
-        let parts = wrap_display(line, w_usize);
-        all_phys_lines.extend(parts);
+    for entry in log.iter() {
+        all_phys_lines.extend(entry.render(w_usize, params.theme));
     }
 
-    // Add todo list items to the log as regular messages
     if !todo_list.is_empty() {
-        // Add a separator before the todo list
-        all_phys_lines.push("--- Todo List ---".to_string());
+        all_phys_lines.extend(
+            crate::tui::state::LogEntry::Plain("--- Todo List ---".to_string())
+                .render(w_usize, params.theme),
+        );
 
-        // Add each todo item with its status symbol
         for todo in todo_list {
             let status_symbol = match todo.status.as_str() {
                 "pending" => "◌",
@@ -155,31 +107,31 @@ pub fn build_render_plan(
                 "completed" => "✓",
                 _ => "○",
             };
-            all_phys_lines.push(format!("{} {}", status_symbol, todo.content));
+            let line = format!("{} {}", status_symbol, todo.content);
+            all_phys_lines
+                .extend(crate::tui::state::LogEntry::Plain(line).render(w_usize, params.theme));
         }
 
-        // Add a separator after the todo list
-        all_phys_lines.push("-----------------".to_string());
+        all_phys_lines.extend(
+            crate::tui::state::LogEntry::Plain("-----------------".to_string())
+                .render(w_usize, params.theme),
+        );
     }
 
     let total_lines = all_phys_lines.len();
 
     // Apply scroll offset
     let log_lines = if scroll_state.auto_scroll || scroll_state.offset == 0 {
-        // Show the most recent lines (bottom of log)
         let start_idx = total_lines.saturating_sub(max_log_rows);
         let mut lines = all_phys_lines[start_idx..].to_vec();
-        // Ensure we don't exceed the display area
         if lines.len() > max_log_rows {
             lines.truncate(max_log_rows);
         }
         lines
     } else {
-        // Show lines based on scroll offset (offset 0 = most recent, higher = older)
         let end_idx = total_lines.saturating_sub(scroll_state.offset);
         let start_idx = end_idx.saturating_sub(max_log_rows);
         let mut lines = all_phys_lines[start_idx..end_idx].to_vec();
-        // Ensure we don't exceed the display area
         if lines.len() > max_log_rows {
             lines.truncate(max_log_rows);
         }

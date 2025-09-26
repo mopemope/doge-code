@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::{Status, build_render_plan};
+    use crate::tui::state::{LogEntry, Status, build_render_plan};
 
     #[test]
     fn test_no_token_display_when_zero() {
         // Test that token usage is not displayed when tokens_used = 0
         let title = "Test Title";
         let status = Status::Idle;
-        let log = vec![];
+        let log: Vec<LogEntry> = Vec::new();
         // let input_mode = InputMode::Normal; // 不要
         let w = 80;
         let h = 24;
@@ -18,6 +18,7 @@ mod tests {
         //     .unwrap()
         //     .textarea; // 不要
 
+        let theme = crate::tui::theme::Theme::dark();
         let params = crate::tui::state::BuildRenderPlanParams {
             title,
             status,
@@ -28,6 +29,7 @@ mod tests {
             spinner_state,
             scroll_state: &crate::tui::state::ScrollState::default(),
             todo_list: &[],
+            theme: &theme,
         };
         let plan = build_render_plan(params);
 

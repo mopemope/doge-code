@@ -1,4 +1,7 @@
-use crate::tui::state::{ScrollState, build_render_plan};
+use crate::tui::{
+    state::{LogEntry, ScrollState, build_render_plan},
+    theme::Theme,
+};
 
 #[test]
 fn test_build_render_plan_with_scroll() {
@@ -12,19 +15,15 @@ fn test_build_render_plan_with_scroll() {
         auto_scroll: false,
         ..Default::default()
     };
-    let log_lines = vec![
-        "Line 1".to_string(),
-        "Line 2".to_string(),
-        "Line 3".to_string(),
-        "Line 4".to_string(),
-        "Line 5".to_string(),
-        "Line 6".to_string(),
-        "Line 7".to_string(),
-        "Line 8".to_string(),
-        "Line 9".to_string(),
-        "Line 10".to_string(),
-    ];
+    let log_lines: Vec<LogEntry> = vec![
+        "Line 1", "Line 2", "Line 3", "Line 4", "Line 5", "Line 6", "Line 7", "Line 8", "Line 9",
+        "Line 10",
+    ]
+    .into_iter()
+    .map(|line| LogEntry::Plain(line.to_string()))
+    .collect();
     let todo_items = vec![];
+    let theme = Theme::dark();
 
     let params = crate::tui::state::BuildRenderPlanParams {
         title: "Test Title",
@@ -36,6 +35,7 @@ fn test_build_render_plan_with_scroll() {
         spinner_state: 0,
         scroll_state: &scroll_state,
         todo_list: &todo_items,
+        theme: &theme,
         // textarea: &textarea, // 削除
         // input_mode: crate::tui::state::InputMode::Normal, // 削除
         // height, // 削除
@@ -47,8 +47,8 @@ fn test_build_render_plan_with_scroll() {
 
     // Verify that the log lines are correctly truncated and displayed
     assert_eq!(plan.log_lines.len(), main_content_height as usize);
-    assert_eq!(plan.log_lines[0], "Line 1"); // 修正
-    assert_eq!(plan.log_lines[7], "Line 8"); // 修正
+    assert_eq!(plan.log_lines[0].text(), "Line 1");
+    assert_eq!(plan.log_lines[7].text(), "Line 8");
 
     // Verify that scroll info is present and correct
     assert!(plan.scroll_info.is_some());
