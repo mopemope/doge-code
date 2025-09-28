@@ -143,7 +143,7 @@ fn count_lines_in_diff(diff_text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 

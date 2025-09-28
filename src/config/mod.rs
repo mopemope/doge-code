@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub project_root: PathBuf,
     pub git_root: Option<PathBuf>,
     pub llm: LlmConfig,
+    pub watch_config: WatchConfig, // Added watch configuration
     pub enable_stream_tools: bool,
     pub theme: String,                             // newly added
     pub project_instructions_file: Option<String>, // newly added
@@ -61,6 +62,7 @@ impl Default for AppConfig {
             project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             git_root: None,
             llm: LlmConfig::default(),
+            watch_config: WatchConfig::default(), // Added default watch config
             enable_stream_tools: false,
             theme: "dark".to_string(),
             project_instructions_file: None,
@@ -86,6 +88,52 @@ pub struct LlmConfig {
     pub retry_jitter_ms: u64,
     pub respect_retry_after: bool,
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchConfig {
+    pub include_patterns: Option<Vec<String>>,
+    pub exclude_patterns: Option<Vec<String>>,
+    pub debounce_delay_ms: Option<u64>,
+    pub rate_limit_duration_ms: Option<u64>,
+    pub ai_comment_pattern: Option<String>,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            include_patterns: Some(vec![
+                "**/*.rs".to_string(),
+                "**/*.js".to_string(),
+                "**/*.ts".to_string(),
+                "**/*.jsx".to_string(),
+                "**/*.tsx".to_string(),
+                "**/*.py".to_string(),
+                "**/*.go".to_string(),
+                "**/*.java".to_string(),
+                "**/*.md".to_string(),
+                "**/*.txt".to_string(),
+                "**/*.yaml".to_string(),
+                "**/*.yml".to_string(),
+                "**/*.toml".to_string(),
+                "**/*.json".to_string(),
+                "**/*.html".to_string(),
+                "**/*.css".to_string(),
+                "**/*.xml".to_string(),
+            ]),
+            exclude_patterns: Some(vec![
+                "**/node_modules/**".to_string(),
+                "**/target/**".to_string(),
+                "**/build/**".to_string(),
+                "**/dist/**".to_string(),
+                "**/.git/**".to_string(),
+                "**/vendor/**".to_string(),
+            ]),
+            debounce_delay_ms: Some(500),
+            rate_limit_duration_ms: Some(2000),
+            ai_comment_pattern: Some("// AI!:".to_string()),
+        }
+    }
 }
 
 impl Default for LlmConfig {
@@ -115,6 +163,7 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     pub project_root: Option<std::path::PathBuf>,
     pub llm: Option<PartialLlmConfig>,
+    pub watch: Option<PartialWatchConfig>, // Added watch configuration
     pub enable_stream_tools: Option<bool>,
     pub theme: Option<String>,                     // newly added
     pub project_instructions_file: Option<String>, // newly added
@@ -130,6 +179,15 @@ pub struct FileConfig {
     // Allowed paths for file access
     pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialWatchConfig {
+    pub include_patterns: Option<Vec<String>>,
+    pub exclude_patterns: Option<Vec<String>>,
+    pub debounce_delay_ms: Option<u64>,
+    pub rate_limit_duration_ms: Option<u64>,
+    pub ai_comment_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -346,6 +404,52 @@ impl AppConfig {
             }
         }
 
+        // Handle watch configuration (project config takes precedence over file config)
+        let watch_config = {
+            let default_watch_cfg = WatchConfig::default();
+            let mut watch_cfg = default_watch_cfg.clone();
+
+            // Apply file config values if present
+            if let Some(file_watch) = &file_cfg.watch {
+                if let Some(include_patterns) = &file_watch.include_patterns {
+                    watch_cfg.include_patterns = Some(include_patterns.clone());
+                }
+                if let Some(exclude_patterns) = &file_watch.exclude_patterns {
+                    watch_cfg.exclude_patterns = Some(exclude_patterns.clone());
+                }
+                if let Some(debounce_delay_ms) = file_watch.debounce_delay_ms {
+                    watch_cfg.debounce_delay_ms = Some(debounce_delay_ms);
+                }
+                if let Some(rate_limit_duration_ms) = file_watch.rate_limit_duration_ms {
+                    watch_cfg.rate_limit_duration_ms = Some(rate_limit_duration_ms);
+                }
+                if let Some(ai_comment_pattern) = &file_watch.ai_comment_pattern {
+                    watch_cfg.ai_comment_pattern = Some(ai_comment_pattern.clone());
+                }
+            }
+
+            // Apply project config values if present (overrides file config)
+            if let Some(project_watch) = &project_cfg.watch {
+                if let Some(include_patterns) = &project_watch.include_patterns {
+                    watch_cfg.include_patterns = Some(include_patterns.clone());
+                }
+                if let Some(exclude_patterns) = &project_watch.exclude_patterns {
+                    watch_cfg.exclude_patterns = Some(exclude_patterns.clone());
+                }
+                if let Some(debounce_delay_ms) = project_watch.debounce_delay_ms {
+                    watch_cfg.debounce_delay_ms = Some(debounce_delay_ms);
+                }
+                if let Some(rate_limit_duration_ms) = project_watch.rate_limit_duration_ms {
+                    watch_cfg.rate_limit_duration_ms = Some(rate_limit_duration_ms);
+                }
+                if let Some(ai_comment_pattern) = &project_watch.ai_comment_pattern {
+                    watch_cfg.ai_comment_pattern = Some(ai_comment_pattern.clone());
+                }
+            }
+
+            watch_cfg
+        };
+
         Ok(Self {
             base_url,
             model,
@@ -353,6 +457,7 @@ impl AppConfig {
             project_root,
             git_root,
             llm,
+            watch_config, // Added watch config
             enable_stream_tools: std::env::var("DOGE_STREAM_TOOLS")
                 .ok()
                 .and_then(|v| v.parse().ok())
