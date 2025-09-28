@@ -447,6 +447,7 @@ mod tests {
             project_root: project_root.clone(),
             git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
+            watch_config: crate::config::WatchConfig::default(), // Add default WatchConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
@@ -480,6 +481,7 @@ mod tests {
             project_root: project_root.clone(),
             git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
+            watch_config: crate::config::WatchConfig::default(), // Add default WatchConfig
             enable_stream_tools: false,               // Add enable_stream_tools
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file

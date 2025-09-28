@@ -214,7 +214,7 @@ pub fn todo_write_from_base_path(
     todos: Vec<TodoItem>,
     session_id: &str,
     base_path: &str,
-    config: &AppConfig,
+    _config: &AppConfig,
 ) -> Result<TodoList> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");

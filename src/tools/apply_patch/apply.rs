@@ -105,7 +105,7 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+
     use std::path::PathBuf;
 
     async fn apply_patch(

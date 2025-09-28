@@ -89,7 +89,7 @@ pub async fn apply_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+
     use std::path::PathBuf;
     use tokio::fs;
 

@@ -41,7 +41,7 @@ pub fn todo_read(session_id: &str, config: &AppConfig) -> Result<TodoList> {
 pub fn todo_read_from_base_path(
     session_id: &str,
     base_path: &str,
-    config: &AppConfig,
+    _config: &AppConfig,
 ) -> Result<TodoList> {
     // Define the todo file path
     let todo_dir = Path::new(base_path).join(".doge").join("todos");
