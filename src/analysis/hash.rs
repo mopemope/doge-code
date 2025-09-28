@@ -30,12 +30,17 @@ pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
 pub async fn calculate_file_hashes(file_paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     use tokio::task;
 
+    // Handle empty file list case to avoid division by zero
+    if file_paths.is_empty() {
+        return HashMap::new();
+    }
+
     let mut tasks = Vec::new();
 
     // Split files into chunks for parallel processing
     // Set the number of chunks to the minimum of the number of CPUs and the number of files
     let num_chunks = std::cmp::min(num_cpus::get(), file_paths.len());
-    // Calculate the chunk size (set to 1 if the number of files is 0)
+    // Calculate the chunk size (num_chunks is guaranteed to be > 0 since file_paths is not empty)
     let chunk_size = std::cmp::max(1, file_paths.len().div_ceil(num_chunks));
     let chunks: Vec<Vec<PathBuf>> = file_paths
         .chunks(chunk_size)
@@ -189,6 +194,14 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains_key(&file1));
         assert!(hashes.contains_key(&file2));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_file_hashes_empty() {
+        let files: Vec<PathBuf> = vec![];
+        let hashes = calculate_file_hashes(&files).await;
+
+        assert_eq!(hashes.len(), 0);
     }
 
     #[test]

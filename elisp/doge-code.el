@@ -87,13 +87,15 @@ CALLBACK is called with the raw stdout string when the process completes."
          (binary doge-code-executable)
          (args-list args)
          (timeout doge-code-timeout))
+    (unless (executable-find binary)
+      (error "Doge-Code executable not found: %s" binary))
     (setq doge-code--current-process
           (async-start
            `(lambda ()
               (let ((process-environment ',process-environment))
                 (with-temp-buffer
-                  (let ((process (apply #'start-process "doge-code" (current-buffer)
-                                        ,binary ,args-list)))
+                  (let* ((cmd-args (cons ,binary ',args-list))
+                         (process (apply #'start-process "doge-code" (current-buffer) cmd-args)))
                     (unless process
                       (error "Failed to start Doge-Code process"))
                     (with-timeout (,timeout
