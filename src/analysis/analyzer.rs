@@ -84,10 +84,15 @@ impl Analyzer {
         let file_count = files.len();
         info!("Found {} target files for analysis", file_count);
 
+        if file_count == 0 {
+            info!("No target files found; returning empty RepoMap");
+            return Ok(RepoMap::default());
+        }
+
         let num_cpus = num_cpus::get();
         // Set the number of chunks to the minimum of the number of CPUs and the number of files
         let num_chunks = std::cmp::min(num_cpus, file_count);
-        // Calculate the chunk size (set to 1 if the number of files is 0)
+        // Calculate the chunk size, ensuring we always process at least one file per chunk
         let chunk_size = std::cmp::max(1, file_count.div_ceil(num_chunks));
         let chunks: Vec<Vec<PathBuf>> = files
             .chunks(chunk_size)
@@ -452,6 +457,17 @@ mod tests {
         for file in &files {
             println!("  {}", file.display());
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_parallel_handles_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        let mut analyzer = Analyzer::new(root).await.unwrap();
+        let repomap = analyzer.build_parallel().await.unwrap();
+
+        assert!(repomap.symbols.is_empty());
     }
 
     #[tokio::test]
