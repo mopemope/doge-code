@@ -235,7 +235,11 @@ impl Executor {
         let client = self.client.as_ref().unwrap();
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
-        let request = build_rewrite_prompt(prompt, snippet, file_path);
+        let original_file_path = file_path.map(|path| path.to_string());
+        let display_path = original_file_path
+            .as_deref()
+            .map(|path| format_location_hint(path, &self.cfg.project_root));
+        let request = build_rewrite_prompt(prompt, snippet, display_path.as_deref());
 
         let mut msgs = Vec::new();
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
@@ -280,7 +284,8 @@ impl Executor {
                             "rewritten_code": rewritten,
                             "tokens_used": tokens_used,
                             "raw_response": raw_response,
-                            "file_path": file_path,
+                            "file_path": original_file_path,
+                            "display_path": display_path,
                         });
                         println!(
                             "{}",
@@ -299,7 +304,9 @@ impl Executor {
                             "success": false,
                             "error": parse_error,
                             "raw_response": raw_response,
-                            "tokens_used": tokens_used
+                            "tokens_used": tokens_used,
+                            "file_path": original_file_path,
+                            "display_path": display_path,
                         });
                         println!(
                             "{}",
@@ -319,7 +326,9 @@ impl Executor {
                     let output = serde_json::json!({
                         "success": false,
                         "error": e.to_string(),
-                        "tokens_used": tokens_used
+                        "tokens_used": tokens_used,
+                        "file_path": original_file_path,
+                        "display_path": display_path,
                     });
                     println!(
                         "{}",
@@ -342,6 +351,21 @@ const REWRITE_MARKER_START: &str = "<REWRITTEN_CODE>";
 const REWRITE_MARKER_END: &str = "</REWRITTEN_CODE>";
 const SNIPPET_MARKER_START: &str = "<ORIGINAL_SNIPPET>";
 const SNIPPET_MARKER_END: &str = "</ORIGINAL_SNIPPET>";
+
+fn format_location_hint(file_path: &str, project_root: &Path) -> String {
+    let file_path = Path::new(file_path);
+
+    if let Ok(relative) = file_path.strip_prefix(project_root)
+        && relative.components().count() > 0
+    {
+        return relative.display().to_string();
+    }
+
+    file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_path.display().to_string())
+}
 
 fn build_rewrite_prompt(prompt: &str, snippet: &str, file_path: Option<&str>) -> String {
     let location_hint = file_path.unwrap_or("the current buffer");
@@ -407,6 +431,7 @@ pub async fn run_rewrite(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -510,6 +535,23 @@ mod tests {
         let original = "fn add(a: i32, b: i32) -> i32 { a + b }";
         let rewritten = super::extract_rewritten_code(&response, original).unwrap();
         assert_eq!(rewritten, snippet);
+    }
+
+    #[test]
+    fn test_format_location_hint_relative_path() {
+        let root = PathBuf::from("/tmp/doge_project");
+        let file_path = root.join("src").join("lib.rs");
+        let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
+        let expected = format!("src{}lib.rs", std::path::MAIN_SEPARATOR);
+        assert_eq!(hint, expected);
+    }
+
+    #[test]
+    fn test_format_location_hint_outside_project() {
+        let root = PathBuf::from("/tmp/doge_project");
+        let file_path = PathBuf::from("/var/tmp/other.rs");
+        let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
+        assert_eq!(hint, "other.rs");
     }
 
     // Additional tests could be added here, such as:

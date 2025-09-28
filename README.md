@@ -387,6 +387,8 @@ Doge-Code offers comprehensive integration with Emacs through two complementary 
 Direct integration with the Doge-Code CLI for:
 - Code analysis and suggestions (`C-c d a`)
 - Prompt-driven region/buffer rewrites applied inline (`C-c d r`)
+  - Requests abort gracefully if you edit the selection before the response arrives, preventing accidental overwrites.
+  - Success messages include the relative project path reported by the CLI so you can verify the rewrite scope at a glance.
 - Code explanations (`C-c d e`)
 - Buffer-wide analysis (`C-c d b`)
 
