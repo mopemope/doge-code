@@ -114,12 +114,16 @@ In `init.el`:
 ### 1. CLI-based Integration (MVI)
 Asynchronously calls Doge-Code's CLI from Emacs: analysis/explanation flows use the `exec` subcommand, while inline rewrites invoke the dedicated `rewrite` subcommand. Results are parsed from JSON (`--json`) and either displayed or applied directly in the buffer as appropriate.
 
+When a rewrite is requested, Doge-Code now normalizes the reported file path relative to the configured project root before it is sent to the LLM and echoed back in JSON responses. This avoids leaking absolute paths while still grounding the model in the correct file context and gives Emacs enough information to show which buffer was rewritten.
+
 #### Commands
 - **doge-code-analyze-region** (`C-c d a`):
   - Analyze selected region and display improvement suggestions.
   - Example: Select a function and analyze → Display "Code improvements: ..." in popup.
 - **doge-code-refactor-region** (`C-c d r`):
   - Prompt for a rewrite instruction, send the selected region (or whole buffer if no region) to Doge-Code, and replace the text with the rewritten snippet returned from the CLI.
+  - The Emacs helper now verifies that the buffer has not changed while the LLM request is in-flight; if the user edits the region, the rewrite is aborted with a clear message.
+  - Success messages include the relative project path reported by the Rust CLI (e.g. `src/lib.rs`) so you can confirm the rewrite scope.
   - Example: Highlight a function, supply "Convert to async/await" as the prompt, and the region is replaced with the rewritten implementation.
 - **doge-code-explain-region** (`C-c d e`):
   - Explain selected region (plain text output).

@@ -152,13 +152,14 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
       (doge-code--show-progress "Error occurred")
       (message "Doge-Code Error: %s" response))))
 
-(defun doge-code--rewrite-snippet (prompt temp-file buffer start-marker end-marker file-path)
+(defun doge-code--rewrite-snippet (prompt temp-file buffer start-marker end-marker file-path original-snippet)
   "Rewrite snippet by invoking Doge-Code rewrite subcommand.
 PROMPT is the user instruction.
 TEMP-FILE contains the snippet to rewrite.
 BUFFER is the target buffer that should receive the rewrite.
 START-MARKER and END-MARKER delimit the region to replace.
-FILE-PATH optionally provides context to the CLI."
+FILE-PATH optionally provides context to the CLI.
+ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying the rewrite."
   (let ((args (append (list "rewrite" "--prompt" prompt "--code-file" temp-file "--json")
                       (when file-path (list "--file-path" file-path)))))
     (doge-code--async-run
@@ -173,29 +174,41 @@ FILE-PATH optionally provides context to the CLI."
                (condition-case err
                    (let ((result (json-read-from-string output)))
                      (if (and (assoc 'success result) (assoc-default 'success result))
-                         (let ((rewritten (assoc-default 'rewritten_code result))
-                               (tokens (or (assoc-default 'tokens_used result) 0)))
-                           (if (not rewritten)
-                               (progn
-                                 (doge-code--show-progress "Error occurred")
-                                 (message "Doge-Code Error: rewrite result missing rewritten_code"))
-                             (let ((beg (marker-position start-marker))
-                                   (end (marker-position end-marker)))
-                               (if (and beg end)
-                                   (progn
-                                     (save-excursion
-                                       (let ((inhibit-read-only t))
-                                         (goto-char beg)
-                                         (delete-region beg end)
-                                         (insert rewritten)))
-                                     (doge-code--show-progress "Completed")
-                                     (message "Doge-Code rewrite applied (tokens: %d)" tokens))
-                                 (progn
-                                   (doge-code--show-progress "Error occurred")
-                                   (message "Doge-Code rewrite aborted: region changed"))))))
-                       (doge-code--show-progress "Error occurred")
-                       (message "Doge-Code Error: %s"
-                                (or (assoc-default 'error result) "Rewrite failed"))))
+                         (let* ((rewritten-raw (assoc-default 'rewritten_code result))
+                                (rewritten (unless (eq rewritten-raw json-null) rewritten-raw))
+                                (tokens-raw (assoc-default 'tokens_used result))
+                                (tokens (if (or (null tokens-raw) (eq tokens-raw json-null)) 0 tokens-raw))
+                                (display-path-raw (assoc-default 'display_path result))
+                                (display-path (when (and display-path-raw (not (eq display-path-raw json-null)))
+                                                display-path-raw)))
+                            (if (not rewritten)
+                                (progn
+                                  (doge-code--show-progress "Error occurred")
+                                  (message "Doge-Code Error: rewrite result missing rewritten_code"))
+                              (let ((beg (marker-position start-marker))
+                                    (end (marker-position end-marker)))
+                                (if (and beg end)
+                                    (let ((current-snippet (buffer-substring-no-properties beg end)))
+                                      (if (not (string= current-snippet original-snippet))
+                                          (progn
+                                            (doge-code--show-progress "Error occurred")
+                                            (message "Doge-Code rewrite aborted: region changed during rewrite"))
+                                        (progn
+                                          (save-excursion
+                                            (let ((inhibit-read-only t))
+                                              (goto-char beg)
+                                              (delete-region beg end)
+                                              (insert rewritten)))
+                                          (doge-code--show-progress "Completed")
+                                          (if display-path
+                                              (message "Doge-Code rewrite applied to %s (tokens: %d)" display-path tokens)
+                                            (message "Doge-Code rewrite applied (tokens: %d)" tokens)))))
+                                  (progn
+                                    (doge-code--show-progress "Error occurred")
+                                    (message "Doge-Code rewrite aborted: region changed"))))))
+                      (doge-code--show-progress "Error occurred")
+                      (message "Doge-Code Error: %s"
+                               (or (assoc-default 'error result) "Rewrite failed"))))
                  (error
                  (doge-code--show-progress "Error occurred")
                   (message "Doge-Code Error: %s\nResponse: %s" err output)))))
@@ -226,9 +239,11 @@ FILE-PATH optionally provides context to the CLI."
            (start-marker (copy-marker beg))
            (end-marker (copy-marker end t))
            (file-path (when buffer-file-name (expand-file-name buffer-file-name))))
+      (when (string-empty-p snippet)
+        (user-error "Selected region is empty"))
       (with-temp-file temp-file
         (insert snippet))
-      (doge-code--rewrite-snippet prompt temp-file target-buffer start-marker end-marker file-path)
+      (doge-code--rewrite-snippet prompt temp-file target-buffer start-marker end-marker file-path snippet)
       (when has-region
         (deactivate-mark)))))
 
