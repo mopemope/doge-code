@@ -160,6 +160,30 @@ pub fn handle_normal_mode_key(
         }
 
         KeyEvent {
+            code: KeyCode::Char('v'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            // Handle Ctrl+V to paste clipboard content
+            match arboard::Clipboard::new() {
+                Ok(mut clipboard) => match clipboard.get_text() {
+                    Ok(contents) => {
+                        app.textarea.insert_str(&contents);
+                        app.dirty = true;
+                    }
+                    Err(e) => {
+                        app.push_log(format!("[Clipboard] Failed to read clipboard: {}", e));
+                        app.dirty = true;
+                    }
+                },
+                Err(e) => {
+                    app.push_log(format!("[Clipboard] Failed to access clipboard: {}", e));
+                    app.dirty = true;
+                }
+            }
+        }
+
+        KeyEvent {
             code: KeyCode::End,
             modifiers,
             ..
