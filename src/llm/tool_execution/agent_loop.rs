@@ -5,7 +5,7 @@ use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
 use crate::tools::todo_write::TodoList;
 use anyhow::{Context, Result, anyhow};
-use humantime::format_rfc3339_seconds;
+use chrono::{DateTime, FixedOffset, Utc};
 use std::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -377,15 +377,17 @@ pub async fn run_agent_loop(
                 };
 
                 let start_time = std::time::SystemTime::now();
-                let timestamp = format_rfc3339_seconds(start_time).to_string();
-                let timestamp_short = &timestamp[11..19]; // HH:MM:SS format
+                let utc_datetime: DateTime<Utc> = start_time.into();
+                let jst_offset = FixedOffset::east_opt(9 * 3600).unwrap(); // JST is UTC+9
+                let jst_datetime = utc_datetime.with_timezone(&jst_offset);
+                let timestamp_short = jst_datetime.format("%H:%M:%S").to_string(); // HH:MM:SS format in JST
 
                 // Send indented lines to create a visually distinct tool execution display
                 let _ = tx.send(format!(
                     "🛠️  [{timestamp_short}] {tool_icon} {} - {}",
                     tc.function.name, status_icon
                 ));
-                let _ = tx.send(format!(" Args: {args_str}"));
+                let _ = tx.send(format!(" \x1b[93mArgs: {args_str}\x1b[0m")); // Bright yellow color for arguments, reset to default
                 let _ = tx.send("".to_string()); // Extra blank line for spacing
             }
 
