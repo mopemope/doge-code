@@ -5,6 +5,7 @@ use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
 use crate::tools::todo_write::TodoList;
 use anyhow::{Context, Result, anyhow};
+use humantime::format_rfc3339_seconds;
 use std::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -353,10 +354,10 @@ pub async fn run_agent_loop(
                 result_summary = t;
             }
 
-            // Send a single combined log line: usage + success/failure marker with icons
+            // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
                 let success = res.is_ok();
-                let status_icon = if success { "✅" } else { "❌" };
+                let status_icon = if success { "✅ SUCCESS" } else { "❌ FAILED" };
 
                 // Map tool names to appropriate icons
                 let tool_icon = match tc.function.name.as_str() {
@@ -375,11 +376,17 @@ pub async fn run_agent_loop(
                     _ => "🔧", // default icon
                 };
 
-                let combined = format!(
-                    "{} {}({}) => {}",
-                    tool_icon, tc.function.name, args_str, status_icon
-                );
-                let _ = tx.send(combined);
+                let start_time = std::time::SystemTime::now();
+                let timestamp = format_rfc3339_seconds(start_time).to_string();
+                let timestamp_short = &timestamp[11..19]; // HH:MM:SS format
+
+                // Send indented lines to create a visually distinct tool execution display
+                let _ = tx.send(format!(
+                    "🛠️  [{timestamp_short}] {tool_icon} {} - {}",
+                    tc.function.name, status_icon
+                ));
+                let _ = tx.send(format!(" Args: {args_str}"));
+                let _ = tx.send("".to_string()); // Extra blank line for spacing
             }
 
             // Also emit structured debug/error logs (include truncated result summary for debugging)

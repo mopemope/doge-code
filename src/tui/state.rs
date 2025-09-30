@@ -309,18 +309,20 @@ fn compose_inline_style(
 }
 
 fn is_tool_line(line: &str) -> bool {
-    // Check if line starts with a known tool emoji
-    line.starts_with("🗂️") ||  // fs_list
-    line.starts_with("📖") ||  // fs_read
-    line.starts_with("📚") ||  // fs_read_many_files
-    line.starts_with("📝") ||  // fs_write
-    line.starts_with("🔍") ||  // search_text
-    line.starts_with("🔧") ||  // execute_bash, default
-    line.starts_with("📁") ||  // find_file
-    line.starts_with("🗺️") ||  // search_repomap
-    line.starts_with("✏️") ||  // edit
-    line.starts_with("🧩") ||  // apply_patch
-    line.starts_with("📋") // todo_write/tod_read
+    // Check if line contains tool execution format with timestamp and tool emoji
+    line.contains("[") && 
+    (line.contains(" 🛠️ ") ||  // tool execution indicator
+    line.contains("🗂️") ||  // fs_list
+    line.contains("📖") ||  // fs_read
+    line.contains("📚") ||  // fs_read_many_files
+    line.contains("📝") ||  // fs_write
+    line.contains("🔍") ||  // search_text
+    line.contains("🔧") ||  // execute_bash, default
+    line.contains("📁") ||  // find_file
+    line.contains("🗺️") ||  // search_repomap
+    line.contains("✏️") ||  // edit
+    line.contains("🧩") ||  // apply_patch
+    line.contains("📋"))   // todo_write/tod_read
 }
 
 fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
@@ -335,13 +337,13 @@ fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
     } else if line.starts_with("> ") {
         Style::default().fg(Color::Cyan)
     } else if is_tool_line(line) {
-        // New emoji-based tool format
+        // Enhanced styling for tool executions with timestamp
         if line.contains(" => ❌") {
-            Style::default().fg(Color::Red)
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else if line.contains(" => ✅") {
-            Style::default().fg(Color::Green)
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Yellow) // For any other tool format
+            Style::default().fg(Color::Cyan) // For in-progress or neutral tool display
         }
     } else if line.starts_with("[tool]") {
         // Old format for backward compatibility
