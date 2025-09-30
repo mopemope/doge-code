@@ -353,11 +353,32 @@ pub async fn run_agent_loop(
                 result_summary = t;
             }
 
-            // Send a single combined log line: usage + success/failure marker
+            // Send a single combined log line: usage + success/failure marker with icons
             if let Some(tx) = &ui_tx {
                 let success = res.is_ok();
-                let status = if success { "OK" } else { "ERR" };
-                let combined = format!("[tool] {}({}) => {}", tc.function.name, args_str, status);
+                let status_icon = if success { "✅" } else { "❌" };
+
+                // Map tool names to appropriate icons
+                let tool_icon = match tc.function.name.as_str() {
+                    "fs_list" => "🗂️",
+                    "fs_read" => "📖",
+                    "fs_read_many_files" => "📚",
+                    "fs_write" => "📝",
+                    "search_text" => "🔍",
+                    "execute_bash" => "🔧",
+                    "find_file" => "📁",
+                    "search_repomap" => "🗺️",
+                    "edit" => "✏️",
+                    "apply_patch" => "🧩",
+                    "todo_write" => "📋",
+                    "todo_read" => "📋",
+                    _ => "🔧", // default icon
+                };
+
+                let combined = format!(
+                    "{} {}({}) => {}",
+                    tool_icon, tc.function.name, args_str, status_icon
+                );
                 let _ = tx.send(combined);
             }
 
