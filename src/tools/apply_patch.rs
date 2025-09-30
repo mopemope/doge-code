@@ -13,28 +13,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "apply_patch".to_string(),
-            description: "Atomically applies a patch to a file in the unified diff format. This is a powerful and safe way to perform complex, multi-location edits.
-
-This tool is typically used in a sequence:
-1. Read the original file content and its hash using `fs_read`.
-2. Generate the desired `modified_content`.
-3. Generate the `patch_content`.
-4. Call this tool, `apply_patch`, with the `patch_content` and the original hash to safely modify the file.
-
-Arguments:
-- `file_path` (string, required): The absolute path to the file you want to modify.
-- `patch_content` (string, required): The patch to apply, formatted as a unified diff. Example:
-  ```diff
-  --- a/original_file.txt
-  +++ b/modified_file.txt
-  @@ -1,3 +1,3 @@
-   line 1
-  -line 2 to be removed
-  +line 2 to be added
-   line 3
-  ```
-
-Returns a detailed result object, indicating success or failure with a descriptive message.".to_string(),
+            description: "Atomically applies a unified diff patch to a file. Provide an absolute `file_path` plus the diff `patch_content`; the tool reports whether the change applied cleanly. Common workflow: inspect the file with `fs_read`, prepare the diff, then call `apply_patch`. Example snippet:\n  ```diff\n  --- a/original.txt\n  +++ b/original.txt\n  @@\n  -old line\n  +new line\n  ```".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
