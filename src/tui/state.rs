@@ -310,8 +310,8 @@ fn compose_inline_style(
 
 fn is_tool_line(line: &str) -> bool {
     // Check if line contains tool execution format with timestamp and tool emoji
-    line.contains("[") && 
-    (line.contains(" 🛠️ ") ||  // tool execution indicator
+    line.contains("[")
+        && (line.contains(" 🛠️ ") ||  // tool execution indicator
     line.contains("🗂️") ||  // fs_list
     line.contains("📖") ||  // fs_read
     line.contains("📚") ||  // fs_read_many_files
@@ -322,7 +322,7 @@ fn is_tool_line(line: &str) -> bool {
     line.contains("🗺️") ||  // search_repomap
     line.contains("✏️") ||  // edit
     line.contains("🧩") ||  // apply_patch
-    line.contains("📋"))   // todo_write/tod_read
+    line.contains("📋")) // todo_write/tod_read
 }
 
 fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
@@ -341,7 +341,9 @@ fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
         if line.contains(" => ❌") {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else if line.contains(" => ✅") {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Cyan) // For in-progress or neutral tool display
         }
