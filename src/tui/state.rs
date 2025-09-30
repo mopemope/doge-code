@@ -308,6 +308,21 @@ fn compose_inline_style(
     style
 }
 
+fn is_tool_line(line: &str) -> bool {
+    // Check if line starts with a known tool emoji
+    line.starts_with("🗂️") ||  // fs_list
+    line.starts_with("📖") ||  // fs_read
+    line.starts_with("📚") ||  // fs_read_many_files
+    line.starts_with("📝") ||  // fs_write
+    line.starts_with("🔍") ||  // search_text
+    line.starts_with("🔧") ||  // execute_bash, default
+    line.starts_with("📁") ||  // find_file
+    line.starts_with("🗺️") ||  // search_repomap
+    line.starts_with("✏️") ||  // edit
+    line.starts_with("🧩") ||  // apply_patch
+    line.starts_with("📋") // todo_write/tod_read
+}
+
 fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
     if line.starts_with("```") || line.trim_start().starts_with("```") {
         theme.code_block_style
@@ -319,7 +334,17 @@ fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
         Style::default().fg(Color::Red)
     } else if line.starts_with("> ") {
         Style::default().fg(Color::Cyan)
+    } else if is_tool_line(line) {
+        // New emoji-based tool format
+        if line.contains(" => ❌") {
+            Style::default().fg(Color::Red)
+        } else if line.contains(" => ✅") {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Yellow) // For any other tool format
+        }
     } else if line.starts_with("[tool]") {
+        // Old format for backward compatibility
         if line.contains("=> ERR") {
             Style::default().fg(Color::Red)
         } else if line.contains("=> OK") {
