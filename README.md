@@ -400,6 +400,70 @@ Run Doge-Code as an MCP HTTP server for real-time tool access:
 
 See `elisp/emacs-integration.md` for detailed installation and usage instructions.
 
+## MCP Server Usage
+
+### Starting the MCP Server
+
+You can start the Doge-Code MCP server using the command line:
+
+```bash
+./target/release/doge-code --mcp-server
+# Default address: http://127.0.0.1:8000
+```
+
+Or specify a custom address:
+
+```bash
+./target/release/doge-code --mcp-server 127.0.0.1:9000
+```
+
+### Calling the MCP Server from External Clients
+
+The server exposes several MCP tools that can be called from external applications:
+
+#### Available Tools
+- `say_hello` - Simple connectivity test
+- `search_repomap` - Search repository symbols with filtering options
+- `fs_read` - Read files from the project
+- `fs_read_many_files` - Read multiple files at once
+- `search_text` - Search for text patterns in files
+- `fs_list` - List files and directories
+- `find_file` - Find files by name
+
+#### Example HTTP Request
+
+```bash
+curl -X POST http://127.0.0.1:8000/mcp/call_tool \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "search_repomap",
+    "arguments": {
+      "keyword_search": ["main", "function"],
+      "limit": 10
+    }
+  }'
+```
+
+### Connecting to External MCP Servers
+
+Doge-Code can also connect to external MCP servers by configuring them in your config.toml:
+
+```toml
+[[mcp_servers]]
+name = "external-server"
+enabled = true
+address = "http://external-server:8080"
+transport = "http"
+
+[[mcp_servers]]
+name = "stdio-server"
+enabled = true
+address = "uvx some-mcp-server"
+transport = "stdio"
+```
+
+In this setup, Doge-Code will act as an MCP client to connect to these external servers, allowing you to access tools from multiple MCP servers through a unified interface.
+
 ## Available Tools
 
 The LLM has access to comprehensive tools for autonomous operation:
