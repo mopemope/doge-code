@@ -424,13 +424,29 @@ pub(super) fn filter_and_group_symbols(
                 if start < end {
                     let mut snippet = lines[start..end].join("\n");
                     if snippet.len() > snippet_max_chars {
-                        // Find a valid character boundary for truncation
-                        let truncate_at = snippet
-                            .char_indices()
-                            .nth(snippet_max_chars)
-                            .map(|(i, _)| i)
-                            .unwrap_or(snippet.len());
-                        snippet.truncate(truncate_at);
+                        // Safely truncate to the nearest character boundary that doesn't exceed snippet_max_chars
+                        let mut valid_truncate_at = 0;
+                        let mut char_count = 0;
+
+                        // Iterate through characters and find the position after snippet_max_chars characters
+                        for (byte_idx, _) in snippet.char_indices() {
+                            if char_count >= snippet_max_chars {
+                                break;
+                            }
+                            valid_truncate_at = byte_idx;
+                            char_count += 1;
+                        }
+
+                        // At this point, valid_truncate_at is the byte position of the last character to keep
+                        // Now we need to advance to the end of that last character to get the truncation point
+                        if char_count >= snippet_max_chars {
+                            // Get the byte length of the character at valid_truncate_at, to move to next position
+                            if let Some(ch) = snippet[valid_truncate_at..].chars().next() {
+                                valid_truncate_at += ch.len_utf8();
+                            }
+                        }
+
+                        snippet.truncate(valid_truncate_at);
                         snippet.push_str("...");
                     }
                     symbol_result.code_snippet = snippet;
