@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 pub fn init_logging() -> Result<()> {
@@ -13,6 +13,16 @@ pub fn init_logging() -> Result<()> {
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
+
+    // Set up panic hook to log panics to the same tracing subscriber
+    std::panic::set_hook(Box::new(|panic_info| {
+        let panic_msg = format!("PANIC: {}", panic_info);
+        error!("{}", panic_msg);
+
+        // Also print to stderr to ensure it's always visible
+        eprintln!("{}", panic_msg);
+    }));
+
     info!("logging initialized");
     Ok(())
 }

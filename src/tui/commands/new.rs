@@ -22,32 +22,32 @@ impl TuiExecutor {
 
             // Spawn an asynchronous task
             tokio::spawn(async move {
-                info!(
-                    "Starting background repomap generation for project at {:?}",
-                    project_root
-                );
-                let start_time = std::time::Instant::now();
-                let mut analyzer = match Analyzer::new(&project_root).await {
-                    Ok(analyzer) => analyzer,
+                match Analyzer::new(&project_root).await {
+                    Ok(mut analyzer) => {
+                        info!(
+                            "Starting background repomap generation for project at {:?}",
+                            project_root
+                        );
+                        let start_time = std::time::Instant::now();
+
+                        match analyzer.build().await {
+                            Ok(map) => {
+                                let duration = start_time.elapsed();
+                                let symbol_count = map.symbols.len();
+                                *repomap_clone.write().await = Some(map);
+                                tracing::debug!(
+                                    "Background repomap generation completed in {:?} with {} symbols",
+                                    duration,
+                                    symbol_count
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to build RepoMap: {:?}", e);
+                            }
+                        }
+                    }
                     Err(e) => {
                         error!("Failed to create Analyzer: {:?}", e);
-                        return;
-                    }
-                };
-
-                match analyzer.build().await {
-                    Ok(map) => {
-                        let duration = start_time.elapsed();
-                        let symbol_count = map.symbols.len();
-                        *repomap_clone.write().await = Some(map);
-                        tracing::debug!(
-                            "Background repomap generation completed in {:?} with {} symbols",
-                            duration,
-                            symbol_count
-                        );
-                    }
-                    Err(e) => {
-                        error!("Failed to build RepoMap: {:?}", e);
                     }
                 }
             });
@@ -117,32 +117,32 @@ impl TuiExecutor {
                 };
 
                 if !is_initialized {
-                    info!(
-                        "Starting background repomap generation for project at {:?}",
-                        project_root
-                    );
-                    let start_time = std::time::Instant::now();
-                    let mut analyzer = match Analyzer::new(&project_root).await {
-                        Ok(analyzer) => analyzer,
+                    match Analyzer::new(&project_root).await {
+                        Ok(mut analyzer) => {
+                            info!(
+                                "Starting background repomap generation for project at {:?}",
+                                project_root
+                            );
+                            let start_time = std::time::Instant::now();
+
+                            match analyzer.build().await {
+                                Ok(map) => {
+                                    let duration = start_time.elapsed();
+                                    let symbol_count = map.symbols.len();
+                                    *repomap_clone.write().await = Some(map);
+                                    tracing::debug!(
+                                        "Background repomap generation completed in {:?} with {} symbols",
+                                        duration,
+                                        symbol_count
+                                    );
+                                }
+                                Err(e) => {
+                                    error!("Failed to build RepoMap: {:?}", e);
+                                }
+                            }
+                        }
                         Err(e) => {
                             error!("Failed to create Analyzer: {:?}", e);
-                            return;
-                        }
-                    };
-
-                    match analyzer.build().await {
-                        Ok(map) => {
-                            let duration = start_time.elapsed();
-                            let symbol_count = map.symbols.len();
-                            *repomap_clone.write().await = Some(map);
-                            tracing::debug!(
-                                "Background repomap generation completed in {:?} with {} symbols",
-                                duration,
-                                symbol_count
-                            );
-                        }
-                        Err(e) => {
-                            error!("Failed to build RepoMap: {:?}", e);
                         }
                     }
                 } else {
