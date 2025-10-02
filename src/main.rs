@@ -121,22 +121,15 @@ async fn main() -> Result<()> {
 
         // Spawn an asynchronous task to build the repomap
         tokio::spawn(async move {
-            let start_time = std::time::Instant::now();
-
-            // Send a message to notify that the repomap is building
-            if let Err(e) = status_tx.send("::status:repomap_building".to_string()) {
-                tracing::error!("Failed to send repomap building message: {:?}", e);
-            }
-
             match crate::analysis::Analyzer::new(&project_root).await {
                 Ok(mut analyzer) => match analyzer.build().await {
                     Ok(map) => {
-                        let duration = start_time.elapsed();
+                        let start_time = std::time::Instant::now();
                         let symbol_count = map.symbols.len();
                         *repomap_clone.write().await = Some(map);
                         tracing::debug!(
                             "Background repomap generation completed in {:?} with {} symbols",
-                            duration,
+                            start_time.elapsed(),
                             symbol_count
                         );
                         // Send a message to notify that the repomap is ready

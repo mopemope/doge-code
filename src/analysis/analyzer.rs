@@ -111,37 +111,48 @@ impl Analyzer {
             let _root_clone = self.root.clone();
 
             let task = task::spawn(async move {
-                let mut parser = Parser::new();
-                let mut current_lang: Language = tree_sitter_rust::LANGUAGE.into();
-                parser
-                    .set_language(&current_lang)
-                    .context("set rust language in task")?;
+                // Wrap the task logic in a catch_unwind to handle potential panics
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Create parser and language in the task
+                    let mut parser = Parser::new();
+                    let mut current_lang: Language = tree_sitter_rust::LANGUAGE.into();
+                    if let Err(e) = parser.set_language(&current_lang) {
+                        return Err(anyhow::anyhow!(
+                            "Failed to set rust language in task: {}",
+                            e
+                        ));
+                    }
 
-                let mut map = RepoMap::default();
-                let mut _parsed_file_count = 0;
+                    let mut map = RepoMap::default();
+                    let mut _parsed_file_count = 0;
 
-                for file_path in chunk {
-                    match parse_single_file(&file_path, &mut parser, &mut current_lang) {
-                        Ok(Some(parse_result)) => {
-                            match process_single_file(file_path.clone(), parse_result) {
-                                Ok(single_file_map) => map = map.merge(single_file_map),
-                                Err(e) => error!(
-                                    "Failed to process file {}: {:?}",
-                                    file_path.display(),
-                                    e
-                                ),
+                    for file_path in chunk {
+                        match parse_single_file(&file_path, &mut parser, &mut current_lang) {
+                            Ok(Some(parse_result)) => {
+                                match process_single_file(file_path.clone(), parse_result) {
+                                    Ok(single_file_map) => map = map.merge(single_file_map),
+                                    Err(e) => error!(
+                                        "Failed to process file {}: {:?}",
+                                        file_path.display(),
+                                        e
+                                    ),
+                                }
+                            }
+                            Ok(None) => {
+                                debug!("Skipped file (no parser): {}", file_path.display());
+                            }
+                            Err(e) => {
+                                error!("Failed to parse file {}: {:?}", file_path.display(), e);
                             }
                         }
-                        Ok(None) => {
-                            debug!("Skipped file (no parser): {}", file_path.display());
-                        }
-                        Err(e) => {
-                            error!("Failed to parse file {}: {:?}", file_path.display(), e);
-                        }
                     }
-                }
 
-                Ok::<RepoMap, anyhow::Error>(map)
+                    Ok::<RepoMap, anyhow::Error>(map)
+                }))
+                .unwrap_or_else(|_| {
+                    error!("Task panicked while processing files");
+                    Err(anyhow::anyhow!("Task panicked during file processing"))
+                })
             });
             tasks.push(task);
         }
@@ -155,8 +166,12 @@ impl Analyzer {
                 Ok(Err(e)) => {
                     error!("Task failed with error: {:?}", e);
                 }
-                Err(_e) => {
-                    // error!("Task join failed with error: {:?}", e);
+                Err(join_error) => {
+                    if join_error.is_panic() {
+                        error!("Task panicked: {:?}", join_error);
+                    } else {
+                        error!("Task join failed with error: {:?}", join_error);
+                    }
                 }
             }
         }
@@ -292,34 +307,47 @@ impl Analyzer {
             let mut tasks = Vec::new();
             for chunk in chunks {
                 let task = task::spawn(async move {
-                    let mut parser = Parser::new();
-                    let mut current_lang: Language = tree_sitter_rust::LANGUAGE.into();
-                    parser
-                        .set_language(&current_lang)
-                        .context("set rust language in incremental task")?;
+                    // Wrap the task logic in a catch_unwind to handle potential panics
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Create parser and language in the task
+                        let mut parser = Parser::new();
+                        let mut current_lang: Language = tree_sitter_rust::LANGUAGE.into();
+                        if let Err(e) = parser.set_language(&current_lang) {
+                            return Err(anyhow::anyhow!(
+                                "Failed to set rust language in incremental task: {}",
+                                e
+                            ));
+                        }
 
-                    let mut map = RepoMap::default();
-                    for file_path in chunk {
-                        match parse_single_file(&file_path, &mut parser, &mut current_lang) {
-                            Ok(Some(parse_result)) => {
-                                match process_single_file(file_path.clone(), parse_result) {
-                                    Ok(single_file_map) => map = map.merge(single_file_map),
-                                    Err(e) => error!(
-                                        "Failed to process file {}: {:?}",
-                                        file_path.display(),
-                                        e
-                                    ),
+                        let mut map = RepoMap::default();
+                        for file_path in chunk {
+                            match parse_single_file(&file_path, &mut parser, &mut current_lang) {
+                                Ok(Some(parse_result)) => {
+                                    match process_single_file(file_path.clone(), parse_result) {
+                                        Ok(single_file_map) => map = map.merge(single_file_map),
+                                        Err(e) => error!(
+                                            "Failed to process file {}: {:?}",
+                                            file_path.display(),
+                                            e
+                                        ),
+                                    }
+                                }
+                                Ok(None) => {
+                                    debug!("Skipped file (no parser): {}", file_path.display());
+                                }
+                                Err(e) => {
+                                    error!("Failed to parse file {}: {:?}", file_path.display(), e);
                                 }
                             }
-                            Ok(None) => {
-                                debug!("Skipped file (no parser): {}", file_path.display());
-                            }
-                            Err(e) => {
-                                error!("Failed to parse file {}: {:?}", file_path.display(), e);
-                            }
                         }
-                    }
-                    Ok::<RepoMap, anyhow::Error>(map)
+                        Ok::<RepoMap, anyhow::Error>(map)
+                    }))
+                    .unwrap_or_else(|_| {
+                        error!("Incremental task panicked while processing files");
+                        Err(anyhow::anyhow!(
+                            "Incremental task panicked during file processing"
+                        ))
+                    })
                 });
                 tasks.push(task);
             }
@@ -328,7 +356,13 @@ impl Analyzer {
                 match task.await {
                     Ok(Ok(map)) => new_maps.push(map),
                     Ok(Err(e)) => error!("Incremental task failed: {:?}", e),
-                    Err(e) => error!("Incremental task join failed: {:?}", e),
+                    Err(join_error) => {
+                        if join_error.is_panic() {
+                            error!("Incremental task panicked: {:?}", join_error);
+                        } else {
+                            error!("Incremental task join failed: {:?}", join_error);
+                        }
+                    }
                 }
             }
         }

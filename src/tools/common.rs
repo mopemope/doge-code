@@ -327,15 +327,24 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
+        // Use a more robust approach to handle potential RwLock poisoning
         let repomap_guard = self.repomap.read().await;
-        match if let Some(map) = &*repomap_guard {
+        let result = match if let Some(map) = &*repomap_guard {
             self.search_repomap_tools.search_repomap(map, args)
         } else {
             Err(anyhow::anyhow!("repomap is still generating"))
         } {
-            Ok(result) => {
+            Ok(search_result) => Ok(search_result),
+            Err(e) => {
+                self.record_tool_call_failure("search_repomap")?;
+                return Err(e);
+            }
+        };
+
+        match result {
+            Ok(search_result) => {
                 self.record_tool_call_success("search_repomap")?;
-                Ok(result)
+                Ok(search_result)
             }
             Err(e) => {
                 self.record_tool_call_failure("search_repomap")?;
