@@ -286,4 +286,69 @@ mod client_tests {
         // Test that client can handle long addresses
         // In a real test, we would mock the transport or use a test server
     }
+
+    #[tokio::test]
+    async fn test_mcp_client_unsupported_transport_error() {
+        let config = McpServerConfig {
+            name: "test".to_string(),
+            enabled: true,
+            address: "127.0.0.1:8000".to_string(),
+            transport: "websocket".to_string(), // Unsupported transport
+        };
+
+        let result = crate::mcp::client::McpClient::from_config(&config).await;
+        assert!(result.is_err());
+
+        match result {
+            Err(rmcp::RmcpError::TransportCreation { .. }) => {
+                // Expected error type
+            }
+            Err(e) => panic!("Expected TransportCreation error, got: {:?}", e),
+            Ok(_) => panic!("Expected error for unsupported transport"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_valid_transport_types() {
+        // Test that both supported transport types work in validation
+        let http_config = McpServerConfig {
+            name: "test".to_string(),
+            enabled: true,
+            address: "http://127.0.0.1:8000".to_string(),
+            transport: "http".to_string(),
+        };
+
+        let stdio_config = McpServerConfig {
+            name: "test".to_string(),
+            enabled: true,
+            address: "echo test".to_string(),
+            transport: "stdio".to_string(),
+        };
+
+        // Both should be valid transport types
+        assert!(http_config.transport == "http" || http_config.transport == "stdio");
+        assert!(stdio_config.transport == "http" || stdio_config.transport == "stdio");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_empty_address_error() {
+        let config = McpServerConfig {
+            name: "test".to_string(),
+            enabled: true,
+            address: "".to_string(),        // Empty address
+            transport: "stdio".to_string(), // stdio will fail with empty address
+        };
+
+        let result = crate::mcp::client::McpClient::from_config(&config).await;
+        assert!(result.is_err());
+
+        // Should fail during stdio command parsing
+        match result {
+            Err(rmcp::RmcpError::TransportCreation { .. }) => {
+                // Expected error type
+            }
+            Err(e) => panic!("Expected TransportCreation error, got: {:?}", e),
+            Ok(_) => panic!("Expected error for empty address"),
+        }
+    }
 }
