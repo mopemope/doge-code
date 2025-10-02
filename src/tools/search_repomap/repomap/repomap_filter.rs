@@ -424,7 +424,13 @@ pub(super) fn filter_and_group_symbols(
                 if start < end {
                     let mut snippet = lines[start..end].join("\n");
                     if snippet.len() > snippet_max_chars {
-                        snippet.truncate(snippet_max_chars);
+                        // Find a valid character boundary for truncation
+                        let truncate_at = snippet
+                            .char_indices()
+                            .nth(snippet_max_chars)
+                            .map(|(i, _)| i)
+                            .unwrap_or(snippet.len());
+                        snippet.truncate(truncate_at);
                         snippet.push_str("...");
                     }
                     symbol_result.code_snippet = snippet;
