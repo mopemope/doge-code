@@ -3,7 +3,7 @@
 //! provided via command-line arguments, interact with the LLM, use tools,
 //! and output the final result to stdout.
 
-use crate::analysis::{Analyzer, RepoMap};
+use crate::analysis::RepoMap;
 use crate::config::AppConfig;
 use crate::llm::{self, OpenAIClient};
 use crate::session::SessionManager;
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::info;
 
 /// Executor for the `exec` subcommand.
 /// This struct holds the necessary components to interact with the LLM and tools.
@@ -38,41 +38,10 @@ impl Executor {
             .with_session_manager(session_manager);
 
         // Only initialize repomap if not disabled
+        // For the exec command, we rely on the main initialization to handle repomap building
+        // to prevent duplicate analyzer work and duplicate logging
         if !cfg.no_repomap {
-            let repomap_clone = repomap.clone();
-            let project_root = cfg.project_root.clone();
-
-            // Spawn an asynchronous task
-            tokio::spawn(async move {
-                match Analyzer::new(&project_root).await {
-                    Ok(mut analyzer) => {
-                        info!(
-                            "Starting background repomap generation for project at {:?}",
-                            project_root
-                        );
-                        let start_time = std::time::Instant::now();
-
-                        match analyzer.build().await {
-                            Ok(map) => {
-                                let duration = start_time.elapsed();
-                                let symbol_count = map.symbols.len();
-                                *repomap_clone.write().await = Some(map);
-                                tracing::debug!(
-                                    "Background repomap generation completed in {:?} with {} symbols",
-                                    duration,
-                                    symbol_count
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to build RepoMap: {:?}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to create Analyzer: {:?}", e);
-                    }
-                }
-            });
+            info!("Repomap initialization deferred to main initialization in exec command");
         } else {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }

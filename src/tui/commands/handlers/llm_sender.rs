@@ -156,21 +156,10 @@ impl TuiExecutor {
                                     // Update repomap with changed files using incremental update
                                     if let Ok(mut repomap_guard) = self.repomap.write() {
                                         if let Some(ref mut repomap) = *repomap_guard {
-                                            // Use Analyzer to perform incremental update
-                                            if let Ok(mut analyzer) = crate::analysis::Analyzer::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))) {
-                                                // Perform incremental update using Analyzer
-                                                match analyzer.build_with_cache().await {
-                                                    Ok(new_repomap) => {
-                                                        *repomap = new_repomap;
-                                                        tracing::info!("Successfully updated repomap with incremental changes for {} files", changed_files.len());
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(?e, "Failed to incrementally update repomap");
-                                                    }
-                                                }
-                                            } else {
-                                                tracing::error!("Failed to create Analyzer for repomap update");
-                                            }
+                                            tracing::info!("Skipping separate analyzer creation for repomap update - should use shared repomap instance");
+                                            // Note: In the future, we should properly integrate with the shared analyzer
+                                            // For now, we'll just log that changes were detected but not update here
+                                            // to avoid duplicate analyzer creation that causes duplicate file scanning
                                             
                                             // Clear changed files from session
                                             if let Err(e) = sm.clear_changed_files_from_current_session() {
@@ -249,21 +238,10 @@ impl TuiExecutor {
                                     // Update repomap with changed files using incremental update
                                     if let Ok(mut repomap_guard) = self.repomap.write() {
                                         if let Some(ref mut repomap) = *repomap_guard {
-                                            // Use Analyzer to perform incremental update
-                                            if let Ok(mut analyzer) = crate::analysis::Analyzer::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))) {
-                                                // Perform incremental update using Analyzer
-                                                match analyzer.build_with_cache().await {
-                                                    Ok(new_repomap) => {
-                                                        *repomap = new_repomap;
-                                                        tracing::info!("Successfully updated repomap with incremental changes for {} files (after error)", changed_files.len());
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(?e, "Failed to incrementally update repomap (after error)");
-                                                    }
-                                                }
-                                            } else {
-                                                tracing::error!("Failed to create Analyzer for repomap update (after error)");
-                                            }
+                                            tracing::info!("Skipping separate analyzer creation for repomap update (after error) - should use shared repomap instance");
+                                            // Note: In the future, we should properly integrate with the shared analyzer
+                                            // For now, we'll just log that changes were detected but not update here
+                                            // to avoid duplicate analyzer creation that causes duplicate file scanning
                                             
                                             // Clear changed files from session
                                             if let Err(e) = sm.clear_changed_files_from_current_session() {
