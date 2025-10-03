@@ -104,51 +104,10 @@ impl TuiExecutor {
         let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
 
         // Only initialize repomap if not disabled and it's not already initialized
+        // In the new_with_repomap flow, we rely on the repomap being initialized elsewhere
+        // (e.g., by the main thread), so we don't spawn our own initialization task here.
         if !cfg.no_repomap {
-            let repomap_clone = repomap.clone();
-            let project_root = cfg.project_root.clone();
-
-            // Spawn a task to check if repomap is initialized and generate if needed
-            tokio::spawn(async move {
-                // Check if repomap is already initialized
-                let is_initialized = {
-                    let repomap_guard = repomap_clone.read().await;
-                    repomap_guard.is_some()
-                };
-
-                if !is_initialized {
-                    match Analyzer::new(&project_root).await {
-                        Ok(mut analyzer) => {
-                            info!(
-                                "Starting background repomap generation for project at {:?}",
-                                project_root
-                            );
-                            let start_time = std::time::Instant::now();
-
-                            match analyzer.build().await {
-                                Ok(map) => {
-                                    let duration = start_time.elapsed();
-                                    let symbol_count = map.symbols.len();
-                                    *repomap_clone.write().await = Some(map);
-                                    tracing::debug!(
-                                        "Background repomap generation completed in {:?} with {} symbols",
-                                        duration,
-                                        symbol_count
-                                    );
-                                }
-                                Err(e) => {
-                                    error!("Failed to build RepoMap: {:?}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to create Analyzer: {:?}", e);
-                        }
-                    }
-                } else {
-                    info!("Repomap already initialized, skipping generation");
-                }
-            });
+            info!("Repomap initialization deferred to external initialization in new_with_repomap");
         } else {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
