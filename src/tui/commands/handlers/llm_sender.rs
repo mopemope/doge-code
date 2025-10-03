@@ -153,19 +153,12 @@ impl TuiExecutor {
                                     // Get changed files
                                     let changed_files = sm.get_changed_files_from_current_session();
                                     
-                                    // Update repomap with changed files using incremental update
-                                    if let Ok(mut repomap_guard) = self.repomap.write() {
-                                        if let Some(ref mut repomap) = *repomap_guard {
-                                            tracing::info!("Skipping separate analyzer creation for repomap update - should use shared repomap instance");
-                                            // Note: In the future, we should properly integrate with the shared analyzer
-                                            // For now, we'll just log that changes were detected but not update here
-                                            // to avoid duplicate analyzer creation that causes duplicate file scanning
-                                            
-                                            // Clear changed files from session
-                                            if let Err(e) = sm.clear_changed_files_from_current_session() {
-                                                tracing::error!(?e, "Failed to clear changed files from session");
-                                            }
-                                        }
+                                    // Update repomap with changed files - skipped to avoid duplicate analyzer creation
+                                    // The main analyzer handles the full repomap which should include changes
+                                    
+                                    // Clear changed files from session
+                                    if let Err(e) = sm.clear_changed_files_from_current_session() {
+                                        tracing::error!(?e, "Failed to clear changed files from session");
                                     }
                                     
                                     if let Some(tx) = &tx {
@@ -235,19 +228,12 @@ impl TuiExecutor {
                                     // Get changed files
                                     let changed_files = sm.get_changed_files_from_current_session();
                                     
-                                    // Update repomap with changed files using incremental update
-                                    if let Ok(mut repomap_guard) = self.repomap.write() {
-                                        if let Some(ref mut repomap) = *repomap_guard {
-                                            tracing::info!("Skipping separate analyzer creation for repomap update (after error) - should use shared repomap instance");
-                                            // Note: In the future, we should properly integrate with the shared analyzer
-                                            // For now, we'll just log that changes were detected but not update here
-                                            // to avoid duplicate analyzer creation that causes duplicate file scanning
-                                            
-                                            // Clear changed files from session
-                                            if let Err(e) = sm.clear_changed_files_from_current_session() {
-                                                tracing::error!(?e, "Failed to clear changed files from session");
-                                            }
-                                        }
+                                    // Update repomap with changed files - skipped to avoid duplicate analyzer creation
+                                    // The main analyzer handles the full repomap which should include changes
+                                    
+                                    // Clear changed files from session
+                                    if let Err(e) = sm.clear_changed_files_from_current_session() {
+                                        tracing::error!(?e, "Failed to clear changed files from session");
                                     }
                                     
                                     if let Some(tx) = &tx {
