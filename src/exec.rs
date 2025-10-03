@@ -40,9 +40,7 @@ impl Executor {
         // Only initialize repomap if not disabled
         // For the exec command, we rely on the main initialization to handle repomap building
         // to prevent duplicate analyzer work and duplicate logging
-        if !cfg.no_repomap {
-            info!("Repomap initialization deferred to main initialization in exec command");
-        } else {
+        if cfg.no_repomap {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
