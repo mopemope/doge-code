@@ -24,7 +24,7 @@ pub async fn run_agent_streaming_once(
     let mut stream = client
         .chat_stream(model, messages.clone(), Some(cancel_token.clone()))
         .await?;
-    let runtime = ToolRuntime::new(fs);
+    let runtime = ToolRuntime::build(fs).await?;
     let mut buf = ToolDeltaBuffer::new();
     let mut acc_text = String::new();
 

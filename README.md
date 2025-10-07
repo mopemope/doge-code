@@ -462,7 +462,16 @@ address = "uvx some-mcp-server"
 transport = "stdio"
 ```
 
+If you omit the protocol or path (for example, `127.0.0.1:8000`), Doge-Code will
+automatically normalize the URI to `http://127.0.0.1:8000/mcp` before connecting.
+This makes it easier to reuse the same configuration for both the built-in
+server (which binds to `host:port`) and outbound MCP client connections.
+
 In this setup, Doge-Code will act as an MCP client to connect to these external servers, allowing you to access tools from multiple MCP servers through a unified interface.
+
+Each remote MCP tool is exposed to the LLM as `mcp_<server-name>_<tool-name>`. For
+example, a `search` tool on the `external-server` above appears as
+`mcp_external-server_search` when the agent requests available tools.
 
 ## Available Tools
 

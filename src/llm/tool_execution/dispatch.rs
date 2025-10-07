@@ -37,6 +37,12 @@ pub async fn dispatch_tool_call(
         "apply_patch" => tools::apply_patch(runtime, &args_val).await,
         "todo_write" => tools::todo_write(runtime, &args_val).await,
 
-        other => Err(anyhow!("unknown tool: {other}")),
+        other => {
+            if let Some(result) = runtime.fs.call_remote_tool(other, &args_val).await? {
+                Ok(result)
+            } else {
+                Err(anyhow!("unknown tool: {other}"))
+            }
+        }
     }
 }

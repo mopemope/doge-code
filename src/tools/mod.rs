@@ -13,7 +13,7 @@ pub mod todo_read;
 pub mod todo_write;
 pub mod write;
 
-pub use common::FsTools;
+pub use common::{FsTools, RemoteToolInfo};
 
 #[cfg(test)]
 mod common_test;

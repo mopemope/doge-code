@@ -106,7 +106,7 @@ pub async fn run_agent_loop(
     tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
-    let runtime = ToolRuntime::new(fs);
+    let runtime = ToolRuntime::build(fs).await?;
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;
@@ -357,10 +357,12 @@ pub async fn run_agent_loop(
             // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
                 let success = res.is_ok();
-                let status_icon = if success { "✅ SUCCESS" } else { "❌ FAILED" };
+                let status_text = if success { "✅ SUCCESS" } else { "❌ FAILED" };
+
+                let tool_name = tc.function.name.as_str();
 
                 // Map tool names to appropriate icons
-                let tool_icon = match tc.function.name.as_str() {
+                let tool_icon = match tool_name {
                     "fs_list" => "🗂️",
                     "fs_read" => "📖",
                     "fs_read_many_files" => "📚",
@@ -383,11 +385,19 @@ pub async fn run_agent_loop(
                 let timestamp_short = jst_datetime.format("%H:%M:%S").to_string(); // HH:MM:SS format in JST
 
                 // Send indented lines to create a visually distinct tool execution display
+                let header_line =
+                    format!("🛠️  [{timestamp_short}] {tool_icon} {tool_name} => {status_text}");
+                let _ = tx.send(header_line);
+
+                // Bright yellow color for arguments (reset to default afterwards)
+                let _ = tx.send(format!(" \x1b[93mArgs: {args_str}\x1b[0m"));
+
+                let result_label = if success { "Result" } else { "Error" };
+                let result_color = if success { "\x1b[92m" } else { "\x1b[91m" };
                 let _ = tx.send(format!(
-                    "🛠️  [{timestamp_short}] {tool_icon} {} - {}",
-                    tc.function.name, status_icon
+                    " {result_color}{result_label}: {result_summary}\x1b[0m"
                 ));
-                let _ = tx.send(format!(" \x1b[93mArgs: {args_str}\x1b[0m")); // Bright yellow color for arguments, reset to default
+
                 let _ = tx.send("".to_string()); // Extra blank line for spacing
             }
 
@@ -395,6 +405,11 @@ pub async fn run_agent_loop(
             match &res {
                 Ok(_) => debug!("[tool] {} succeeded: {}", tc.function.name, result_summary),
                 Err(e) => error!("[tool] {} failed: {}", tc.function.name, e),
+            }
+
+            // Inform the UI that tool processing is complete and we are waiting for the LLM
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send("::status:waiting".into());
             }
 
             // Check if the tool call is todo_write and update the todo list in the UI
