@@ -48,6 +48,20 @@ fn create_test_symbol_with_keywords(
     }
 }
 
+fn run_response(
+    symbols: &[crate::analysis::SymbolInfo],
+    args: SearchRepomapArgs,
+) -> SearchRepomapResponse {
+    filter_and_group_symbols(symbols, args)
+}
+
+fn collect_results(
+    symbols: &[crate::analysis::SymbolInfo],
+    args: SearchRepomapArgs,
+) -> Vec<RepomapSearchResult> {
+    run_response(symbols, args).results
+}
+
 #[test]
 fn test_filter_by_file_lines() {
     let symbols = vec![
@@ -60,7 +74,7 @@ fn test_filter_by_file_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("large.rs"));
     assert_eq!(results[0].file_total_lines, 600);
@@ -84,7 +98,7 @@ fn test_filter_by_function_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "large_func");
@@ -102,7 +116,7 @@ fn test_filter_by_symbol_kind() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].kind, "fn");
@@ -122,7 +136,7 @@ fn test_sort_by_file_lines() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].file_total_lines, 500); // largest first
     assert_eq!(results[1].file_total_lines, 300);
@@ -155,7 +169,7 @@ fn test_keyword_search() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "test_function");
@@ -195,7 +209,7 @@ fn test_keyword_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both test_function and math_function
     let mut found_test = false;
@@ -247,7 +261,7 @@ fn test_name_search() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "calculate_total");
@@ -287,7 +301,7 @@ fn test_name_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both calculate_total and parse_json
     let mut found_calculate = false;
@@ -328,7 +342,7 @@ fn test_code_doc_field_matching() {
         keyword_search: Some(vec!["special_doc_term".to_string()]),
         ..Default::default()
     };
-    let results_doc = filter_and_group_symbols(&symbols, args_doc);
+    let results_doc = collect_results(&symbols, args_doc);
     assert_eq!(results_doc.len(), 1);
     assert_eq!(results_doc[0].symbols.len(), 1);
     let sym_doc = &results_doc[0].symbols[0];
@@ -342,7 +356,7 @@ fn test_code_doc_field_matching() {
         keyword_search: Some(vec!["special_code_term".to_string()]),
         ..Default::default()
     };
-    let results_code = filter_and_group_symbols(&symbols, args_code);
+    let results_code = collect_results(&symbols, args_code);
     assert_eq!(results_code.len(), 1);
     let sym_code = &results_code[0].symbols[0];
     assert!(sym_code.match_score.is_some());
@@ -375,7 +389,7 @@ fn test_exclude_patterns_skip_files() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("src/keep.rs"));
 }
@@ -399,7 +413,7 @@ fn test_language_filters_by_extension() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("lib.rs"));
 }
@@ -432,7 +446,7 @@ fn test_match_score_threshold_filters_symbols() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "match_symbol");
@@ -455,8 +469,128 @@ fn test_max_symbols_per_file_caps_results() {
         ..Default::default()
     };
 
-    let results = filter_and_group_symbols(&symbols, args);
+    let results = collect_results(&symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 2);
     assert_eq!(results[0].symbol_count, 2);
+}
+
+#[test]
+fn test_compact_density_limits_snippets_and_symbols() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file_path = tmp.path().join("dense.rs");
+    let content = (0..20)
+        .map(|idx| format!("fn item{}() {{}}", idx))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&file_path, content).unwrap();
+
+    let mut symbols = Vec::new();
+    for idx in 0..6 {
+        let mut symbol = create_test_symbol(
+            &format!("func{}", idx),
+            SymbolKind::Function,
+            file_path.to_str().unwrap(),
+            200,
+            Some(4),
+        );
+        symbol.start_line = idx + 1;
+        symbol.end_line = idx + 2;
+        symbols.push(symbol);
+    }
+
+    let full_response = run_response(
+        &symbols,
+        SearchRepomapArgs {
+            result_density: Some(ResultDensity::Full),
+            include_snippets: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(!full_response.results[0].symbols[0].code_snippet.is_empty());
+
+    let compact_response = run_response(
+        &symbols,
+        SearchRepomapArgs {
+            result_density: Some(ResultDensity::Compact),
+            include_snippets: Some(true),
+            max_symbols_per_file: Some(10),
+            snippet_max_chars: Some(2000),
+            ..Default::default()
+        },
+    );
+    let file_entry = &compact_response.results[0];
+    assert_eq!(file_entry.symbols.len(), 5);
+    assert!(
+        file_entry
+            .symbols
+            .iter()
+            .all(|symbol| symbol.code_snippet.is_empty())
+    );
+}
+
+#[test]
+fn test_response_budget_limits_and_sets_cursor() {
+    let mut symbols = Vec::new();
+    for idx in 0..12 {
+        symbols.push(create_test_symbol(
+            &format!("func{}", idx),
+            SymbolKind::Function,
+            &format!("budget_{}.rs", idx),
+            120,
+            Some(6),
+        ));
+    }
+
+    let response = run_response(
+        &symbols,
+        SearchRepomapArgs {
+            result_density: Some(ResultDensity::Full),
+            include_snippets: Some(false),
+            response_budget_chars: Some(1500),
+            ..Default::default()
+        },
+    );
+
+    let budget = response.applied_budget.expect("budget summary missing");
+    assert!(response.results.len() <= budget.effective_limit);
+    assert!(response.next_cursor.is_some());
+    assert!(
+        response
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("response budget"))
+    );
+}
+
+#[test]
+fn test_cursor_pagination_returns_expected_slice() {
+    let mut symbols = Vec::new();
+    for idx in 0..8 {
+        symbols.push(create_test_symbol(
+            &format!("func{}", idx),
+            SymbolKind::Function,
+            &format!("file_{}.rs", idx),
+            80,
+            Some(5),
+        ));
+    }
+
+    let response = run_response(
+        &symbols,
+        SearchRepomapArgs {
+            result_density: Some(ResultDensity::Full),
+            include_snippets: Some(false),
+            sort_by: Some("file_path".to_string()),
+            sort_desc: Some(false),
+            limit: Some(8),
+            cursor: Some(3),
+            page_size: Some(3),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.next_cursor, Some(6));
+    assert_eq!(response.results[0].file, PathBuf::from("file_3.rs"));
 }

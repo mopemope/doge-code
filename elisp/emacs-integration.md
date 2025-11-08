@@ -156,6 +156,8 @@ Run Doge-Code as an HTTP server (`dgc --mcp-server [address]`). Directly call to
 #### Emacs Client Commands
 - **doge-mcp-search-repomap** (`C-c d m s`):
   - Search repository map with keywords (e.g., "function name").
+  - 既定では `result_density="compact"` が有効で、スニペット無し＆5シンボル/ファイルに圧縮されます。詳細が必要な場合のみ `"full"` を指定してください。
+  - コンテキスト節約のために `response_budget_chars` でレスポンス上限（例: 4000）を渡すか、`cursor`/`page_size` でページングしてください。戻り値の `next_cursor` を次リクエストに渡すと続きが取得できます。
 - **doge-mcp-fs-read** (`C-c d m f`):
   - Read a file (enter path).
 - **doge-mcp-list-tools** (`C-c d m l`):

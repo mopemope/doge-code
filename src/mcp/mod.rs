@@ -120,6 +120,7 @@ mod tests {
     async fn test_search_repomap_tool_without_repomap() {
         let service = service::DogeMcpService::default();
         let params = service::SearchRepomapParams {
+            result_density: None,
             max_file_lines: None,
             max_function_lines: None,
             file_pattern: None,
@@ -137,6 +138,9 @@ mod tests {
             snippet_max_chars: None,
             max_symbols_per_file: None,
             match_score_threshold: None,
+            response_budget_chars: None,
+            cursor: None,
+            page_size: None,
         };
 
         let result = service.search_repomap(Parameters(params)).await;

@@ -1,5 +1,5 @@
 use super::repomap_filter::filter_and_group_symbols;
-use super::types::{RepomapSearchResult, SearchRepomapArgs};
+use super::types::{SearchRepomapArgs, SearchRepomapResponse};
 use crate::analysis::RepoMap;
 use anyhow::Result;
 
@@ -21,7 +21,7 @@ impl RepomapSearchTools {
         &self,
         map: &RepoMap,
         args: SearchRepomapArgs,
-    ) -> Result<Vec<RepomapSearchResult>> {
+    ) -> Result<SearchRepomapResponse> {
         // Avoid cloning the entire symbols vector; pass a reference-aware API
         let results = filter_and_group_symbols(&map.symbols, args);
         Ok(results)

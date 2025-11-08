@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{MatchSpan, RepomapSearchResult, SearchRepomapArgs, SymbolSearchResult};
+use super::{
+    AppliedBudgetSummary, MatchSpan, RepomapSearchResult, ResultDensity, SearchRepomapArgs,
+    SearchRepomapResponse, SymbolSearchResult,
+};
 use crate::analysis::SymbolInfo;
 
 fn normalize_filter_value(raw: &str) -> String {
@@ -70,10 +73,155 @@ fn matches_language_filters(path: &Path, filters: &[String]) -> bool {
     })
 }
 
+const DEFAULT_RESULT_LIMIT: usize = 50;
+const COMPACT_RESULT_LIMIT: usize = 20;
+const DEFAULT_SNIPPET_MAX_CHARS: usize = 1000;
+const COMPACT_SNIPPET_MAX_CHARS: usize = 280;
+const COMPACT_SYMBOLS_PER_FILE: usize = 5;
+const DEFAULT_BUDGET_SYMBOLS_PER_FILE: usize = 12;
+const MIN_RESULT_LIMIT_FOR_BUDGET: usize = 5;
+const MIN_SYMBOLS_PER_FILE_FOR_BUDGET: usize = 2;
+const MIN_SNIPPET_CHARS_FOR_BUDGET: usize = 80;
+const BASE_SYMBOL_METADATA_CHARS: usize = 180;
+
 pub(super) fn filter_and_group_symbols(
     symbols: &[SymbolInfo],
-    args: SearchRepomapArgs,
-) -> Vec<RepomapSearchResult> {
+    mut args: SearchRepomapArgs,
+) -> SearchRepomapResponse {
+    let mut warnings: Vec<String> = Vec::new();
+    let mut applied_budget: Option<AppliedBudgetSummary> = None;
+
+    let mut limit = args.limit.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
+    let mut max_symbols_per_file = args.max_symbols_per_file;
+    let mut snippet_max_chars = args
+        .snippet_max_chars
+        .unwrap_or(DEFAULT_SNIPPET_MAX_CHARS)
+        .max(MIN_SNIPPET_CHARS_FOR_BUDGET);
+    let mut include_snippets = args.include_snippets.unwrap_or(true);
+
+    let density = args
+        .result_density
+        .clone()
+        .unwrap_or(ResultDensity::Compact);
+
+    match density {
+        ResultDensity::Compact => {
+            include_snippets = false;
+            let capped_symbols = max_symbols_per_file
+                .unwrap_or(COMPACT_SYMBOLS_PER_FILE)
+                .min(COMPACT_SYMBOLS_PER_FILE);
+            max_symbols_per_file = Some(capped_symbols);
+            snippet_max_chars = snippet_max_chars.min(COMPACT_SNIPPET_MAX_CHARS);
+            if args.limit.is_none() || limit > COMPACT_RESULT_LIMIT {
+                limit = COMPACT_RESULT_LIMIT;
+            }
+        }
+        ResultDensity::Full => {}
+    }
+
+    if let Some(budget) = args.response_budget_chars {
+        let mut effective_limit = limit;
+        let mut effective_symbol_cap = max_symbols_per_file
+            .unwrap_or(DEFAULT_BUDGET_SYMBOLS_PER_FILE)
+            .max(MIN_SYMBOLS_PER_FILE_FOR_BUDGET);
+        let mut effective_snippet_cap = snippet_max_chars;
+        let mut limit_adjusted = false;
+        let mut symbol_adjusted = false;
+        let mut snippet_adjusted = false;
+        let mut satisfied_budget = false;
+
+        loop {
+            let estimate = estimate_payload_size(
+                effective_limit,
+                effective_symbol_cap,
+                effective_snippet_cap,
+                include_snippets,
+            );
+            if estimate <= budget {
+                satisfied_budget = true;
+                break;
+            }
+
+            if effective_limit > MIN_RESULT_LIMIT_FOR_BUDGET {
+                let reduced = shrink_value(effective_limit, MIN_RESULT_LIMIT_FOR_BUDGET);
+                if reduced < effective_limit {
+                    effective_limit = reduced;
+                    limit_adjusted = true;
+                    continue;
+                }
+            }
+
+            if include_snippets && effective_symbol_cap > MIN_SYMBOLS_PER_FILE_FOR_BUDGET {
+                let reduced = shrink_value(effective_symbol_cap, MIN_SYMBOLS_PER_FILE_FOR_BUDGET);
+                if reduced < effective_symbol_cap {
+                    effective_symbol_cap = reduced;
+                    symbol_adjusted = true;
+                    continue;
+                }
+            }
+
+            if include_snippets && effective_snippet_cap > MIN_SNIPPET_CHARS_FOR_BUDGET {
+                let reduced = shrink_value(effective_snippet_cap, MIN_SNIPPET_CHARS_FOR_BUDGET);
+                if reduced < effective_snippet_cap {
+                    effective_snippet_cap = reduced;
+                    snippet_adjusted = true;
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        if limit_adjusted || symbol_adjusted || snippet_adjusted {
+            let mut parts = Vec::new();
+            if limit_adjusted {
+                parts.push(format!("limit→{}", effective_limit));
+            }
+            if symbol_adjusted {
+                parts.push(format!("max_symbols_per_file→{}", effective_symbol_cap));
+            }
+            if include_snippets && snippet_adjusted {
+                parts.push(format!("snippet_max_chars→{}", effective_snippet_cap));
+            }
+            warnings.push(format!(
+                "response budget {} applied ({}).",
+                budget,
+                parts.join(", ")
+            ));
+        }
+
+        if !satisfied_budget {
+            warnings.push(format!(
+                "response budget {} could not be fully satisfied; consider using cursor/page_size for additional pages.",
+                budget
+            ));
+        }
+
+        limit = effective_limit;
+        if include_snippets || symbol_adjusted || max_symbols_per_file.is_some() {
+            max_symbols_per_file = Some(effective_symbol_cap);
+        }
+        if include_snippets {
+            snippet_max_chars = effective_snippet_cap;
+        }
+
+        applied_budget = Some(AppliedBudgetSummary {
+            response_budget_chars: Some(budget),
+            effective_limit: limit,
+            effective_max_symbols_per_file: max_symbols_per_file,
+            effective_snippet_max_chars: if include_snippets {
+                Some(snippet_max_chars)
+            } else {
+                None
+            },
+        });
+    }
+
+    args.limit = Some(limit);
+    args.max_symbols_per_file = max_symbols_per_file;
+    args.snippet_max_chars = Some(snippet_max_chars);
+    args.include_snippets = Some(include_snippets);
+
     // Group symbols by file
     let mut file_groups: HashMap<PathBuf, Vec<&SymbolInfo>> = HashMap::new();
     for symbol in symbols {
@@ -604,9 +752,52 @@ pub(super) fn filter_and_group_symbols(
         });
     }
 
-    // Apply limit
-    let limit = args.limit.unwrap_or(50);
-    results.truncate(limit);
+    // Apply limit determined by density/budget settings per response page
+    let limit = args.limit.unwrap_or(DEFAULT_RESULT_LIMIT);
+    let mut page_size = args.page_size.unwrap_or(limit).max(1);
+    if page_size == 0 {
+        page_size = limit.max(1);
+    }
+    page_size = page_size.min(limit);
+    let cursor = args.cursor.unwrap_or(0);
+    let total = results.len();
 
-    results
+    let (paged_results, next_cursor) = if cursor >= total {
+        (Vec::new(), None)
+    } else {
+        let end = (cursor + page_size).min(total);
+        let next_cursor = if end < total { Some(end) } else { None };
+        (
+            results.into_iter().skip(cursor).take(page_size).collect(),
+            next_cursor,
+        )
+    };
+
+    SearchRepomapResponse {
+        results: paged_results,
+        next_cursor,
+        warnings,
+        applied_budget,
+    }
+}
+
+fn estimate_payload_size(
+    limit: usize,
+    max_symbols_per_file: usize,
+    snippet_chars: usize,
+    include_snippets: bool,
+) -> usize {
+    let snippet = if include_snippets { snippet_chars } else { 0 };
+    let per_symbol = BASE_SYMBOL_METADATA_CHARS + snippet;
+    limit
+        .saturating_mul(max_symbols_per_file)
+        .saturating_mul(per_symbol)
+}
+
+fn shrink_value(current: usize, minimum: usize) -> usize {
+    if current <= minimum {
+        return minimum;
+    }
+    let reduced = current.saturating_mul(7).saturating_add(9) / 10; // approx 0.7 * current, rounded up
+    reduced.max(minimum)
 }

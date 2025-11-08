@@ -1,7 +1,7 @@
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
 use crate::tools::search_repomap::RepomapSearchTools;
-use crate::tools::search_repomap::repomap::SearchRepomapArgs;
+use crate::tools::search_repomap::repomap::{ResultDensity, SearchRepomapArgs};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -11,12 +11,14 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Tool parameter structures
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SearchRepomapParams {
+    pub result_density: Option<String>,
     pub max_file_lines: Option<u32>,
     pub max_function_lines: Option<u32>,
     pub file_pattern: Option<String>,
@@ -34,6 +36,9 @@ pub struct SearchRepomapParams {
     pub snippet_max_chars: Option<u32>,
     pub max_symbols_per_file: Option<u32>,
     pub match_score_threshold: Option<f64>,
+    pub response_budget_chars: Option<u32>,
+    pub cursor: Option<u32>,
+    pub page_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -141,7 +146,12 @@ impl DogeMcpService {
     ) -> Result<CallToolResult, McpError> {
         let repomap_guard = self.repomap.read().await;
         if let Some(map) = &*repomap_guard {
+            let result_density = params
+                .result_density
+                .as_deref()
+                .and_then(|raw| ResultDensity::from_str(raw).ok());
             let args = SearchRepomapArgs {
+                result_density,
                 min_file_lines: None,
                 max_file_lines: params.max_file_lines.map(|v| v as usize),
                 min_function_lines: None,
@@ -155,6 +165,7 @@ impl DogeMcpService {
                 sort_by: params.sort_by,
                 sort_desc: params.sort_desc,
                 limit: params.limit.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
                 keyword_search: params.keyword_search,
                 name: params.name,
                 fields: params.fields,
@@ -163,6 +174,8 @@ impl DogeMcpService {
                 snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
                 ranking_strategy: None,
                 match_score_threshold: params.match_score_threshold,
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
             };
 
             match self.search_repomap_tools.search_repomap(map, args) {

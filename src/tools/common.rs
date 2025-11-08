@@ -519,7 +519,7 @@ impl FsTools {
     pub async fn search_repomap(
         &self,
         args: search_repomap::SearchRepomapArgs,
-    ) -> Result<Vec<search_repomap::RepomapSearchResult>> {
+    ) -> Result<search_repomap::SearchRepomapResponse> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 

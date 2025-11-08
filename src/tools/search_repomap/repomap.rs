@@ -48,6 +48,12 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
   - Caps how many symbols are returned for a single file. The most relevant matches are kept.
 - `match_score_threshold`:
   - Require a minimum per-symbol `match_score` (0.0–1.0) to filter out weaker matches.
+- `result_density`:
+  - Choose between `compact` (default) and `full`. Compact mode disables snippets, caps symbols per file, and trims limits to preserve tokens.
+- `response_budget_chars`:
+  - Provide an approximate upper bound (e.g. 5000). The tool will automatically tighten `limit`, `max_symbols_per_file`, and snippet sizes to stay within budget when possible.
+- `cursor` / `page_size`:
+  - Use these to paginate through sorted results without pulling everything at once. Combine with `response_budget_chars` for predictable payload sizes.
 - `max_file_lines` / `max_function_lines`:
   - Use these to filter for code that might be too complex or require refactoring.
 - `ranking_strategy`:
@@ -58,9 +64,7 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
   - In addition to existing options (`file_lines`, `function_lines`, `symbol_count`, `file_path`), you can now sort by `file_match_score`.
 
 **Return Value:**
-The tool returns a list of `RepomapSearchResult` objects, each containing file and symbol information, including the symbol's name, kind, location, associated keywords, and the **code_snippet**.
-The `code_snippet` allows you to understand the code immediately without a followup `fs_read` call.
-Each result also includes a `file_match_score` which indicates the relevance of the file based on the symbols it contains and the chosen `ranking_strategy`.
+The tool returns a `SearchRepomapResponse` structure. The `results` field contains the familiar list of `RepomapSearchResult` objects (with names, kinds, locations, keywords, and optional **code_snippet** data). The response may also include a `next_cursor` for pagination, `warnings` when budgets force aggressive trimming, and an `applied_budget` summary so you know which constraints were tightened automatically.
 "#;
 
 /// Placeholder function to match the required function signature for search_repomap
@@ -68,7 +72,7 @@ Each result also includes a `file_match_score` which indicates the relevance of 
 pub fn search_repomap(
     _args: SearchRepomapArgs,
     _config: &AppConfig,
-) -> Result<Vec<RepomapSearchResult>> {
+) -> Result<SearchRepomapResponse> {
     // This is a placeholder implementation to match the required function signature
     // The actual implementation is in the RepomapSearchTools struct
     todo!("This function is not meant to be called directly. Use FsTools::search_repomap instead.")
@@ -84,10 +88,15 @@ pub fn tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "max_file_lines": {
-                        "type": ["integer", "null"],
-                        "description": "Maximum number of lines in the file"
-                    },
+            "result_density": {
+                "type": ["string", "null"],
+                "enum": ["compact", "full"],
+                "description": "Controls verbosity. 'compact' disables snippets and caps per-file matches while 'full' preserves legacy output"
+            },
+            "max_file_lines": {
+                "type": ["integer", "null"],
+                "description": "Maximum number of lines in the file"
+            },
                     "max_function_lines": {
                         "type": ["integer","null"],
                         "description": "Maximum number of lines in functions"
@@ -116,19 +125,23 @@ pub fn tool_def() -> ToolDef {
                         "enum": ["file_lines", "function_lines", "symbol_count", "file_path", "file_match_score"],
                         "description": "Sort results by specified criteria"
                     },
-                    "sort_desc": {
-                        "type": "boolean",
-                        "description": "Sort in descending order (default: true)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 50)"
-                    },
-                    "keyword_search": {
-                        "type": ["array", "null"],
-                        "items": {"type": "string"},
-                        "description": "A list of search for symbols containing specific keywords in their associated comments"
-                    },
+            "sort_desc": {
+                "type": "boolean",
+                "description": "Sort in descending order (default: true)"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default: 50)"
+            },
+            "response_budget_chars": {
+                "type": ["integer", "null"],
+                "description": "Approximate upper bound (in characters) for the response; the tool will downscale limits/snippets when exceeded"
+            },
+            "keyword_search": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": "A list of search for symbols containing specific keywords in their associated comments"
+            },
                     "name": {
                         "type": ["array", "null"],
                         "items": {"type": "string"},
@@ -151,15 +164,23 @@ pub fn tool_def() -> ToolDef {
                         "type": ["integer","null"],
                         "description": "Maximum characters for a snippet (truncate with '...' if exceeded)"
                     },
-                    "ranking_strategy": {
-                        "type": ["string", "null"],
-                        "enum": ["max_score", "avg_score", "sum_score", "hybrid"],
-                        "description": "Strategy for calculating file-level match score (default: max_score)"
-                    },
-                    "match_score_threshold": {
-                        "type": ["number", "null"],
-                        "description": "Minimum match_score (0.0-1.0) a symbol must meet to be returned"
-                    }
+            "ranking_strategy": {
+                "type": ["string", "null"],
+                "enum": ["max_score", "avg_score", "sum_score", "hybrid"],
+                "description": "Strategy for calculating file-level match score (default: max_score)"
+            },
+            "match_score_threshold": {
+                "type": ["number", "null"],
+                "description": "Minimum match_score (0.0-1.0) a symbol must meet to be returned"
+            },
+            "cursor": {
+                "type": ["integer", "null"],
+                "description": "Zero-based cursor for paging through sorted results"
+            },
+            "page_size": {
+                "type": ["integer", "null"],
+                "description": "Number of results to return from the cursor position (defaults to limit when unset)"
+            }
                 },
                 "additionalProperties": false
             }),

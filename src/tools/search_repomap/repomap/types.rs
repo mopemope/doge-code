@@ -1,10 +1,50 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::analysis::SymbolInfo;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ResultDensity {
+    #[default]
+    Compact,
+    Full,
+}
+
+
+impl FromStr for ResultDensity {
+    type Err = ResultDensityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "compact" => Ok(Self::Compact),
+            "full" => Ok(Self::Full),
+            other => Err(ResultDensityParseError(other.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResultDensityParseError(String);
+
+impl fmt::Display for ResultDensityParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unsupported result_density '{}': expected compact or full",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ResultDensityParseError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearchRepomapArgs {
+    pub result_density: Option<ResultDensity>,
     pub min_file_lines: Option<usize>,
     pub max_file_lines: Option<usize>,
     pub min_function_lines: Option<usize>,
@@ -20,6 +60,7 @@ pub struct SearchRepomapArgs {
     pub sort_by: Option<String>,
     pub sort_desc: Option<bool>,
     pub limit: Option<usize>,
+    pub response_budget_chars: Option<usize>,
     /// Minimum symbol match_score (0.0 - 1.0) required to include a symbol/result
     pub match_score_threshold: Option<f64>,
     /// Search for symbols containing specific keywords
@@ -37,6 +78,10 @@ pub struct SearchRepomapArgs {
     pub snippet_max_chars: Option<usize>,
     /// Strategy for calculating file-level match score ('max_score', 'avg_score', 'sum_score', 'hybrid')
     pub ranking_strategy: Option<String>,
+    /// Cursor position for paginated responses (0-based index)
+    pub cursor: Option<usize>,
+    /// Page size for paginated responses (defaults to limit when unset)
+    pub page_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +127,28 @@ pub struct SymbolSearchResult {
     pub matches: Vec<MatchSpan>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub code_snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SearchRepomapResponse {
+    pub results: Vec<RepomapSearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_budget: Option<AppliedBudgetSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedBudgetSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_budget_chars: Option<usize>,
+    pub effective_limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_max_symbols_per_file: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_snippet_max_chars: Option<usize>,
 }
 
 impl From<SymbolInfo> for SymbolSearchResult {
