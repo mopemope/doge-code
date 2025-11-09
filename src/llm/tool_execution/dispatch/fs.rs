@@ -1,4 +1,7 @@
 use crate::llm::tool_runtime::ToolRuntime;
+use crate::tools::list::{FsListMode, FsListOptions};
+use crate::tools::read::{FsReadMode, FsReadOptions};
+use crate::tools::read_many::FsReadManyOptions;
 use anyhow::{Result, anyhow};
 use serde_json::json;
 
@@ -12,8 +15,28 @@ pub async fn fs_list(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     let pattern = args.get("pattern").and_then(|v| v.as_str());
-    match runtime.fs.fs_list(path, max_depth, pattern) {
-        Ok(files) => Ok(json!({ "ok": true, "files": files })),
+    let options = FsListOptions {
+        mode: FsListMode::from_optional_str(args.get("mode").and_then(|v| v.as_str())),
+        cursor: args
+            .get("cursor")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        page_size: args
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        max_entries: args
+            .get("max_entries")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        response_budget_chars: args
+            .get("response_budget_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+    };
+
+    match runtime.fs.fs_list(path, max_depth, pattern, options) {
+        Ok(files) => Ok(json!({ "ok": true, "result": files })),
         Err(e) => Err(anyhow!("{e}")),
     }
 }
@@ -31,8 +54,29 @@ pub async fn fs_read(
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
-    match runtime.fs.fs_read(path, start_line, limit) {
-        Ok(text) => Ok(json!({ "ok": true, "path": path, "content": text })),
+    let cursor = args
+        .get("cursor")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let page_size = args
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let response_budget_chars = args
+        .get("response_budget_chars")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let options = FsReadOptions {
+        start_line,
+        limit,
+        cursor,
+        page_size,
+        response_budget_chars,
+        mode: FsReadMode::from_optional_str(args.get("mode").and_then(|v| v.as_str())),
+    };
+
+    match runtime.fs.fs_read(path, options) {
+        Ok(result) => Ok(json!({ "ok": true, "result": result })),
         Err(e) => Err(anyhow!("{e}")),
     }
 }
@@ -106,8 +150,35 @@ pub async fn fs_read_many_files(
             .collect::<Vec<_>>()
     });
     let recursive = args.get("recursive").and_then(|v| v.as_bool());
-    match runtime.fs.fs_read_many_files(paths, exclude, recursive) {
-        Ok(content) => Ok(json!({ "ok": true, "content": content })),
+    let options = FsReadManyOptions {
+        mode: FsReadMode::from_optional_str(args.get("mode").and_then(|v| v.as_str())),
+        cursor: args
+            .get("cursor")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        page_size: args
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        max_entries: args
+            .get("max_entries")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        response_budget_chars: args
+            .get("response_budget_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        snippet_max_chars: args
+            .get("snippet_max_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+    };
+
+    match runtime
+        .fs
+        .fs_read_many_files(paths, exclude, recursive, options)
+    {
+        Ok(result) => Ok(json!({ "ok": true, "result": result })),
         Err(e) => Err(anyhow!("{e}")),
     }
 }

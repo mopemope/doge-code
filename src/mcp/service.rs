@@ -1,5 +1,8 @@
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
+use crate::tools::list::{FsListMode, FsListOptions};
+use crate::tools::read::{FsReadMode, FsReadOptions};
+use crate::tools::read_many::FsReadManyOptions;
 use crate::tools::search_repomap::RepomapSearchTools;
 use crate::tools::search_repomap::repomap::{ResultDensity, SearchRepomapArgs};
 use rmcp::{
@@ -46,6 +49,10 @@ pub struct FsReadParams {
     pub path: String,
     pub start_line: Option<usize>,
     pub limit: Option<usize>,
+    pub mode: Option<String>,
+    pub response_budget_chars: Option<u32>,
+    pub cursor: Option<u32>,
+    pub page_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -53,6 +60,12 @@ pub struct FsReadManyFilesParams {
     pub paths: Vec<String>,
     pub exclude: Option<Vec<String>>,
     pub recursive: Option<bool>,
+    pub mode: Option<String>,
+    pub response_budget_chars: Option<u32>,
+    pub cursor: Option<u32>,
+    pub page_size: Option<u32>,
+    pub max_entries: Option<u32>,
+    pub snippet_max_chars: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -66,6 +79,11 @@ pub struct FsListParams {
     pub path: String,
     pub max_depth: Option<usize>,
     pub pattern: Option<String>,
+    pub mode: Option<String>,
+    pub response_budget_chars: Option<u32>,
+    pub cursor: Option<u32>,
+    pub page_size: Option<u32>,
+    pub max_entries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -199,11 +217,17 @@ impl DogeMcpService {
     ) -> Result<CallToolResult, McpError> {
         match crate::tools::read::fs_read(
             &params.path,
-            params.start_line,
-            params.limit,
+            FsReadOptions {
+                start_line: params.start_line,
+                limit: params.limit,
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+                mode: FsReadMode::from_optional_str(params.mode.as_deref()),
+            },
             &self.config,
         ) {
-            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
+            Ok(result) => self.format_json_result(result),
             Err(e) => Err(self.format_error("Failed to read file ", Some(json!(e.to_string())))),
         }
     }
@@ -218,8 +242,16 @@ impl DogeMcpService {
             params.exclude,
             params.recursive,
             &self.config,
+            FsReadManyOptions {
+                mode: FsReadMode::from_optional_str(params.mode.as_deref()),
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
+                max_entries: params.max_entries.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+                snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
+            },
         ) {
-            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
+            Ok(result) => self.format_json_result(result),
             Err(e) => Err(self.format_error("Failed to read files ", Some(json!(e.to_string())))),
         }
     }
@@ -259,6 +291,13 @@ impl DogeMcpService {
             params.max_depth,
             params.pattern.as_deref(),
             &self.config,
+            FsListOptions {
+                mode: FsListMode::from_optional_str(params.mode.as_deref()),
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
+                max_entries: params.max_entries.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+            },
         ) {
             Ok(files) => self.format_json_result(files),
             Err(e) => Err(self.format_error("Failed to list files ", Some(json!(e.to_string())))),

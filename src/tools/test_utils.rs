@@ -16,7 +16,12 @@ pub fn test_fs_read(
     path: &str,
     start_line: Option<usize>,
     limit: Option<usize>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<super::read::FsReadResult> {
     let config = create_test_config_with_temp_dir();
-    super::read::fs_read(path, start_line, limit, &config)
+    let opts = super::read::FsReadOptions {
+        start_line,
+        limit,
+        ..Default::default()
+    };
+    super::read::fs_read(path, opts, &config)
 }

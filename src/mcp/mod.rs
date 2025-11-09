@@ -66,6 +66,10 @@ mod tests {
             path: "/nonexistent/file.txt".to_string(),
             start_line: None,
             limit: None,
+            mode: None,
+            response_budget_chars: None,
+            cursor: None,
+            page_size: None,
         };
 
         let result = service.fs_read(Parameters(params));
@@ -80,6 +84,11 @@ mod tests {
             path: "/nonexistent/directory".to_string(),
             max_depth: None,
             pattern: None,
+            mode: None,
+            response_budget_chars: None,
+            cursor: None,
+            page_size: None,
+            max_entries: None,
         };
 
         let result = service.fs_list(Parameters(params));

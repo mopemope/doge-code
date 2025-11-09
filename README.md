@@ -9,3 +9,8 @@
 - レスポンスは `SearchRepomapResponse` で返り、`results`（従来の `RepomapSearchResult` 群）に加えて `warnings` と `applied_budget`（実際に適用された制限の概要）が含まれます。
 
 これらを組み合わせることで、LLM のコンテキストを圧迫せずに最大効果のコード探索が可能です。
+
+## ファイル系ツールの軽量モード
+- `fs_read`: 既定モードは `mode="summary"` で 400 行 & 6,000 文字までを返し、残りは `next_cursor` で追跡できます。全文が必要な時だけ `mode="full"` や `page_size`/`cursor` を指定してください。
+- `fs_read_many_files`: `paths` で解決されたファイル群を `mode="summary"` では 1 ページ 5 件・各ファイル 40 行までで返し、`response_budget_chars` を超えそうな場合は自動的に `warnings` + `next_cursor` を返します。
+- `fs_list`: ディレクトリ一覧も `FsListResponse` で返り、`entries` には `path` と `is_dir` だけを載せるためコンパクトです。`cursor`/`page_size`/`response_budget_chars` を活用して深い木構造を段階的に取得してください。

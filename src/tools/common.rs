@@ -330,11 +330,12 @@ impl FsTools {
         path: &str,
         max_depth: Option<usize>,
         pattern: Option<&str>,
-    ) -> Result<Vec<String>> {
+        options: list::FsListOptions,
+    ) -> Result<list::FsListResponse> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match list::fs_list(path, max_depth, pattern, &self.config) {
+        match list::fs_list(path, max_depth, pattern, &self.config, options) {
             Ok(result) => {
                 self.record_tool_call_success("fs_list")?;
                 Ok(result)
@@ -346,16 +347,11 @@ impl FsTools {
         }
     }
 
-    pub fn fs_read(
-        &self,
-        path: &str,
-        start_line: Option<usize>,
-        limit: Option<usize>,
-    ) -> Result<String> {
+    pub fn fs_read(&self, path: &str, opts: read::FsReadOptions) -> Result<read::FsReadResult> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match read::fs_read(path, start_line, limit, &self.config) {
+        match read::fs_read(path, opts, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read")?;
                 Ok(result)
@@ -372,11 +368,12 @@ impl FsTools {
         paths: Vec<String>,
         exclude: Option<Vec<String>>,
         recursive: Option<bool>,
-    ) -> Result<String> {
+        options: read_many::FsReadManyOptions,
+    ) -> Result<read_many::FsReadManyResponse> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
-        match read_many::fs_read_many_files(paths, exclude, recursive, &self.config) {
+        match read_many::fs_read_many_files(paths, exclude, recursive, &self.config, options) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read_many_files")?;
                 Ok(result)

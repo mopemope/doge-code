@@ -175,6 +175,8 @@ Doge-Code tools available via MCP:
 - `fs_list`: Directory listing.
 - etc. (extensible via rmcp).
 
+> ℹ️ すべてのファイル系ツール（`fs_read`/`fs_read_many_files`/`fs_list`）はデフォルトでコンパクトモードになりました。まずは summary で概要を掴み、必要な場合のみ `mode="full"` や `cursor`/`page_size` を指定して詳細を取得してください。
+
 ## Troubleshooting
 
 - **API Key Error**: Set `OPENAI_API_KEY`. JSON output shows `{"success": false, "error": "..."}`.

@@ -14,7 +14,6 @@ pub enum ResultDensity {
     Full,
 }
 
-
 impl FromStr for ResultDensity {
     type Err = ResultDensityParseError;
 

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use reqwest::Url;
 use rmcp::{
     RmcpError,
@@ -21,10 +20,10 @@ fn internal_error(message: impl Into<String>) -> RmcpError {
     }
 }
 
-fn normalize_http_uri(address: &str) -> Result<String, RmcpError> {
+fn normalize_http_uri(address: &str) -> Result<String, String> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
-        return Err(internal_error("MCP HTTP address cannot be empty"));
+        return Err("MCP HTTP address cannot be empty".into());
     }
 
     let with_scheme = if trimmed.contains("://") {
@@ -33,8 +32,8 @@ fn normalize_http_uri(address: &str) -> Result<String, RmcpError> {
         format!("http://{}", trimmed)
     };
 
-    let mut url = Url::parse(&with_scheme)
-        .map_err(|e| internal_error(format!("Invalid MCP HTTP address: {}", e)))?;
+    let mut url =
+        Url::parse(&with_scheme).map_err(|e| format!("Invalid MCP HTTP address: {}", e))?;
 
     if url.path() == "/" {
         url.set_path("mcp");
@@ -119,7 +118,7 @@ impl McpClient {
             })?
         } else {
             // For HTTP transport, address is the URL
-            let http_uri = normalize_http_uri(&config.address)?;
+            let http_uri = normalize_http_uri(&config.address).map_err(internal_error)?;
             normalized_config.address = http_uri.clone();
             let transport = StreamableHttpClientTransport::from_uri(http_uri);
 
