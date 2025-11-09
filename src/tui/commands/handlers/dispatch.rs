@@ -6,6 +6,7 @@ use crate::tui::commands::handlers::custom::load_custom_commands;
 use crate::tui::commands::handlers::slash_commands::cancel::handle_cancel;
 use crate::tui::commands::handlers::slash_commands::clear::handle_clear;
 use crate::tui::commands::handlers::slash_commands::compact::handle_compact;
+use crate::tui::commands::handlers::slash_commands::edit_symbol::handle_edit_symbol;
 use crate::tui::commands::handlers::slash_commands::git_worktree::handle_git_worktree;
 use crate::tui::commands::handlers::slash_commands::help::handle_help;
 use crate::tui::commands::handlers::slash_commands::map::handle_map;
@@ -40,6 +41,7 @@ impl CommandHandler for TuiExecutor {
             "/cancel" => handle_cancel(self, ui),
             "/compact" => handle_compact(self, ui),
             "/map" => handle_map(self, ui),
+            "/edit-symbol" => handle_edit_symbol(self, ui),
             "/git-worktree" => match handle_git_worktree() {
                 Ok(message) => ui.push_log(message),
                 Err(e) => ui.push_log(format!("Error: {}", e)),

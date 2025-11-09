@@ -4,6 +4,7 @@ mod compact_history;
 mod history;
 mod stream;
 mod stream_tools;
+mod symbol_edit;
 mod tool_def;
 mod tool_execution;
 mod tool_runtime;
@@ -14,6 +15,7 @@ use reqwest::StatusCode;
 pub use chat_with_tools::*;
 pub use client_core::*;
 pub use history::*;
+pub use symbol_edit::*;
 pub use tool_def::*;
 pub use types::*;
 

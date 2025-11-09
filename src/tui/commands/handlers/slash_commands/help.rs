@@ -18,6 +18,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 
     ui.push_log("Repository Analysis:");
     ui.push_log("  /map - Show repository analysis summary");
+    ui.push_log("  /edit-symbol - Invoke symbol-scoped LLM edit and preview via the diff review");
     ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
     ui.push_log("");
 
