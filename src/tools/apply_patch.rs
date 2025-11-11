@@ -12,7 +12,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "apply_patch".to_string(),
-            description: "Applies a unified diff patch to a file. Provide an absolute `file_path` plus the diff `patch_content`; the tool reports whether the change applied cleanly. Common workflow: inspect the file with `fs_read`, prepare the diff, then call `apply_patch`. Example snippet:\n  ```diff\n  --- a/original.txt\n  +++ b/original.txt\n  @@\n  -old line\n  +new line\n  ```".to_string(),
+            description: "Applies a unified diff patch to a file. Provide an absolute `file_path` plus the diff `patch_content`; the tool reports whether the change applied cleanly. The patch must follow the unified diff format with proper line number ranges in the @@ lines. CRITICAL: The patch context lines (those starting with space ' ') must exactly match the current content of the file, otherwise the patch will fail to apply. Common workflow: inspect the file with `fs_read` to get current content, then prepare the diff based on that exact content, then call `apply_patch`. Example snippet:\n  ```diff\n  --- a/original.txt\n  +++ b/original.txt\n  @@ -1,3 +1,3 @@\n  -Hello, world!\n  +Hello, Rust!\n   This is the original file.\n  ```".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
