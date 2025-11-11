@@ -90,9 +90,41 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
         patched_content_lf = patched_content_lf.replace('\n', "\r\n");
     }
 
+    // First, verify that we can write to the file by checking permissions before attempting the write
+    // This helps catch permission issues early and provide more specific errors
+    let metadata = fs::metadata(path)
+        .await
+        .with_context(|| format!("Failed to get file metadata: {}", path.display()))?;
+
+    // Check if file is writable by trying to verify permissions (on Unix systems)
+    #[cfg(unix)]
+    {
+        let permissions = metadata.permissions();
+        if permissions.readonly() {
+            anyhow::bail!("Failed to write to file: {}", path.display());
+        }
+    }
+    // On non-Unix systems, we rely on the write operation to detect permission issues
+    // The actual write operation will catch permission issues
+
     fs::write(path, &patched_content_lf)
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
+
+    // Double-check that the file was actually modified by reading it back
+    let verification_content = fs::read_to_string(path).await.with_context(|| {
+        format!(
+            "Failed to read back file after patching: {}",
+            path.display()
+        )
+    })?;
+
+    if verification_content != patched_content_lf {
+        return Err(anyhow::anyhow!(
+            "File content verification failed: content read back after patching does not match expected patched content for file: {}",
+            path.display()
+        ));
+    }
 
     Ok(ApplyPatchResult {
         success: true,
