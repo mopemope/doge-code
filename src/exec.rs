@@ -5,6 +5,7 @@
 
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
+use crate::hooks::HookManager;
 use crate::llm::{self, OpenAIClient};
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -24,6 +25,7 @@ pub struct Executor {
     repomap: Arc<RwLock<Option<RepoMap>>>,
     client: Option<OpenAIClient>,
     conversation_history: Arc<Mutex<Vec<llm::types::ChatMessage>>>,
+    hook_manager: HookManager,
 }
 
 impl Executor {
@@ -58,6 +60,7 @@ impl Executor {
             repomap,
             client,
             conversation_history,
+            hook_manager: HookManager::default(),
         })
     }
 
@@ -128,7 +131,29 @@ impl Executor {
         let tokens_used = client.get_prompt_tokens_used();
 
         match res {
-            Ok((_updated_messages, final_msg)) => {
+            Ok((updated_messages, final_msg)) => {
+                // Execute hooks after the agent loop completes
+                let final_assistant_msg = crate::llm::types::ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(final_msg.content.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                };
+
+                if let Err(e) = self
+                    .hook_manager
+                    .execute_hooks(
+                        &updated_messages,
+                        &final_assistant_msg,
+                        &self.cfg,
+                        &fs_tools,
+                        &self.repomap,
+                    )
+                    .await
+                {
+                    tracing::error!("Error executing hooks: {}", e);
+                }
+
                 if json {
                     let response = &final_msg.content;
                     let output = serde_json::json!({
@@ -136,7 +161,7 @@ impl Executor {
                         "response": response,
                         "tokens_used": tokens_used,
                         "tools_called": [], // TODO: Track tools called during execution
-                        "conversation_length": _updated_messages.len()
+                        "conversation_length": updated_messages.len()
                     });
                     println!(
                         "{}",
@@ -241,7 +266,29 @@ impl Executor {
         let tokens_used = client.get_prompt_tokens_used();
 
         match res {
-            Ok((_updated_messages, final_msg)) => {
+            Ok((updated_messages, final_msg)) => {
+                // Execute hooks after the agent loop completes
+                let final_assistant_msg = crate::llm::types::ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(final_msg.content.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                };
+
+                if let Err(e) = self
+                    .hook_manager
+                    .execute_hooks(
+                        &updated_messages,
+                        &final_assistant_msg,
+                        &self.cfg,
+                        &fs_tools,
+                        &self.repomap,
+                    )
+                    .await
+                {
+                    tracing::error!("Error executing hooks: {}", e);
+                }
+
                 let raw_response = final_msg.content.clone();
                 if let Some(rewritten) = extract_rewritten_code(&raw_response, snippet) {
                     if json {
@@ -311,6 +358,16 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    /// Add a hook to be executed after each instruction
+    pub fn add_hook(&mut self, hook: Box<dyn crate::hooks::InstructionHook>) {
+        self.hook_manager.add_hook(hook);
+    }
+
+    /// Get access to the hook manager
+    pub fn hook_manager(&mut self) -> &mut crate::hooks::HookManager {
+        &mut self.hook_manager
     }
 }
 

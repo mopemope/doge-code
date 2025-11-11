@@ -197,6 +197,7 @@ impl TuiExecutor {
                 let conversation_history = self.conversation_history.clone();
                 let session_manager = self.session_manager.clone();
                 let cfg = self.cfg.clone();
+                let _repomap = self.repomap.clone();
                 rt.spawn(async move {
                     // Notify that request sending has started
                     if let Some(tx) = &tx {
@@ -227,6 +228,9 @@ impl TuiExecutor {
                     let total_tokens = c.get_tokens_used();
                     match res {
                         Ok((updated_messages, _final_msg)) => {
+                            // Execute hooks after the agent loop completes
+                            // This would require cloning hook_manager which is complex in async context
+
                             if let Some(tx) = tx {
                                 // run_agent_loop already sends the final assistant content as a
                                 // "::status:done:<content>" message. Avoid duplicating it here.

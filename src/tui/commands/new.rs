@@ -1,4 +1,5 @@
 use crate::analysis::{Analyzer, RepoMap};
+use crate::hooks::HookManager;
 use crate::llm::OpenAIClient;
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -93,6 +94,7 @@ impl TuiExecutor {
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
+            hook_manager: HookManager::default(),
         })
     }
 
@@ -150,6 +152,7 @@ impl TuiExecutor {
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
+            hook_manager: HookManager::default(),
         })
     }
 }

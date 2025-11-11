@@ -89,7 +89,6 @@ impl TuiExecutor {
                         msgs,
                         tx.clone(),
                         Some(cancel_token),
-                        Some(session_manager.clone()),
                         &cfg,
                         Some(self),
                     )
@@ -98,7 +97,37 @@ impl TuiExecutor {
                     let tokens_used = c.get_prompt_tokens_used();
                     let total_tokens = c.get_tokens_used();
                     match res {
-                        Ok((updated_messages, _final_msg)) => {
+                        Ok((updated_messages, final_msg)) => {
+                            // Execute hooks after the agent loop completes
+                            let final_assistant_msg = crate::llm::types::ChatMessage {
+                                role: "assistant".into(),
+                                content: Some(final_msg.content.clone()),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            };
+                            
+                            // Access the hook manager through the executor (self)
+                            // We need to get a closure with the necessary values for hook execution
+                            let hook_manager = self.hook_manager.clone();
+                            let cfg = self.cfg.clone();
+                            let fs = self.tools.clone();
+                            let repomap = self.repomap.clone();
+                            
+                            // Spawn a task to execute hooks without blocking the main flow
+                            let hook_fut = async move {
+                                if let Err(e) = hook_manager.execute_hooks(
+                                    &updated_messages,
+                                    &final_assistant_msg,
+                                    &cfg,
+                                    &fs,
+                                    &repomap,
+                                ).await {
+                                    tracing::error!("Error executing hooks: {}", e);
+                                }
+                            };
+                            
+                            // Execute the hooks task
+                            tokio::spawn(hook_fut);
                             // Store the final elapsed time string without taking the start time
                             if let Some(start_time) = ui.processing_start_time {
                                 let elapsed = start_time.elapsed();

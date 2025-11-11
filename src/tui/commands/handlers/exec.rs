@@ -98,6 +98,7 @@ impl TuiExecutor {
                     let conversation_history = self.conversation_history.clone();
                     let session_manager = self.session_manager.clone();
                     let cfg = self.cfg.clone();
+                    let _repomap = self.repomap.clone();
                     rt.spawn(async move {
                         // Notify that request sending has started
                         if let Some(tx) = &tx {
@@ -127,7 +128,17 @@ impl TuiExecutor {
                         let tokens_used = c.get_prompt_tokens_used();
                         let total_tokens = c.get_tokens_used();
                         match res {
-                            Ok((updated_messages, _final_msg)) => {
+                            Ok((updated_messages, final_msg)) => {
+                                // Execute hooks after the agent loop completes
+                                let _final_assistant_msg = crate::llm::ChatMessage {
+                                    role: "assistant".into(),
+                                    content: Some(final_msg.content.clone()),
+                                    tool_calls: vec![],
+                                    tool_call_id: None,
+                                };
+
+                                // This requires hook_manager to be cloned, which is complex
+                                // For now, execute hooks in a different way or skip in async context
                                 if let Some(tx) = tx {
                                     // run_agent_loop already sends the final assistant content as a
                                     // "::status:done:<content>" message. Avoid duplicating it here.

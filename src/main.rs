@@ -4,6 +4,7 @@ pub mod config;
 pub mod diff_review;
 pub mod exec;
 pub mod features;
+pub mod hooks;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
