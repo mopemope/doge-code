@@ -115,6 +115,26 @@ impl TuiApp {
         };
         let separator = Paragraph::new(separator_text).style(theme.footer_style);
         f.render_widget(separator, header_chunks[1]);
+
+        // Ensure the entire header area is filled to prevent artifacts
+        if area.height > 2 {
+            // If header area is larger than our content (shouldn't happen with current layout but be safe)
+            let blank_lines_needed = area.height - 2;
+            if blank_lines_needed > 0 {
+                let blank_lines: Vec<Line> =
+                    (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
+
+                let blank_paragraph = Paragraph::new(blank_lines).style(theme.footer_style);
+
+                let blank_area = Rect {
+                    x: area.x,
+                    y: area.y + 2,
+                    width: area.width,
+                    height: blank_lines_needed,
+                };
+                f.render_widget(blank_paragraph, blank_area);
+            }
+        }
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
@@ -149,42 +169,49 @@ impl TuiApp {
         // Clear log panel area to prevent artifacts when content height or layout changes
         f.render_widget(Clear, area);
 
-        // Pre-initialize all lines in the area to ensure complete coverage
-        let max_displayable = area.height as usize;
-        let mut lines: Vec<Line> = Vec::new();
+        // Create paragraph with the content lines
+        let lines: Vec<Line> = plan
+            .log_lines
+            .iter()
+            .map(|styled_line| {
+                let spans: Vec<Span> = styled_line
+                    .spans
+                    .iter()
+                    .map(|segment| Span::styled(segment.content.clone(), segment.style))
+                    .collect();
+                if spans.is_empty() {
+                    Line::raw("")
+                } else {
+                    Line::from(spans)
+                }
+            })
+            .collect();
 
-        // Calculate how many lines we can render
-        let lines_to_render = plan.log_lines.len().min(max_displayable);
-
-        // Add the actual content lines
-        for styled_line in plan.log_lines.iter().take(lines_to_render) {
-            let spans: Vec<Span> = styled_line
-                .spans
-                .iter()
-                .map(|segment| Span::styled(segment.content.clone(), segment.style))
-                .collect();
-            if spans.is_empty() {
-                lines.push(Line::raw(""));
-            } else {
-                lines.push(Line::from(spans));
-            }
-        }
-
-        // Fill remaining space with empty lines to ensure complete area coverage
-        // and prevent any artifacts from previous renders
-        while lines.len() < max_displayable {
-            lines.push(Line::raw("")); // Empty line with proper raw content
-        }
-
-        // Ensure we have exactly the right number of lines to fill the area
-        if lines.len() > max_displayable {
-            lines.truncate(max_displayable);
-        }
-
-        let paragraph = Paragraph::new(lines)
+        let paragraph = Paragraph::new(lines.clone())
             .style(theme.log_style)
             .block(Block::default());
         f.render_widget(paragraph, area);
+
+        // After rendering content, fill any remaining area with blank lines to ensure
+        // complete coverage and prevent artifacts from previous renders
+        // We'll render this as a separate widget to ensure it clears properly
+        if lines.len() < area.height as usize {
+            let blank_lines_needed = area.height as usize - lines.len();
+            let blank_lines: Vec<Line> = (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
+
+            let blank_paragraph = Paragraph::new(blank_lines)
+                .style(Style::default().bg(theme.log_style.bg.unwrap_or(Color::Reset)))
+                .block(Block::default());
+
+            // Position the blank area starting just after our content
+            let blank_area = Rect {
+                x: area.x,
+                y: area.y + lines.len() as u16,
+                width: area.width,
+                height: blank_lines_needed as u16,
+            };
+            f.render_widget(blank_paragraph, blank_area);
+        }
     }
 
     fn render_diff_review(&self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -271,17 +298,30 @@ impl TuiApp {
             f.render_widget(paragraph, layout[1]);
         } else {
             let diff_lines: Vec<Line> = vec![Line::raw("No diff available")];
-            // Fill remaining space to prevent artifacts
-            let max_displayable = layout[1].height as usize;
-            let mut lines = diff_lines;
-            while lines.len() < max_displayable {
-                lines.push(Line::raw(""));
-            }
 
-            let paragraph = Paragraph::new(lines)
+            let paragraph = Paragraph::new(diff_lines)
                 .block(diff_block)
                 .style(theme.log_style);
             f.render_widget(paragraph, layout[1]);
+
+            // Fill remaining space with blank lines to prevent artifacts
+            if 1 < layout[1].height as usize {
+                let blank_lines_needed = (layout[1].height as usize - 1).max(0);
+                let blank_lines: Vec<Line> =
+                    (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
+
+                let blank_paragraph = Paragraph::new(blank_lines)
+                    .style(Style::default().bg(theme.log_style.bg.unwrap_or(Color::Reset)))
+                    .block(Block::default());
+
+                let blank_area = Rect {
+                    x: layout[1].x,
+                    y: layout[1].y + 1,
+                    width: layout[1].width,
+                    height: blank_lines_needed as u16,
+                };
+                f.render_widget(blank_paragraph, blank_area);
+            }
         }
 
         // instructions footer for diff
@@ -302,6 +342,7 @@ impl TuiApp {
     ) {
         // Clear dedicated session list area to avoid overlapping with previous content.
         f.render_widget(Clear, area);
+
         let items: Vec<ListItem> = session_list_state
             .sessions
             .iter()
@@ -320,15 +361,8 @@ impl TuiApp {
             })
             .collect();
 
-        // If we have fewer items than the area height, fill with empty items to prevent artifacts
-        let max_displayable = area.height.saturating_sub(2) as usize; // account for borders
-        let mut all_items = items;
-        while all_items.len() < max_displayable {
-            all_items.push(ListItem::new("")); // Empty list item
-        }
-
         let list =
-            List::new(all_items)
+            List::new(items.clone())
                 .block(Block::default().borders(Borders::ALL).title(
                     "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
                 ))
@@ -336,6 +370,28 @@ impl TuiApp {
                 .highlight_symbol(">> ");
 
         f.render_widget(list, area);
+
+        // Fill any remaining space with blank lines to prevent artifacts
+        let list_height = items.len();
+        let border_height = 2; // top and bottom border
+        if list_height + border_height < area.height as usize {
+            let blank_lines_needed = (area.height as usize - list_height - border_height).max(0);
+            if blank_lines_needed > 0 {
+                let blank_lines: Vec<Line> =
+                    (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
+
+                let blank_paragraph = Paragraph::new(blank_lines)
+                    .style(Style::default().bg(theme.log_style.bg.unwrap_or(Color::Reset)));
+
+                let blank_area = Rect {
+                    x: area.x + 1,                       // account for left border
+                    y: area.y + list_height as u16 + 1,  // account for items and top border
+                    width: area.width.saturating_sub(2), // account for left and right borders
+                    height: blank_lines_needed as u16,
+                };
+                f.render_widget(blank_paragraph, blank_area);
+            }
+        }
     }
 
     fn render_input_area(&mut self, f: &mut Frame, area: Rect) {
@@ -414,18 +470,33 @@ impl TuiApp {
                 _ => "Completion", // Fallback, should not happen if completion_active is true
             };
 
-            // If we have fewer items than the area height, fill with empty items to prevent artifacts
-            let max_displayable = completion_area.height.saturating_sub(2) as usize; // account for borders
-            let mut all_items = items;
-            while all_items.len() < max_displayable {
-                all_items.push(ListItem::new("")); // Empty list item
-            }
-
             let list =
-                List::new(all_items).block(Block::default().borders(Borders::ALL).title(title));
+                List::new(items.clone()).block(Block::default().borders(Borders::ALL).title(title));
 
             f.render_widget(Clear, completion_area); // Clear the area behind the popup
             f.render_widget(list, completion_area);
+
+            // Fill any remaining space in the completion popup with blank items to prevent artifacts
+            let num_items = items.len();
+            let max_displayable = completion_area.height.saturating_sub(2) as usize; // account for borders
+            if num_items < max_displayable {
+                let blank_items_needed = max_displayable - num_items;
+                if blank_items_needed > 0 {
+                    let blank_items: Vec<ListItem> = (0..blank_items_needed)
+                        .map(|_| ListItem::new(" "))
+                        .collect();
+
+                    let blank_list = List::new(blank_items).block(Block::default());
+
+                    let blank_area = Rect {
+                        x: completion_area.x + 1,                       // account for left border
+                        y: completion_area.y + 1 + num_items as u16, // account for title and items
+                        width: completion_area.width.saturating_sub(2), // account for borders
+                        height: blank_items_needed as u16,
+                    };
+                    f.render_widget(blank_list, blank_area);
+                }
+            }
         }
     }
 
@@ -475,9 +546,37 @@ impl TuiApp {
             footer_text.push_str(&format!("Elapsed: {} ", last_elapsed));
         }
 
+        // Ensure the text is padded to fill the full width to prevent artifacts
+        let max_width = area.width as usize;
+        if footer_text.len() < max_width {
+            footer_text.extend(std::iter::repeat_n(' ', max_width - footer_text.len()));
+        } else if footer_text.len() > max_width {
+            footer_text.truncate(max_width);
+        }
+
         let footer_paragraph = Paragraph::new(footer_text)
             .style(theme.footer_style)
             .alignment(Alignment::Left);
         f.render_widget(footer_paragraph, area);
+
+        // If area is taller than our content, fill remaining space
+        if area.height > 1 {
+            let blank_lines_needed = area.height - 1;
+            if blank_lines_needed > 0 {
+                let blank_lines: Vec<Line> =
+                    (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
+
+                let blank_paragraph = Paragraph::new(blank_lines)
+                    .style(Style::default().bg(theme.footer_style.bg.unwrap_or(Color::Reset)));
+
+                let blank_area = Rect {
+                    x: area.x,
+                    y: area.y + 1,
+                    width: area.width,
+                    height: blank_lines_needed,
+                };
+                f.render_widget(blank_paragraph, blank_area);
+            }
+        }
     }
 }
