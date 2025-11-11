@@ -70,10 +70,18 @@ pub async fn apply_patch(
 
     match crate::tools::apply_patch::apply_patch(params, &runtime.fs.config).await {
         Ok(res) => {
-            // Any successful response from apply_patch is treated as a successful tool call
-            // for metrics purposes. Detailed outcome is carried in the payload.
-            if let Err(e) = runtime.fs.record_tool_call_success("apply_patch") {
-                tracing::error!(?e, "Failed to record tool call success for apply_patch");
+            // Treat only a logically successful patch as a successful tool call.
+            // Non-successful ApplyPatchResult values are recorded as failures
+            // to keep metrics aligned with actual outcomes.
+            if res.success {
+                if let Err(e) = runtime.fs.record_tool_call_success("apply_patch") {
+                    tracing::error!(?e, "Failed to record tool call success for apply_patch");
+                }
+            } else if let Err(e) = runtime.fs.record_tool_call_failure("apply_patch") {
+                tracing::error!(
+                    ?e,
+                    "Failed to record tool call failure for apply_patch with unsuccessful result"
+                );
             }
 
             Ok(serde_json::to_value(res)?)
