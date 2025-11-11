@@ -77,9 +77,22 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
     let mut patched_content_lf = match diffy::apply(&original_content, &patch) {
         Ok(content) => content,
         Err(e) => {
+            // Provide more detailed error message to help users understand the common cause
+            let error_str = e.to_string();
+            let detailed_message = if error_str.contains("error applying hunk")
+                || error_str.contains("context lines do not match")
+            {
+                format!(
+                    "Failed to apply patch: Context lines do not match. This usually happens when the file content has changed since the patch was created, or the context in the patch doesn't match the current file content exactly. Make sure to read the current file content with fs_read before creating your patch. Error: {}",
+                    e
+                )
+            } else {
+                format!("Failed to apply patch: {}", e)
+            };
+
             return Ok(ApplyPatchResult {
                 success: false,
-                message: format!("Failed to apply patch: {}", e),
+                message: detailed_message,
                 original_content: Some(original_content_raw),
                 modified_content: None,
             });
@@ -258,6 +271,14 @@ line C
         // 3. Verify that the patch application failed due to content mismatch
         assert!(!result.success);
         assert!(result.message.contains("Failed to apply patch"));
+        // Check that the enhanced error message includes helpful guidance
+        assert!(
+            result.message.contains("Context lines do not match")
+                || result.message.contains("context lines do not match")
+        );
+        assert!(
+            result.message.contains("fs_read") || result.message.contains("current file content")
+        );
 
         // Ensure the file content remains unchanged
         let final_content = std::fs::read_to_string(file_path).unwrap();

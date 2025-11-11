@@ -153,6 +153,14 @@ mod tests {
         // 3. Verify that the patch application failed due to content mismatch
         assert!(!result.success);
         assert!(result.message.contains("Failed to apply patch"));
+        // Check that the enhanced error message includes helpful guidance
+        assert!(
+            result.message.contains("Context lines do not match")
+                || result.message.contains("context lines do not match")
+        );
+        assert!(
+            result.message.contains("fs_read") || result.message.contains("current file content")
+        );
 
         // Ensure the file content remains unchanged
         let final_content = fs::read_to_string(file_path).await.unwrap();
