@@ -12,6 +12,9 @@ impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
 
+        // Clear full frame to avoid ghost artifacts when layout/content changes.
+        f.render_widget(Clear, size);
+
         //debug!("Screen size: {}x{}", size.width, size.height);
 
         // Adjust layout for multi-line input area
@@ -64,16 +67,13 @@ impl TuiApp {
         self.render_status_footer(f, chunks[2], &self.theme);
         self.render_input_area(f, chunks[3]);
 
-        // If there are todo items in the plan, add them to the log as regular messages
-        if !plan.todo_list.is_empty() {
-            // We'll add todo items to the log in the build_render_plan function
-            // This section is intentionally left empty to remove the separate panel rendering
-        }
-
         // The cursor is now handled by the TextArea widget, so no need to set it manually.
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        // Clear header area fully to avoid artifacts when content shrinks.
+        f.render_widget(Clear, area);
+
         let header_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
@@ -118,14 +118,15 @@ impl TuiApp {
     }
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        // Always clear the main content area before drawing any mode-specific content.
+        // This avoids artifacts when switching between log, diff review, and session list views.
+        f.render_widget(Clear, area);
+
         if self.input_mode == crate::tui::state::InputMode::SessionList
             && let Some(session_list_state) = &self.session_list_state
         {
             self.render_session_list(f, area, session_list_state, theme);
-            return;
-        }
-
-        if self.diff_review.is_some() {
+        } else if self.diff_review.is_some() {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
@@ -139,6 +140,9 @@ impl TuiApp {
     }
 
     fn render_log_panel(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        // Clear log panel area to prevent artifacts when content height or layout changes
+        f.render_widget(Clear, area);
+
         if plan.log_lines.len() > area.height as usize {
             // retain silent overflow awareness for future enhancements
         }
@@ -160,6 +164,12 @@ impl TuiApp {
             }
         }
 
+        // Ensure the entire log panel area is repainted every frame to avoid leftover
+        // colored artifacts when the visible lines shrink (e.g., after scrolling).
+        while lines.len() < max_displayable {
+            lines.push(Line::default());
+        }
+
         let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
             .block(Block::default());
@@ -170,6 +180,9 @@ impl TuiApp {
         let Some(review) = &self.diff_review else {
             return;
         };
+
+        // Ensure diff review area is clean when toggling on/off.
+        f.render_widget(Clear, area);
 
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -268,6 +281,8 @@ impl TuiApp {
         session_list_state: &crate::tui::state::SessionListState,
         theme: &Theme,
     ) {
+        // Clear dedicated session list area to avoid overlapping with previous content.
+        f.render_widget(Clear, area);
         let items: Vec<ListItem> = session_list_state
             .sessions
             .iter()
@@ -298,6 +313,9 @@ impl TuiApp {
     }
 
     fn render_input_area(&mut self, f: &mut Frame, area: Rect) {
+        // Clear input area fully to avoid artifacts when input shrinks or mode changes.
+        f.render_widget(Clear, area);
+
         let input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
             self.theme.shell_input_style
         } else {

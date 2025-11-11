@@ -442,6 +442,9 @@ impl TuiApp {
                 }
             }
 
+            // When the UI state is marked as dirty, always perform a full frame redraw.
+            // This intentionally favors correctness and prevents ghosting artifacts
+            // over aggressively skipping draws.
             if self.dirty {
                 let model = self.model.clone();
                 terminal.draw(|f| self.view(f, model.as_deref()))?;

@@ -6,7 +6,6 @@ use serde_json::json;
 
 pub mod apply;
 use apply::apply_patch as apply_impl;
-use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -45,24 +44,7 @@ pub async fn apply_patch(
     params: ApplyPatchParams,
     _config: &AppConfig,
 ) -> Result<ApplyPatchResult> {
-    let result = apply_impl(params, _config).await;
-
-    // Update session with changed file if the patch was applied successfully
-    if let Ok(ref res) = result
-        && res.success
-        && let Ok(current_dir) = std::env::current_dir()
-    {
-        // Bind String::new() to a variable to avoid temporary value borrowing
-        let empty_string = String::new();
-        let modified_content_ref = res.modified_content.as_ref().unwrap_or(&empty_string);
-        let path = Path::new(modified_content_ref);
-        if let Ok(relative_path) = path.strip_prefix(current_dir) {
-            let fs_tools = crate::tools::FsTools::default();
-            let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
-        }
-    }
-
-    result
+    apply_impl(params, _config).await
 }
 
 #[cfg(test)]
