@@ -97,8 +97,8 @@ pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result
     Ok(ApplyPatchResult {
         success: true,
         message: "File patched successfully.".to_string(),
-        original_content: None,
-        modified_content: None,
+        original_content: Some(original_content_raw),
+        modified_content: Some(patched_content_lf),
     })
 }
 
@@ -449,6 +449,52 @@ second line modified
 
         let result = apply_patch(params).await.unwrap();
         assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_returns_content_in_success_case() {
+        let original_content = "Hello, world!\nThis is the original file.\n";
+        let modified_content = "Hello, Rust!\nThis is the modified file.\n";
+
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.message, "File patched successfully.");
+
+        // Verify that content is returned in the success case (this was the fix)
+        assert!(
+            result.original_content.is_some(),
+            "Original content should be returned in success case"
+        );
+        assert!(
+            result.modified_content.is_some(),
+            "Modified content should be returned in success case"
+        );
+
+        if let Some(orig_content) = &result.original_content {
+            assert_eq!(
+                orig_content, original_content,
+                "Returned original content should match"
+            );
+        }
+
+        if let Some(mod_content) = &result.modified_content {
+            assert_eq!(
+                mod_content, modified_content,
+                "Returned modified content should match"
+            );
+        }
 
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, modified_content);
