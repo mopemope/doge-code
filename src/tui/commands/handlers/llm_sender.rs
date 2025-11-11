@@ -144,25 +144,66 @@ impl TuiExecutor {
                                     tracing::error!(?e, "Failed to update session with token count");
                                 }
 
-                                // Check for changed files and trigger repomap update if needed
+                                // If there are changed files in this session, trigger a repomap rebuild
                                 if sm.current_session_has_changed_files() {
                                     if let Some(tx) = &tx {
                                         let _ = tx.send("::status:updating_repomap".to_string());
                                     }
-                                    
-                                    // Get changed files
-                                    let changed_files = sm.get_changed_files_from_current_session();
-                                    
-                                    // Update repomap with changed files - skipped to avoid duplicate analyzer creation
-                                    // The main analyzer handles the full repomap which should include changes
-                                    
-                                    // Clear changed files from session
-                                    if let Err(e) = sm.clear_changed_files_from_current_session() {
-                                        tracing::error!(?e, "Failed to clear changed files from session");
-                                    }
-                                    
-                                    if let Some(tx) = &tx {
-                                        let _ = tx.send("::status:repomap_updated".to_string());
+
+                                    // Capture state for async repomap rebuild
+                                    let repomap_clone = fs.repomap.clone();
+                                    let project_root = cfg.project_root.clone();
+                                    let ui_tx = tx.clone();
+                                    let mut sm_for_clear = sm;
+
+                                    tokio::spawn(async move {
+                                        use crate::analysis::Analyzer;
+                                        use tracing::{error, info, warn};
+
+                                        info!("Starting post-session repomap rebuild");
+
+                                        let mut analyzer = match Analyzer::new(&project_root).await {
+                                            Ok(analyzer) => analyzer,
+                                            Err(e) => {
+                                                error!("Failed to create Analyzer for repomap rebuild: {:?}", e);
+                                                if let Some(tx) = ui_tx.clone() {
+                                                    let _ = tx.send(format!(
+                                                        "[Failed to create analyzer for repomap rebuild: {}]",
+                                                        e
+                                                    ));
+                                                }
+                                                return;
+                                            }
+                                        };
+
+                                        if let Err(e) = analyzer.clear_cache().await {
+                                            warn!("Failed to clear cache before repomap rebuild: {}", e);
+                                        }
+
+                                        match analyzer.build_parallel().await {
+                                            Ok(map) => {
+                                                *repomap_clone.write().await = Some(map);
+                                                if let Some(tx) = ui_tx {
+                                                    let _ = tx.send("::status:repomap_updated".to_string());
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to rebuild repomap: {:?}", e);
+                                                if let Some(tx) = ui_tx {
+                                                    let _ = tx.send(format!(
+                                                        "[Failed to rebuild repomap: {}]",
+                                                        e
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    if let Err(e) = sm_for_clear.clear_changed_files_from_current_session() {
+                                        tracing::error!(
+                                            ?e,
+                                            "Failed to clear changed files from session after repomap rebuild trigger"
+                                        );
                                     }
                                 }
                             }

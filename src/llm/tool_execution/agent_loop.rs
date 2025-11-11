@@ -242,7 +242,7 @@ pub async fn run_agent_loop(
             }
 
             // Prepare and sanitize arguments for logging
-            let mut args_str = tc.function.arguments.clone();
+            let args_str = tc.function.arguments.clone();
             if let Ok(mut args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
                 if let Some(obj) = args_val.as_object_mut() {
                     if tc.function.name == "fs_write" {
@@ -298,18 +298,23 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                if let Ok(modified_args_str) = serde_json::to_string(&args_val) {
-                    args_str = modified_args_str;
-                }
+                let _ = serde_json::to_string(&args_val);
             }
 
+            let mut args_str_truncated = args_str;
             const MAX_ARG_LEN: usize = 120;
-            if args_str.len() > MAX_ARG_LEN {
-                let mut truncated = args_str.chars().take(MAX_ARG_LEN - 3).collect::<String>();
-                truncated.push_str("...");
-                args_str = truncated;
+            if args_str_truncated.len() > MAX_ARG_LEN {
+                args_str_truncated = format!(
+                    "{}...",
+                    args_str_truncated
+                        .chars()
+                        .take(MAX_ARG_LEN - 3)
+                        .collect::<String>()
+                );
             }
 
+            // Currently args_str_truncated is only used for potential future logging.
+            let _ = &args_str_truncated;
             let res = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
