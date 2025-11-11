@@ -389,14 +389,7 @@ pub async fn run_agent_loop(
                     format!("🛠️  [{timestamp_short}] {tool_icon} {tool_name} => {status_text}");
                 let _ = tx.send(header_line);
 
-                // Bright yellow color for arguments (reset to default afterwards)
-                let _ = tx.send(format!(" \x1b[93mArgs: {args_str}\x1b[0m"));
-
-                let result_label = if success { "Result" } else { "Error" };
-                let result_color = if success { "\x1b[92m" } else { "\x1b[91m" };
-                let _ = tx.send(format!(
-                    " {result_color}{result_label}: {result_summary}\x1b[0m"
-                ));
+                // Tool arguments and results are intentionally not displayed in the TUI to avoid leaking sensitive data.
 
                 let _ = tx.send("".to_string()); // Extra blank line for spacing
             }

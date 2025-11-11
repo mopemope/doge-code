@@ -309,20 +309,8 @@ fn compose_inline_style(
 }
 
 fn is_tool_line(line: &str) -> bool {
-    // Check if line contains tool execution format with timestamp and tool emoji
-    line.contains("[")
-        && (line.contains(" 🛠️ ") ||  // tool execution indicator
-    line.contains("🗂️") ||  // fs_list
-    line.contains("📖") ||  // fs_read
-    line.contains("📚") ||  // fs_read_many_files
-    line.contains("📝") ||  // fs_write
-    line.contains("🔍") ||  // search_text
-    line.contains("🔧") ||  // execute_bash, default
-    line.contains("📁") ||  // find_file
-    line.contains("🗺️") ||  // search_repomap
-    line.contains("✏️") ||  // edit
-    line.contains("🧩") ||  // apply_patch
-    line.contains("📋")) // todo_write/tod_read
+    // Check if line contains tool execution status markers (without exposing args/results)
+    line.contains("[") && (line.contains(" => ❌") || line.contains(" => ✅"))
 }
 
 fn style_for_plain_line(line: &str, theme: &Theme) -> Style {
