@@ -127,14 +127,20 @@ impl TuiApp {
         {
             self.render_session_list(f, area, session_list_state, theme);
         } else if self.diff_review.is_some() {
+            // For diff review mode, we use a horizontal split
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
                 .split(area);
 
+            // Render log panel on the left
             self.render_log_panel(f, columns[0], plan, theme);
+            // Render diff review on the right
             self.render_diff_review(f, columns[1], theme);
         } else {
+            // For normal mode, use the full area for the log panel
+            // Ensure that if we were previously in diff review mode, the right-side area is cleared
+            // by explicitly rendering the log panel on the entire area
             self.render_log_panel(f, area, plan, theme);
         }
     }
@@ -143,14 +149,14 @@ impl TuiApp {
         // Clear log panel area to prevent artifacts when content height or layout changes
         f.render_widget(Clear, area);
 
-        if plan.log_lines.len() > area.height as usize {
-            // retain silent overflow awareness for future enhancements
-        }
-
-        let mut lines: Vec<Line> = Vec::new();
+        // Pre-initialize all lines in the area to ensure complete coverage
         let max_displayable = area.height as usize;
+        let mut lines: Vec<Line> = Vec::new();
+
+        // Calculate how many lines we can render
         let lines_to_render = plan.log_lines.len().min(max_displayable);
 
+        // Add the actual content lines
         for styled_line in plan.log_lines.iter().take(lines_to_render) {
             let spans: Vec<Span> = styled_line
                 .spans
@@ -158,16 +164,21 @@ impl TuiApp {
                 .map(|segment| Span::styled(segment.content.clone(), segment.style))
                 .collect();
             if spans.is_empty() {
-                lines.push(Line::default());
+                lines.push(Line::raw(""));
             } else {
                 lines.push(Line::from(spans));
             }
         }
 
-        // Ensure the entire log panel area is repainted every frame to avoid leftover
-        // colored artifacts when the visible lines shrink (e.g., after scrolling).
+        // Fill remaining space with empty lines to ensure complete area coverage
+        // and prevent any artifacts from previous renders
         while lines.len() < max_displayable {
-            lines.push(Line::default());
+            lines.push(Line::raw("")); // Empty line with proper raw content
+        }
+
+        // Ensure we have exactly the right number of lines to fill the area
+        if lines.len() > max_displayable {
+            lines.truncate(max_displayable);
         }
 
         let paragraph = Paragraph::new(lines)
@@ -259,7 +270,15 @@ impl TuiApp {
                 .scroll((scroll, 0));
             f.render_widget(paragraph, layout[1]);
         } else {
-            let paragraph = Paragraph::new("No diff available")
+            let diff_lines: Vec<Line> = vec![Line::raw("No diff available")];
+            // Fill remaining space to prevent artifacts
+            let max_displayable = layout[1].height as usize;
+            let mut lines = diff_lines;
+            while lines.len() < max_displayable {
+                lines.push(Line::raw(""));
+            }
+
+            let paragraph = Paragraph::new(lines)
                 .block(diff_block)
                 .style(theme.log_style);
             f.render_widget(paragraph, layout[1]);
@@ -301,8 +320,15 @@ impl TuiApp {
             })
             .collect();
 
+        // If we have fewer items than the area height, fill with empty items to prevent artifacts
+        let max_displayable = area.height.saturating_sub(2) as usize; // account for borders
+        let mut all_items = items;
+        while all_items.len() < max_displayable {
+            all_items.push(ListItem::new("")); // Empty list item
+        }
+
         let list =
-            List::new(items)
+            List::new(all_items)
                 .block(Block::default().borders(Borders::ALL).title(
                     "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
                 ))
@@ -388,7 +414,15 @@ impl TuiApp {
                 _ => "Completion", // Fallback, should not happen if completion_active is true
             };
 
-            let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+            // If we have fewer items than the area height, fill with empty items to prevent artifacts
+            let max_displayable = completion_area.height.saturating_sub(2) as usize; // account for borders
+            let mut all_items = items;
+            while all_items.len() < max_displayable {
+                all_items.push(ListItem::new("")); // Empty list item
+            }
+
+            let list =
+                List::new(all_items).block(Block::default().borders(Borders::ALL).title(title));
 
             f.render_widget(Clear, completion_area); // Clear the area behind the popup
             f.render_widget(list, completion_area);
@@ -396,6 +430,9 @@ impl TuiApp {
     }
 
     fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        // Clear footer area to prevent artifacts when content changes
+        f.render_widget(Clear, area);
+
         // Single line footer: combine version, tokens, repomap, mode, elapsed
         let mut footer_text = String::with_capacity(150);
         footer_text.push_str("v0.1.0 | ");
