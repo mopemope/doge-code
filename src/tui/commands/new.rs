@@ -1,5 +1,5 @@
 use crate::analysis::{Analyzer, RepoMap};
-use crate::hooks::HookManager;
+use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
 use crate::llm::OpenAIClient;
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -94,7 +94,11 @@ impl TuiExecutor {
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
-            hook_manager: HookManager::default(),
+            hook_manager: {
+                let mut hook_manager = HookManager::default();
+                hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
+                hook_manager
+            },
         })
     }
 
@@ -152,7 +156,11 @@ impl TuiExecutor {
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
-            hook_manager: HookManager::default(),
+            hook_manager: {
+                let mut hook_manager = HookManager::default();
+                hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
+                hook_manager
+            },
         })
     }
 }

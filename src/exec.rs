@@ -5,7 +5,7 @@
 
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
-use crate::hooks::HookManager;
+use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
 use crate::llm::{self, OpenAIClient};
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -60,7 +60,11 @@ impl Executor {
             repomap,
             client,
             conversation_history,
-            hook_manager: HookManager::default(),
+            hook_manager: {
+                let mut hook_manager = HookManager::default();
+                hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
+                hook_manager
+            },
         })
     }
 

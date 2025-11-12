@@ -74,3 +74,4 @@ impl Default for HookManager {
 }
 
 pub mod examples;
+pub mod repomap_update;
