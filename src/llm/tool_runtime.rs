@@ -4,7 +4,7 @@ use crate::tools::{FsTools, RemoteToolInfo};
 use anyhow::Result;
 use tracing::debug;
 
-const MAX_ITERS: usize = 128;
+const MAX_ITERS: usize = 256;
 
 pub struct ToolRuntime<'a> {
     pub tools: Vec<ToolDef>,

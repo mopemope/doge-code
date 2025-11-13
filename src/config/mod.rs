@@ -142,9 +142,9 @@ impl Default for LlmConfig {
             connect_timeout_ms: 5_000,
             request_timeout_ms: 60_000,
             read_idle_timeout_ms: 20_000,
-            max_retries: 3,
-            retry_base_ms: 300,
-            retry_jitter_ms: 200,
+            max_retries: 100,
+            retry_base_ms: 1000,
+            retry_jitter_ms: 5000,
             respect_retry_after: true,
             timeout_ms: 600_000, // 10 minutes
         }

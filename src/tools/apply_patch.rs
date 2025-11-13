@@ -126,7 +126,17 @@ async fn apply_patch_impl(
     }
 
     // ===== 7. パッチ適用 =====
-    let patched_content_lf = apply_patch_to_content(&original_content, &patch, path)?;
+    let patched_content_lf = match apply_patch_to_content(&original_content, &patch, path) {
+        Ok(content) => content,
+        Err(e) => {
+            return Ok(ApplyPatchResult {
+                success: false,
+                message: format!("Failed to apply patch: {}", e),
+                original_content: Some(original_content_raw),
+                modified_content: None,
+            });
+        }
+    };
 
     // ===== 8. 改行コードの復元 =====
     let patched_content = if has_crlf {
@@ -337,5 +347,527 @@ async fn update_session_with_changed_file(path: &Path) {
     {
         let fs_tools = crate::tools::FsTools::default();
         let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::test_utils::create_test_config_with_temp_dir;
+    use diffy;
+    use std::path::PathBuf;
+    use tempfile::Builder;
+
+    async fn apply_patch(params: ApplyPatchParams) -> anyhow::Result<ApplyPatchResult> {
+        let config = create_test_config_with_temp_dir();
+        super::apply_patch(params, &config).await
+    }
+
+    fn create_temp_file(content: &str) -> (PathBuf, String) {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = Builder::new()
+            .prefix("test_")
+            .suffix(".txt")
+            .rand_bytes(5)
+            .tempfile_in(&temp_dir)
+            .unwrap()
+            .into_temp_path()
+            .to_path_buf();
+        std::fs::write(&file_path, content).unwrap();
+        let file_path_str = file_path.to_str().unwrap().to_string();
+        (file_path, file_path_str)
+    }
+
+    fn create_patch_content(original: &str, modified: &str) -> String {
+        let patch = diffy::create_patch(original, modified);
+        patch.to_string()
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_success() {
+        let original_content = r#"Hello, world!
+This is the original file.
+"#;
+        let modified_content = r#"Hello, Rust!
+This is the modified file.
+"#;
+
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.message, "File patched successfully.");
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_apply_patch_integration() {
+        let original_content = r#"line 1
+line 2
+line 3
+"#;
+        let modified_content = r#"line 1
+line two
+line 3
+"#;
+
+        // Create a temporary file with the original content
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // 1. Create the patch
+        let patch_content = create_patch_content(original_content, modified_content);
+        assert!(patch_content.contains("-line 2"));
+        assert!(patch_content.contains("+line two"));
+
+        // 2. Apply the patch
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        // 3. Verify the result
+        assert!(result.success);
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_conflict() {
+        let original_content = r#"line A
+line B
+line C
+"#;
+        let modified_content = r#"line A
+line Bee
+line C
+"#;
+        let actual_content_in_file = r#"line A
+line Z
+line C
+"#; // This is different from original_content
+
+        // Create a temporary file with the "actual" content
+        let (_temp_file, file_path) = create_temp_file(actual_content_in_file);
+
+        // 1. Create the patch based on the "original" content
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        // 2. Attempt to apply the patch to the "actual" content
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        // 3. Verify that the patch application failed due to content mismatch
+        assert!(!result.success);
+        assert!(result.message.contains("Failed to apply patch"));
+        // Check that the enhanced error message includes helpful guidance
+        assert!(
+            result.message.contains("Context lines do not match")
+                || result.message.contains("context lines do not match")
+        );
+        assert!(
+            result.message.contains("fs_read") || result.message.contains("current file content")
+        );
+
+        // Ensure the file content remains unchanged
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, actual_content_in_file);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_requires_absolute_path() {
+        let params = ApplyPatchParams {
+            file_path: "relative/path/to/file.txt".to_string(),
+            patch_content: "any patch".to_string(),
+        };
+
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("File path must be absolute")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_with_crlf_line_endings() {
+        let original_content = r#"first line
+second line
+"#
+        .replace('\n', "\r\n");
+        let modified_content = r#"first line
+second line modified
+"#
+        .replace('\n', "\r\n");
+
+        let (_temp_file, file_path) = create_temp_file(&original_content);
+
+        // Create patch using LF-normalized content, as our tool now handles this internally
+        let patch_content = create_patch_content(
+            &original_content.replace("\r\n", "\n"),
+            &modified_content.replace("\r\n", "\n"),
+        );
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(
+            result.success,
+            "Patch should apply cleanly. Message: {}",
+            result.message
+        );
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_no_newline_at_end_of_file() {
+        let original_content = "hello";
+        let modified_content = "hello world";
+
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_large_change() {
+        let original_content = "line\n".repeat(100);
+        let modified_content = "changed line\n".repeat(100);
+
+        let (_temp_file, file_path) = create_temp_file(&original_content);
+
+        let patch_content = create_patch_content(&original_content, &modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_to_non_existent_file() {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("non_existent_file.txt");
+        let params = ApplyPatchParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            patch_content: "... a patch ...".to_string(),
+        };
+
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("File does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_to_directory() {
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let params = ApplyPatchParams {
+            file_path: temp_dir.to_str().unwrap().to_string(),
+            patch_content: "... a patch ...".to_string(),
+        };
+
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Path is a directory"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_to_read_only_file() {
+        let original_content = "read only content";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&file_path, perms).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix systems, we can't easily set read-only, so skip this test
+            return;
+        }
+
+        let patch_content = create_patch_content(original_content, "new content");
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Failed to write to file"));
+
+        // Cleanup: make writable again to allow deletion by tempfile
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+            // Restore writable permissions for owner (rw-r--r--)
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&file_path, perms).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_with_malformed_patch_content() {
+        let original_content = "some content";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let params = ApplyPatchParams {
+            file_path,
+            patch_content: "this is not a valid patch".to_string(),
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(!result.success);
+        assert!(
+            result
+                .message
+                .contains("Patch content is invalid or results in no changes.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_patch_to_make_file_empty() {
+        let original_content = "delete me";
+        let modified_content = "";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_patch_on_empty_file() {
+        let original_content = "";
+        let modified_content = "add me";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_returns_content_in_success_case() {
+        let original_content = "Hello, world!\nThis is the original file.\n";
+        let modified_content = "Hello, Rust!\nThis is the modified file.\n";
+
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.message, "File patched successfully.");
+
+        // Verify that content is returned in the success case (this was the fix)
+        assert!(
+            result.original_content.is_some(),
+            "Original content should be returned in success case"
+        );
+        assert!(
+            result.modified_content.is_some(),
+            "Modified content should be returned in success case"
+        );
+
+        if let Some(orig_content) = &result.original_content {
+            assert_eq!(
+                orig_content, original_content,
+                "Returned original content should match"
+            );
+        }
+
+        if let Some(mod_content) = &result.modified_content {
+            assert_eq!(
+                mod_content, modified_content,
+                "Returned modified content should match"
+            );
+        }
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_updates_session_with_changed_file() {
+        let original_content = "Hello, world!\n";
+        let modified_content = "Hello, Rust!\n";
+
+        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_file_path = temp_dir.join("test_apply_patch_session.txt");
+        std::fs::write(&temp_file_path, original_content).unwrap();
+        let file_path_str = temp_file_path.to_string_lossy().to_string();
+
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path_str,
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        // Verify file was actually changed
+        let final_content = std::fs::read_to_string(&temp_file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+
+        // Clean up
+        std::fs::remove_file(&temp_file_path).unwrap();
+
+        // Note: The session update happens in a separate thread with FsTools::default(),
+        // so we can't directly check it in this test. The important thing is that the
+        // update_session_with_changed_file call is made in the success path, which it is.
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_with_path_traversal_attempt() {
+        let original_content = "test content";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Try to use a path with parent directory references
+        let path_with_traversal = format!("{}/../forbidden.txt", file_path);
+        let patch_content = create_patch_content(original_content, "modified");
+
+        let params = ApplyPatchParams {
+            file_path: path_with_traversal,
+            patch_content,
+        };
+
+        // This should fail because path traversal is detected
+        let result = apply_patch(params).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("parent directory references")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_mixed_line_endings() {
+        // Test with CRLF line endings
+        let original_content = "line1\r\nline2\r\nline3\r\n";
+        let modified_content = "line1\r\nline2_modified\r\nline3\r\n";
+
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Create patch using normalized content (CRLF -> LF)
+        let normalized_original = original_content.replace("\r\n", "\n");
+        let normalized_modified = modified_content.replace("\r\n", "\n");
+        let patch_content = create_patch_content(&normalized_original, &normalized_modified);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success);
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_permission_check_unix() {
+        let original_content = "test content";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // On Unix systems, test read-only file handling
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+            perms.set_mode(0o444); // read-only
+            std::fs::set_permissions(&file_path, perms).unwrap();
+
+            let patch_content = create_patch_content(original_content, "modified content");
+            let params = ApplyPatchParams {
+                file_path: file_path.clone(),
+                patch_content,
+            };
+
+            let result = apply_patch(params).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(err_msg.contains("read-only") || err_msg.contains("no write permissions"));
+
+            // Restore permissions for cleanup
+            let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&file_path, perms).unwrap();
+        }
     }
 }
