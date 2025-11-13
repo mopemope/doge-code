@@ -1,5 +1,4 @@
 pub mod apply_patch;
-pub mod apply_patch_impl;
 mod common;
 pub mod edit;
 pub mod execute;
