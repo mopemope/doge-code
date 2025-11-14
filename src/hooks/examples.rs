@@ -65,14 +65,18 @@ impl InstructionHook for LoggingHook {
 #[derive(Clone)]
 pub struct SaveConversationHook {
     name: String,
-    output_path: String,
+}
+
+impl Default for SaveConversationHook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SaveConversationHook {
-    pub fn new(output_path: String) -> Self {
+    pub fn new() -> Self {
         Self {
             name: "SaveConversationHook".to_string(),
-            output_path,
         }
     }
 }
@@ -115,14 +119,18 @@ impl InstructionHook for SaveConversationHook {
 #[derive(Clone)]
 pub struct AnalysisHook {
     name: String,
-    model: String,
+}
+
+impl Default for AnalysisHook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnalysisHook {
-    pub fn new(model: String) -> Self {
+    pub fn new() -> Self {
         Self {
             name: "AnalysisHook".to_string(),
-            model,
         }
     }
 }

@@ -277,16 +277,16 @@ impl SessionManager {
     pub fn get_session_statistics(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
             let mut stats = format!(
-                "\n=== Session Statistics ===\n\
-                 ID: {}\n\
-                 Title: {}\n\
-                 Created: {}\n\
-                 Updated: {}\n\
-                 Requests: {}\n\
-                 Token count: {}\n\
-                 Tool calls: {}\n\
-                 Lines edited: {}\n\
-                 Changed files: {}",
+                "\n📊 === Session Statistics ===\n\
+                 🔍 ID: {}\n\
+                 📑 Title: {}\n\
+                 📅 Created: {}\n\
+                 ⏰ Updated: {}\n\
+                 📈 Requests: {}\n\
+                 🏷️  Token count: {}\n\
+                 🛠️  Tool calls: {}\n\
+                 ✏️  Lines edited: {}\n\
+                 📁 Changed files: {}",
                 session.meta.id,
                 session.meta.title,
                 session.meta.created_at,
@@ -298,19 +298,66 @@ impl SessionManager {
                 session.changed_files.len()
             );
 
-            // Add tool call success statistics
-            if !session.tool_call_successes.is_empty() {
-                stats.push_str("\n\nTool Call Successes:");
-                for (tool_name, count) in &session.tool_call_successes {
-                    stats.push_str(&format!("\n  {}: {}", tool_name, count));
+            // Add visual progress indicators
+            let request_progress = "█".repeat(session.requests.min(20) as usize)
+                + &"░".repeat((20 - session.requests.min(20)) as usize);
+            let token_progress = "█".repeat((session.token_count / 100).min(20) as usize)
+                + &"░".repeat((20 - (session.token_count / 100).min(20)) as usize);
+
+            stats.push_str(&format!(
+                "\n\n📈 Request Progress: [{}] {}",
+                request_progress, session.requests
+            ));
+            stats.push_str(&format!(
+                "\n💾 Token Progress: [{}] {}",
+                token_progress, session.token_count
+            ));
+
+            // Add tool call summary
+            let mut success_count = 0;
+            let mut failure_count = 0;
+            for count in session.tool_call_successes.values() {
+                success_count += count;
+            }
+            for count in session.tool_call_failures.values() {
+                failure_count += count;
+            }
+            let total_tool_calls = success_count + failure_count;
+            let success_rate = if total_tool_calls > 0 {
+                (success_count as f64 / total_tool_calls as f64 * 100.0).round() as u64
+            } else {
+                0
+            };
+
+            stats.push_str(&format!(
+                "\n\n✅ Tool Success Rate: {}% ({} succeeded, {} failed)",
+                success_rate, success_count, failure_count
+            ));
+
+            // Add tool call details in a table-like format
+            if !session.tool_call_successes.is_empty() || !session.tool_call_failures.is_empty() {
+                stats.push_str("\n\n🔧 Tool Call Details:");
+
+                if !session.tool_call_successes.is_empty() {
+                    stats.push_str("\n   ✅ Successes:");
+                    for (tool_name, count) in &session.tool_call_successes {
+                        stats.push_str(&format!("\n      • {}: {}", tool_name, count));
+                    }
+                }
+
+                if !session.tool_call_failures.is_empty() {
+                    stats.push_str("\n   ❌ Failures:");
+                    for (tool_name, count) in &session.tool_call_failures {
+                        stats.push_str(&format!("\n      • {}: {}", tool_name, count));
+                    }
                 }
             }
 
-            // Add tool call failure statistics
-            if !session.tool_call_failures.is_empty() {
-                stats.push_str("\n\nTool Call Failures:");
-                for (tool_name, count) in &session.tool_call_failures {
-                    stats.push_str(&format!("\n  {}: {}", tool_name, count));
+            // Add file change summary
+            if !session.changed_files.is_empty() {
+                stats.push_str("\n\n📁 Changed Files:");
+                for file_path in &session.changed_files {
+                    stats.push_str(&format!("\n   • {}", file_path));
                 }
             }
 
@@ -413,6 +460,50 @@ mod tests {
         assert_eq!(changed_files.len(), 2);
         assert!(changed_files.contains(&PathBuf::from("/path/to/file1.rs")));
         assert!(changed_files.contains(&PathBuf::from("/path/to/file2.rs")));
+    }
+
+    #[test]
+    fn test_get_session_statistics() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        let mut session_manager = SessionManager {
+            store,
+            current_session: None,
+        };
+
+        // Create a session and add some data
+        session_manager
+            .create_session(Some("Test prompt".to_string()))
+            .expect("Failed to create session");
+        session_manager
+            .update_current_session_with_token_count(1500)
+            .expect("Failed to update token count");
+        session_manager
+            .update_current_session_with_request_count()
+            .expect("Failed to update request count");
+        session_manager
+            .record_tool_call_success("test_tool")
+            .expect("Failed to record tool success");
+        session_manager
+            .record_tool_call_failure("another_tool")
+            .expect("Failed to record tool failure");
+        session_manager
+            .update_current_session_with_changed_file(PathBuf::from("test.rs"))
+            .expect("Failed to update changed file");
+
+        let stats = session_manager
+            .get_session_statistics()
+            .expect("Should have session statistics");
+
+        assert!(stats.contains("Session Statistics"));
+        assert!(stats.contains("Test prompt"));
+        assert!(stats.contains("1500"));
+        assert!(stats.contains("test_tool"));
+        assert!(stats.contains("another_tool"));
+        assert!(stats.contains("test.rs"));
+        assert!(stats.contains("📊"));
+        assert!(stats.contains("📈"));
+        assert!(stats.contains("✅"));
     }
 
     #[test]
