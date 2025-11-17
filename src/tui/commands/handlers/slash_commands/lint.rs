@@ -2,9 +2,10 @@ use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command as StdCommand;
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::thread;
 
-/// Configuration for linters per language
 #[derive(Debug, Clone)]
 pub struct LintConfig {
     pub commands: Vec<LintCommand>,
@@ -21,25 +22,20 @@ pub struct LintCommand {
 pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("Running lint command...");
 
-    let project_root = &executor.cfg.project_root;
-    ui.push_log(format!("Project root: {}", project_root.display()));
+    let project_root = executor.cfg.project_root.clone();
+    ui.push_log("Running lint in background with TUI spinner...");
 
-    // Detect languages in the project
-    let detected_languages = detect_project_languages(project_root);
+    if let Some(ui_tx) = &executor.ui_tx {
+        let _ = ui_tx.send("::status:shell_running".to_string());
 
-    ui.push_log(format!("Detected languages: {:?}", detected_languages));
+        let ui_tx_clone = ui_tx.clone();
+        let project_root_clone = project_root.clone();
 
-    if detected_languages.is_empty() {
-        ui.push_log("No supported languages (Go, Rust, TypeScript) detected in the project.");
-        return;
+        thread::spawn(move || lint_thread(project_root_clone, ui_tx_clone));
+    } else {
+        ui.push_log("UI channel unavailable - falling back to sync lint (TUI may freeze).");
+        // fallback sync logic could be added here if needed
     }
-
-    // Run linters for each detected language
-    for lang in detected_languages {
-        run_language_linter(executor, ui, &lang);
-    }
-
-    ui.push_log("Linting completed.");
 }
 
 /// Detect project languages by checking for common file extensions and configuration files
@@ -143,93 +139,6 @@ fn scan_directory_for_languages(dir: &Path, languages: &mut std::collections::Ha
     }
 }
 
-/// Run linters for a specific language
-fn run_language_linter(executor: &TuiExecutor, ui: &mut TuiApp, language: &str) {
-    ui.push_log(format!("\n--- Linting {} ---", language));
-
-    let lint_configs = get_lint_configs();
-    if let Some(config) = lint_configs.get(language) {
-        for lint_cmd in &config.commands {
-            match run_command(executor, ui, &lint_cmd.command, &lint_cmd.args) {
-                Ok(_) => {
-                    ui.push_log(format!(
-                        "Successfully ran: {} {}",
-                        lint_cmd.command,
-                        lint_cmd.args.join(" ")
-                    ));
-                }
-                Err(e) => {
-                    ui.push_log(format!("Failed to run {}: {}", lint_cmd.command, e));
-
-                    // If the lint command supports auto-fix and it failed, try running with auto-fix
-                    if let Some(auto_fix_flag) = &lint_cmd.auto_fix_flag {
-                        let mut fix_args = lint_cmd.args.clone();
-                        fix_args.push(auto_fix_flag.clone());
-                        match run_command(executor, ui, &lint_cmd.command, &fix_args) {
-                            Ok(_) => {
-                                ui.push_log(format!(
-                                    "Successfully ran auto-fix: {} {}",
-                                    lint_cmd.command,
-                                    fix_args.join(" ")
-                                ));
-                            }
-                            Err(e_fix) => {
-                                ui.push_log(format!(
-                                    "Auto-fix also failed: {} {}",
-                                    lint_cmd.command, e_fix
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        ui.push_log(format!(
-            "No linter configuration found for language: {}",
-            language
-        ));
-    }
-}
-
-/// Run a shell command in the project directory
-fn run_command(
-    executor: &TuiExecutor,
-    ui: &mut TuiApp,
-    cmd: &str,
-    args: &[String],
-) -> Result<(), String> {
-    let project_root = &executor.cfg.project_root;
-
-    ui.push_log(format!("Running: {} {}", cmd, args.join(" ")));
-
-    let output = StdCommand::new(cmd)
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        // Only log stderr if there's an error, as stdout might contain important lint results
-        if !stderr.is_empty() {
-            ui.push_log(format!("STDERR: {}", stderr));
-        }
-        if !stdout.is_empty() {
-            ui.push_log(format!("STDOUT: {}", stdout));
-        }
-        return Err(format!("Command exited with status: {}", output.status));
-    }
-
-    if !stdout.is_empty() {
-        ui.push_log(format!("Output:\n{}", stdout));
-    }
-
-    Ok(())
-}
-
 /// Get lint configurations for supported languages
 fn get_lint_configs() -> HashMap<String, LintConfig> {
     let mut configs = HashMap::new();
@@ -281,6 +190,126 @@ fn get_lint_configs() -> HashMap<String, LintConfig> {
     configs.insert("typescript".to_string(), LintConfig { commands: vec![] });
 
     configs
+}
+
+fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
+    let _ = ui_tx.send(format!(
+        "::shell_output:Project root: {}",
+        project_root.display()
+    ));
+
+    // Detect languages in the project
+    let detected_languages = detect_project_languages(&project_root);
+
+    let _ = ui_tx.send(format!(
+        "::shell_output:Detected languages: {:?}",
+        detected_languages
+    ));
+
+    if detected_languages.is_empty() {
+        let _ = ui_tx.send(
+            "::shell_output:No supported languages (Go, Rust, TypeScript) detected in the project."
+                .to_string(),
+        );
+        let _ = ui_tx.send("::status:idle".to_string());
+        return;
+    }
+
+    // Run linters for each detected language
+    for lang in detected_languages {
+        let _ = ui_tx.send(format!("::shell_output:\\n--- Linting {} ---", lang));
+
+        let lint_configs = get_lint_configs();
+        if let Some(config) = lint_configs.get(&lang) {
+            for lint_cmd in &config.commands {
+                match run_command_sync(&project_root, &ui_tx, &lint_cmd.command, &lint_cmd.args) {
+                    Ok(_) => {
+                        let _ = ui_tx.send(format!(
+                            "::shell_output:Successfully ran: {} {}",
+                            lint_cmd.command,
+                            lint_cmd.args.join(" ")
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(format!(
+                            "::shell_output:Failed to run {}: {}",
+                            lint_cmd.command, e
+                        ));
+
+                        // If the lint command supports auto-fix and it failed, try running with auto-fix
+                        if let Some(auto_fix_flag) = &lint_cmd.auto_fix_flag {
+                            let mut fix_args = lint_cmd.args.clone();
+                            fix_args.push(auto_fix_flag.clone());
+                            match run_command_sync(
+                                &project_root,
+                                &ui_tx,
+                                &lint_cmd.command,
+                                &fix_args,
+                            ) {
+                                Ok(_) => {
+                                    let _ = ui_tx.send(format!(
+                                        "::shell_output:Successfully ran auto-fix: {} {}",
+                                        lint_cmd.command,
+                                        fix_args.join(" ")
+                                    ));
+                                }
+                                Err(e_fix) => {
+                                    let _ = ui_tx.send(format!(
+                                        "::shell_output:Auto-fix also failed: {} {}",
+                                        lint_cmd.command, e_fix
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = ui_tx.send(format!(
+                "::shell_output:No linter configuration found for language: {}",
+                lang
+            ));
+        }
+    }
+
+    let _ = ui_tx.send("::shell_output:Linting completed.".to_string());
+    let _ = ui_tx.send("::status:idle".to_string());
+}
+
+fn run_command_sync(
+    project_root: &Path,
+    ui_tx: &Sender<String>,
+    cmd: &str,
+    args: &[String],
+) -> Result<(), String> {
+    let run_msg = format!("Running: {} {}", cmd, args.join(" "));
+    let _ = ui_tx.send(format!("::shell_output:{}", run_msg));
+
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        // Only log stderr if there's an error, as stdout might contain important lint results
+        if !stderr.is_empty() {
+            let _ = ui_tx.send(format!("::shell_output:STDERR: {}", stderr));
+        }
+        if !stdout.is_empty() {
+            let _ = ui_tx.send(format!("::shell_output:STDOUT: {}", stdout));
+        }
+        return Err(format!("Command exited with status: {:?}", output.status));
+    }
+
+    if !stdout.is_empty() {
+        let _ = ui_tx.send(format!("::shell_output:Output:\n{}", stdout));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
