@@ -1,8 +1,12 @@
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
+use regex::Regex;
+use serde_json;
 use std::collections::HashMap;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -16,6 +20,24 @@ pub struct LintCommand {
     pub command: String,
     pub args: Vec<String>,
     pub auto_fix_flag: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LintIssue {
+    pub file_path: String,
+    pub line_number: Option<u32>,
+    pub severity: String, // "error", "warning", "note"
+    pub message: String,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LintResult {
+    pub command: String,
+    pub issues: Vec<LintIssue>,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
 }
 
 /// Run linting for Go, Rust, and TypeScript projects
@@ -215,6 +237,8 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         return;
     }
 
+    let mut all_issues = Vec::new();
+
     // Run linters for each detected language
     for lang in detected_languages {
         let _ = ui_tx.send(format!("::shell_output:\\n--- Linting {} ---", lang));
@@ -222,45 +246,65 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         let lint_configs = get_lint_configs();
         if let Some(config) = lint_configs.get(&lang) {
             for lint_cmd in &config.commands {
-                match run_command_sync(&project_root, &ui_tx, &lint_cmd.command, &lint_cmd.args) {
-                    Ok(_) => {
-                        let _ = ui_tx.send(format!(
-                            "::shell_output:Successfully ran: {} {}",
-                            lint_cmd.command,
-                            lint_cmd.args.join(" ")
-                        ));
-                    }
-                    Err(e) => {
-                        let _ = ui_tx.send(format!(
-                            "::shell_output:Failed to run {}: {}",
-                            lint_cmd.command, e
-                        ));
+                let result =
+                    run_command_sync_with_output(&project_root, &lint_cmd.command, &lint_cmd.args);
 
-                        // If the lint command supports auto-fix and it failed, try running with auto-fix
-                        if let Some(auto_fix_flag) = &lint_cmd.auto_fix_flag {
-                            let mut fix_args = lint_cmd.args.clone();
-                            fix_args.push(auto_fix_flag.clone());
-                            match run_command_sync(
-                                &project_root,
-                                &ui_tx,
-                                &lint_cmd.command,
-                                &fix_args,
-                            ) {
-                                Ok(_) => {
-                                    let _ = ui_tx.send(format!(
-                                        "::shell_output:Successfully ran auto-fix: {} {}",
-                                        lint_cmd.command,
-                                        fix_args.join(" ")
-                                    ));
-                                }
-                                Err(e_fix) => {
-                                    let _ = ui_tx.send(format!(
-                                        "::shell_output:Auto-fix also failed: {} {}",
-                                        lint_cmd.command, e_fix
-                                    ));
-                                }
-                            }
-                        }
+                // Send output to UI
+                if result.success {
+                    let _ = ui_tx.send(format!(
+                        "::shell_output:Successfully ran: {} {}",
+                        lint_cmd.command,
+                        lint_cmd.args.join(" ")
+                    ));
+                } else {
+                    let _ = ui_tx.send(format!(
+                        "::shell_output:Failed to run {}: Command exited with status",
+                        lint_cmd.command
+                    ));
+                }
+
+                if !result.stdout.is_empty() {
+                    let _ = ui_tx.send(format!("::shell_output:Output:\\n{}", result.stdout));
+                }
+
+                if !result.stderr.is_empty() {
+                    let _ = ui_tx.send(format!("::shell_output:STDERR: {}", result.stderr));
+                }
+
+                // Parse lint issues
+                let issues = parse_lint_output(&result, &lint_cmd.command, &lang);
+                if !issues.is_empty() {
+                    let _ = ui_tx.send(format!(
+                        "::shell_output:Found {} issues from {}",
+                        issues.len(),
+                        lint_cmd.command
+                    ));
+                }
+
+                all_issues.extend(issues);
+
+                // If the lint command failed and supports auto-fix, try running with auto-fix
+                if !result.success
+                    && let Some(auto_fix_flag) = &lint_cmd.auto_fix_flag
+                {
+                    let mut fix_args = lint_cmd.args.clone();
+                    fix_args.push(auto_fix_flag.clone());
+
+                    let fix_result =
+                        run_command_sync_with_output(&project_root, &lint_cmd.command, &fix_args);
+
+                    if fix_result.success {
+                        let _ = ui_tx.send(format!(
+                            "::shell_output:Successfully ran auto-fix: {} {}",
+                            lint_cmd.command,
+                            fix_args.join(" ")
+                        ));
+                    } else {
+                        let _ = ui_tx.send(format!(
+                            "::shell_output:Auto-fix also failed: {} {}",
+                            lint_cmd.command,
+                            fix_args.join(" ")
+                        ));
                     }
                 }
             }
@@ -272,44 +316,224 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         }
     }
 
+    // If there are issues, send them to LLM for fixing
+    if !all_issues.is_empty() {
+        let _ = ui_tx.send(format!(
+            "::shell_output:\\nFound {} total issues. Sending to LLM for analysis and fixes...",
+            all_issues.len()
+        ));
+
+        // Send a message to trigger LLM processing
+        let _ = ui_tx.send(format!(
+            "::lint_issues:{:}",
+            serde_json::to_string(&all_issues).unwrap_or_default()
+        ));
+    }
+
     let _ = ui_tx.send("::shell_output:Linting completed.".to_string());
     let _ = ui_tx.send("::status:idle".to_string());
 }
 
-fn run_command_sync(
-    project_root: &Path,
-    ui_tx: &Sender<String>,
-    cmd: &str,
-    args: &[String],
-) -> Result<(), String> {
-    let run_msg = format!("Running: {} {}", cmd, args.join(" "));
-    let _ = ui_tx.send(format!("::shell_output:{}", run_msg));
-
+fn run_command_sync_with_output(project_root: &Path, cmd: &str, args: &[String]) -> LintResult {
     let output = std::process::Command::new(cmd)
         .args(args)
         .current_dir(project_root)
         .output()
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
+        .unwrap_or_else(|e| std::process::Output {
+            status: ExitStatus::from_raw(1),
+            stdout: format!("Failed to execute command: {}", e).into_bytes(),
+            stderr: Vec::new(),
+        });
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
 
-    if !output.status.success() {
-        // Only log stderr if there's an error, as stdout might contain important lint results
-        if !stderr.is_empty() {
-            let _ = ui_tx.send(format!("::shell_output:STDERR: {}", stderr));
+    LintResult {
+        command: format!("{} {}", cmd, args.join(" ")),
+        issues: Vec::new(), // Will be populated by parse_lint_output
+        stdout,
+        stderr,
+        success,
+    }
+}
+
+fn parse_lint_output(result: &LintResult, command: &str, language: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+
+    // Parse based on the command and language
+    match (command, language) {
+        ("golangci-lint", "go") => {
+            issues.extend(parse_golangci_lint_output(&result.stdout, &result.stderr));
         }
-        if !stdout.is_empty() {
-            let _ = ui_tx.send(format!("::shell_output:STDOUT: {}", stdout));
+        ("go", "go") => {
+            if command.contains("fmt") {
+                issues.extend(parse_go_fmt_output(&result.stdout, &result.stderr));
+            }
         }
-        return Err(format!("Command exited with status: {:?}", output.status));
+        ("cargo", "rust") => {
+            if command.contains("clippy") {
+                issues.extend(parse_cargo_clippy_output(&result.stdout, &result.stderr));
+            } else if command.contains("fmt") {
+                issues.extend(parse_cargo_fmt_output(&result.stdout, &result.stderr));
+            }
+        }
+        _ => {
+            // Generic parsing for other tools
+            issues.extend(parse_generic_lint_output(&result.stdout, &result.stderr));
+        }
     }
 
-    if !stdout.is_empty() {
-        let _ = ui_tx.send(format!("::shell_output:Output:\n{}", stdout));
+    issues
+}
+
+fn parse_golangci_lint_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // golangci-lint output format: filepath:line:column: message (linter)
+    let re = Regex::new(r"^(.+\.go):(\d+):(\d+):\s+(.+?)\s+\[(.+)\]$").unwrap();
+
+    for line in combined.lines() {
+        if let Some(captures) = re.captures(line.trim()) {
+            let file_path = captures.get(1).map_or("", |m| m.as_str()).to_string();
+            let line_number = captures.get(2).map_or("", |m| m.as_str()).parse().ok();
+            let message = captures.get(4).map_or("", |m| m.as_str()).to_string();
+            let code = captures.get(5).map_or("", |m| m.as_str()).to_string();
+
+            issues.push(LintIssue {
+                file_path,
+                line_number,
+                severity: "error".to_string(),
+                message,
+                code: Some(code),
+            });
+        }
     }
 
-    Ok(())
+    issues
+}
+
+fn parse_go_fmt_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // go fmt output format: filepath:line:column: message
+    let re = Regex::new(r"^(.+\.go):(\d+):(\d+):\s+(.+)$").unwrap();
+
+    for line in combined.lines() {
+        if let Some(captures) = re.captures(line.trim()) {
+            let file_path = captures.get(1).map_or("", |m| m.as_str()).to_string();
+            let line_number = captures.get(2).map_or("", |m| m.as_str()).parse().ok();
+            let message = captures.get(4).map_or("", |m| m.as_str()).to_string();
+
+            issues.push(LintIssue {
+                file_path,
+                line_number,
+                severity: "warning".to_string(),
+                message,
+                code: None,
+            });
+        }
+    }
+
+    issues
+}
+
+fn parse_cargo_clippy_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // clippy output format: warning: message
+    //  --> filepath:line:column
+    let re_warning = Regex::new(r"^warning:\s+(.+)$").unwrap();
+    let re_location = Regex::new(r"^\s*-->\s+(.+):(\d+):(\d+)$").unwrap();
+
+    let lines: Vec<&str> = combined.lines().collect();
+    let mut current_file = String::new();
+    let mut current_line = None;
+
+    for line in lines.iter() {
+        if let Some(captures) = re_location.captures(line.trim()) {
+            current_file = captures.get(1).map_or("", |m| m.as_str()).to_string();
+            current_line = captures.get(2).map_or("", |m| m.as_str()).parse().ok();
+        } else if let Some(captures) = re_warning.captures(line.trim()) {
+            let message = captures.get(1).map_or("", |m| m.as_str()).to_string();
+
+            issues.push(LintIssue {
+                file_path: current_file.clone(),
+                line_number: current_line,
+                severity: "warning".to_string(),
+                message,
+                code: None,
+            });
+
+            // Reset for next iteration
+            current_file.clear();
+            current_line = None;
+        }
+    }
+
+    issues
+}
+
+fn parse_cargo_fmt_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // cargo fmt doesn't typically output structured errors, but we can look for file paths
+    let re = Regex::new(r"^(.+\.rs)$").unwrap();
+
+    for line in combined.lines() {
+        let line = line.trim();
+        if line.ends_with(".rs") && re.is_match(line) {
+            issues.push(LintIssue {
+                file_path: line.to_string(),
+                line_number: None,
+                severity: "warning".to_string(),
+                message: "File needs formatting".to_string(),
+                code: None,
+            });
+        }
+    }
+
+    issues
+}
+
+fn parse_generic_lint_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // Generic pattern: filepath:line: message
+    let re = Regex::new(r"^(.+):(\d+):\s+(.+)$").unwrap();
+
+    for line in combined.lines() {
+        if let Some(captures) = re.captures(line.trim()) {
+            let file_path = captures.get(1).map_or("", |m| m.as_str()).to_string();
+            let line_number = captures.get(2).map_or("", |m| m.as_str()).parse().ok();
+            let message = captures.get(3).map_or("", |m| m.as_str()).to_string();
+
+            // Determine severity based on message content
+            let severity = if message.to_lowercase().contains("error") {
+                "error"
+            } else if message.to_lowercase().contains("warning") {
+                "warning"
+            } else {
+                "note"
+            }
+            .to_string();
+
+            issues.push(LintIssue {
+                file_path,
+                line_number,
+                severity,
+                message,
+                code: None,
+            });
+        }
+    }
+
+    issues
 }
 
 #[cfg(test)]

@@ -99,6 +99,55 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(payload) = msg.strip_prefix("::lint_issues:") {
+                        if let Ok(issues) = serde_json::from_str::<
+                            Vec<crate::tui::commands::handlers::slash_commands::lint::LintIssue>,
+                        >(payload)
+                        {
+                            self.push_log(format!(
+                                "[lint] Found {} issues. Sending to LLM for analysis...",
+                                issues.len()
+                            ));
+                            self.dirty = true;
+
+                            // Create a prompt for LLM to fix the issues
+                            let mut prompt = String::from(
+                                "Please analyze and fix the following lint issues in the codebase:\n\n",
+                            );
+
+                            for (i, issue) in issues.iter().enumerate() {
+                                prompt.push_str(&format!("Issue {}: {}\n", i + 1, issue.message));
+                                if !issue.file_path.is_empty() {
+                                    prompt.push_str(&format!("File: {}\n", issue.file_path));
+                                }
+                                if let Some(line) = issue.line_number {
+                                    prompt.push_str(&format!("Line: {}\n", line));
+                                }
+                                prompt.push_str(&format!("Severity: {}\n", issue.severity));
+                                if let Some(code) = &issue.code {
+                                    prompt.push_str(&format!("Code: {}\n", code));
+                                }
+                                prompt.push('\n');
+                            }
+
+                            prompt.push_str("Please provide specific code fixes for each issue. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code with clear explanations.");
+
+                            // Send the prompt to LLM via dispatch
+                            self.push_log(format!("> {}", prompt));
+                            self.last_user_input = Some(prompt.clone());
+
+                            // Trigger LLM processing using the existing dispatch mechanism
+                            self.dispatch(&prompt);
+                        } else {
+                            self.push_log(format!(
+                                "[lint][warn] Failed to parse lint issues: {}",
+                                payload
+                            ));
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
+
                     if let Some(output) = msg.strip_prefix("::diff_output:") {
                         let payload = DiffReviewPayload {
                             diff: output.to_string(),
