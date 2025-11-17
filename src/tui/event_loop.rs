@@ -302,6 +302,13 @@ impl TuiApp {
                                 }
                                 self.dirty = true;
 
+                                // Also update remaining context tokens when prompt tokens change
+                                // Use the current context window size if available
+                                let context_size =
+                                    self.cfg.as_ref().and_then(|c| c.get_context_window_size());
+                                self.update_remaining_context_tokens(context_size);
+                                self.dirty = true; // Mark UI as dirty to trigger redraw
+
                                 // Check auto-compact threshold and trigger if necessary
                                 if self.tokens_prompt_used
                                     >= self.auto_compact_prompt_token_threshold
@@ -325,6 +332,13 @@ impl TuiApp {
                                 self.tokens_prompt_used = tokens;
                                 self.dirty = true;
 
+                                // Also update remaining context tokens when prompt tokens change
+                                // Use the current context window size if available
+                                let context_size =
+                                    self.cfg.as_ref().and_then(|c| c.get_context_window_size());
+                                self.update_remaining_context_tokens(context_size);
+                                self.dirty = true; // Mark UI as dirty to trigger redraw
+
                                 // Check auto-compact threshold and trigger if necessary (legacy format)
                                 if self.tokens_prompt_used
                                     >= self.auto_compact_prompt_token_threshold
@@ -339,6 +353,19 @@ impl TuiApp {
                                     self.dispatch("/compact");
                                 }
                             }
+                        }
+                        _ if msg.starts_with("::update_remaining_tokens") => {
+                            // Update remaining context tokens
+                            if msg.len() > 22 {
+                                // "::update_remaining_tokens:".len() == 22
+                                if let Ok(context_size) = msg[22..].parse::<u32>() {
+                                    self.update_remaining_context_tokens(Some(context_size));
+                                }
+                            } else {
+                                // No context size provided, just update with None
+                                self.update_remaining_context_tokens(None);
+                            }
+                            self.dirty = true; // Mark UI as dirty to trigger redraw
                         }
                         _ if msg.starts_with("::status:error:") => {
                             let content = &msg["::status:error:".len()..];

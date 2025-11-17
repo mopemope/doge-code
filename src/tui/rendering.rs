@@ -511,9 +511,16 @@ impl TuiApp {
         // Token usage
         write!(footer_text, "Prompt: {} ", self.tokens_prompt_used).unwrap();
         if let Some(total) = self.tokens_total_used {
-            write!(footer_text, "Total: {} | ", total).unwrap();
+            write!(footer_text, "Total: {} ", total).unwrap();
         } else {
-            footer_text.push_str("Total: N/A | ");
+            footer_text.push_str("Total: N/A ");
+        }
+
+        // Remaining context tokens
+        if let Some(remaining) = self.remaining_context_tokens {
+            write!(footer_text, "Remaining: {} | ", remaining).unwrap();
+        } else {
+            footer_text.push_str("Remaining: N/A | ");
         }
 
         // Repomap status

@@ -27,6 +27,7 @@ pub fn handle_clear(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.tokens_prompt_used = 0;
     ui.tokens_used = 0;
     ui.tokens_total_used = None;
+    ui.remaining_context_tokens = None;
     ui.dirty = true;
 
     ui.push_log("Cleared conversation history and started new session. Tokens reset to 0.");

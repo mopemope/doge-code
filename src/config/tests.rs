@@ -133,3 +133,80 @@ other-model = 333
 
     std::env::set_current_dir(prev_dir).unwrap();
 }
+
+#[test]
+fn test_get_context_window_size() {
+    // Test OpenAI models
+    let cfg = AppConfig {
+        model: "gpt-4o".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(128_000));
+
+    let cfg = AppConfig {
+        model: "gpt-4".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(8_192));
+
+    let cfg = AppConfig {
+        model: "gpt-3.5-turbo".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(16_385));
+
+    // Test Anthropic Claude models
+    let cfg = AppConfig {
+        model: "claude-3-5-sonnet-20241022".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(200_000));
+
+    let cfg = AppConfig {
+        model: "claude-3-opus".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(200_000));
+
+    let cfg = AppConfig {
+        model: "claude-2".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(100_000));
+
+    // Test OpenRouter models
+    let cfg = AppConfig {
+        model: "kwaipilot/kat-coder-pro:free".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(128_000));
+
+    let cfg = AppConfig {
+        model: "qwen/qwen3-coder:free".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(32_768));
+
+    let cfg = AppConfig {
+        model: "deepseek/deepseek-chat-v3.1:free".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(64_000));
+
+    // Test explicitly configured model
+    let cfg = AppConfig {
+        llm: crate::config::LlmConfig {
+            context_window_size: Some(50_000),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(50_000));
+
+    // Test unknown model
+    let cfg = AppConfig {
+        model: "unknown-model".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), None);
+}

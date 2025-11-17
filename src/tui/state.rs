@@ -703,6 +703,8 @@ pub struct TuiApp {
     pub auto_compact_prompt_token_threshold: u32,
     // auto-compact flag to avoid duplicate triggers
     pub auto_compact_pending: bool,
+    // remaining context tokens (calculated)
+    pub remaining_context_tokens: Option<u32>,
     pub pending_instructions: VecDeque<String>,
     pub diff_review: Option<DiffReviewState>,
     // todo list
@@ -722,6 +724,8 @@ pub struct TuiApp {
     pub processing_start_time: Option<std::time::Instant>,
     /// Final elapsed time string for display after processing completes (remains until next instruction)
     pub last_elapsed_time: Option<String>,
+    /// Configuration for the application; used to access context window size
+    pub cfg: Option<crate::config::AppConfig>,
 }
 
 impl TuiApp {
@@ -893,6 +897,8 @@ impl TuiApp {
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             // auto-compact starts not pending
             auto_compact_pending: false,
+            // remaining context tokens starts as None (calculated later)
+            remaining_context_tokens: None,
             pending_instructions: VecDeque::new(),
             diff_review: None,
             // todo list
@@ -906,6 +912,7 @@ impl TuiApp {
             repomap_status: RepomapStatus::default(), // Initialize with NotStarted
             processing_start_time: None,
             last_elapsed_time: None,
+            cfg: None,
         };
 
         Ok(app)
@@ -1097,6 +1104,23 @@ impl TuiApp {
             selected_index: 0,
         });
         self.input_mode = InputMode::SessionList;
+        self.dirty = true;
+    }
+
+    /// Update remaining context tokens based on current usage and model's context window
+    pub fn update_remaining_context_tokens(&mut self, context_window_size: Option<u32>) {
+        if let Some(window_size) = context_window_size {
+            let used_tokens = self.tokens_prompt_used;
+            if used_tokens < window_size {
+                self.remaining_context_tokens = Some(window_size - used_tokens);
+            } else {
+                // Context is exceeded
+                self.remaining_context_tokens = Some(0);
+            }
+        } else {
+            // Unknown context size
+            self.remaining_context_tokens = None;
+        }
         self.dirty = true;
     }
 

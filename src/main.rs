@@ -208,6 +208,14 @@ async fn run_tui(
     app.auto_compact_prompt_token_threshold =
         cfg.auto_compact_prompt_token_threshold_for_current_model();
 
+    // Initialize remaining context tokens
+    let context_size = cfg.get_context_window_size();
+    app.update_remaining_context_tokens(context_size);
+
+    // Set configuration in the UI app before creating and attaching executor so that
+    // context size is available when processing token update messages
+    app.cfg = Some(cfg.clone());
+
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");
 

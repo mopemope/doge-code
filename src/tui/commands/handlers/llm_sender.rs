@@ -149,6 +149,14 @@ impl TuiExecutor {
                                     tokens_used,
                                     total_tokens
                                 ));
+                                // Notify to update remaining context tokens with current config
+                                let context_size = self.cfg.get_context_window_size();
+                                if let Some(size) = context_size {
+                                    let _ = tx.send(format!("::update_remaining_tokens:{}", size));
+                                } else {
+                                    let _ = tx.send("::update_remaining_tokens".to_string());
+                                }
+                                ));
                             }
                             // Update conversation history (save all messages except system messages)
                             if let Ok(mut history) = conversation_history.lock() {
@@ -206,6 +214,13 @@ impl TuiExecutor {
                                     tokens_used,
                                     total_tokens
                                 ));
+                                // Notify to update remaining context tokens with current config
+                                let context_size = self.cfg.get_context_window_size();
+                                if let Some(size) = context_size {
+                                    let _ = tx.send(format!("::update_remaining_tokens:{}", size));
+                                } else {
+                                    let _ = tx.send("::update_remaining_tokens".to_string());
+                                }
                             }
                             // Update conversation history on error (only user input)
                             if let Ok(mut history) = conversation_history.lock() {

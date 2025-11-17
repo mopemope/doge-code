@@ -88,6 +88,8 @@ pub struct LlmConfig {
     pub retry_jitter_ms: u64,
     pub respect_retry_after: bool,
     pub timeout_ms: u64,
+    /// Context window size in tokens for the model
+    pub context_window_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +149,7 @@ impl Default for LlmConfig {
             retry_jitter_ms: 5000,
             respect_retry_after: true,
             timeout_ms: 600_000, // 10 minutes
+            context_window_size: None,
         }
     }
 }
@@ -208,6 +211,8 @@ pub struct PartialLlmConfig {
     pub retry_jitter_ms: Option<u64>,
     pub respect_retry_after: Option<bool>,
     pub timeout_ms: Option<u64>,
+    /// Context window size in tokens for the model
+    pub context_window_size: Option<u32>,
 }
 
 impl AppConfig {
@@ -216,6 +221,51 @@ impl AppConfig {
             .get(model)
             .copied()
             .unwrap_or(self.auto_compact_prompt_token_threshold)
+    }
+
+    /// Get context window size for the current model
+    /// Returns the configured size or a default based on model name
+    pub fn get_context_window_size(&self) -> Option<u32> {
+        // First check if explicitly configured
+        if let Some(size) = self.llm.context_window_size {
+            return Some(size);
+        }
+
+        // Use defaults based on model name
+        let model_lower = self.model.to_lowercase();
+
+        // OpenAI models
+        if model_lower.contains("gpt-4o") {
+            Some(128_000)
+        } else if model_lower.contains("gpt-4") {
+            Some(8_192)
+        } else if model_lower.contains("gpt-3.5") {
+            Some(16_385)
+        }
+        // Anthropic Claude models
+        else if model_lower.contains("claude-3-5-sonnet")
+            || model_lower.contains("claude-3-opus")
+            || model_lower.contains("claude-3-haiku")
+        {
+            Some(200_000)
+        } else if model_lower.contains("claude-2") {
+            Some(100_000)
+        }
+        // OpenRouter models
+        else if model_lower.contains("kwaipilot/kat-coder-pro") {
+            Some(128_000)
+        } else if model_lower.contains("qwen/qwen3-coder") {
+            Some(32_768)
+        } else if model_lower.contains("deepseek/deepseek-chat-v3.1") {
+            Some(64_000)
+        }
+        // Other common models
+        else if model_lower.contains("llama-3") || model_lower.contains("gemma") {
+            Some(8_192)
+        } else {
+            // Unknown model - return None
+            None
+        }
     }
 
     pub fn auto_compact_prompt_token_threshold_for_current_model(&self) -> u32 {
@@ -283,6 +333,9 @@ impl AppConfig {
                             .respect_retry_after
                             .or(file_llm.respect_retry_after),
                         timeout_ms: project_llm.timeout_ms.or(file_llm.timeout_ms),
+                        context_window_size: project_llm
+                            .context_window_size
+                            .or(file_llm.context_window_size),
                     })
                 }
                 (Some(project_llm), None) => Some(project_llm.clone()),
@@ -308,6 +361,7 @@ impl AppConfig {
                         .respect_retry_after
                         .unwrap_or(llm_defaults.respect_retry_after),
                     timeout_ms: p.timeout_ms.unwrap_or(llm_defaults.timeout_ms),
+                    context_window_size: p.context_window_size.or(llm_defaults.context_window_size),
                 }
             } else {
                 llm_defaults
