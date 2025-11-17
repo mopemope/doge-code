@@ -14,6 +14,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /tokens - Show token usage");
     ui.push_log("  /compact - Compact conversation history to reduce token usage");
     ui.push_log("  /cancel - Cancel the current operation");
+    ui.push_log("  /lint - Run linting tools for Go, Rust, and TypeScript");
     ui.push_log("");
 
     ui.push_log("Repository Analysis:");

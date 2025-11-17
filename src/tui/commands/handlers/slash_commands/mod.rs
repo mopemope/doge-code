@@ -4,6 +4,7 @@ pub mod compact;
 pub mod edit_symbol;
 pub mod git_worktree;
 pub mod help;
+pub mod lint;
 pub mod map;
 pub mod open;
 pub mod quit;
