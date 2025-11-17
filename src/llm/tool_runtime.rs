@@ -1,6 +1,7 @@
 use crate::llm::tool_def::default_tools_def;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use crate::tools::{FsTools, RemoteToolInfo};
+use crate::tools::FsTools;
+use crate::tools::remote_tools::RemoteToolInfo;
 use anyhow::Result;
 use tracing::debug;
 
@@ -15,8 +16,8 @@ pub struct ToolRuntime<'a> {
 
 impl<'a> ToolRuntime<'a> {
     pub async fn build(fs: &'a FsTools) -> Result<Self> {
-        fs.ensure_remote_tools().await?;
-        let remote_tools = fs.remote_tools_snapshot().await;
+        fs.get_remote_tool_manager().ensure_remote_tools().await?;
+        let remote_tools = fs.get_remote_tool_manager().remote_tools_snapshot().await;
 
         let mut tools = default_tools_def();
         append_remote_tools(&mut tools, &remote_tools);

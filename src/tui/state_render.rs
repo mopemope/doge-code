@@ -88,7 +88,7 @@ pub fn build_render_plan(
 
     // Build wrapped physical lines from logs with scroll support
     let max_log_rows = main_content_height as usize;
-    let mut all_phys_lines: Vec<crate::tui::state::StyledLine> = Vec::new();
+    let mut all_phys_lines: Vec<crate::tui::style_utils::StyledLine> = Vec::new();
 
     for entry in log.iter() {
         all_phys_lines.extend(entry.render(w_usize, params.theme));

@@ -41,10 +41,15 @@ impl InstructionHook for RepomapUpdateHook {
         repomap: &Arc<RwLock<Option<RepoMap>>>,
     ) -> Result<()> {
         // Check if there are changed files in the current session that would require a repomap rebuild
-        if let Some(ref session_manager) = fs_tools.session_manager {
+        if let Some(session_manager) = fs_tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .as_ref()
+        {
             // Check if session has changed files without holding the lock across await
             let has_changed_files = {
-                let sm = session_manager.lock().unwrap();
+                let sm: std::sync::MutexGuard<'_, crate::session::SessionManager> =
+                    session_manager.lock().unwrap();
                 sm.current_session_has_changed_files()
             };
 

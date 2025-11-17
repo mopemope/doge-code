@@ -8,6 +8,7 @@ pub mod llm_response_handler;
 pub mod rendering;
 pub mod state;
 pub mod state_render;
+pub mod style_utils;
 pub mod theme;
 pub mod view;
 
