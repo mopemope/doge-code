@@ -1,3 +1,9 @@
+//! Doge-Code CLI Application
+//!
+//! This module provides the main entry point for the Doge-Code application,
+//! handling command-line arguments, configuration, and routing to appropriate
+//! subcommands.
+
 pub mod analysis;
 pub mod assets;
 pub mod config;
@@ -223,7 +229,8 @@ async fn run_tui(
         Ok(exec) => {
             // If resume flag is set, load the latest session
             if cfg.resume {
-                let mut session_manager = exec.session_manager.lock().unwrap();
+                let mut session_manager =
+                    utils::safe_std_lock(&exec.session_manager, "session_manager")?;
                 if let Err(e) = session_manager.load_latest_session() {
                     eprintln!("Failed to load latest session: {}", e);
                 } else if session_manager.current_session.is_some() {
@@ -272,7 +279,7 @@ async fn run_tui(
     if let Some(handler) = &app.handler
         && let Some(executor) = handler.as_any().downcast_ref::<TuiExecutor>()
     {
-        let session_manager = executor.session_manager.lock().unwrap();
+        let session_manager = utils::safe_std_lock(&executor.session_manager, "session_manager")?;
         if let Some(stats) = session_manager.get_session_statistics() {
             println!("{}", stats);
         }

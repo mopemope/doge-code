@@ -148,6 +148,21 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(prompt) = msg.strip_prefix("::lint_command_output_analysis:") {
+                        self.push_log(
+                            "[lint] Sending full command output to LLM for analysis and fixes...",
+                        );
+                        self.dirty = true;
+
+                        // Send the prompt to LLM via dispatch
+                        self.push_log(format!("> {}", prompt));
+                        self.last_user_input = Some(prompt.to_string());
+
+                        // Trigger LLM processing using the existing dispatch mechanism
+                        self.dispatch(prompt);
+                        continue;
+                    }
+
                     if let Some(output) = msg.strip_prefix("::diff_output:") {
                         let payload = DiffReviewPayload {
                             diff: output.to_string(),

@@ -238,6 +238,8 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     }
 
     let mut all_issues = Vec::new();
+    let mut all_command_outputs = Vec::new(); // Track all command outputs
+    let mut has_any_warnings_or_errors = false; // Track if we found any issues
 
     // Run linters for each detected language
     for lang in detected_languages {
@@ -248,6 +250,26 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
             for lint_cmd in &config.commands {
                 let result =
                     run_command_sync_with_output(&project_root, &lint_cmd.command, &lint_cmd.args);
+
+                // Store the command output to send to LLM if there are warnings/errors
+                all_command_outputs.push(format!(
+                    "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    lint_cmd.command,
+                    lint_cmd.args.join(" "),
+                    if result.success { 0 } else { 1 },
+                    result.stdout,
+                    result.stderr
+                ));
+
+                // Check if output contains warnings or errors
+                if !result.success
+                    || result.stdout.to_lowercase().contains("warning")
+                    || result.stdout.to_lowercase().contains("error")
+                    || result.stderr.to_lowercase().contains("warning")
+                    || result.stderr.to_lowercase().contains("error")
+                {
+                    has_any_warnings_or_errors = true;
+                }
 
                 // Send output to UI
                 if result.success {
@@ -306,6 +328,16 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                             fix_args.join(" ")
                         ));
                     }
+
+                    // Also check the auto-fix output for warnings/errors
+                    if !fix_result.success
+                        || fix_result.stdout.to_lowercase().contains("warning")
+                        || fix_result.stdout.to_lowercase().contains("error")
+                        || fix_result.stderr.to_lowercase().contains("warning")
+                        || fix_result.stderr.to_lowercase().contains("error")
+                    {
+                        has_any_warnings_or_errors = true;
+                    }
                 }
             }
         } else {
@@ -328,6 +360,27 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
             "::lint_issues:{:}",
             serde_json::to_string(&all_issues).unwrap_or_default()
         ));
+    }
+
+    // If there are any warnings or errors in the output (regardless of parsed issues),
+    // send all command outputs to the LLM for analysis and fixes
+    if has_any_warnings_or_errors {
+        let all_outputs = all_command_outputs.join("\n\n---\n\n");
+
+        // Create a specific prompt for the LLM to analyze all outputs and fix issues
+        let mut prompt = String::from(
+            "Analyze the following lint command outputs and fix any warnings or errors detected:\n\n",
+        );
+        prompt.push_str(&all_outputs);
+        prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
+
+        let _ = ui_tx.send(
+            "::shell_output:\\nSending full lint output to LLM for analysis and fixes..."
+                .to_string(),
+        );
+        // Use the existing dispatch pattern by sending the prompt via the user input mechanism
+        // This will trigger the LLM to process the full output
+        let _ = ui_tx.send(format!("::lint_command_output_analysis:{}", prompt));
     }
 
     let _ = ui_tx.send("::shell_output:Linting completed.".to_string());

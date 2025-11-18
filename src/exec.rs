@@ -24,7 +24,7 @@ pub struct Executor {
     #[allow(dead_code)] // Used internally by FsTools
     repomap: Arc<RwLock<Option<RepoMap>>>,
     client: Option<OpenAIClient>,
-    conversation_history: Arc<Mutex<Vec<llm::types::ChatMessage>>>,
+    conversation_history: Arc<tokio::sync::Mutex<Vec<llm::types::ChatMessage>>>,
     hook_manager: HookManager,
 }
 
@@ -52,7 +52,7 @@ impl Executor {
         };
 
         // Initialize conversation history
-        let conversation_history = Arc::new(Mutex::new(Vec::new()));
+        let conversation_history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         Ok(Self {
             cfg,
@@ -103,9 +103,8 @@ impl Executor {
         });
 
         // Add existing conversation history (should be empty for exec mode, but let's be safe)
-        if let Ok(history) = self.conversation_history.lock() {
-            msgs.extend(history.clone());
-        }
+        let history = self.conversation_history.lock().await;
+        msgs.extend(history.clone());
 
         msgs.push(llm::types::ChatMessage {
             role: "user".into(),

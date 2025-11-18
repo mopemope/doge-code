@@ -1,5 +1,10 @@
 //! Utility functions module
+//!
+//! This module provides common utility functions used throughout the application,
+//! including Git repository detection, temporary directory management, and
+//! error handling helpers.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Checks if the specified path is a Git repository.
@@ -76,6 +81,105 @@ pub fn get_git_repository_root<P: AsRef<Path>>(path: P) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Safely locks a mutex with error context
+pub fn safe_lock<'a, T>(
+    mutex: &'a tokio::sync::Mutex<T>,
+    resource_name: &str,
+) -> Result<tokio::sync::MutexGuard<'a, T>> {
+    mutex
+        .try_lock()
+        .with_context(|| format!("Failed to lock {} mutex", resource_name))
+}
+
+/// Safely locks a RwLock for reading with error context
+pub fn safe_read_lock<'a, T>(
+    rwlock: &'a tokio::sync::RwLock<T>,
+    resource_name: &str,
+) -> Result<tokio::sync::RwLockReadGuard<'a, T>> {
+    rwlock
+        .try_read()
+        .with_context(|| format!("Failed to read-lock {} rwlock", resource_name))
+}
+
+/// Safely locks a RwLock for writing with error context
+pub fn safe_write_lock<'a, T>(
+    rwlock: &'a tokio::sync::RwLock<T>,
+    resource_name: &str,
+) -> Result<tokio::sync::RwLockWriteGuard<'a, T>> {
+    rwlock
+        .try_write()
+        .with_context(|| format!("Failed to write-lock {} rwlock", resource_name))
+}
+
+/// Safely locks a std::sync::Mutex with error context
+pub fn safe_std_lock<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    resource_name: &str,
+) -> Result<std::sync::MutexGuard<'a, T>> {
+    mutex
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Failed to lock {} std::mutex: {}", resource_name, e))
+}
+
+/// Safely locks a std::sync::RwLock for reading with error context
+pub fn safe_std_read_lock<'a, T>(
+    rwlock: &'a std::sync::RwLock<T>,
+    resource_name: &str,
+) -> Result<std::sync::RwLockReadGuard<'a, T>> {
+    rwlock
+        .read()
+        .map_err(|e| anyhow::anyhow!("Failed to read-lock {} std::rwlock: {}", resource_name, e))
+}
+
+/// Safely locks a std::sync::RwLock for writing with error context
+pub fn safe_std_write_lock<'a, T>(
+    rwlock: &'a std::sync::RwLock<T>,
+    resource_name: &str,
+) -> Result<std::sync::RwLockWriteGuard<'a, T>> {
+    rwlock
+        .write()
+        .map_err(|e| anyhow::anyhow!("Failed to write-lock {} std::rwlock: {}", resource_name, e))
+}
+
+/// Creates a temporary directory with error context
+pub fn create_temp_dir_with_context(context: &str) -> Result<std::path::PathBuf> {
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!("doge-code-{}-{}", context, fastrand::u64(..)));
+    std::fs::create_dir_all(&temp_path).with_context(|| {
+        format!(
+            "Failed to create temporary directory: {}",
+            temp_path.display()
+        )
+    })?;
+    Ok(temp_path)
+}
+
+/// Safely reads a file with error context
+pub fn read_file_safe<P: AsRef<Path>>(path: P) -> Result<String> {
+    let path = path.as_ref();
+    std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))
+}
+
+/// Safely writes to a file with error context
+pub fn write_file_safe<P: AsRef<Path>>(path: P, content: &str) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write file: {}", path.display()))
+}
+
+/// Safely creates a directory with error context
+pub fn create_dir_safe<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("Failed to create directory: {}", path.display()))
+}
+
+/// Safely checks if a path exists
+pub fn path_exists_safe<P: AsRef<Path>>(path: P) -> bool {
+    path.as_ref().exists()
 }
 
 #[cfg(test)]

@@ -5,12 +5,12 @@ use tempfile::TempDir;
 
 #[test]
 fn test_load_project_config() {
-    let temp_dir = TempDir::new().unwrap();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let project_root = temp_dir.path();
 
     // Create .doge directory and config file
     let doge_dir = project_root.join(".doge");
-    fs::create_dir_all(&doge_dir).unwrap();
+    fs::create_dir_all(&doge_dir).expect("Failed to create dir");
 
     let config_content = r#"
 model = "gpt-4o"

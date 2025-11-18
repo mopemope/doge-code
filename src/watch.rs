@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use crate::config::AppConfig;
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::types::ChatMessage;
+use crate::utils;
 
 use std::sync::{Arc, Mutex};
 
@@ -159,7 +160,7 @@ async fn debounce_file_change(
     // Check rate limiting to avoid excessive API calls
     let rate_limit_duration = cfg.watch_config.rate_limit_duration_ms.unwrap_or(2000);
     {
-        let last_processed_lock = last_processed.lock().unwrap();
+        let last_processed_lock = utils::safe_std_lock(&*last_processed, "last_processed")?;
         if let Some(last_time) = last_processed_lock.get(&path)
             && last_time.elapsed() < Duration::from_millis(rate_limit_duration)
         {
@@ -175,7 +176,7 @@ async fn debounce_file_change(
     } else {
         // Update the last processed time
         {
-            let mut last_processed_lock = last_processed.lock().unwrap();
+            let mut last_processed_lock = utils::safe_std_lock(&*last_processed, "last_processed")?;
             last_processed_lock.insert(path, Instant::now());
         }
     }
