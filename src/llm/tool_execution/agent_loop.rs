@@ -414,6 +414,16 @@ pub async fn run_agent_loop(
                     let _ = tx.send(path.to_string());
                 }
 
+                // For search_text, show the search keyword right after SUCCESS
+                if tool_name == "search_text"
+                    && let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    && let Some(keyword) = args.get("search_pattern").and_then(|v| v.as_str())
+                    && success
+                {
+                    let _ = tx.send(format!("Keyword: {}", keyword));
+                }
+
                 // For execute_bash, show the command that was executed right after SUCCESS
                 if tool_name == "execute_bash"
                     && let Ok(args) =
