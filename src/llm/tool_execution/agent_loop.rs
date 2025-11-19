@@ -404,6 +404,16 @@ pub async fn run_agent_loop(
                     let _ = tx.send(path.to_string());
                 }
 
+                // For edit, show the file path right after SUCCESS
+                if tool_name == "edit"
+                    && let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    && let Some(path) = args.get("file_path").and_then(|v| v.as_str())
+                    && success
+                {
+                    let _ = tx.send(path.to_string());
+                }
+
                 // For execute_bash, show the command that was executed right after SUCCESS
                 if tool_name == "execute_bash"
                     && let Ok(args) =
