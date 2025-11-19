@@ -162,7 +162,7 @@ async fn apply_patch_impl(
     // ===== 13. 成功結果の返却 =====
     Ok(ApplyPatchResult {
         success: true,
-        message: "File patched successfully.".to_string(),
+        message: file_path,
         original_content: Some(original_content_raw),
         modified_content: Some(patched_content),
     })
@@ -404,7 +404,7 @@ This is the modified file.
 
         let result = apply_patch(params).await.unwrap();
         assert!(result.success);
-        assert_eq!(result.message, "File patched successfully.");
+        assert!(result.message.contains(&file_path));
 
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, modified_content);
@@ -727,7 +727,7 @@ second line modified
 
         let result = apply_patch(params).await.unwrap();
         assert!(result.success);
-        assert_eq!(result.message, "File patched successfully.");
+        assert!(result.message.contains(&file_path));
 
         // Verify that content is returned in the success case (this was the fix)
         assert!(
