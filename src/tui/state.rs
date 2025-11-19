@@ -650,18 +650,39 @@ impl TuiApp {
         //     return Err(anyhow::anyhow!("Standard input/output is not a terminal. Please run in a terminal environment."));
         // }
 
-        struct TuiGuard;
+        struct TuiGuard {
+            _mouse_capture: Option<crossterm::event::EnableMouseCapture>,
+        }
         impl Drop for TuiGuard {
             fn drop(&mut self) {
                 let mut stdout = io::stdout();
+                // Disable mouse capture first
+                if self._mouse_capture.is_some() {
+                    let _ = execute!(stdout, crossterm::event::DisableMouseCapture);
+                }
                 let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
                 let _ = terminal::disable_raw_mode();
+                // Mouse capture is automatically disabled when the guard is dropped
+                let _ = self._mouse_capture.take();
             }
         }
         let mut stdout = io::stdout();
         terminal::enable_raw_mode()?;
-        execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
-        let _guard = TuiGuard;
+
+        // Enable mouse capture for scrolling support using the correct crossterm 0.29 API
+        let mouse_capture = crossterm::event::EnableMouseCapture;
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            mouse_capture
+        )?;
+
+        tracing::info!("TUI initialized with mouse capture enabled");
+
+        let _guard = TuiGuard {
+            _mouse_capture: Some(mouse_capture),
+        };
         let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
         let mut terminal = ratatui::Terminal::new(backend)?;
         self.event_loop(&mut terminal)

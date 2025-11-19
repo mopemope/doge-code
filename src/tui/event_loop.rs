@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 
 use std::fs;
 use std::io::ErrorKind;
@@ -493,43 +493,95 @@ impl TuiApp {
                 }
             }
 
-            if event::poll(Duration::from_millis(50))?
-                && let Event::Key(k) = event::read()?
-            {
-                if self.process_diff_review_key(k)? {
-                    continue;
-                }
+            if event::poll(Duration::from_millis(10))? {
+                let event = event::read()?;
 
-                // Global key handlers
-                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                    let now = Instant::now();
-                    if let Some(prev) = last_ctrl_c_at
-                        && now.duration_since(prev) <= Duration::from_secs(3)
-                    {
-                        return Ok(());
+                // Add debug logging for ALL events to see what's being captured
+                tracing::debug!("Event captured: {:?}", event);
+
+                // Handle mouse events first, before any other events
+                match event {
+                    Event::Mouse(mouse_event) => {
+                        tracing::debug!(
+                            "Mouse event captured in main event loop: {:?}",
+                            mouse_event.kind
+                        );
+
+                        // Only handle scroll events for log scrolling
+                        match mouse_event.kind {
+                            event::MouseEventKind::ScrollUp => {
+                                let visible_lines = terminal
+                                    .size()
+                                    .map(|s| s.height.saturating_sub(3) as usize)
+                                    .unwrap_or(20);
+                                let scroll_lines = visible_lines.saturating_div(3).max(1);
+                                tracing::debug!(
+                                    "Mouse scroll up detected, scrolling {} lines",
+                                    scroll_lines
+                                );
+                                self.scroll_up(scroll_lines);
+                            }
+                            event::MouseEventKind::ScrollDown => {
+                                let visible_lines = terminal
+                                    .size()
+                                    .map(|s| s.height.saturating_sub(3) as usize)
+                                    .unwrap_or(20);
+                                let scroll_lines = visible_lines.saturating_div(3).max(1);
+                                tracing::debug!(
+                                    "Mouse scroll down detected, scrolling {} lines",
+                                    scroll_lines
+                                );
+                                self.scroll_down(scroll_lines);
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "Other mouse event ignored: {:?}",
+                                    mouse_event.kind
+                                );
+                            }
+                        }
+                        continue;
                     }
-                    last_ctrl_c_at = Some(now);
-                    self.dispatch("/cancel");
-                    self.push_log("[Press Ctrl+C again within 3s to exit]");
-                    self.dirty = true;
-                    continue;
-                }
+                    Event::Key(k) => {
+                        if self.process_diff_review_key(k)? {
+                            continue;
+                        }
 
-                // Mode-specific key handlers
-                match self.input_mode {
-                    InputMode::Normal => {
-                        if handle_normal_mode_key(self, k, terminal)? {
-                            return Ok(());
+                        // Global key handlers
+                        if k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            let now = Instant::now();
+                            if let Some(prev) = last_ctrl_c_at
+                                && now.duration_since(prev) <= Duration::from_secs(3)
+                            {
+                                return Ok(());
+                            }
+                            last_ctrl_c_at = Some(now);
+                            self.dispatch("/cancel");
+                            self.push_log("[Press Ctrl+C again within 3s to exit]");
+                            self.dirty = true;
+                            continue;
+                        }
+
+                        // Mode-specific key handlers
+                        match self.input_mode {
+                            InputMode::Normal => {
+                                if handle_normal_mode_key(self, k, terminal)? {
+                                    return Ok(());
+                                }
+                            }
+                            InputMode::Shell => {
+                                handle_shell_mode_key(self, k)?;
+                            }
+                            InputMode::SessionList => {
+                                if handle_session_list_key(self, k, terminal)? {
+                                    return Ok(());
+                                }
+                            }
                         }
                     }
-                    InputMode::Shell => {
-                        handle_shell_mode_key(self, k)?;
-                    }
-                    InputMode::SessionList => {
-                        if handle_session_list_key(self, k, terminal)? {
-                            return Ok(());
-                        }
-                    }
+                    _ => {}
                 }
             }
 
@@ -755,4 +807,69 @@ fn revert_paths(paths: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+impl TuiApp {
+    /// Process mouse events for scrolling
+    ///
+    /// Handles mouse wheel scroll events in normal mode:
+    /// - Scroll up: Scrolls the log up by visible_lines/3 lines (similar to PageUp)
+    /// - Scroll down: Scrolls the log down by visible_lines/3 lines (similar to PageDown)
+    /// - Only active in Normal input mode
+    /// - Respects existing scroll behavior (auto-scroll, bottom detection)
+    fn process_mouse_event(
+        &mut self,
+        mouse_event: MouseEvent,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<bool> {
+        // Only handle scroll events in normal mode for now
+        if self.input_mode != InputMode::Normal {
+            return Ok(false);
+        }
+
+        // Calculate visible lines similar to PageUp/PageDown
+        let visible_lines = terminal
+            .size()
+            .map(|s| s.height.saturating_sub(3) as usize)
+            .unwrap_or(20);
+
+        // Use 1/3 of visible lines for mouse scroll (similar to other TUI applications)
+        let scroll_lines = visible_lines.saturating_div(3).max(1);
+
+        match mouse_event {
+            MouseEvent {
+                kind: event::MouseEventKind::ScrollUp,
+                ..
+            } => {
+                tracing::debug!("Mouse scroll up detected, scrolling {} lines", scroll_lines);
+                // Scroll up by 1/3 of visible lines
+                self.scroll_up(scroll_lines);
+                Ok(true)
+            }
+            MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                ..
+            } => {
+                tracing::debug!(
+                    "Mouse scroll down detected, scrolling {} lines",
+                    scroll_lines
+                );
+                // Scroll down by 1/3 of visible lines
+                self.scroll_down(scroll_lines);
+                Ok(true)
+            }
+            MouseEvent {
+                kind: event::MouseEventKind::Down(_) | event::MouseEventKind::Up(_),
+                ..
+            } => {
+                // Ignore mouse button clicks
+                tracing::debug!("Mouse button event ignored");
+                Ok(false)
+            }
+            _ => {
+                tracing::debug!("Other mouse event ignored: {:?}", mouse_event.kind);
+                Ok(false)
+            }
+        }
+    }
 }

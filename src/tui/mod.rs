@@ -23,3 +23,9 @@ mod test_scroll_formatting;
 mod test_scroll_logging;
 #[cfg(test)]
 mod test_scroll_render;
+
+#[cfg(test)]
+mod mouse_test;
+
+#[cfg(test)]
+mod integration_test;

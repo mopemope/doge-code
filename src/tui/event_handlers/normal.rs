@@ -324,18 +324,37 @@ pub fn handle_normal_mode_key(
         }
 
         other => {
-            // debug!("Handling other key event: {:?}", other.code);
-            let handled_by_textarea = app.textarea.input(Input::from(other));
-            // debug!("Handled by textarea: {}", handled_by_textarea);
-            if handled_by_textarea {
-                app.dirty = true;
-                let input_str = app.textarea.lines()[0].clone();
-                if input_str.starts_with('/') {
-                    app.update_completion_candidates(&input_str);
-                } else if input_str.contains('@') {
-                    app.update_file_path_completion_candidates(&input_str);
-                } else {
-                    app.completion_active = false;
+            // Completely block all mouse-related input from reaching textarea
+            // to prevent conflicts with our custom mouse scroll handling
+            match other.code {
+                KeyCode::Char(_)
+                | KeyCode::Tab
+                | KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Enter
+                | KeyCode::Esc
+                | KeyCode::F(_)
+                | KeyCode::BackTab => {
+                    let handled_by_textarea = app.textarea.input(Input::from(other));
+                    if handled_by_textarea {
+                        app.dirty = true;
+                        let input_str = app.textarea.lines()[0].clone();
+                        if input_str.starts_with('/') {
+                            app.update_completion_candidates(&input_str);
+                        } else if input_str.contains('@') {
+                            app.update_file_path_completion_candidates(&input_str);
+                        } else {
+                            app.completion_active = false;
+                        }
+                    }
+                }
+                _ => {
+                    // Block all other events (including any mouse events that might sneak through)
+                    tracing::debug!("Blocked non-key event from textarea: {:?}", other.code);
                 }
             }
         }
