@@ -394,6 +394,16 @@ pub async fn run_agent_loop(
                     format!("🛠️  [{timestamp_short}] {tool_icon} {tool_name} => {status_text}");
                 let _ = tx.send(header_line);
 
+                // For execute_bash, show the command that was executed right after SUCCESS
+                if tool_name == "execute_bash"
+                    && let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    && let Some(command) = args.get("command").and_then(|v| v.as_str())
+                    && success
+                {
+                    let _ = tx.send(format!("Command: {}", command));
+                }
+
                 // Tool arguments and results are intentionally not displayed in the TUI to avoid leaking sensitive data.
 
                 let _ = tx.send("".to_string()); // Extra blank line for spacing
