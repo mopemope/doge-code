@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, watch};
 
+const PLAN_CREATION_GUIDANCE: &str = "Plan requirements:\n- Produce at least three ordered steps with stable unique ids (e.g., step-1)\n- Default each status to \"pending\" and update via plan_write mode=\"merge\"\n- Keep only one item in_progress at a time\n- Describe expected outputs (files, tests) so implementation stays concrete\n";
+
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
     fn get_custom_commands(&self) -> Vec<String>;
@@ -101,8 +103,8 @@ impl TuiExecutor {
             );
         }
         let directive = format!(
-            "{}\nBefore acting on the new instruction, call plan_write with mode=\"replace\" to produce at least three concrete, ordered steps (status=\"pending\" by default). After saving the plan, resume work on: {}",
-            reason, instruction
+            "{}\n{}\nBefore acting on the new instruction, call plan_write with mode=\"replace\" to create the plan. After saving it, resume work on: {}",
+            reason, PLAN_CREATION_GUIDANCE, instruction
         );
         msgs.push(ChatMessage {
             role: "system".into(),
