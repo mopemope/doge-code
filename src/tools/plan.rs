@@ -3,6 +3,7 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -13,10 +14,16 @@ Always draft concrete, ordered steps before modifying code, and rewrite the
 plan as scope evolves.
 
 Guidelines:
-- Provide at least three specific steps (pending by default)
-- Track progress by updating each item's status (pending | in_progress | completed)
+- Aim for at least three actionable steps (pending by default)
+- IDs must remain stable and unique so progress can be tracked over time
 - Keep only one item in_progress at a time; mark completed immediately after finishing
-- Do not delete history mid-session; instead, append or update statuses
+- Do not delete history mid-session; instead, append or update statuses via merge
+- Describe concrete actions and expected outcomes (e.g., tests to run, files to touch)
+
+Hard requirements (automatically enforced):
+- Provide at least one non-empty step
+- Use unique IDs per step
+- Use only pending/in_progress/completed statuses, with at most one in_progress
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +157,8 @@ pub fn plan_write_from_base_path(
         items: new_items,
     };
 
+    validate_plan_items(&plan_list.items)?;
+
     let json_content = serde_json::to_string_pretty(&plan_list)
         .with_context(|| "Failed to serialize plan list to JSON")?;
     fs::write(&plan_file_path, &json_content)
@@ -239,4 +248,136 @@ pub fn format_plan_summary(items: &[PlanItem]) -> Option<String> {
         ));
     }
     Some(lines.join("\n"))
+}
+
+fn validate_plan_items(items: &[PlanItem]) -> Result<()> {
+    if items.is_empty() {
+        anyhow::bail!(
+            "Plan must contain at least one step. Provide pending steps instead of clearing the plan."
+        );
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut in_progress_count = 0u32;
+
+    for item in items {
+        if !seen_ids.insert(item.id.clone()) {
+            anyhow::bail!("Duplicate plan item id detected: {}", item.id);
+        }
+
+        let trimmed = item.content.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!(
+                "Plan item '{}' must include a non-empty description.",
+                item.id
+            );
+        }
+
+        match item.status.as_str() {
+            "pending" | "completed" => {}
+            "in_progress" => in_progress_count += 1,
+            other => anyhow::bail!("Invalid status '{}' for plan item {}", other, item.id),
+        }
+    }
+
+    if in_progress_count > 1 {
+        anyhow::bail!(
+            "Only one plan item may be marked in_progress at a time (found {}).",
+            in_progress_count
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn plan_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        (dir, base)
+    }
+
+    #[test]
+    fn plan_write_accepts_valid_plan() {
+        let (_dir, base) = plan_dir();
+        let items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                content: "Review requirements and clarify scope".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "step-2".into(),
+                content: "Implement feature across modules".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "step-3".into(),
+                content: "Run tests and verify results".into(),
+                status: "pending".into(),
+            },
+        ];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base,
+            &AppConfig::default(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn plan_write_rejects_duplicate_ids() {
+        let (_dir, base) = plan_dir();
+        let items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                content: "Do something".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "step-1".into(),
+                content: "Do another".into(),
+                status: "pending".into(),
+            },
+        ];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base,
+            &AppConfig::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_write_rejects_multiple_in_progress() {
+        let (_dir, base) = plan_dir();
+        let items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                content: "Work item".into(),
+                status: "in_progress".into(),
+            },
+            PlanItem {
+                id: "step-2".into(),
+                content: "Another".into(),
+                status: "in_progress".into(),
+            },
+        ];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base,
+            &AppConfig::default(),
+        );
+        assert!(result.is_err());
+    }
 }
