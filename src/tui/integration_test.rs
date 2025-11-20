@@ -2,9 +2,6 @@
 
 use crate::tui::state::{InputMode, TuiApp};
 use anyhow::Result;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 #[cfg(test)]
 mod tests {
@@ -39,6 +36,5 @@ mod tests {
         let _mouse_capture = crossterm::event::EnableMouseCapture;
 
         // If this compiles and runs without panicking, mouse capture is available
-        assert!(true);
     }
 }

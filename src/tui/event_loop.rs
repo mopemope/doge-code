@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
 use std::fs;
 use std::io::ErrorKind;
@@ -809,67 +809,4 @@ fn revert_paths(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-impl TuiApp {
-    /// Process mouse events for scrolling
-    ///
-    /// Handles mouse wheel scroll events in normal mode:
-    /// - Scroll up: Scrolls the log up by visible_lines/3 lines (similar to PageUp)
-    /// - Scroll down: Scrolls the log down by visible_lines/3 lines (similar to PageDown)
-    /// - Only active in Normal input mode
-    /// - Respects existing scroll behavior (auto-scroll, bottom detection)
-    fn process_mouse_event(
-        &mut self,
-        mouse_event: MouseEvent,
-        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    ) -> Result<bool> {
-        // Only handle scroll events in normal mode for now
-        if self.input_mode != InputMode::Normal {
-            return Ok(false);
-        }
-
-        // Calculate visible lines similar to PageUp/PageDown
-        let visible_lines = terminal
-            .size()
-            .map(|s| s.height.saturating_sub(3) as usize)
-            .unwrap_or(20);
-
-        // Use 1/3 of visible lines for mouse scroll (similar to other TUI applications)
-        let scroll_lines = visible_lines.saturating_div(3).max(1);
-
-        match mouse_event {
-            MouseEvent {
-                kind: event::MouseEventKind::ScrollUp,
-                ..
-            } => {
-                tracing::debug!("Mouse scroll up detected, scrolling {} lines", scroll_lines);
-                // Scroll up by 1/3 of visible lines
-                self.scroll_up(scroll_lines);
-                Ok(true)
-            }
-            MouseEvent {
-                kind: event::MouseEventKind::ScrollDown,
-                ..
-            } => {
-                tracing::debug!(
-                    "Mouse scroll down detected, scrolling {} lines",
-                    scroll_lines
-                );
-                // Scroll down by 1/3 of visible lines
-                self.scroll_down(scroll_lines);
-                Ok(true)
-            }
-            MouseEvent {
-                kind: event::MouseEventKind::Down(_) | event::MouseEventKind::Up(_),
-                ..
-            } => {
-                // Ignore mouse button clicks
-                tracing::debug!("Mouse button event ignored");
-                Ok(false)
-            }
-            _ => {
-                tracing::debug!("Other mouse event ignored: {:?}", mouse_event.kind);
-                Ok(false)
-            }
-        }
-    }
-}
+impl TuiApp {}
