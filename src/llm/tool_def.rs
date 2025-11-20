@@ -13,7 +13,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::apply_patch::tool_def(),
         tools::find_file::tool_def(),
         tools::read_many::tool_def(),
-        tools::todo_write::tool_def(),
-        tools::todo_read::tool_def(),
+        tools::plan::plan_write_tool_def(),
+        tools::plan::plan_read_tool_def(),
     ]
 }

@@ -4,6 +4,7 @@ use crate::session::{SessionData, SessionManager};
 use crate::tools::execute;
 use crate::tools::find_file;
 use crate::tools::list;
+use crate::tools::plan;
 use crate::tools::read;
 use crate::tools::read_many;
 use crate::tools::remote_tools::RemoteToolManager;
@@ -11,8 +12,6 @@ use crate::tools::search_repomap;
 use crate::tools::search_text;
 use crate::tools::security::SecurityChecker;
 use crate::tools::session_manager::SessionManagerWrapper;
-use crate::tools::todo_read;
-use crate::tools::todo_write;
 use crate::tools::write;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -328,48 +327,37 @@ impl FsTools {
         }
     }
 
-    pub fn todo_write(&self, todos: Vec<todo_write::TodoItem>) -> Result<todo_write::TodoList> {
-        // Update session with tool call count
+    pub fn plan_write(
+        &self,
+        items: Vec<plan::PlanItem>,
+        mode: plan::PlanWriteMode,
+    ) -> Result<plan::PlanList> {
         self.update_session_with_tool_call_count()?;
 
-        // Get the current session ID
         let session_id = self
             .get_current_session()
             .map(|session| session.meta.id)
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
-        match todo_write::todo_write(todos, &session_id, &self.config) {
+        match plan::plan_write(items, mode, &session_id, &self.config) {
             Ok(res) => {
-                self.record_tool_call_success("todo_write")?;
+                self.record_tool_call_success("plan_write")?;
                 Ok(res)
             }
             Err(e) => {
-                self.record_tool_call_failure("todo_write")?;
+                self.record_tool_call_failure("plan_write")?;
                 Err(e)
             }
         }
     }
 
-    pub fn todo_read(&self) -> Result<todo_read::TodoList> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
-        // Get the current session ID
+    pub fn plan_read(&self) -> Result<plan::PlanList> {
         let session_id = self
             .get_current_session()
             .map(|session| session.meta.id)
             .ok_or_else(|| anyhow::anyhow!("No current session"))?;
 
-        match todo_read::todo_read_from_base_path(&session_id, ".", &self.config) {
-            Ok(todo_list) => {
-                self.record_tool_call_success("todo_read")?;
-                Ok(todo_list)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("todo_read")?;
-                Err(e)
-            }
-        }
+        plan::plan_read(&session_id, &self.config)
     }
 
     pub async fn call_remote_tool(

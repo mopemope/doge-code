@@ -99,40 +99,61 @@ pub async fn apply_patch(
     }
 }
 
-pub async fn todo_write(
+pub async fn plan_write(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    #[derive(serde::Deserialize)]
-    struct TodoWriteArgs {
-        todos: Vec<crate::tools::todo_write::TodoItem>,
-    }
-
-    let params: TodoWriteArgs = serde_json::from_value(args.clone())?;
+    let params: crate::tools::plan::PlanWriteArgs = serde_json::from_value(args.clone())?;
 
     // Count the tool call attempt
     if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    // Move the todos out so we can return them as the tool result payload
-    let todos = params.todos;
-    match runtime.fs.todo_write(todos.clone()) {
+    let plan_items = params.items;
+    match runtime.fs.plan_write(plan_items.clone(), params.mode) {
         Ok(res) => {
             // Record success for this tool call
-            if let Err(e) = runtime.fs.record_tool_call_success("todo_write") {
-                tracing::error!(?e, "Failed to record tool call success for todo_write");
+            if let Err(e) = runtime.fs.record_tool_call_success("plan_write") {
+                tracing::error!(?e, "Failed to record tool call success for plan_write");
             }
 
-            // Return the todos as the tool result so the agent loop can forward them to the UI
+            // Return the plan as the tool result so the agent loop can forward them to the UI
             Ok(serde_json::to_value(res)?)
         }
         Err(e) => {
             // Record failure for the tool call
-            if let Err(rec_err) = runtime.fs.record_tool_call_failure("todo_write") {
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("plan_write") {
                 tracing::error!(
                     ?rec_err,
-                    "Failed to record tool call failure for todo_write on error"
+                    "Failed to record tool call failure for plan_write on error"
+                );
+            }
+            Err(anyhow!("{e}"))
+        }
+    }
+}
+
+pub async fn plan_read(
+    runtime: &ToolRuntime<'_>,
+    _args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
+        tracing::error!(?e, "Failed to update session with tool call count");
+    }
+
+    match runtime.fs.plan_read() {
+        Ok(res) => {
+            if let Err(e) = runtime.fs.record_tool_call_success("plan_read") {
+                tracing::error!(?e, "Failed to record tool call success for plan_read");
+            }
+            Ok(serde_json::to_value(res)?)
+        }
+        Err(e) => {
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("plan_read") {
+                tracing::error!(
+                    ?rec_err,
+                    "Failed to record tool call failure for plan_read on error"
                 );
             }
             Err(anyhow!("{e}"))

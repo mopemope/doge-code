@@ -11,9 +11,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
 use tui_textarea::TextArea;
 
-// Add TodoItem definition
+// PlanItem definition
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct TodoItem {
+pub struct PlanItem {
     pub id: String,
     pub content: String,
     pub status: String, // pending, in_progress, completed
@@ -96,7 +96,7 @@ pub struct BuildRenderPlanParams<'a> {
     pub model: Option<&'a str>,
     pub spinner_state: usize,
     pub scroll_state: &'a ScrollState,
-    pub todo_list: &'a [TodoItem],
+    pub plan_list: &'a [PlanItem],
     pub theme: &'a Theme,
 }
 
@@ -109,8 +109,8 @@ pub struct RenderPlan {
     pub input_cursor_col: u16,
     // scroll indicator info
     pub scroll_info: Option<ScrollInfo>,
-    /// Todo list items to be rendered separately from the log area
-    pub todo_list: Vec<TodoItem>,
+    /// Plan list items to be rendered separately from the log area
+    pub plan_list: Vec<PlanItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,13 +203,13 @@ pub struct TuiApp {
     pub remaining_context_tokens: Option<u32>,
     pub pending_instructions: VecDeque<String>,
     pub diff_review: Option<DiffReviewState>,
-    // todo list
-    pub todo_list: Vec<TodoItem>,
-    /// If true, the todo list received from `todo_write` that contained only
+    // plan list
+    pub plan_list: Vec<PlanItem>,
+    /// If true, the plan list received from `plan_write` that contained only
     /// completed items should be hidden when the next user instruction is
     /// dispatched. This preserves the current display but clears the list on
     /// the following command as requested.
-    pub hide_todo_on_next_instruction: bool,
+    pub hide_plan_on_next_instruction: bool,
     // last user input for retrying after compact
     pub last_user_input: Option<String>,
     // session list state
@@ -398,9 +398,9 @@ impl TuiApp {
             remaining_context_tokens: None,
             pending_instructions: VecDeque::new(),
             diff_review: None,
-            // todo list
-            todo_list: Vec::new(),
-            hide_todo_on_next_instruction: false,
+            // plan list
+            plan_list: Vec::new(),
+            hide_plan_on_next_instruction: false,
             // last user input for retrying after compact
             last_user_input: None,
             // session list state
@@ -625,13 +625,13 @@ impl TuiApp {
         // Clear the last LLM response content as a new user command is being processed
         self.last_llm_response_content = None;
 
-        // If the todo list was flagged to be hidden on the next instruction,
-        // clear it now and reset the flag. This ensures the todo list created
-        // by `todo_write` that contains only completed items will be hidden
+        // If the plan list was flagged to be hidden on the next instruction,
+        // clear it now and reset the flag. This ensures the plan list created
+        // by `plan_write` that contains only completed items will be hidden
         // starting from the user's next command.
-        if self.hide_todo_on_next_instruction {
-            self.todo_list.clear();
-            self.hide_todo_on_next_instruction = false;
+        if self.hide_plan_on_next_instruction {
+            self.plan_list.clear();
+            self.hide_plan_on_next_instruction = false;
         }
 
         if self.handler.is_some() {

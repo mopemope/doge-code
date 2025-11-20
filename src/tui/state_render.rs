@@ -34,7 +34,7 @@ pub fn build_render_plan(
     let model = params.model;
     let spinner_state = params.spinner_state;
     let scroll_state = params.scroll_state;
-    let todo_list = params.todo_list;
+    let plan_list = params.plan_list;
     let w_usize = w as usize;
     let status_str = match status {
         crate::tui::state::Status::Idle => "Ready".to_string(),
@@ -94,13 +94,13 @@ pub fn build_render_plan(
         all_phys_lines.extend(entry.render(w_usize, params.theme));
     }
 
-    if !todo_list.is_empty() {
+    if !plan_list.is_empty() {
         all_phys_lines.extend(
-            crate::tui::state::LogEntry::Plain("--- Todo List ---".to_string())
+            crate::tui::state::LogEntry::Plain("--- Plan List ---".to_string())
                 .render(w_usize, params.theme),
         );
 
-        for todo in todo_list {
+        for todo in plan_list {
             let status_symbol = match todo.status.as_str() {
                 "pending" => "◌",
                 "in_progress" => "◔",
@@ -166,7 +166,7 @@ pub fn build_render_plan(
         input_line,
         input_cursor_col,
         scroll_info,
-        // Pass an empty todo list since we've already added the items to the log
-        todo_list: vec![],
+        // Pass an empty plan list since we've already added the items to the log
+        plan_list: vec![],
     }
 }

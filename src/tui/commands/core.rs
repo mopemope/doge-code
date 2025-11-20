@@ -2,8 +2,9 @@ use crate::analysis::RepoMap;
 use crate::hooks::HookManager;
 use crate::llm::OpenAIClient;
 
+use crate::llm::types::ChatMessage;
 use crate::session::SessionManager;
-use crate::tools::FsTools;
+use crate::tools::{FsTools, plan};
 use crate::tui::commands::handlers::custom::CustomCommand;
 use crate::tui::view::TuiApp;
 use std::any::Any;
@@ -68,5 +69,96 @@ impl TuiExecutor {
     /// Get access to the hook manager
     pub fn hook_manager(&mut self) -> &mut crate::hooks::HookManager {
         &mut self.hook_manager
+    }
+
+    /// Publish the persisted plan (if any) for the current session to the UI.
+    pub fn publish_plan_list(&self) {
+        if let Ok(plan_list) = self.tools.plan_read() {
+            self.send_plan_items_to_ui(&plan_list.items);
+        } else {
+            self.send_plan_items_to_ui(&[]);
+        }
+    }
+
+    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem]) {
+        if let Some(tx) = &self.ui_tx
+            && let Ok(json) = serde_json::to_string(items)
+        {
+            let _ = tx.send(format!("::plan_list:{}", json));
+        }
+    }
+
+    fn push_plan_creation_directive(
+        &self,
+        msgs: &mut Vec<ChatMessage>,
+        instruction: &str,
+        ui: Option<&mut TuiApp>,
+        reason: &str,
+    ) {
+        if let Some(ui) = ui {
+            ui.push_log(
+                "[plan] 計画が未作成のため plan_write (mode=\"replace\") で作成して下さい。",
+            );
+        }
+        let directive = format!(
+            "{}\nBefore acting on the new instruction, call plan_write with mode=\"replace\" to produce at least three concrete, ordered steps (status=\"pending\" by default). After saving the plan, resume work on: {}",
+            reason, instruction
+        );
+        msgs.push(ChatMessage {
+            role: "system".into(),
+            content: Some(directive),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+        self.send_plan_items_to_ui(&[]);
+    }
+
+    pub fn enforce_plan_context(
+        &self,
+        msgs: &mut Vec<ChatMessage>,
+        instruction: &str,
+        ui: Option<&mut TuiApp>,
+    ) {
+        match self.tools.plan_read() {
+            Ok(plan_list) if !plan_list.items.is_empty() => {
+                if let Some(summary) = plan::format_plan_summary(&plan_list.items) {
+                    let plan_msg = format!(
+                        "Current execution plan (keep statuses in sync via plan_write mode=\"merge\" and reference plan_read when needed):\n{}",
+                        summary
+                    );
+                    msgs.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some(plan_msg),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+                }
+                if let Some(ui) = ui {
+                    ui.push_log(
+                        "[plan] 現在の計画を読み込みました。進捗は plan_write で更新して下さい。",
+                    );
+                }
+                self.send_plan_items_to_ui(&plan_list.items);
+            }
+            Ok(plan_list) => {
+                // Plan file exists but has no steps
+                self.send_plan_items_to_ui(&plan_list.items);
+                self.push_plan_creation_directive(
+                    msgs,
+                    instruction,
+                    ui,
+                    "Plan storage exists but contains no steps.",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(?e, "Failed to read plan; requesting plan creation");
+                self.push_plan_creation_directive(
+                    msgs,
+                    instruction,
+                    ui,
+                    "No execution plan available for the current session.",
+                );
+            }
+        }
     }
 }

@@ -88,6 +88,8 @@ impl TuiExecutor {
                         msgs.extend(history.clone());
                     }
 
+                    self.enforce_plan_context(&mut msgs, &content, Some(ui));
+
                     msgs.push(crate::llm::ChatMessage {
                         role: "user".into(),
                         content: Some(content.clone()),
