@@ -248,6 +248,7 @@ async fn run_tui(
 
     let mut exec = exec;
     exec.set_ui_tx(app.sender());
+    exec.publish_plan_list();
     // Show which project instructions file (if any) was used at startup
     if let Some(path) = crate::tui::commands::prompt::get_project_instructions_file_path(&exec.cfg)
     {

@@ -29,7 +29,7 @@ mod tests {
             model,
             spinner_state,
             scroll_state: &crate::tui::state::ScrollState::default(),
-            todo_list: &[],
+            plan_list: &[],
             theme: &theme,
         };
         let plan = build_render_plan(params);

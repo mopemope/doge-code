@@ -22,7 +22,7 @@ fn test_build_render_plan_with_scroll() {
     .into_iter()
     .map(|line| LogEntry::Plain(line.to_string()))
     .collect();
-    let todo_items = vec![];
+    let plan_items: Vec<crate::tui::state::PlanItem> = vec![];
     let theme = Theme::dark();
 
     let params = crate::tui::state::BuildRenderPlanParams {
@@ -34,7 +34,7 @@ fn test_build_render_plan_with_scroll() {
         model: None,
         spinner_state: 0,
         scroll_state: &scroll_state,
-        todo_list: &todo_items,
+        plan_list: &plan_items,
         theme: &theme,
         // textarea: &textarea, // 削除
         // input_mode: crate::tui::state::InputMode::Normal, // 削除

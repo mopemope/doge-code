@@ -15,6 +15,5 @@ pub fn handle_tools(_executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  🗺️ search_repomap: Search the repomap with specific criteria");
     ui.push_log("  ✏️ edit: Edit a single unique block of text within a file");
     ui.push_log("  🧩 apply_patch: Apply a unified diff patch to a file");
-    ui.push_log("  📋 todo_write: Create and manage a structured task list");
-    ui.push_log("  📋 todo_read: Read the todo list for the current session");
+    ui.push_log("  📋 plan_write: Create or update the execution plan for the current session");
 }

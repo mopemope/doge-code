@@ -50,7 +50,7 @@ impl TuiApp {
             model,
             spinner_state: self.spinner_state,
             scroll_state: &self.scroll_state,
-            todo_list: &self.todo_list,
+            plan_list: &self.plan_list,
             theme: &self.theme,
         };
         let plan = build_render_plan(params);

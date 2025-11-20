@@ -440,23 +440,25 @@ impl TuiApp {
                             // Reset processing_start_time to stop the timer
                             self.processing_start_time = None;
                         }
-                        _ if msg.starts_with("::todo_list:") => {
-                            let todo_list_json = &msg["::todo_list:".len()..];
-                            if let Ok(todo_list) = serde_json::from_str::<
-                                Vec<crate::tui::state::TodoItem>,
-                            >(todo_list_json)
+                        _ if msg.starts_with("::plan_list:") || msg.starts_with("::todo_list:") => {
+                            let prefix = if msg.starts_with("::plan_list:") {
+                                "::plan_list:"
+                            } else {
+                                "::todo_list:"
+                            };
+                            let plan_list_json = &msg[prefix.len()..];
+                            if let Ok(plan_list) = serde_json::from_str::<
+                                Vec<crate::tui::state::PlanItem>,
+                            >(plan_list_json)
                             {
-                                // If the list is non-empty and every item is marked completed,
-                                // clear the todo list immediately so it is not displayed in the TUI.
-                                let all_completed = !todo_list.is_empty()
-                                    && todo_list.iter().all(|t| t.status == "completed");
+                                let all_completed = !plan_list.is_empty()
+                                    && plan_list.iter().all(|t| t.status == "completed");
                                 if all_completed {
-                                    // Do not display completed-only todo lists
-                                    self.todo_list.clear();
-                                    self.hide_todo_on_next_instruction = false;
+                                    self.plan_list.clear();
+                                    self.hide_plan_on_next_instruction = false;
                                 } else {
-                                    self.todo_list = todo_list.clone();
-                                    self.hide_todo_on_next_instruction = false;
+                                    self.plan_list = plan_list.clone();
+                                    self.hide_plan_on_next_instruction = false;
                                 }
                                 self.dirty = true;
                             }

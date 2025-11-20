@@ -46,7 +46,7 @@ mod tests {
                 // prompt_tokens: 0, // 削除
                 // total_tokens: None, // 削除
                 scroll_state,
-                todo_list: &[],
+                plan_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
                 theme: &app.theme,
             };
@@ -102,7 +102,7 @@ mod tests {
             // prompt_tokens: 0, // 削除
             // total_tokens: None, // 削除
             scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
         };
@@ -141,7 +141,7 @@ mod tests {
             // prompt_tokens: 0, // 削除
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
         };
@@ -214,7 +214,7 @@ mod tests {
             // prompt_tokens: 0, // 削除
             // total_tokens: None, // 削除
             scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
         };
@@ -274,7 +274,7 @@ mod tests {
                 // prompt_tokens: 0, // 削除
                 // total_tokens: None, // 削除
                 scroll_state,
-                todo_list: &[],
+                plan_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
                 theme: &app.theme,
             };
@@ -332,7 +332,7 @@ mod tests {
             // prompt_tokens: 0, // 削除
             // total_tokens: None, // 削除
             scroll_state: &app.scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
         };
@@ -406,7 +406,7 @@ mod tests {
             // prompt_tokens: tokens_used, // 削除
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &theme,
         };
@@ -438,7 +438,7 @@ mod tests {
             // prompt_tokens: tokens_used, // 削除
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
-            todo_list: &[],
+            plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &theme,
         };

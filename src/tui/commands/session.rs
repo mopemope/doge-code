@@ -10,10 +10,8 @@ impl TuiExecutor {
             return Ok(());
         }
 
-        let mut session_manager = self.session_manager.lock().unwrap();
-
         match args[0] {
-            "list" => match session_manager.list_sessions() {
+            "list" => match self.session_manager.lock().unwrap().list_sessions() {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         ui.push_log("No sessions found.");
@@ -31,11 +29,19 @@ impl TuiExecutor {
                 } else {
                     None
                 };
-                match session_manager.create_session(initial_prompt) {
+                match self
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .create_session(initial_prompt)
+                {
                     Ok(()) => {
-                        if let Some(info) = (*session_manager).current_session_info() {
+                        if let Some(info) =
+                            self.session_manager.lock().unwrap().current_session_info()
+                        {
                             ui.push_log(format!("Created new session:\n{}", info));
                         }
+                        self.publish_plan_list();
                     }
                     Err(e) => ui.push_log(format!("Failed to create session: {}", e)),
                 }
@@ -47,34 +53,35 @@ impl TuiExecutor {
                     return Ok(());
                 }
                 let id = args[1];
-                match session_manager.load_session(id) {
-                    Ok(()) => {
-                        // Clear the TUI display
-                        ui.clear_log();
-                        ui.push_log(format!("Switched to session: {}", id));
-
-                        // Load conversation history from session
-                        if let (Some(session), Ok(mut history)) = (
-                            &session_manager.current_session,
-                            self.conversation_history.lock(),
-                        ) {
-                            history.clear();
-                            // Deserialize session conversation entries into ChatMessage objects
-                            for entry in &session.conversation {
-                                let map: serde_json::Map<_, _> =
-                                    entry.clone().into_iter().collect();
-                                if let Ok(msg) =
-                                    serde_json::from_value::<crate::llm::types::ChatMessage>(
-                                        serde_json::Value::Object(map),
-                                    )
-                                {
-                                    history.push(msg);
-                                }
-                            }
+                let session_after_switch = {
+                    let mut session_manager = self.session_manager.lock().unwrap();
+                    match session_manager.load_session(id) {
+                        Ok(()) => session_manager.current_session.clone(),
+                        Err(e) => {
+                            ui.push_log(format!("Failed to switch session: {}", e));
+                            return Ok(());
                         }
                     }
-                    Err(e) => ui.push_log(format!("Failed to switch session: {}", e)),
+                };
+
+                ui.clear_log();
+                ui.push_log(format!("Switched to session: {}", id));
+
+                if let (Some(session), Ok(mut history)) =
+                    (session_after_switch, self.conversation_history.lock())
+                {
+                    history.clear();
+                    for entry in &session.conversation {
+                        let map: serde_json::Map<_, _> = entry.clone().into_iter().collect();
+                        if let Ok(msg) = serde_json::from_value::<crate::llm::types::ChatMessage>(
+                            serde_json::Value::Object(map),
+                        ) {
+                            history.push(msg);
+                        }
+                    }
                 }
+
+                self.publish_plan_list();
             }
             "save" => {
                 // This is implicitly handled when history is updated.
@@ -87,12 +94,12 @@ impl TuiExecutor {
                     return Ok(());
                 }
                 let id = args[1];
-                match session_manager.delete_session(id) {
+                match self.session_manager.lock().unwrap().delete_session(id) {
                     Ok(()) => {
                         ui.push_log(format!("Deleted session: {}", id));
                         // If we're in session list mode, refresh the list
                         if ui.input_mode == crate::tui::state::InputMode::SessionList {
-                            match session_manager.list_sessions() {
+                            match self.session_manager.lock().unwrap().list_sessions() {
                                 Ok(sessions) => {
                                     if sessions.is_empty() {
                                         // Exit session list mode if no sessions left
@@ -123,18 +130,24 @@ impl TuiExecutor {
                                 }
                             }
                         }
+                        self.publish_plan_list();
                     }
                     Err(e) => ui.push_log(format!("Failed to delete session: {}", e)),
                 }
             }
             "current" => {
-                if let Some(info) = (*session_manager).current_session_info() {
+                if let Some(info) = self.session_manager.lock().unwrap().current_session_info() {
                     ui.push_log(info);
                 } else {
                     ui.push_log("No session loaded.");
                 }
             }
-            "clear" => match session_manager.clear_current_session_conversation() {
+            "clear" => match self
+                .session_manager
+                .lock()
+                .unwrap()
+                .clear_current_session_conversation()
+            {
                 Ok(()) => ui.push_log("Cleared current session conversation."),
                 Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },

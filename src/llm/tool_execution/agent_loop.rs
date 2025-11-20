@@ -3,7 +3,7 @@ use crate::llm::LlmErrorKind;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
-use crate::tools::todo_write::TodoList;
+use crate::tools::plan::PlanList;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
 use std::process::Command;
@@ -378,8 +378,8 @@ pub async fn run_agent_loop(
                     "search_repomap" => "🗺️",
                     "edit" => "✏️",
                     "apply_patch" => "🧩",
-                    "todo_write" => "📋",
-                    "todo_read" => "📋",
+                    "plan_write" => "🗂️",
+                    "plan_read" => "🗂️",
                     _ => "🔧", // default icon
                 };
 
@@ -450,17 +450,17 @@ pub async fn run_agent_loop(
                 let _ = tx.send("::status:waiting".into());
             }
 
-            // Check if the tool call is todo_write and update the todo list in the UI
-            if tc.function.name == "todo_write"
+            // Check if the tool call is plan_write/plan_read and update the plan list in the UI
+            if matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
                 && let Ok(tool_result) = &res
-                && let Ok(todo_list) = serde_json::from_value::<TodoList>(tool_result.clone())
+                && let Ok(plan_list) = serde_json::from_value::<PlanList>(tool_result.clone())
             {
-                debug!(?todo_list, "Updated todo list from todo_write tool");
-                // Send the todo list to the UI
+                debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
+                // Send the plan list to the UI
                 if let Some(tx) = &ui_tx {
-                    // Serialize the todo list to JSON and send it to the UI
-                    if let Ok(todo_list_json) = serde_json::to_string(&todo_list.todos) {
-                        let _ = tx.send(format!("::todo_list:{}", todo_list_json));
+                    // Serialize the plan list to JSON and send it to the UI
+                    if let Ok(plan_list_json) = serde_json::to_string(&plan_list.items) {
+                        let _ = tx.send(format!("::plan_list:{}", plan_list_json));
                     }
                 }
             }
