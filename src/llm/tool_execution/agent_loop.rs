@@ -414,6 +414,16 @@ pub async fn run_agent_loop(
                     let _ = tx.send(path.to_string());
                 }
 
+                // For fs_list, show the directory path right after SUCCESS
+                if tool_name == "fs_list"
+                    && let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
+                    && success
+                {
+                    let _ = tx.send(path.to_string());
+                }
+
                 // For search_text, show the search keyword right after SUCCESS
                 if tool_name == "search_text"
                     && let Ok(args) =
@@ -422,6 +432,28 @@ pub async fn run_agent_loop(
                     && success
                 {
                     let _ = tx.send(format!("Keyword: {}", keyword));
+                }
+
+                // For search_repomap, show the search keywords right after SUCCESS
+                if tool_name == "search_repomap"
+                    && let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    && success
+                {
+                    // Check keyword_search field
+                    if let Some(keyword_search) =
+                        args.get("keyword_search").and_then(|v| v.as_array())
+                        && !keyword_search.is_empty()
+                    {
+                        let keywords: Vec<String> = keyword_search
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .collect();
+                        if !keywords.is_empty() {
+                            let _ = tx.send(format!("Keywords: {}", keywords.join(", ")));
+                        }
+                    }
                 }
 
                 // For execute_bash, show the command that was executed right after SUCCESS

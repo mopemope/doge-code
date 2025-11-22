@@ -115,7 +115,11 @@ pub async fn fs_write(
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.fs_write(path, content) {
-        Ok(()) => Ok(json!({ "ok": true, "path": path, "bytesWritten": content.len() })),
+        Ok(()) => {
+            println!("SUCCESS");
+            println!("{}", path);
+            Ok(json!({ "ok": true, "path": path, "bytesWritten": content.len() }))
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }
