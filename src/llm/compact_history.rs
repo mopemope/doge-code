@@ -117,19 +117,9 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
     msgs.extend(params.history.clone());
 
     // Send the summarization request to the LLM using run_agent_loop
-    match llm::run_agent_loop(
-        &params.client,
-        &params.model,
-        &params.fs_tools,
-        msgs,
-        None, // No UI sender for this function
-        None, // No cancellation token for this operation
-        &params.cfg,
-        None, // No TuiExecutor for compact history
-    )
-    .await
-    {
-        Ok((_updated_messages, final_msg)) => {
+    // Send the summarization request to the LLM using chat_once (no tool usage needed/allowed for compaction)
+    match params.client.chat_once(&params.model, msgs, None).await {
+        Ok(final_msg) => {
             // Extract the summary from the final message
             if !final_msg.content.is_empty() {
                 // Create a new compacted message with the summary
