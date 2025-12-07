@@ -119,6 +119,72 @@ pub async fn run_agent_loop(
             return Err(anyhow!("max tool iterations reached"));
         }
 
+        // --- Proactive Compaction Check ---
+        let threshold = cfg.auto_compact_prompt_token_threshold_for_current_model();
+        let context_limit = cfg.get_context_window_size().unwrap_or(128_000); // Default to a safe large value if unknown
+        let safety_limit = (context_limit as f64 * 0.9) as u32;
+        let effective_limit = std::cmp::min(threshold, safety_limit);
+        let last_prompt_tokens = client.get_prompt_tokens_used();
+
+        // Only compact if we are over the limit AND we have enough history to meaningful compact (avoid loops)
+        // We typically want at least System + User + Assistant + Tool (4 messages) or similar complexity before compacting becomes the only option.
+        // But strictly > 2 (System + User + something) matches our plan.
+        if last_prompt_tokens > effective_limit && messages.len() > 2 {
+            warn!(
+                current_tokens = last_prompt_tokens,
+                limit = effective_limit,
+                "Proactive compaction triggered"
+            );
+
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send(
+                    "::status:compacting:Context limits approaching, summarizing history..."
+                        .to_string(),
+                );
+            }
+
+            let params = crate::llm::CompactParams {
+                client: client.clone(),
+                model: model.to_string(),
+                fs_tools: fs.clone(),
+                history: messages.clone(),
+                cfg: cfg.clone(),
+            };
+
+            match crate::llm::compact_conversation_history(params).await {
+                Ok(compact_result) => {
+                    if compact_result.metadata.success {
+                        info!("Proactive history compaction successful.");
+
+                        // Preserve System Prompt if present
+                        let system_prompt = messages.iter().find(|m| m.role == "system").cloned();
+                        messages.clear();
+                        if let Some(sys) = system_prompt {
+                            messages.push(sys);
+                        }
+                        messages.push(compact_result.compacted_message);
+
+                        if let Some(tx) = &ui_tx {
+                            let _ = tx.send(
+                                "::status:waiting:History compacted. Continuing...".to_string(),
+                            );
+                        }
+                        // Continue loop with new compacted history
+                        continue;
+                    } else {
+                        error!(
+                            "Proactive compaction failed: {:?}",
+                            compact_result.metadata.error_message
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Proactive compaction error: {}", e);
+                }
+            }
+        }
+        // ----------------------------------
+
         let msg = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
@@ -157,8 +223,14 @@ pub async fn run_agent_loop(
                                 Ok(compact_result) => {
                                     if compact_result.metadata.success {
                                         info!("History compaction successful. Resuming with compacted history.");
-                                        // Update messages with the compacted one
-                                        messages = vec![compact_result.compacted_message];
+
+                                        // Preserve System Prompt if present
+                                        let system_prompt = messages.iter().find(|m| m.role == "system").cloned();
+                                        messages.clear();
+                                        if let Some(sys) = system_prompt {
+                                            messages.push(sys);
+                                        }
+                                        messages.push(compact_result.compacted_message);
 
                                         // Inform UI
                                         if let Some(tx) = &ui_tx {
