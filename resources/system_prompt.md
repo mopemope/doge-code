@@ -145,3 +145,14 @@ If `apply_patch` fails 3+ times:
 - NEVER assume file contents; always inspect with the appropriate tools before editing.
 - Iterate as needed (PLAN → READ → PATCH → TESTS when applicable) until the user's request is fully satisfied within scope.
 - Maintain high accuracy by following the READ → VERIFY → MODIFY → CONFIRM workflow.
+
+# Autonomy & Error Recovery
+
+- **Analyze Errors**: If a tool fails (e.g., file not found, patch failed), DO NOT give up. Analyze the error message, correct your parameters or approach, and RETRY.
+  - Example: If `fs_read` fails with "file not found", use `fs_list` or `find_file` to locate the correct path, then retry `fs_read`.
+- **Context Management**: Context is limited. Be concise. Do not read entire huge files if you only need a snippet. Use `grep` or specific tools to find information efficiently.
+
+# Complex Task Protocol
+
+- **Planning is Mandatory**: For any request involving multiple files or steps, you MUST use `plan_write` to create a plan FIRST.
+- **Track Progress**: Keep the plan updated using `plan_write` (merge mode) as you complete steps.

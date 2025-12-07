@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
 use std::process::Command;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 fn collect_diff_review_payload() -> Result<Option<DiffReviewPayload>> {
     let tracked_diff = Command::new("git")
@@ -103,7 +103,7 @@ pub async fn run_agent_loop(
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
     cfg: &crate::config::AppConfig,
-    tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
+    _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
     let runtime = ToolRuntime::build(fs).await?;
@@ -136,25 +136,53 @@ pub async fn run_agent_loop(
                     Ok(msg) => msg,
                     Err(e) => {
                         // Check if the error is due to context length exceeded
-                        if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>()
-                            && let Some(_executor) = tui_executor {
-                                // Send a message to the UI to indicate that we are compacting
-                                if let Some(tx) = &ui_tx {
-                                    let _ = tx.send("[INFO] Context length exceeded. Compacting conversation history...".to_string());
-                                }
+                        if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>() {
+                            warn!("Context length exceeded in agent loop. Attempting to compact history.");
 
-                                // Call the compact command
-                                // Since we don't have access to TuiApp here, we'll need to find a way to trigger the compact command.
-                                // One approach is to send a special message to the UI to trigger the compact command.
-                                // For now, we'll just return an error to indicate that the operation should be retried after compacting.
-                                // A better approach would be to have a callback or a channel to notify the TUI to run the compact command.
-                                // For now, we'll return the error to let the caller handle it.
-                                return Err(anyhow!(LlmErrorKind::ContextLengthExceeded));
+                            // Send a message to the UI to indicate that we are compacting
+                            if let Some(tx) = &ui_tx {
+                                let _ = tx.send("::status:compacting:Context limits reached, summarizing history...".to_string());
                             }
+
+                            // Perform compaction
+                            let params = crate::llm::CompactParams {
+                                client: client.clone(),
+                                model: model.to_string(),
+                                fs_tools: fs.clone(), // FsTools is cheap to clone
+                                history: messages.clone(),
+                                cfg: cfg.clone(),
+                            };
+
+                            match crate::llm::compact_conversation_history(params).await {
+                                Ok(compact_result) => {
+                                    if compact_result.metadata.success {
+                                        info!("History compaction successful. Resuming with compacted history.");
+                                        // Update messages with the compacted one
+                                        messages = vec![compact_result.compacted_message];
+
+                                        // Inform UI
+                                        if let Some(tx) = &ui_tx {
+                                            let _ = tx.send("::status:waiting:History compacted. Retrying...".to_string());
+                                        }
+
+                                        // Retry the loop iteration with the new history
+                                        continue;
+                                    } else {
+                                        error!("History compaction failed: {:?}", compact_result.metadata.error_message);
+                                        // Fall through to return the original error if compaction failed
+                                    }
+                                }
+                                Err(compact_err) => {
+                                    error!("Error during history compaction: {}", compact_err);
+                                    // Fall through to return the original error
+                                }
+                            }
+                        }
                         return Err(e);
                     }
                 }
             },
+
         };
 
         // If assistant returned final content without tool calls, we are done.
