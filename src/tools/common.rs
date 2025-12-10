@@ -1,4 +1,4 @@
-use crate::analysis::RepoMap;
+use crate::analysis::{ContextManager, RepoMap};
 use crate::config::AppConfig;
 use crate::session::{SessionData, SessionManager};
 use crate::tools::execute;
@@ -26,6 +26,7 @@ pub struct FsTools {
     pub config: Arc<AppConfig>,
     remote_tool_manager: RemoteToolManager,
     security_checker: SecurityChecker,
+    pub context_manager: Arc<RwLock<ContextManager>>,
 }
 
 impl Default for FsTools {
@@ -38,6 +39,7 @@ impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
+            context_manager: Arc::new(RwLock::new(ContextManager::new(repomap.clone()))),
             repomap,
             session_manager_wrapper: SessionManagerWrapper::new(None),
             config: config.clone(),
@@ -101,9 +103,16 @@ impl FsTools {
         &self.session_manager_wrapper
     }
 
-    /// Check if a command is allowed based on the allowed_commands list
     pub fn is_command_allowed(&self, command: &str) -> bool {
         self.security_checker.is_command_allowed(command)
+    }
+
+    /// Update context with accessed file
+    pub fn update_context(&self, path: std::path::PathBuf) {
+        let cm = self.context_manager.clone();
+        tokio::spawn(async move {
+            cm.write().await.add_file(&path);
+        });
     }
 
     pub fn fs_list(
@@ -135,6 +144,7 @@ impl FsTools {
         match read::fs_read(path, opts, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read")?;
+                self.update_context(PathBuf::from(path));
                 Ok(result)
             }
             Err(e) => {
@@ -157,6 +167,9 @@ impl FsTools {
         match read_many::fs_read_many_files(paths, exclude, recursive, &self.config, options) {
             Ok(result) => {
                 self.record_tool_call_success("fs_read_many_files")?;
+                for file in &result.files {
+                    self.update_context(PathBuf::from(&file.path));
+                }
                 Ok(result)
             }
             Err(e) => {
@@ -193,6 +206,7 @@ impl FsTools {
         match write::fs_write(path, content, &self.config) {
             Ok(result) => {
                 self.record_tool_call_success("fs_write")?;
+                self.update_context(PathBuf::from(path));
                 Ok(result)
             }
             Err(e) => {

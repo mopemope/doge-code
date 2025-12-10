@@ -17,6 +17,8 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::info;
 
+pub mod fix;
+
 /// Executor for the `exec` subcommand.
 /// This struct holds the necessary components to interact with the LLM and tools.
 pub struct Executor {

@@ -106,6 +106,16 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Run a command and auto-fix if it fails
+    #[command()]
+    Fix {
+        /// The command to execute (e.g., "cargo test")
+        command: String,
+        /// Maximum number of fix attempts
+        #[arg(long, default_value_t = 3)]
+        retry: usize,
+    },
 }
 
 #[tokio::main]
@@ -183,6 +193,7 @@ async fn main() -> Result<()> {
             file_path,
             json,
         }) => run_rewrite(cfg, prompt, code_file, file_path.as_deref(), *json).await,
+        Some(Commands::Fix { command, retry }) => run_fix(cfg, command, *retry).await,
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
@@ -308,4 +319,10 @@ async fn run_rewrite(
     json: bool,
 ) -> anyhow::Result<()> {
     crate::exec::run_rewrite(cfg, prompt, code_file, file_path, json).await
+}
+
+async fn run_fix(cfg: crate::config::AppConfig, command: &str, retry: usize) -> anyhow::Result<()> {
+    let mut executor = crate::exec::Executor::new(cfg)?;
+    crate::exec::fix::run_fix_loop(&mut executor, command, retry).await?;
+    Ok(())
 }

@@ -17,13 +17,14 @@ pub async fn edit(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let params = serde_json::from_value(args.clone())?;
+    let params: crate::tools::edit::EditParams = serde_json::from_value(args.clone())?;
 
     // Count the tool call attempt
     if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
+    let file_path = params.file_path.clone();
     match crate::tools::edit::edit(params, &runtime.fs.config).await {
         Ok(res) => {
             // Record success/failure for this tool call
@@ -38,6 +39,10 @@ pub async fn edit(
                 {
                     tracing::error!(?e, "Failed to update session with lines edited count");
                 }
+
+                runtime
+                    .fs
+                    .update_context(std::path::PathBuf::from(&file_path));
             } else if let Err(e) = runtime.fs.record_tool_call_failure("edit") {
                 tracing::error!(?e, "Failed to record tool call failure for edit");
             }
@@ -77,6 +82,12 @@ pub async fn apply_patch(
                 if let Err(e) = runtime.fs.record_tool_call_success("apply_patch") {
                     tracing::error!(?e, "Failed to record tool call success for apply_patch");
                 }
+                // We should probably track context for all files in patch, but params doesn't easily give list?
+                // Actually apply_patch params is defined in src/tools/apply_patch.rs.
+                // Let's assume for now we don't track context for apply_patch (multi-file) or implemented later.
+                // But typically apply_patch is the result of a plan, maybe not critical to track "read" since LLM wrote it.
+                // However, editing files puts them in working set.
+                // Let's skip for now as I can't easily get the file list from `params` without parsing.
             } else if let Err(e) = runtime.fs.record_tool_call_failure("apply_patch") {
                 tracing::error!(
                     ?e,
