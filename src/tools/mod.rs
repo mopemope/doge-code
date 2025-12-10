@@ -12,6 +12,7 @@ pub mod search_repomap;
 pub mod search_text;
 pub mod security;
 pub mod session_manager;
+pub mod undo;
 pub mod write;
 
 pub use common::FsTools;

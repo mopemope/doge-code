@@ -114,7 +114,7 @@ pub async fn fs_write(
 ) -> Result<serde_json::Value> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    match runtime.fs.fs_write(path, content) {
+    match runtime.fs.fs_write(path, content).await {
         Ok(()) => {
             println!("SUCCESS");
             println!("{}", path);

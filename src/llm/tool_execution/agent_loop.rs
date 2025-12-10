@@ -47,13 +47,15 @@ pub async fn run_agent_loop(
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;
+    let mut loop_detector = crate::analysis::LoopDetector::new();
+    let mut task_sentinel = crate::analysis::TaskSentinel::new();
 
     loop {
         iters += 1;
         debug!(iteration = iters, messages = ?messages, "agent loop iteration");
         if iters > runtime.max_iters {
             warn!(iters, "max tool iterations reached");
-            return Err(AgentLoopError::MaxIterationsError(iters).into());
+            return Err(AgentLoopError::MaxIterations(iters).into());
         }
 
         // --- Proactive Compaction Check ---
@@ -187,7 +189,7 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
-                        let agent_error = AgentLoopError::LLMError(e.to_string());
+                        let agent_error = AgentLoopError::Llm(e.to_string());
                         handle_agent_error(&agent_error, &ui_tx);
                         return Err(agent_error.into());
                     }
@@ -225,7 +227,7 @@ pub async fn run_agent_loop(
                             let _ = tx.send(format!("::diff_review:{}", json));
                         }
                         Err(e) => {
-                            let agent_error = AgentLoopError::SerializationError(e.to_string());
+                            let agent_error = AgentLoopError::Serialization(e.to_string());
                             handle_agent_error(&agent_error, &ui_tx);
                             let _ = tx.send(format!(
                                     "::diff_review:{}",
@@ -239,7 +241,7 @@ pub async fn run_agent_loop(
                         debug!("No diff detected after tool execution");
                     }
                     Err(e) => {
-                        let agent_error = AgentLoopError::DiffCollectionError(e.to_string());
+                        let agent_error = AgentLoopError::DiffCollection(e.to_string());
                         handle_agent_error(&agent_error, &ui_tx);
                         let _ = tx.send(format!(
                             "::diff_review:{}",
@@ -543,8 +545,49 @@ pub async fn run_agent_loop(
                 role: "tool".into(),
                 content: Some(tool_message_content),
                 tool_calls: vec![],
-                tool_call_id: tc.id,
+                tool_call_id: tc.id.clone(),
             });
+
+            // Loop Detection
+            loop_detector.record_tool_call(&tc);
+            if let Some(loop_type) = loop_detector.detect_loop() {
+                let warning_msg = match loop_type {
+                    crate::analysis::loop_detector::LoopType::ConsecutiveRepetition(name) => {
+                        format!("WARNING: You are repeatedly calling the tool '{}' with the same arguments. This suggests you are stuck. Please allow yourself to think step-by-step again, and try a DIFFERENT approach or explore more files.", name)
+                    }
+                    crate::analysis::loop_detector::LoopType::CycleRepetition => {
+                        "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current strategy is not working. Please STOP, re-evaluate the situation, and try a completely different approach.".to_string()
+                    }
+                };
+
+                warn!("Loop detected: {}", warning_msg);
+                if let Some(tx) = &ui_tx {
+                    let _ = tx.send("::status:warning:Loop detected. Intervening...".to_string());
+                }
+
+                messages.push(ChatMessage {
+                    role: "user".into(), // System role is processed differently, User role forces attention
+                    content: Some(warning_msg),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
+            }
+
+            // Task Sentinel (Stalled Progress Check)
+            task_sentinel.record_tool_call(&tc.function.name, res.is_ok());
+            if let Some(stall_warning) = task_sentinel.check_stalled() {
+                warn!("Stalled progress detected: {}", stall_warning);
+                if let Some(tx) = &ui_tx {
+                    let _ =
+                        tx.send("::status:warning:Progress stalled. Intervening...".to_string());
+                }
+                messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: Some(stall_warning),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
+            }
         }
     }
 }
