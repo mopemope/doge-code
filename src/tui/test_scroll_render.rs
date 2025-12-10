@@ -49,6 +49,7 @@ mod tests {
                 plan_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
                 theme: &app.theme,
+                log_heights: &app.log_heights,
             };
             let plan = build_render_plan(params);
 
@@ -105,6 +106,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
+            log_heights: &app.log_heights,
         };
         let plan = build_render_plan(params);
 
@@ -144,6 +146,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
+            log_heights: &app.log_heights,
         };
         let plan = build_render_plan(params);
 
@@ -217,6 +220,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
+            log_heights: &app.log_heights,
         };
         let plan = build_render_plan(params);
 
@@ -277,6 +281,7 @@ mod tests {
                 plan_list: &[],
                 // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
                 theme: &app.theme,
+                log_heights: &app.log_heights,
             };
             let plan = build_render_plan(params);
 
@@ -335,6 +340,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &app.theme,
+            log_heights: &app.log_heights,
         };
         let plan = build_render_plan(params);
 
@@ -381,6 +387,7 @@ mod tests {
             .into_iter()
             .map(|line| LogEntry::Plain(line.to_string()))
             .collect();
+        let log_heights = vec![1; log.len()];
 
         // let input_mode = InputMode::Normal; // 不要
         let w = 80;
@@ -409,6 +416,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &theme,
+            log_heights: &log_heights,
         };
         let plan = build_render_plan(params);
 
@@ -441,6 +449,7 @@ mod tests {
             plan_list: &[],
             // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
             theme: &theme,
+            log_heights: &log_heights,
         };
         let plan = build_render_plan(params);
 

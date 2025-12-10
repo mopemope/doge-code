@@ -24,6 +24,7 @@ fn test_build_render_plan_with_scroll() {
     .collect();
     let plan_items: Vec<crate::tui::state::PlanItem> = vec![];
     let theme = Theme::dark();
+    let log_heights = vec![1; log_lines.len()];
 
     let params = crate::tui::state::BuildRenderPlanParams {
         title: "Test Title",
@@ -36,6 +37,7 @@ fn test_build_render_plan_with_scroll() {
         scroll_state: &scroll_state,
         plan_list: &plan_items,
         theme: &theme,
+        log_heights: &log_heights,
         // textarea: &textarea, // 削除
         // input_mode: crate::tui::state::InputMode::Normal, // 削除
         // height, // 削除

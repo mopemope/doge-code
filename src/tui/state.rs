@@ -98,6 +98,7 @@ pub struct BuildRenderPlanParams<'a> {
     pub scroll_state: &'a ScrollState,
     pub plan_list: &'a [PlanItem],
     pub theme: &'a Theme,
+    pub log_heights: &'a [usize],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +151,8 @@ pub struct TuiApp {
     pub title: String,
     pub textarea: TextArea<'static>,
     pub log: Vec<LogEntry>,
+    pub log_heights: Vec<usize>, // Cache for wrapped line counts of log entries
+    pub window_width: usize,     // Current window width for cache invalidation
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
     pub(crate) inbox_tx: Option<Sender<String>>,
@@ -362,10 +365,12 @@ impl TuiApp {
             title: title.into(),
             textarea,
             log: Vec::new(),
+            log_heights: Vec::new(),
+            window_width: 0,
             handler: None,
             inbox_rx: Some(rx),
             inbox_tx: Some(tx),
-            max_log_lines: 500,
+            max_log_lines: 10000,
             status: Status::Idle,
             model,
             input_history,
@@ -485,15 +490,43 @@ impl TuiApp {
         self.inbox_tx.clone()
     }
 
+    pub fn calculate_entry_height(&self, entry: &LogEntry, width: usize) -> usize {
+        if width == 0 {
+            return 1; // Fallback
+        }
+        entry.render(width, &self.theme).len()
+    }
+
+    pub fn recalculate_all_heights(&mut self) {
+        if self.window_width == 0 {
+            self.log_heights.clear();
+            self.log_heights.resize(self.log.len(), 1);
+            return;
+        }
+        self.log_heights.clear();
+        for entry in &self.log {
+            self.log_heights
+                .push(self.calculate_entry_height(entry, self.window_width));
+        }
+    }
+
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
         let lines_before = self.log.len();
         let content = s.into();
         for line in content.split('\n') {
-            self.log.push(LogEntry::Plain(line.to_string()));
+            let entry = LogEntry::Plain(line.to_string());
+            let height = if self.window_width > 0 {
+                self.calculate_entry_height(&entry, self.window_width)
+            } else {
+                1
+            };
+            self.log.push(entry);
+            self.log_heights.push(height);
         }
         if self.log.len() > self.max_log_lines {
             let overflow = self.log.len() - self.max_log_lines;
             self.log.drain(0..overflow);
+            self.log_heights.drain(0..overflow);
         }
 
         let _lines_added = self.log.len().saturating_sub(lines_before);
@@ -524,11 +557,19 @@ impl TuiApp {
         }
 
         let lines_before = self.log.len();
-        self.log.push(LogEntry::Markdown(content.to_string()));
+        let entry = LogEntry::Markdown(content.to_string());
+        let height = if self.window_width > 0 {
+            self.calculate_entry_height(&entry, self.window_width)
+        } else {
+            1
+        };
+        self.log.push(entry);
+        self.log_heights.push(height);
 
         if self.log.len() > self.max_log_lines {
             let overflow = self.log.len() - self.max_log_lines;
             self.log.drain(0..overflow);
+            self.log_heights.drain(0..overflow);
         }
 
         if !self.scroll_state.auto_scroll {
@@ -590,6 +631,7 @@ impl TuiApp {
     /// Clears the log and resets the last LLM response content.
     pub fn clear_log(&mut self) {
         self.log.clear();
+        self.log_heights.clear();
         self.last_llm_response_content = None;
         self.scroll_state = ScrollState::default();
     }

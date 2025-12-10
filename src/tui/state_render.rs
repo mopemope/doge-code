@@ -88,66 +88,115 @@ pub fn build_render_plan(
 
     // Build wrapped physical lines from logs with scroll support
     let max_log_rows = main_content_height as usize;
-    let mut all_phys_lines: Vec<crate::tui::style_utils::StyledLine> = Vec::new();
 
-    for entry in log.iter() {
-        all_phys_lines.extend(entry.render(w_usize, params.theme));
+    // Calculate total height from cached heights
+    let total_plan_rows = if !plan_list.is_empty() {
+        // "--- Plan List ---" (1) + items (N) + "-----------------" (1)
+        plan_list.len() + 2
+    } else {
+        0
+    };
+
+    let total_log_rows: usize = params.log_heights.iter().sum();
+    let total_rows = total_log_rows + total_plan_rows;
+
+    // Calculate visible range
+    let view_end_row = if scroll_state.auto_scroll || scroll_state.offset == 0 {
+        total_rows
+    } else {
+        total_rows.saturating_sub(scroll_state.offset)
+    };
+    let view_start_row = view_end_row.saturating_sub(max_log_rows);
+
+    let mut log_lines: Vec<crate::tui::style_utils::StyledLine> = Vec::new();
+    let mut current_row = 0;
+
+    // 1. Render visible Log entries
+    for (i, entry) in log.iter().enumerate() {
+        let height = *params.log_heights.get(i).unwrap_or(&1);
+        let entry_start = current_row;
+        let entry_end = current_row + height;
+
+        // Check intersection with visible window [view_start_row, view_end_row)
+        if entry_end > view_start_row && entry_start < view_end_row {
+            let rendered_lines = entry.render(w_usize, params.theme);
+
+            // Calculate slice of this entry to include
+            let slice_start = view_start_row.saturating_sub(entry_start);
+            let slice_end = (view_end_row.saturating_sub(entry_start)).min(height);
+
+            if slice_start < rendered_lines.len() {
+                let end = slice_end.min(rendered_lines.len());
+                if slice_start < end {
+                    log_lines.extend_from_slice(&rendered_lines[slice_start..end]);
+                }
+            }
+        }
+        current_row += height;
+        if current_row >= view_end_row {
+            break;
+        }
     }
 
-    if !plan_list.is_empty() {
-        all_phys_lines.extend(
-            crate::tui::state::LogEntry::Plain("--- Plan List ---".to_string())
-                .render(w_usize, params.theme),
-        );
+    // 2. Render visible Plan List items (if active and in view)
+    if !plan_list.is_empty() && current_row < view_end_row {
+        // Helper to render a plain line similar to LogEntry logic
+        let render_plain = |text: String, row_idx: usize| {
+            if row_idx >= view_start_row && row_idx < view_end_row {
+                crate::tui::state::LogEntry::Plain(text)
+                    .render(w_usize, params.theme)
+                    .into_iter()
+                    .next() // Assuming single line for these headers/items
+            } else {
+                None
+            }
+        };
 
+        // Header
+        if let Some(line) = render_plain("--- Plan List ---".to_string(), current_row) {
+            log_lines.push(line);
+        }
+        current_row += 1;
+
+        // Items
         for todo in plan_list {
+            if current_row >= view_end_row {
+                break;
+            }
+
             let status_symbol = match todo.status.as_str() {
                 "pending" => "◌",
                 "in_progress" => "◔",
                 "completed" => "✓",
                 _ => "○",
             };
-            let line = format!("{} {}", status_symbol, todo.content);
-            all_phys_lines
-                .extend(crate::tui::state::LogEntry::Plain(line).render(w_usize, params.theme));
+            let line_text = format!("{} {}", status_symbol, todo.content);
+
+            if let Some(line) = render_plain(line_text, current_row) {
+                log_lines.push(line);
+            }
+            current_row += 1;
         }
 
-        all_phys_lines.extend(
-            crate::tui::state::LogEntry::Plain("-----------------".to_string())
-                .render(w_usize, params.theme),
-        );
+        // Footer
+        if current_row < view_end_row {
+            if let Some(line) = render_plain("-----------------".to_string(), current_row) {
+                log_lines.push(line);
+            }
+            current_row += 1;
+        }
     }
 
-    let total_lines = all_phys_lines.len();
-
-    // Apply scroll offset
-    let log_lines = if scroll_state.auto_scroll || scroll_state.offset == 0 {
-        let start_idx = total_lines.saturating_sub(max_log_rows);
-        let mut lines = all_phys_lines[start_idx..].to_vec();
-        if lines.len() > max_log_rows {
-            lines.truncate(max_log_rows);
-        }
-        lines
-    } else {
-        let end_idx = total_lines.saturating_sub(scroll_state.offset);
-        let start_idx = end_idx.saturating_sub(max_log_rows);
-        let mut lines = all_phys_lines[start_idx..end_idx].to_vec();
-        if lines.len() > max_log_rows {
-            lines.truncate(max_log_rows);
-        }
-        lines
-    };
-
     // Create scroll info
-    let scroll_info = if total_lines > max_log_rows {
+    let scroll_info = if total_rows > max_log_rows {
         let current_line = if scroll_state.auto_scroll || scroll_state.offset == 0 {
-            total_lines
+            total_rows
         } else {
-            total_lines.saturating_sub(scroll_state.offset)
+            total_rows.saturating_sub(scroll_state.offset)
         };
         Some(crate::tui::state::ScrollInfo {
             current_line,
-            total_lines,
+            total_lines: total_rows,
             is_scrolling: !scroll_state.auto_scroll && scroll_state.offset > 0,
             new_messages: scroll_state.new_messages,
         })
