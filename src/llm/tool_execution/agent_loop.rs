@@ -1,98 +1,13 @@
-use crate::diff_review::DiffReviewPayload;
 use crate::llm::LlmErrorKind;
+use crate::llm::tool_execution::error::{AgentLoopError, handle_agent_error};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
 use crate::tools::plan::PlanList;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
-use std::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-fn collect_diff_review_payload() -> Result<Option<DiffReviewPayload>> {
-    let tracked_diff = Command::new("git")
-        .arg("diff")
-        .arg("--color=never")
-        .output()
-        .context("failed to run git diff --color=never")?;
-
-    let mut diff_sections = Vec::new();
-    if !tracked_diff.stdout.is_empty() {
-        let diff = String::from_utf8(tracked_diff.stdout)
-            .context("git diff output was not valid UTF-8")?;
-        diff_sections.push(diff);
-    }
-
-    let names_output = Command::new("git")
-        .arg("diff")
-        .arg("--name-only")
-        .output()
-        .context("failed to run git diff --name-only")?;
-
-    let mut files = String::from_utf8(names_output.stdout)
-        .context("git diff --name-only output was not valid UTF-8")?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-
-    let status_output = Command::new("git")
-        .arg("status")
-        .arg("--porcelain=v1")
-        .output()
-        .context("failed to run git status --porcelain")?;
-
-    let status_text = String::from_utf8(status_output.stdout)
-        .context("git status --porcelain output was not valid UTF-8")?;
-
-    for line in status_text.lines() {
-        let Some(path) = line.strip_prefix("?? ") else {
-            continue;
-        };
-
-        if path.trim().is_empty() || path.ends_with('/') {
-            continue;
-        }
-
-        let path = path.trim();
-
-        let untracked_diff = Command::new("git")
-            .arg("diff")
-            .arg("--color=never")
-            .arg("--no-index")
-            .arg("/dev/null")
-            .arg(path)
-            .output()
-            .with_context(|| format!("failed to diff untracked file {path}"))?;
-
-        if !untracked_diff.stdout.is_empty() {
-            let diff = String::from_utf8(untracked_diff.stdout)
-                .context("git diff --no-index output for untracked file was not valid UTF-8")?;
-            diff_sections.push(diff);
-        }
-
-        let path_string = path.to_string();
-        if !files.contains(&path_string) {
-            files.push(path_string);
-        }
-    }
-
-    if diff_sections.is_empty() {
-        return Ok(None);
-    }
-
-    let mut combined_diff = diff_sections.join("\n");
-    if !combined_diff.ends_with('\n') {
-        combined_diff.push('\n');
-    }
-
-    Ok(Some(DiffReviewPayload {
-        diff: combined_diff,
-        files,
-    }))
-}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
@@ -116,7 +31,7 @@ pub async fn run_agent_loop(
         debug!(iteration = iters, messages = ?messages, "agent loop iteration");
         if iters > runtime.max_iters {
             warn!(iters, "max tool iterations reached");
-            return Err(anyhow!("max tool iterations reached"));
+            return Err(AgentLoopError::MaxIterationsError(iters).into());
         }
 
         // --- Proactive Compaction Check ---
@@ -250,7 +165,9 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
-                        return Err(e);
+                        let agent_error = AgentLoopError::LLMError(e.to_string());
+                        handle_agent_error(&agent_error, &ui_tx);
+                        return Err(agent_error.into());
                     }
                 }
             },
@@ -280,13 +197,14 @@ pub async fn run_agent_loop(
                 && file_was_written
                 && let Some(tx) = &ui_tx
             {
-                match collect_diff_review_payload() {
+                match crate::llm::tool_execution::collect_diff_review_payload().await {
                     Ok(Some(payload)) => match serde_json::to_string(&payload) {
                         Ok(json) => {
                             let _ = tx.send(format!("::diff_review:{}", json));
                         }
                         Err(e) => {
-                            error!(error = %e, "Failed to serialize diff review payload");
+                            let agent_error = AgentLoopError::SerializationError(e.to_string());
+                            handle_agent_error(&agent_error, &ui_tx);
                             let _ = tx.send(format!(
                                     "::diff_review:{}",
                                     serde_json::json!({
@@ -299,7 +217,8 @@ pub async fn run_agent_loop(
                         debug!("No diff detected after tool execution");
                     }
                     Err(e) => {
-                        warn!(error = %e, "Failed to collect diff review payload");
+                        let agent_error = AgentLoopError::DiffCollectionError(e.to_string());
+                        handle_agent_error(&agent_error, &ui_tx);
                         let _ = tx.send(format!(
                             "::diff_review:{}",
                             serde_json::json!({
