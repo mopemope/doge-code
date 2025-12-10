@@ -21,6 +21,28 @@ pub async fn run_agent_loop(
     _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
+
+    // Inject Proactive Context
+    {
+        let cm = fs.context_manager.read().await;
+        let context_prompt = cm.get_context_prompt().await;
+        if !context_prompt.is_empty() {
+            let context_msg = ChatMessage {
+                role: "system".into(),
+                content: Some(context_prompt),
+                tool_calls: vec![],
+                tool_call_id: None,
+            };
+            // Insert before the last message if it's a User message to provide immediate context
+            if !messages.is_empty() && messages.last().map(|m| m.role == "user").unwrap_or(false) {
+                let idx = messages.len() - 1;
+                messages.insert(idx, context_msg);
+            } else {
+                messages.push(context_msg);
+            }
+        }
+    }
+
     let runtime = ToolRuntime::build(fs).await?;
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
