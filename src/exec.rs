@@ -10,6 +10,7 @@ use crate::llm::{self, OpenAIClient};
 use crate::session::SessionManager;
 use crate::tools::FsTools;
 use anyhow::{Context, Result};
+use notify_rust::Notification;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::fs;
@@ -72,15 +73,17 @@ impl Executor {
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
     pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
         if self.client.is_none() {
+            let error_msg = "OPENAI_API_KEY not set; cannot call LLM.";
+            tracing::error!("{}", error_msg);
             if json {
                 let output = serde_json::json!({
                     "success": false,
-                    "error": "OPENAI_API_KEY not set; cannot call LLM.".to_string(),
+                    "error": error_msg.to_string(),
                     "tokens_used": 0
                 });
                 println!("{}", serde_json::to_string_pretty(&output).unwrap_or_else(|_| r#"{"error": "JSON serialization failed"}"#.to_string()));
             } else {
-                eprintln!("OPENAI_API_KEY not set; cannot call LLM.");
+                eprintln!("{}", error_msg);
             }
             return Ok(());
         }
@@ -178,6 +181,7 @@ impl Executor {
                 }
             }
             Err(e) => {
+                tracing::error!("LLM execution failed: {}", e);
                 if json {
                     let output = serde_json::json!({
                         "success": false,
@@ -254,22 +258,25 @@ impl Executor {
 
         let (tx, _rx) = std::sync::mpsc::channel::<String>();
 
-        let res = llm::run_agent_loop(
-            client,
-            &model,
-            &fs_tools,
-            msgs,
-            Some(tx),
-            None,
-            &self.cfg,
-            None,
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            llm::run_agent_loop(
+                client,
+                &model,
+                &fs_tools,
+                msgs,
+                Some(tx),
+                None,
+                &self.cfg,
+                None,
+            ),
         )
         .await;
 
         let tokens_used = client.get_prompt_tokens_used();
 
         match res {
-            Ok((updated_messages, final_msg)) => {
+            Ok(Ok((updated_messages, final_msg))) => {
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
                     role: "assistant".into(),
@@ -294,6 +301,36 @@ impl Executor {
 
                 let raw_response = final_msg.content.clone();
                 if let Some(rewritten) = extract_rewritten_code(&raw_response, snippet) {
+                    // Security check: Ensure the rewritten code does not contain malicious patterns
+                    if rewritten.contains("rm -rf")
+                        || rewritten.contains("drop table")
+                        || rewritten.contains("exec(")
+                    {
+                        tracing::error!(
+                            "Security check failed: Rewritten code contains potentially malicious patterns"
+                        );
+                        if json {
+                            let output = serde_json::json!({
+                                "success": false,
+                                "error": "Security check failed: Rewritten code contains potentially malicious patterns",
+                                "tokens_used": tokens_used,
+                                "file_path": original_file_path,
+                                "display_path": display_path,
+                            });
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
+                                    r#"{"error": "JSON serialization failed"}"#.to_string()
+                                })
+                            );
+                        } else {
+                            eprintln!(
+                                "Security check failed: Rewritten code contains potentially malicious patterns"
+                            );
+                            eprintln!("Total prompt tokens used: {}", tokens_used);
+                        }
+                        return Ok(());
+                    }
                     if json {
                         let output = serde_json::json!({
                             "success": true,
@@ -313,6 +350,19 @@ impl Executor {
                     } else {
                         println!("{}", rewritten);
                         eprintln!("Total prompt tokens used: {}", tokens_used);
+                    }
+
+                    // Send desktop notification on successful rewrite
+                    let file_description = display_path.as_deref().unwrap_or("the file");
+                    if let Err(e) = Notification::new()
+                        .summary("Doge-Code Rewrite Completed")
+                        .body(&format!(
+                            "Successfully rewrote code in {}",
+                            file_description
+                        ))
+                        .show()
+                    {
+                        tracing::warn!("Failed to send desktop notification: {}", e);
                     }
                 } else {
                     let parse_error = "Failed to parse rewritten code from model response";
@@ -338,7 +388,8 @@ impl Executor {
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Inner error from the agent loop
                 if json {
                     let output = serde_json::json!({
                         "success": false,
@@ -355,6 +406,27 @@ impl Executor {
                     );
                 } else {
                     eprintln!("LLM error: {}", e);
+                    eprintln!("Total prompt tokens used: {}", tokens_used);
+                }
+            }
+            Err(e) => {
+                // Timeout error
+                if json {
+                    let output = serde_json::json!({
+                        "success": false,
+                        "error": format!("Timeout error: {}", e),
+                        "tokens_used": tokens_used,
+                        "file_path": original_file_path,
+                        "display_path": display_path,
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
+                            r#"{"error": "JSON serialization failed"}"#.to_string()
+                        })
+                    );
+                } else {
+                    eprintln!("Timeout error: {}", e);
                     eprintln!("Total prompt tokens used: {}", tokens_used);
                 }
             }
@@ -581,6 +653,26 @@ mod tests {
         let file_path = PathBuf::from("/var/tmp/other.rs");
         let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
         assert_eq!(hint, "other.rs");
+    }
+
+    #[tokio::test]
+    async fn test_executor_new_without_api_key() {
+        let cfg = AppConfig {
+            api_key: None,
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).unwrap();
+        assert!(executor.client.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_executor_new_with_api_key() {
+        let cfg = AppConfig {
+            api_key: Some("test_key".to_string()),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).unwrap();
+        assert!(executor.client.is_some());
     }
 
     // Additional tests could be added here, such as:
