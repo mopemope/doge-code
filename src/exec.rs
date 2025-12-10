@@ -261,7 +261,7 @@ impl Executor {
         let (tx, _rx) = std::sync::mpsc::channel::<String>();
 
         let res = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(self.cfg.rewrite_timeout_sec),
             llm::run_agent_loop(
                 client,
                 &model,
@@ -561,6 +561,7 @@ mod tests {
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
+            rewrite_timeout_sec: 30,
         };
 
         let executor = Executor::new(cfg);
@@ -595,6 +596,7 @@ mod tests {
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
+            rewrite_timeout_sec: 30,
         };
 
         let mut executor = Executor::new(cfg).unwrap();
