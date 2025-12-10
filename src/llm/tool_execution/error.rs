@@ -80,13 +80,23 @@ pub fn handle_agent_error(error: &AgentLoopError, ui_tx: &Option<std::sync::mpsc
 
 /// Returns a hint string for a given error message, or None if no hint is available.
 pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
-    if err_str.contains("No such file") || err_str.contains("not found") {
+    let err_lower = err_str.to_lowercase();
+
+    if err_lower.contains("no such file") || err_lower.contains("not found") {
         Some(
             "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure.",
         )
-    } else if err_str.contains("context bounds") || err_str.contains("patch failed") {
+    } else if err_lower.contains("context bounds") || err_lower.contains("patch failed") {
         Some(
             "Hint: Patch failed due to context mismatch. Use `fs_read` to get the FRESH content of the file, then regenerate the patch.",
+        )
+    } else if err_lower.contains("json") || err_lower.contains("parse error") {
+        Some(
+            "Hint: JSON serialization/parsing failed. Ensure arguments are valid JSON. Avoid using unescaped quotes in strings.",
+        )
+    } else if err_lower.contains("syntax") {
+        Some(
+            "Hint: Syntax error detected. Read the code and the error message carefully to fix the syntax.",
         )
     } else {
         None
@@ -125,5 +135,22 @@ mod tests {
             )
         );
         assert_eq!(get_error_hint("some random error"), None);
+
+        // Test new hints
+        assert!(
+            get_error_hint("invalid json")
+                .unwrap()
+                .contains("JSON serialization/parsing failed")
+        );
+        assert!(
+            get_error_hint("Parse Error")
+                .unwrap()
+                .contains("JSON serialization/parsing failed")
+        );
+        assert!(
+            get_error_hint("syntax error")
+                .unwrap()
+                .contains("Syntax error detected")
+        );
     }
 }
