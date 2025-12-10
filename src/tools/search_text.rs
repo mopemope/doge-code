@@ -18,7 +18,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_text".to_string(),
-            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used. The `file_glob` argument is mandatory and must include a file extension to scope the search precisely.".to_string(),
+            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used. The `file_glob` argument is mandatory. Use `**/*` to search in all files, or specific patterns like `src/**/*.rs` to scope the search.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
@@ -29,7 +29,7 @@ pub fn tool_def() -> ToolDef {
                     },
                     "file_glob": {
                         "type": "string",
-                        "description": "A glob pattern to filter which files are searched. This pattern must include a file extension. Examples: 'src/**/*.rs', 'tests/*.test.ts', '*.toml'."
+                        "description": "A glob pattern to filter which files are searched. This pattern must include a file extension or wildcard. Examples: 'src/**/*.rs', '**/*.toml', '**/*'."
                     }
                 },
                 "required": ["search_pattern", "file_glob"]
