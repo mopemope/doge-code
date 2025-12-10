@@ -32,6 +32,7 @@ pub struct AppConfig {
     // Allowed paths for file access
     pub allowed_paths: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub rewrite_timeout_sec: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +75,7 @@ impl Default for AppConfig {
             allowed_commands: vec![],
             allowed_paths: vec![],
             mcp_servers: vec![McpServerConfig::default()],
+            rewrite_timeout_sec: 30,
         }
     }
 }
@@ -182,6 +184,7 @@ pub struct FileConfig {
     // Allowed paths for file access
     pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
+    pub rewrite_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -539,6 +542,10 @@ impl AppConfig {
                 .or(file_cfg.allowed_paths)
                 .unwrap_or_default(),
             mcp_servers,
+            rewrite_timeout_sec: project_cfg
+                .rewrite_timeout_sec
+                .or(file_cfg.rewrite_timeout_sec)
+                .unwrap_or(30),
         })
     }
 }

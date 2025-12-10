@@ -262,6 +262,39 @@ ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying th
   (interactive)
   (doge-code--exec "Analyze the entire file and suggest improvements" nil t #'doge-code--handle-response))
 
+;;;###autoload
+(defun doge-code-exec-interactive (instruction)
+  "Execute a generic Doge-Code instruction."
+  (interactive "sInstruction: ")
+  (doge-code--exec instruction nil t #'doge-code--handle-response))
+
+;;;###autoload
+(defalias 'doge-code-exec 'doge-code-exec-interactive)
+
+;;;###autoload
+(defalias 'doge-code-rewrite-region 'doge-code-refactor-region)
+
+;;;###autoload
+(defun doge-code-fix ()
+  "Attempt to fix the last failed command (default: compile-command).
+Runs the command via 'dgc fix' and displays output in a buffer."
+  (interactive)
+  (let ((cmd (read-string "Command to fix: " compile-command)))
+    (let ((buffer (get-buffer-create "*doge-code-fix*")))
+      (with-current-buffer buffer
+        (erase-buffer)
+        (insert (format "Running: %s fix \"%s\"\n\n" doge-code-executable cmd)))
+      (display-buffer buffer)
+      (make-process
+       :name "doge-code-fix"
+       :buffer buffer
+       :command (list doge-code-executable "fix" cmd)
+       :sentinel (lambda (proc event)
+                   (when (string= event "finished\n")
+                     (with-current-buffer (process-buffer proc)
+                       (insert "\n[Done]"))
+                     (message "Doge-Code: Fix attempt finished.")))))))
+
 ;; Enable mode in programming modes
 (dolist (mode '(prog-mode c-mode c++-mode python-mode rust-mode js-mode typescript-mode))
   (add-hook (intern (format "%s-hook" mode)) 'doge-code-mode))
