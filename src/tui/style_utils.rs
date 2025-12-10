@@ -1,6 +1,8 @@
+use ansi_to_tui::IntoText;
 use ratatui::style::{Color, Modifier, Style};
 use std::mem;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledSpan {
@@ -77,7 +79,8 @@ pub fn wrap_segments(segments: &[StyledSpan], width: usize) -> Vec<StyledLine> {
     let mut current_width = 0usize;
 
     for seg in segments {
-        for ch in seg.content.chars() {
+        // Use graphemes for correct width calculation of combined characters/emojis
+        for g in seg.content.graphemes(true) {
             if !style_initialized {
                 current_style = seg.style;
                 style_initialized = true;
@@ -88,7 +91,7 @@ pub fn wrap_segments(segments: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                 current_style = seg.style;
             }
 
-            if ch == '\n' {
+            if g == "\n" {
                 flush_segment(&mut current_segments, &mut buffer, current_style);
                 lines.push(StyledLine {
                     spans: std::mem::take(&mut current_segments),
@@ -98,8 +101,8 @@ pub fn wrap_segments(segments: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                 continue;
             }
 
-            let ch_width = ch.width().unwrap_or(0);
-            if ch_width > 0 && current_width + ch_width > width && current_width > 0 {
+            let g_width = UnicodeWidthStr::width(g);
+            if g_width > 0 && current_width + g_width > width && current_width > 0 {
                 flush_segment(&mut current_segments, &mut buffer, current_style);
                 lines.push(StyledLine {
                     spans: std::mem::take(&mut current_segments), // This takes ownership, so we need to recreate it
@@ -109,8 +112,8 @@ pub fn wrap_segments(segments: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                 current_style = seg.style;
             }
 
-            buffer.push(ch);
-            current_width += ch_width;
+            buffer.push_str(g);
+            current_width += g_width;
         }
     }
 
@@ -282,17 +285,37 @@ pub fn render_plain_entry(
     theme: &crate::tui::theme::Theme,
 ) -> Vec<StyledLine> {
     let mut lines = Vec::new();
-    for part in text.split('\n') {
-        let style = style_for_plain_line(part, theme);
-        let wrapped = wrap_segments(
-            &[StyledSpan {
-                content: part.to_string(),
-                style,
-            }],
-            width.max(1),
-        );
-        lines.extend(wrapped);
+
+    // Try to convert text using ansi_to_tui
+    if let Ok(ansi_text) = text.as_bytes().into_text() {
+        for line in ansi_text.lines {
+            // Convert ratatui Line/Span to our StyledLine/StyledSpan
+            let mut segments = Vec::new();
+            for span in line.spans {
+                segments.push(StyledSpan {
+                    content: span.content.to_string(),
+                    style: span.style,
+                });
+            }
+
+            let wrapped = wrap_segments(&segments, width.max(1));
+            lines.extend(wrapped);
+        }
+    } else {
+        // Fallback to simpler logic if ansi parsing fails
+        for part in text.split('\n') {
+            let style = style_for_plain_line(part, theme);
+            let wrapped = wrap_segments(
+                &[StyledSpan {
+                    content: part.to_string(),
+                    style,
+                }],
+                width.max(1),
+            );
+            lines.extend(wrapped);
+        }
     }
+
     lines
 }
 
