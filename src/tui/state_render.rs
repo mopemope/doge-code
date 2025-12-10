@@ -1,4 +1,5 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub fn truncate_display(s: &str, max: usize) -> String {
     if max == 0 {
@@ -6,17 +7,17 @@ pub fn truncate_display(s: &str, max: usize) -> String {
     }
     let mut width = 0usize;
     let mut out = String::new();
-    for ch in s.chars() {
-        let ch_w = ch.width().unwrap_or(0);
-        if ch_w == 0 {
-            out.push(ch);
+    for g in s.graphemes(true) {
+        let g_w = UnicodeWidthStr::width(g);
+        if g_w == 0 {
+            out.push_str(g);
             continue;
         }
-        if width + ch_w > max {
+        if width + g_w > max {
             break;
         }
-        out.push(ch);
-        width += ch_w;
+        out.push_str(g);
+        width += g_w;
     }
     out
 }
@@ -179,12 +180,11 @@ pub fn build_render_plan(
         }
 
         // Footer
-        if current_row < view_end_row {
-            if let Some(line) = render_plain("-----------------".to_string(), current_row) {
+        if current_row < view_end_row
+            && let Some(line) = render_plain("-----------------".to_string(), current_row) {
                 log_lines.push(line);
             }
-            current_row += 1;
-        }
+            // current_row += 1; // Unused assignment
     }
 
     // Create scroll info

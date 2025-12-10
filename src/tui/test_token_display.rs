@@ -2,6 +2,7 @@
 mod tests {
     use crate::config::AppConfig;
     use crate::tui::state::{LogEntry, Status, TuiApp, build_render_plan};
+    use crate::tui::state_render::truncate_display;
 
     #[test]
     fn test_no_token_display_when_zero() {
@@ -70,5 +71,17 @@ mod tests {
         app.tokens_prompt_used = 100;
         app.update_remaining_context_tokens(None);
         assert_eq!(app.remaining_context_tokens, None);
+    }
+
+    #[test]
+    fn test_truncate_display() {
+        assert_eq!(truncate_display("hello", 3), "hel");
+        assert_eq!(truncate_display("hello", 5), "hello");
+        assert_eq!(truncate_display("hello", 10), "hello");
+        // Emoji test: 👨‍👩‍👧‍👦 is a single grapheme cluster but display width might be 2 or more depending on terminal.
+        // In unicode-width, it might be width 2.
+        // Let's test basic CJK.
+        assert_eq!(truncate_display("こんにちは", 4), "こん");
+        assert_eq!(truncate_display("こんにちは", 3), "こ"); // 'ん' is width 2, so 2+2=4 > 3, stop at 'こ'
     }
 }
