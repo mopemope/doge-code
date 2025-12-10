@@ -181,10 +181,11 @@ pub fn build_render_plan(
 
         // Footer
         if current_row < view_end_row
-            && let Some(line) = render_plain("-----------------".to_string(), current_row) {
-                log_lines.push(line);
-            }
-            // current_row += 1; // Unused assignment
+            && let Some(line) = render_plain("-----------------".to_string(), current_row)
+        {
+            log_lines.push(line);
+        }
+        // current_row += 1; // Unused assignment
     }
 
     // Create scroll info
