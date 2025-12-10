@@ -27,6 +27,7 @@ pub struct FsTools {
     remote_tool_manager: RemoteToolManager,
     security_checker: SecurityChecker,
     pub context_manager: Arc<RwLock<ContextManager>>,
+    pub undo_stack: Arc<RwLock<crate::tools::undo::UndoStack>>,
 }
 
 impl Default for FsTools {
@@ -45,6 +46,7 @@ impl FsTools {
             config: config.clone(),
             remote_tool_manager: RemoteToolManager::new(config.clone()),
             security_checker: SecurityChecker::new(config),
+            undo_stack: Arc::new(RwLock::new(crate::tools::undo::UndoStack::new())),
         }
     }
 
@@ -113,6 +115,27 @@ impl FsTools {
         tokio::spawn(async move {
             cm.write().await.add_file(&path);
         });
+    }
+
+    /// Backup file content to undo stack
+    pub async fn backup_file(&self, path: &std::path::Path) -> Result<()> {
+        if path.exists() {
+            let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            self.undo_stack
+                .write()
+                .await
+                .push(path.to_path_buf(), content);
+        } else {
+            // If file doesn't exist, we push an empty content entry for it,
+            // or handle "creation" undo separately. For now, empty string implies "was empty/new".
+            // But actually, if it didn't exist, we might want to delete it on undo.
+            // Currently undo() just writes content. Writing empty string is close enough for text files.
+            self.undo_stack
+                .write()
+                .await
+                .push(path.to_path_buf(), String::new());
+        }
+        Ok(())
     }
 
     pub fn fs_list(
@@ -199,9 +222,14 @@ impl FsTools {
         }
     }
 
-    pub fn fs_write(&self, path: &str, content: &str) -> Result<()> {
+    pub async fn fs_write(&self, path: &str, content: &str) -> Result<()> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
+
+        // Backup existing file before overwriting
+        if let Err(e) = self.backup_file(std::path::Path::new(path)).await {
+            tracing::warn!("Failed to backup file {}: {}", path, e);
+        }
 
         match write::fs_write(path, content, &self.config) {
             Ok(result) => {

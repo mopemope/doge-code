@@ -25,6 +25,16 @@ pub async fn edit(
     }
 
     let file_path = params.file_path.clone();
+
+    // Backup existing file before editing
+    if let Err(e) = runtime
+        .fs
+        .backup_file(std::path::Path::new(&file_path))
+        .await
+    {
+        tracing::warn!("Failed to backup file {}: {}", file_path, e);
+    }
+
     match crate::tools::edit::edit(params, &runtime.fs.config).await {
         Ok(res) => {
             // Record success/failure for this tool call
@@ -165,6 +175,33 @@ pub async fn plan_read(
                 tracing::error!(
                     ?rec_err,
                     "Failed to record tool call failure for plan_read on error"
+                );
+            }
+            Err(anyhow!("{e}"))
+        }
+    }
+}
+
+pub async fn undo(
+    runtime: &ToolRuntime<'_>,
+    _args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
+        tracing::error!(?e, "Failed to update session with tool call count");
+    }
+
+    match crate::tools::undo::undo(runtime.fs).await {
+        Ok(res) => {
+            if let Err(e) = runtime.fs.record_tool_call_success("undo") {
+                tracing::error!(?e, "Failed to record tool call success for undo");
+            }
+            Ok(serde_json::to_value(res)?)
+        }
+        Err(e) => {
+            if let Err(rec_err) = runtime.fs.record_tool_call_failure("undo") {
+                tracing::error!(
+                    ?rec_err,
+                    "Failed to record tool call failure for undo on error"
                 );
             }
             Err(anyhow!("{e}"))
