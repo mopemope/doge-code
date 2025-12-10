@@ -78,6 +78,21 @@ pub fn handle_agent_error(error: &AgentLoopError, ui_tx: &Option<std::sync::mpsc
     }
 }
 
+/// Returns a hint string for a given error message, or None if no hint is available.
+pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
+    if err_str.contains("No such file") || err_str.contains("not found") {
+        Some(
+            "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure.",
+        )
+    } else if err_str.contains("context bounds") || err_str.contains("patch failed") {
+        Some(
+            "Hint: Patch failed due to context mismatch. Use `fs_read` to get the FRESH content of the file, then regenerate the patch.",
+        )
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +102,28 @@ mod tests {
         let anyhow_err = anyhow::anyhow!("test error");
         let agent_err = AgentLoopError::from(anyhow_err);
         assert!(matches!(agent_err, AgentLoopError::Unknown(_)));
+    }
+
+    #[test]
+    fn test_get_error_hint() {
+        assert_eq!(
+            get_error_hint("No such file or directory"),
+            Some(
+                "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure."
+            )
+        );
+        assert_eq!(
+            get_error_hint("command not found"),
+            Some(
+                "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure."
+            )
+        );
+        assert_eq!(
+            get_error_hint("patch failed: hunk #1"),
+            Some(
+                "Hint: Patch failed due to context mismatch. Use `fs_read` to get the FRESH content of the file, then regenerate the patch."
+            )
+        );
+        assert_eq!(get_error_hint("some random error"), None);
     }
 }

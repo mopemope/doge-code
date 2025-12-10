@@ -553,10 +553,10 @@ pub async fn run_agent_loop(
             if let Some(loop_type) = loop_detector.detect_loop() {
                 let warning_msg = match loop_type {
                     crate::analysis::loop_detector::LoopType::ConsecutiveRepetition(name) => {
-                        format!("WARNING: You are repeatedly calling the tool '{}' with the same arguments. This suggests you are stuck. Please allow yourself to think step-by-step again, and try a DIFFERENT approach or explore more files.", name)
+                        format!("WARNING: You are repeatedly calling the tool '{}' with the same arguments. STOP. This strategy is NOT working.\n1. Analyze WHY it is failing.\n2. Read the error message carefully.\n3. Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify the file content first).", name)
                     }
                     crate::analysis::loop_detector::LoopType::CycleRepetition => {
-                        "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current strategy is not working. Please STOP, re-evaluate the situation, and try a completely different approach.".to_string()
+                        "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current mental model is likely incorrect. STOP. Reset your plan. Use `plan_write` to outline a NEW approach.".to_string()
                     }
                 };
 
@@ -566,7 +566,7 @@ pub async fn run_agent_loop(
                 }
 
                 messages.push(ChatMessage {
-                    role: "user".into(), // System role is processed differently, User role forces attention
+                    role: "user".into(),
                     content: Some(warning_msg),
                     tool_calls: vec![],
                     tool_call_id: None,
@@ -587,6 +587,19 @@ pub async fn run_agent_loop(
                     tool_calls: vec![],
                     tool_call_id: None,
                 });
+            }
+
+            // Specific Error Recovery Hints
+            if let Err(e) = &res {
+                let err_str = e.to_string();
+                if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
+                    messages.push(ChatMessage {
+                        role: "user".into(),
+                        content: Some(hint.to_string()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+                }
             }
         }
     }

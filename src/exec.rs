@@ -181,6 +181,22 @@ impl Executor {
                     println!("{}", final_msg.content);
                     eprintln!("Total prompt tokens used: {}", tokens_used);
                 }
+
+                if !json {
+                    // Send desktop notification on success
+                    let summary = format!(
+                        "Execution Completed Successfully\nTokens: {}\nSteps: {}",
+                        tokens_used,
+                        updated_messages.len()
+                    );
+                    if let Err(e) = Notification::new()
+                        .summary("Doge-Code Agent Finished")
+                        .body(&summary)
+                        .show()
+                    {
+                        tracing::warn!("Failed to send desktop notification: {}", e);
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("LLM execution failed: {}", e);
@@ -199,6 +215,17 @@ impl Executor {
                 } else {
                     eprintln!("LLM error: {}", e);
                     eprintln!("Total prompt tokens used: {}", tokens_used);
+
+                    // Send desktop notification on failure
+                    let summary =
+                        format!("Execution Failed\nError: {}\nTokens: {}", e, tokens_used);
+                    if let Err(e) = Notification::new()
+                        .summary("Doge-Code Agent Failed")
+                        .body(&summary)
+                        .show()
+                    {
+                        tracing::warn!("Failed to send desktop notification: {}", e);
+                    }
                 }
             }
         }
