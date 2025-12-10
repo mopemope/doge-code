@@ -41,6 +41,11 @@ impl TuiApp {
         // debug!("Main content area height: {}", main_content_height);
         // debug!("Total log lines: {}", self.log.len());
 
+        if self.window_width != size.width as usize {
+            self.window_width = size.width as usize;
+            self.recalculate_all_heights();
+        }
+
         let params = crate::tui::state::BuildRenderPlanParams {
             title: &self.title,
             status: self.status,
@@ -52,6 +57,7 @@ impl TuiApp {
             scroll_state: &self.scroll_state,
             plan_list: &self.plan_list,
             theme: &self.theme,
+            log_heights: &self.log_heights,
         };
         let plan = build_render_plan(params);
 

@@ -31,6 +31,7 @@ mod tests {
             scroll_state: &crate::tui::state::ScrollState::default(),
             plan_list: &[],
             theme: &theme,
+            log_heights: &[],
         };
         let plan = build_render_plan(params);
 
