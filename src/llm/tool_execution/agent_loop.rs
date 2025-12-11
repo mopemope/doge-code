@@ -27,15 +27,23 @@ pub async fn run_agent_loop(
 
     debug!("run_agent_loop called");
 
-    // Inject System Prompt
+    // Inject System Prompt if not already present
     {
-        let system_msg = ChatMessage {
-            role: "system".into(),
-            content: Some(SYSTEM_PROMPT.to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        };
-        messages.insert(0, system_msg);
+        // Check if there's already a system message in the history
+        let has_system_prompt = messages.iter().any(|m| m.role == "system");
+
+        if !has_system_prompt {
+            debug!("Injecting default system prompt");
+            let system_msg = ChatMessage {
+                role: "system".into(),
+                content: Some(SYSTEM_PROMPT.to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            };
+            messages.insert(0, system_msg);
+        } else {
+            debug!("System prompt already present, skipping injection");
+        }
     }
 
     // Inject Proactive Context
@@ -60,6 +68,7 @@ pub async fn run_agent_loop(
     }
 
     let runtime = ToolRuntime::build(fs).await?;
+    let verifier = crate::features::verification::AutoVerifier::new();
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;
@@ -416,14 +425,30 @@ pub async fn run_agent_loop(
                 || tc.function.name == "apply_patch")
                 && res.is_ok()
             {
-                let verification_note = r#"
+                // Run AutoVerifier
+                if let Some(err_msg) = verifier.verify(&tc, true).await {
+                    let warning = format!(
+                        "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately.</SYSTEM_NOTE>",
+                        err_msg
+                    );
+                    tool_message_content.push_str(&warning);
+                    if let Some(tx) = &ui_tx {
+                        let _ = tx.send("::status:warning:Auto-verification failed.".to_string());
+                    }
+                } else {
+                    // Only add generic reminder if no specific error was found (to reduce noise? or always?)
+                    // Prompt instruction says: "File modification detected. You MUST now verify..."
+                    // I'll keep the generic note as well, or merge them.
+                    let verification_note = r#"
 
 <SYSTEM_NOTE>
 File modification detected. You MUST now verify your changes:
+
 1. Read the file to confirm the content is correct.
 2. Run tests to ensure no regressions.
 </SYSTEM_NOTE>"#;
-                tool_message_content.push_str(verification_note);
+                    tool_message_content.push_str(verification_note);
+                }
             }
 
             // Prepare a short result summary for UI log and truncate if necessary
@@ -587,14 +612,7 @@ File modification detected. You MUST now verify your changes:
             // Loop Detection
             loop_detector.record_tool_call(&tc);
             if let Some(loop_type) = loop_detector.detect_loop() {
-                let warning_msg = match loop_type {
-                    crate::analysis::loop_detector::LoopType::ConsecutiveRepetition(name) => {
-                        format!("WARNING: You are repeatedly calling the tool '{}' with the same arguments. STOP. This strategy is NOT working.\n1. Analyze WHY it is failing.\n2. Read the error message carefully.\n3. Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify the file content first).", name)
-                    }
-                    crate::analysis::loop_detector::LoopType::CycleRepetition => {
-                        "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current mental model is likely incorrect. STOP. Reset your plan. Use `plan_write` to outline a NEW approach.".to_string()
-                    }
-                };
+                let warning_msg = loop_detector.loop_warning(&loop_type);
 
                 warn!("Loop detected: {}", warning_msg);
                 if let Some(tx) = &ui_tx {
