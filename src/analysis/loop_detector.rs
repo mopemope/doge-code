@@ -101,6 +101,30 @@ impl LoopDetector {
 
         None
     }
+
+    pub fn loop_warning(&self, loop_type: &LoopType) -> String {
+        match loop_type {
+            LoopType::ConsecutiveRepetition(name) => {
+                format!(
+                    "WARNING: You are repeatedly calling the tool '{}' with the same arguments. STOP. This strategy is NOT working.\n\
+                     <RECOMMENDED_ACTION>\n\
+                     1. Analyze WHY it is failing.\n\
+                     2. Read the error message carefully.\n\
+                     3. Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify the file content first).\n\
+                     </RECOMMENDED_ACTION>",
+                    name
+                )
+            }
+            LoopType::CycleRepetition => {
+                "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current mental model is likely incorrect. STOP.\n\
+                 <RECOMMENDED_ACTION>\n\
+                 1. Reset your plan.\n\
+                 2. Use `plan_write` to outline a NEW approach.\n\
+                 3. Double check file paths and contents.\n\
+                 </RECOMMENDED_ACTION>".to_string()
+            }
+        }
+    }
 }
 
 fn is_same(a: &ToolCallEntry, b: &ToolCallEntry) -> bool {
