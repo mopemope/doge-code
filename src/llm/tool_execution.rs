@@ -4,6 +4,7 @@ mod dispatch;
 mod error;
 mod requests;
 mod streaming;
+pub mod ui_rendering;
 
 pub use agent_loop::run_agent_loop;
 pub use diff_collection::collect_diff_review_payload;
