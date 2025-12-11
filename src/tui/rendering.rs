@@ -197,27 +197,6 @@ impl TuiApp {
             .style(theme.log_style)
             .block(Block::default());
         f.render_widget(paragraph, area);
-
-        // After rendering content, fill any remaining area with blank lines to ensure
-        // complete coverage and prevent artifacts from previous renders
-        // We'll render this as a separate widget to ensure it clears properly
-        if lines.len() < area.height as usize {
-            let blank_lines_needed = area.height as usize - lines.len();
-            let blank_lines: Vec<Line> = (0..blank_lines_needed).map(|_| Line::raw(" ")).collect();
-
-            let blank_paragraph = Paragraph::new(blank_lines)
-                .style(Style::default().bg(theme.log_style.bg.unwrap_or(Color::Reset)))
-                .block(Block::default());
-
-            // Position the blank area starting just after our content
-            let blank_area = Rect {
-                x: area.x,
-                y: area.y + lines.len() as u16,
-                width: area.width,
-                height: blank_lines_needed as u16,
-            };
-            f.render_widget(blank_paragraph, blank_area);
-        }
     }
 
     fn render_diff_review(&self, f: &mut Frame, area: Rect, theme: &Theme) {

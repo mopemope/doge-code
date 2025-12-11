@@ -84,19 +84,29 @@ pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
 
     if err_lower.contains("no such file") || err_lower.contains("not found") {
         Some(
-            "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure.",
+            "Hint: The file was not found. \n1. Use `fs_list` to verify the directory structure.\n2. Use `find_file` to search for the file if you are unsure of the path.",
         )
-    } else if err_lower.contains("context bounds") || err_lower.contains("patch failed") {
+    } else if err_lower.contains("context bounds")
+        || err_lower.contains("patch failed")
+        || err_lower.contains("hunk")
+    {
         Some(
-            "Hint: Patch failed due to context mismatch. Use `fs_read` to get the FRESH content of the file, then regenerate the patch.",
+            "Hint: Patch failed due to context mismatch.\n1. The file content may have changed. Use `fs_read` to get the FRESH content.\n2. Rewrite the patch using the exact lines from the fresh content as context.",
         )
-    } else if err_lower.contains("json") || err_lower.contains("parse error") {
+    } else if err_lower.contains("json")
+        || err_lower.contains("parse error")
+        || err_lower.contains("invalid request")
+    {
         Some(
-            "Hint: JSON serialization/parsing failed. Ensure arguments are valid JSON. Avoid using unescaped quotes in strings.",
+            "Hint: JSON serialization/parsing failed.\n1. Check if you are using unescaped quotes inside strings.\n2. Ensure the arguments match the tool schema exactly.\n3. Wrap your step-by-step thinking in <thinking> tags to calm down and format correct JSON.",
         )
     } else if err_lower.contains("syntax") {
         Some(
-            "Hint: Syntax error detected. Read the code and the error message carefully to fix the syntax.",
+            "Hint: Syntax error detected in the code you wrote.\n1. Read the error message carefully.\n2. If it's a bracket mismatch, check the nesting.\n3. Fix the code immediately.",
+        )
+    } else if err_lower.contains("timeout") {
+        Some(
+            "Hint: The operation timed out.\n1. If you are reading a huge file, try reading it in chunks or use `grep_search` to find what you need.\n2. If it's a network request, try again.",
         )
     } else {
         None
@@ -119,19 +129,19 @@ mod tests {
         assert_eq!(
             get_error_hint("No such file or directory"),
             Some(
-                "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure."
+                "Hint: The file was not found. \n1. Use `fs_list` to verify the directory structure.\n2. Use `find_file` to search for the file if you are unsure of the path."
             )
         );
         assert_eq!(
             get_error_hint("command not found"),
             Some(
-                "Hint: File not found. Use `find_file` to locate it or `fs_list` to check the directory structure."
+                "Hint: The file was not found. \n1. Use `fs_list` to verify the directory structure.\n2. Use `find_file` to search for the file if you are unsure of the path."
             )
         );
         assert_eq!(
             get_error_hint("patch failed: hunk #1"),
             Some(
-                "Hint: Patch failed due to context mismatch. Use `fs_read` to get the FRESH content of the file, then regenerate the patch."
+                "Hint: Patch failed due to context mismatch.\n1. The file content may have changed. Use `fs_read` to get the FRESH content.\n2. Rewrite the patch using the exact lines from the fresh content as context."
             )
         );
         assert_eq!(get_error_hint("some random error"), None);
@@ -151,6 +161,11 @@ mod tests {
             get_error_hint("syntax error")
                 .unwrap()
                 .contains("Syntax error detected")
+        );
+        assert!(
+            get_error_hint("timeout")
+                .unwrap()
+                .contains("operation timed out")
         );
     }
 }
