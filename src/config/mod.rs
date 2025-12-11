@@ -550,6 +550,63 @@ impl AppConfig {
     }
 }
 
+fn get_default_config_content() -> String {
+    r#"# Doge-Code Configuration
+# This file contains the default configuration for doge-code
+
+# OpenAI-compatible API settings
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4o-mini"
+# api_key = "your-api-key-here"  # Consider using environment variable OPENAI_API_KEY instead
+
+# LLM settings
+[llm]
+connect_timeout_ms = 5000
+request_timeout_ms = 60000
+read_idle_timeout_ms = 20000
+max_retries = 100
+retry_base_ms = 1000
+retry_jitter_ms = 5000
+respect_retry_after = true
+timeout_ms = 600000  # 10 minutes
+# context_window_size = 128000  # Optional context window size for the model
+
+# Watch mode settings
+[watch]
+# include_patterns = ["**/*.rs", "**/*.js", "**/*.ts", "**/*.jsx", "**/*.tsx", "**/*.py", "**/*.go", "**/*.java", "**/*.md", "**/*.txt", "**/*.yaml", "**/*.yml", "**/*.toml", "**/*.json", "**/*.html", "**/*.css", "**/*.xml"]
+# exclude_patterns = ["**/node_modules/**", "**/target/**", "**/build/**", "**/dist/**", "**/.git/**", "**/vendor/**"]
+# debounce_delay_ms = 500
+# rate_limit_duration_ms = 2000
+# ai_comment_pattern = "// AI!:"
+
+# UI settings
+theme = "dark"  # "dark" or "light"
+
+# Other settings
+enable_stream_tools = false
+project_instructions_file = null
+no_repomap = false
+show_diff = false
+auto_compact_prompt_token_threshold = 250000
+# auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
+resume = false
+rewrite_timeout_sec = 30
+
+# Allowed commands for execute_bash tool
+# allowed_commands = ["git", "ls", "cat", "grep", "find"]
+
+# Allowed paths for file access
+# allowed_paths = ["/tmp", "/home/user/project"]
+
+# MCP server configurations
+[[mcp_servers]]
+name = "default"
+enabled = false
+address = "127.0.0.1:8000"
+transport = "http"
+"#.to_string()
+}
+
 pub fn load_file_config() -> Result<FileConfig> {
     use std::env;
     use std::fs;
@@ -575,9 +632,12 @@ pub fn load_file_config() -> Result<FileConfig> {
         v
     }
 
-    for p in candidate_paths() {
+    let candidate_paths = candidate_paths();
+
+    // First, check if any config file already exists
+    for p in &candidate_paths {
         if p.exists() {
-            let s = fs::read_to_string(&p)
+            let s = fs::read_to_string(p)
                 .with_context(|| format!("read config file: {}", p.display()))?;
             match toml::from_str::<FileConfig>(&s) {
                 Ok(cfg) => {
@@ -591,6 +651,42 @@ pub fn load_file_config() -> Result<FileConfig> {
             }
         }
     }
+
+    // If no config file exists, create one in the most appropriate location
+    if let Some(first_path) = candidate_paths.first() {
+        // Ensure parent directory exists
+        if let Some(parent) = first_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory: {}", parent.display())
+            })?;
+        }
+
+        // Write default config content to the first candidate path
+        fs::write(first_path, get_default_config_content()).with_context(|| {
+            format!(
+                "failed to write default config file: {}",
+                first_path.display()
+            )
+        })?;
+
+        info!(path=%first_path.display(), "created default config file");
+
+        // Now load the newly created config file
+        let s = fs::read_to_string(first_path)
+            .with_context(|| format!("read newly created config file: {}", first_path.display()))?;
+        match toml::from_str::<FileConfig>(&s) {
+            Ok(cfg) => {
+                info!(path=%first_path.display(), "loaded newly created config file");
+                return Ok(cfg);
+            }
+            Err(e) => {
+                warn!(path=%first_path.display(), error=%e.to_string(), "parse newly created config failed, using defaults");
+                return Ok(FileConfig::default());
+            }
+        }
+    }
+
+    // Fallback to default config if no candidate paths are available
     Ok(FileConfig::default())
 }
 
@@ -621,4 +717,63 @@ pub fn load_project_config(project_root: &Path) -> Result<FileConfig> {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_load_file_config_creates_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_home = env::var("HOME").ok();
+        let original_xdg_config_home = env::var("XDG_CONFIG_HOME").ok();
+
+        // Set up test environment
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+            let config_home = temp_dir.path().join(".config");
+            std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        }
+
+        // Remove any existing config file to test creation
+        let config_path = temp_dir
+            .path()
+            .join(".config")
+            .join("doge-code")
+            .join("config.toml");
+
+        // Load config (this should create the file)
+        let result = load_file_config();
+        assert!(result.is_ok());
+
+        // Check that the config file was created
+        assert!(
+            config_path.exists(),
+            "Config file should be created at {:?}",
+            config_path
+        );
+
+        // Check that the file contains content
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(!content.is_empty(), "Config file should not be empty");
+        assert!(
+            content.contains("# Doge-Code Configuration"),
+            "Config should contain comment header"
+        );
+
+        // Restore original environment
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(xdg_home) = original_xdg_config_home {
+                std::env::set_var("XDG_CONFIG_HOME", xdg_home);
+            } else {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+        }
+    }
+}
