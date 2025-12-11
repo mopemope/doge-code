@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use super::ui_rendering::truncate_string_with_graphemes;
 use crate::llm::message_utils::truncate_tool_output;
 use crate::llm::prompts::SYSTEM_PROMPT;
 
@@ -428,12 +429,15 @@ pub async fn run_agent_loop(
                 // Run AutoVerifier
                 if let Some(err_msg) = verifier.verify(&tc, true).await {
                     let warning = format!(
-                        "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately.</SYSTEM_NOTE>",
+                        "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
                         err_msg
                     );
                     tool_message_content.push_str(&warning);
                     if let Some(tx) = &ui_tx {
-                        let _ = tx.send("::status:warning:Auto-verification failed.".to_string());
+                        let _ = tx.send(
+                            "::status:warning:Auto-verification failed. Correction required."
+                                .to_string(),
+                        );
                     }
                 } else {
                     // Only add generic reminder if no specific error was found (to reduce noise? or always?)
@@ -452,16 +456,7 @@ File modification detected. You MUST now verify your changes:
             }
 
             // Prepare a short result summary for UI log and truncate if necessary
-            let mut result_summary = tool_message_content.clone();
-            const MAX_RESULT_LEN: usize = 200;
-            if result_summary.len() > MAX_RESULT_LEN {
-                let mut t = result_summary
-                    .chars()
-                    .take(MAX_RESULT_LEN - 3)
-                    .collect::<String>();
-                t.push_str("...");
-                result_summary = t;
-            }
+            let result_summary = truncate_string_with_graphemes(&tool_message_content, 200);
 
             // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
