@@ -9,41 +9,8 @@ use chrono::{DateTime, FixedOffset, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-const SYSTEM_PROMPT: &str = r#"You are Doge-Code, an expert AI coding agent.
-Your goal is to solve the user's coding tasks autonomously, efficiently, and accurately.
-
-# Core Guidelines
-1.  **Reasoning**: You MUST use `<thinking>` tags to explain your thought process, analysis, and plan before executing tools.
-2.  **Accuracy**: Verify your assumptions. Read files before editing them. Check for mistakes after editing.
-3.  **Efficiency**: Avoid repetitive tool calls. Use `read_many_files` to read multiple files at once.
-4.  **Stability**: If a tool fails, analyze the error message carefully. Do not blindly retry the same arguments.
-
-# Communication
-- Be concise in your final responses.
-- Use Markdown for code navigation.
-"#;
-
-fn truncate_tool_output(content: String, tool_name: &str) -> String {
-    const DEFAULT_MAX_LEN: usize = 8000;
-    const READ_MAX_LEN: usize = 40000; // Allow more context for reading files
-
-    let max_len = if tool_name == "fs_read" || tool_name == "fs_read_many_files" {
-        READ_MAX_LEN
-    } else {
-        DEFAULT_MAX_LEN
-    };
-
-    if content.len() > max_len {
-        let truncated: String = content.chars().take(max_len).collect();
-        format!(
-            "{}... (Output truncated. Total length: {} chars. Refine your tool call to reduce output.)",
-            truncated,
-            content.len()
-        )
-    } else {
-        content
-    }
-}
+use crate::llm::message_utils::truncate_tool_output;
+use crate::llm::prompts::SYSTEM_PROMPT;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
@@ -426,7 +393,7 @@ pub async fn run_agent_loop(
             }
 
             // Build tool message content (full JSON) for feeding back to the LLM
-            let tool_message_content = match &res {
+            let mut tool_message_content = match &res {
                 Ok(value) => {
                     let json_str = serde_json::to_string(value).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize tool result\"}".to_string()
@@ -442,6 +409,22 @@ pub async fn run_agent_loop(
                     truncate_tool_output(json_str, &tc.function.name)
                 }
             };
+
+            // Inject verification note if file was written
+            if (tc.function.name == "fs_write"
+                || tc.function.name == "edit"
+                || tc.function.name == "apply_patch")
+                && res.is_ok()
+            {
+                let verification_note = r#"
+
+<SYSTEM_NOTE>
+File modification detected. You MUST now verify your changes:
+1. Read the file to confirm the content is correct.
+2. Run tests to ensure no regressions.
+</SYSTEM_NOTE>"#;
+                tool_message_content.push_str(verification_note);
+            }
 
             // Prepare a short result summary for UI log and truncate if necessary
             let mut result_summary = tool_message_content.clone();
