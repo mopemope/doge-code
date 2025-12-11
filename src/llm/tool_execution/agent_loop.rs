@@ -9,6 +9,42 @@ use chrono::{DateTime, FixedOffset, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+const SYSTEM_PROMPT: &str = r#"You are Doge-Code, an expert AI coding agent.
+Your goal is to solve the user's coding tasks autonomously, efficiently, and accurately.
+
+# Core Guidelines
+1.  **Reasoning**: You MUST use `<thinking>` tags to explain your thought process, analysis, and plan before executing tools.
+2.  **Accuracy**: Verify your assumptions. Read files before editing them. Check for mistakes after editing.
+3.  **Efficiency**: Avoid repetitive tool calls. Use `read_many_files` to read multiple files at once.
+4.  **Stability**: If a tool fails, analyze the error message carefully. Do not blindly retry the same arguments.
+
+# Communication
+- Be concise in your final responses.
+- Use Markdown for code navigation.
+"#;
+
+fn truncate_tool_output(content: String, tool_name: &str) -> String {
+    const DEFAULT_MAX_LEN: usize = 8000;
+    const READ_MAX_LEN: usize = 40000; // Allow more context for reading files
+
+    let max_len = if tool_name == "fs_read" || tool_name == "fs_read_many_files" {
+        READ_MAX_LEN
+    } else {
+        DEFAULT_MAX_LEN
+    };
+
+    if content.len() > max_len {
+        let truncated: String = content.chars().take(max_len).collect();
+        format!(
+            "{}... (Output truncated. Total length: {} chars. Refine your tool call to reduce output.)",
+            truncated,
+            content.len()
+        )
+    } else {
+        content
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
@@ -21,6 +57,19 @@ pub async fn run_agent_loop(
     _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
+
+    debug!("run_agent_loop called");
+
+    // Inject System Prompt
+    {
+        let system_msg = ChatMessage {
+            role: "system".into(),
+            content: Some(SYSTEM_PROMPT.to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        messages.insert(0, system_msg);
+    }
 
     // Inject Proactive Context
     {
@@ -378,15 +427,19 @@ pub async fn run_agent_loop(
 
             // Build tool message content (full JSON) for feeding back to the LLM
             let tool_message_content = match &res {
-                Ok(value) => serde_json::to_string(value).unwrap_or_else(|_e| {
-                    "{\"error\":\"failed to serialize tool result\"}".to_string()
-                }),
+                Ok(value) => {
+                    let json_str = serde_json::to_string(value).unwrap_or_else(|_e| {
+                        "{\"error\":\"failed to serialize tool result\"}".to_string()
+                    });
+                    truncate_tool_output(json_str, &tc.function.name)
+                }
                 Err(e) => {
                     error!(error = %e, "tool execution failed");
-                    serde_json::to_string(&serde_json::json!({ "error": e.to_string() }))
-                        .unwrap_or_else(|_e| {
-                            "{\"error\":\"failed to serialize error\"}".to_string()
-                        })
+                    let err_json = serde_json::json!({ "error": e.to_string() });
+                    let json_str = serde_json::to_string(&err_json).unwrap_or_else(|_e| {
+                        "{\"error\":\"failed to serialize error\"}".to_string()
+                    });
+                    truncate_tool_output(json_str, &tc.function.name)
                 }
             };
 
@@ -602,5 +655,33 @@ pub async fn run_agent_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_tool_output() {
+        let short = "short output";
+        assert_eq!(truncate_tool_output(short.to_string(), "any_tool"), short);
+
+        let long = "na".repeat(5000); // 10000 chars
+        assert!(long.len() > 8000);
+        let truncated = truncate_tool_output(long.clone(), "any_tool");
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.len() < long.len());
+
+        // Exception for fs_read
+        let read_content = "na".repeat(15000); // 30000 chars
+        let not_truncated = truncate_tool_output(read_content.clone(), "fs_read");
+        assert_eq!(not_truncated.len(), 30000);
+        assert!(!not_truncated.contains("truncated"));
+
+        // fs_read too huge
+        let huge_read = "na".repeat(21000); // 42000 chars
+        let huge_truncated = truncate_tool_output(huge_read.clone(), "fs_read");
+        assert!(huge_truncated.contains("truncated"));
     }
 }
