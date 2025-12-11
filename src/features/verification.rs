@@ -77,7 +77,7 @@ impl AutoVerifier {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // Combine output
             let msg = format!(
-                "Automatic Verification Failed (cargo check):\n{}{}",
+                "<verification_error>\nCargo Check Failed:\n{}{}\n</verification_error>",
                 stdout, stderr
             );
             warn!("Verification failed: {}", msg);
@@ -100,7 +100,7 @@ impl AutoVerifier {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Some(format!(
-                "Automatic Verification Failed (python syntax):\n{}",
+                "<verification_error>\nPython Syntax Check Failed:\n{}\n</verification_error>",
                 stderr
             ));
         }
@@ -123,13 +123,40 @@ impl AutoVerifier {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Some(format!(
-                    "Automatic Verification Failed (node syntax):\n{}",
+                    "<verification_error>\nNode.js Syntax Check Failed:\n{}\n</verification_error>",
                     stderr
                 ));
             }
         }
-        // For TS, `tsc --noEmit` is usually full project. Checking single file is harder.
-        // Leaving TS for now.
+
+        // TypeScript verification using tsc
+        if ext == "ts" || ext == "tsx" {
+            debug!("Running tsc check on {:?}", path);
+            // We use --noEmit to only check types/syntax without generating files
+            // We also try to run it on the specific file.
+            // Note: running tsc on a single file ignores tsconfig.json by default usually,
+            // but it's better than nothing for syntax checks.
+            let output = Command::new("tsc")
+                .arg("--noEmit")
+                .arg("--allowSyntheticDefaultImports")
+                .arg("--target")
+                .arg("esnext")
+                .arg("--moduleResolution")
+                .arg("node")
+                .arg(path)
+                .output()
+                .await
+                .ok()?;
+
+            if !output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // tsc outputs errors to stdout usually
+                return Some(format!(
+                    "<verification_error>\nTypeScript Check Failed:\n{}\n</verification_error>",
+                    stdout
+                ));
+            }
+        }
         None
     }
 
@@ -148,7 +175,7 @@ impl AutoVerifier {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Some(format!(
-                "Automatic Verification Failed (go vet):\n{}",
+                "<verification_error>\nGo Vet Failed:\n{}\n</verification_error>",
                 stderr
             ));
         }
