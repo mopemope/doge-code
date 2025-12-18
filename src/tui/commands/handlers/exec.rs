@@ -88,6 +88,22 @@ impl TuiExecutor {
                         msgs.extend(history.clone());
                     }
 
+                    // Inject shell context if available
+                    if !ui.shell_output_buffer.is_empty() {
+                        let lines: Vec<&str> =
+                            ui.shell_output_buffer.lines().rev().take(50).collect();
+                        let context = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+                        msgs.push(crate::llm::ChatMessage {
+                            role: "system".into(),
+                            content: Some(format!(
+                                "Recent shell output (last 50 lines):\n```\n{}\n```",
+                                context
+                            )),
+                            tool_calls: vec![],
+                            tool_call_id: None,
+                        });
+                    }
+
                     self.enforce_plan_context(&mut msgs, &content, Some(ui));
 
                     msgs.push(crate::llm::ChatMessage {
