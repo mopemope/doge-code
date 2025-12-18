@@ -597,7 +597,7 @@ impl TuiApp {
                                 }
                             }
                             InputMode::Shell => {
-                                handle_shell_mode_key(self, k)?;
+                                handle_shell_mode_key(self, k, terminal)?;
                             }
                             InputMode::SessionList => {
                                 if handle_session_list_key(self, k, terminal)? {

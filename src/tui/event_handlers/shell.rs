@@ -8,6 +8,7 @@ use crate::tui::state::{InputMode, TuiApp, save_input_history};
 pub fn handle_shell_mode_key(
     app: &mut TuiApp,
     k: ratatui::crossterm::event::KeyEvent,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> Result<()> {
     match k.code {
         ratatui::crossterm::event::KeyCode::Esc => {
@@ -25,6 +26,64 @@ pub fn handle_shell_mode_key(
             app.enter_history_search();
             app.dirty = true;
         }
+        ratatui::crossterm::event::KeyCode::Up => {
+            if app.history_index > 0 {
+                // If we are currently at the end (editing a new command), save draft
+                if app.history_index == app.input_history.len() {
+                    app.draft = app.textarea.lines().join("\n");
+                }
+
+                app.history_index -= 1;
+                let history_item = app.input_history[app.history_index].clone();
+
+                // Re-create textarea to reset cursor and content cleanly
+                app.textarea = TextArea::default();
+                app.textarea.set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input (Shell Mode - Press ESC to exit)"),
+                );
+                app.textarea.set_placeholder_text("Enter your message...");
+                app.textarea.insert_str(history_item);
+                app.dirty = true;
+            }
+        }
+        ratatui::crossterm::event::KeyCode::Down => {
+            if app.history_index < app.input_history.len() {
+                app.history_index += 1;
+
+                let content = if app.history_index == app.input_history.len() {
+                    // Restore draft
+                    app.draft.clone()
+                } else {
+                    app.input_history[app.history_index].clone()
+                };
+
+                app.textarea = TextArea::default();
+                app.textarea.set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Input (Shell Mode - Press ESC to exit)"),
+                );
+                app.textarea.set_placeholder_text("Enter your message...");
+                app.textarea.insert_str(content);
+                app.dirty = true;
+            }
+        }
+        ratatui::crossterm::event::KeyCode::PageUp => {
+            let visible_lines = terminal
+                .size()
+                .map(|s| s.height.saturating_sub(3) as usize)
+                .unwrap_or(20);
+            app.page_up(visible_lines);
+        }
+        ratatui::crossterm::event::KeyCode::PageDown => {
+            let visible_lines = terminal
+                .size()
+                .map(|s| s.height.saturating_sub(3) as usize)
+                .unwrap_or(20);
+            app.page_down(visible_lines);
+        }
         ratatui::crossterm::event::KeyCode::Enter => {
             let command = app.textarea.lines().join("\n");
             // If the command is empty, we still send a newline to the PTY
@@ -36,6 +95,7 @@ pub fn handle_shell_mode_key(
                 app.input_history.push(command.clone());
                 save_input_history(&app.input_history);
                 app.history_index = app.input_history.len();
+                app.draft.clear(); // Clear draft after successful run
 
                 if let Some(session) = app.shell_session.as_mut() {
                     // Write command + newline to PTY
