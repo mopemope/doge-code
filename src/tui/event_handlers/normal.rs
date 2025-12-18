@@ -139,6 +139,15 @@ pub fn handle_normal_mode_key(
         }
 
         KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.enter_file_search();
+            app.dirty = true;
+        }
+
+        KeyEvent {
             code: KeyCode::PageUp,
             ..
         } => {

@@ -159,6 +159,13 @@ impl TuiApp {
             self.render_log_panel(f, area, plan, theme);
             // Render history search overlay on top
             self.render_history_search(f, area, history_search_state, theme);
+        } else if self.input_mode == crate::tui::state::InputMode::FileSearch
+            && let Some(file_search_state) = &self.file_search_state
+        {
+            // Render log panel in the background first
+            self.render_log_panel(f, area, plan, theme);
+            // Render file search overlay on top
+            self.render_file_search(f, area, file_search_state, theme);
         } else if self.diff_review.is_some() {
             // For diff review mode, we use a horizontal split
             let columns = Layout::default()
@@ -392,8 +399,10 @@ impl TuiApp {
 
         let input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
             self.theme.shell_input_style
-        } else if self.input_mode == crate::tui::state::InputMode::HistorySearch {
-            // Use a distinct style for history search input if desired, or fallback to normal
+        } else if self.input_mode == crate::tui::state::InputMode::HistorySearch
+            || self.input_mode == crate::tui::state::InputMode::FileSearch
+        {
+            // Use normal input style for search modes
             self.theme.input_style
         } else {
             self.theme.input_style
@@ -410,6 +419,8 @@ impl TuiApp {
             "Input (Shell Mode - Press ESC to exit)"
         } else if self.input_mode == crate::tui::state::InputMode::HistorySearch {
             "Input (History Search)"
+        } else if self.input_mode == crate::tui::state::InputMode::FileSearch {
+            "Input (File Search)"
         } else {
             "Input"
         };
@@ -544,6 +555,61 @@ impl TuiApp {
         f.render_widget(list, overlay_area);
     }
 
+    fn render_file_search(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        state: &crate::tui::state::FileSearchState,
+        theme: &Theme,
+    ) {
+        // Create an overlay area centered
+        let overlay_height = (area.height as usize).min(20).max(10) as u16;
+        let overlay_width = (area.width as usize).min(120).max(60) as u16;
+
+        let overlay_area = Rect {
+            x: area.x + (area.width.saturating_sub(overlay_width)) / 2,
+            y: area.y + (area.height.saturating_sub(overlay_height)) / 2,
+            width: overlay_width,
+            height: overlay_height,
+        };
+
+        f.render_widget(Clear, overlay_area);
+
+        let items: Vec<ListItem> = if state.loading && state.all_files.is_empty() {
+            vec![ListItem::new("Scanning files...").style(theme.completion_style)]
+        } else {
+            state
+                .results
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    let style = if i == state.selected_index {
+                        theme.completion_selected_style
+                    } else {
+                        theme.completion_style
+                    };
+                    ListItem::new(path.clone()).style(style)
+                })
+                .collect()
+        };
+
+        let title = if state.loading {
+            format!("File Search: (Loading...) '{}'", state.query)
+        } else {
+            format!(
+                "File Search: '{}' ({} found)",
+                state.query,
+                state.results.len()
+            )
+        };
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(theme.completion_selected_style);
+
+        f.render_widget(list, overlay_area);
+    }
+
     fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         // Clear footer area to prevent artifacts when content changes
         f.render_widget(Clear, area);
@@ -582,6 +648,7 @@ impl TuiApp {
             crate::tui::state::InputMode::Shell => "Shell",
             crate::tui::state::InputMode::SessionList => "SessionList",
             crate::tui::state::InputMode::HistorySearch => "HistorySearch",
+            crate::tui::state::InputMode::FileSearch => "FileSearch",
         };
         footer_text.push_str(&format!("Mode: {} | ", mode_str));
 

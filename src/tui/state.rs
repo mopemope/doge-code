@@ -33,6 +33,15 @@ pub struct HistorySearchState {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchState {
+    pub query: String,
+    pub all_files: Vec<String>,
+    pub results: Vec<String>,
+    pub selected_index: usize,
+    pub loading: bool,
+}
+
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum CompletionType {
     #[default]
@@ -48,6 +57,7 @@ pub enum InputMode {
     Shell,
     SessionList,   // Session list selection mode
     HistorySearch, // History search mode (Ctrl+R)
+    FileSearch,    // File search mode (Ctrl+P)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +237,8 @@ pub struct TuiApp {
     pub session_list_state: Option<SessionListState>,
     // history search state
     pub history_search_state: Option<HistorySearchState>,
+    // file search state
+    pub file_search_state: Option<FileSearchState>,
     /// Status of the repomap
     pub repomap_status: RepomapStatus,
     /// Start time for processing elapsed time tracking
@@ -421,6 +433,7 @@ impl TuiApp {
             // session list state
             session_list_state: None,
             history_search_state: None,
+            file_search_state: None,
             // repomap status
             repomap_status: RepomapStatus::default(), // Initialize with NotStarted
             processing_start_time: None,
@@ -681,6 +694,65 @@ impl TuiApp {
                 .cloned()
                 .collect();
             state.selected_index = 0; // Reset selection
+        }
+        self.dirty = true;
+    }
+
+    /// Enter file search mode and start background scanning
+    pub fn enter_file_search(&mut self) {
+        self.file_search_state = Some(FileSearchState {
+            query: String::new(),
+            all_files: Vec::new(),
+            results: Vec::new(),
+            selected_index: 0,
+            loading: true,
+        });
+        self.input_mode = InputMode::FileSearch;
+        self.dirty = true;
+
+        let tx = self.inbox_tx.clone().unwrap();
+        let project_root = self
+            .cfg
+            .as_ref()
+            .map(|c| c.project_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Spawn background task to walk project files
+        tokio::spawn(async move {
+            use ignore::WalkBuilder;
+            let mut files = Vec::new();
+            let mut builder = WalkBuilder::new(project_root);
+            builder.hidden(false);
+
+            for result in builder.build() {
+                if let Ok(entry) = result
+                    && entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                {
+                    let path = entry.path();
+                    let path_str = path.to_string_lossy().to_string();
+                    // Filter out .git contents manually just in case, though ignore should handle it if .gitignore is present
+                    if !path_str.contains("/.git/") && !path_str.ends_with("/.git") {
+                        files.push(path_str);
+                    }
+                }
+            }
+            if let Ok(json) = serde_json::to_string(&files) {
+                tx.send(format!("::file_list_loaded:{}", json)).ok();
+            }
+        });
+    }
+
+    /// Update file search results based on query
+    pub fn update_file_search(&mut self) {
+        if let Some(state) = &mut self.file_search_state {
+            let query = state.query.to_lowercase();
+            state.results = state
+                .all_files
+                .iter()
+                .filter(|f| f.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+            state.selected_index = 0;
         }
         self.dirty = true;
     }
