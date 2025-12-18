@@ -152,6 +152,13 @@ impl TuiApp {
             && let Some(session_list_state) = &self.session_list_state
         {
             self.render_session_list(f, area, session_list_state, theme);
+        } else if self.input_mode == crate::tui::state::InputMode::HistorySearch
+            && let Some(history_search_state) = &self.history_search_state
+        {
+            // Render log panel in the background first
+            self.render_log_panel(f, area, plan, theme);
+            // Render history search overlay on top
+            self.render_history_search(f, area, history_search_state, theme);
         } else if self.diff_review.is_some() {
             // For diff review mode, we use a horizontal split
             let columns = Layout::default()
@@ -385,6 +392,9 @@ impl TuiApp {
 
         let input_style = if self.input_mode == crate::tui::state::InputMode::Shell {
             self.theme.shell_input_style
+        } else if self.input_mode == crate::tui::state::InputMode::HistorySearch {
+            // Use a distinct style for history search input if desired, or fallback to normal
+            self.theme.input_style
         } else {
             self.theme.input_style
         };
@@ -398,6 +408,8 @@ impl TuiApp {
         // Set the block title based on the input mode
         let block_title = if self.input_mode == crate::tui::state::InputMode::Shell {
             "Input (Shell Mode - Press ESC to exit)"
+        } else if self.input_mode == crate::tui::state::InputMode::HistorySearch {
+            "Input (History Search)"
         } else {
             "Input"
         };
@@ -485,6 +497,53 @@ impl TuiApp {
         }
     }
 
+    fn render_history_search(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        state: &crate::tui::state::HistorySearchState,
+        theme: &Theme,
+    ) {
+        // Create an overlay area centered or near input
+        let overlay_height = (area.height as usize).min(15).max(5) as u16;
+        let overlay_width = (area.width as usize).min(100).max(40) as u16;
+
+        // Center the overlay
+        let overlay_area = Rect {
+            x: area.x + (area.width.saturating_sub(overlay_width)) / 2,
+            y: area.y + (area.height.saturating_sub(overlay_height)) / 2,
+            width: overlay_width,
+            height: overlay_height,
+        };
+
+        // Clear area for overlay
+        f.render_widget(Clear, overlay_area);
+
+        let items: Vec<ListItem> = state
+            .results
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let style = if i == state.selected_index {
+                    theme.completion_selected_style
+                } else {
+                    theme.completion_style
+                };
+                ListItem::new(cmd.clone()).style(style)
+            })
+            .collect();
+
+        let title = format!(
+            "History Search: '{}' (Ctrl+R cycle, Enter select, ESC cancel)",
+            state.query
+        );
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(theme.completion_selected_style);
+
+        f.render_widget(list, overlay_area);
+    }
+
     fn render_status_footer(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         // Clear footer area to prevent artifacts when content changes
         f.render_widget(Clear, area);
@@ -522,6 +581,7 @@ impl TuiApp {
             crate::tui::state::InputMode::Normal => "Normal",
             crate::tui::state::InputMode::Shell => "Shell",
             crate::tui::state::InputMode::SessionList => "SessionList",
+            crate::tui::state::InputMode::HistorySearch => "HistorySearch",
         };
         footer_text.push_str(&format!("Mode: {} | ", mode_str));
 

@@ -20,6 +20,13 @@ pub fn handle_shell_mode_key(
                 .set_block(Block::default().borders(Borders::ALL).title("Input"));
             app.dirty = true;
         }
+        ratatui::crossterm::event::KeyCode::Char('r')
+            if k.modifiers
+                .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            app.enter_history_search();
+            app.dirty = true;
+        }
         ratatui::crossterm::event::KeyCode::Enter => {
             let command = app.textarea.lines().join("\n");
             if !command.trim().is_empty() {

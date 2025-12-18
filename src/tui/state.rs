@@ -26,6 +26,13 @@ pub struct SessionListState {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySearchState {
+    pub query: String,
+    pub results: Vec<String>,
+    pub selected_index: usize,
+}
+
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum CompletionType {
     #[default]
@@ -39,7 +46,8 @@ pub enum InputMode {
     #[default]
     Normal,
     Shell,
-    SessionList, // Session list selection mode
+    SessionList,   // Session list selection mode
+    HistorySearch, // History search mode (Ctrl+R)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +225,8 @@ pub struct TuiApp {
     pub last_user_input: Option<String>,
     // session list state
     pub session_list_state: Option<SessionListState>,
+    // history search state
+    pub history_search_state: Option<HistorySearchState>,
     /// Status of the repomap
     pub repomap_status: RepomapStatus,
     /// Start time for processing elapsed time tracking
@@ -410,6 +420,7 @@ impl TuiApp {
             last_user_input: None,
             // session list state
             session_list_state: None,
+            history_search_state: None,
             // repomap status
             repomap_status: RepomapStatus::default(), // Initialize with NotStarted
             processing_start_time: None,
@@ -643,6 +654,34 @@ impl TuiApp {
             selected_index: 0,
         });
         self.input_mode = InputMode::SessionList;
+        self.dirty = true;
+    }
+
+    /// Enter history search mode
+    pub fn enter_history_search(&mut self) {
+        self.history_search_state = Some(HistorySearchState {
+            query: String::new(),
+            results: self.input_history.clone().into_iter().rev().collect(),
+            selected_index: 0,
+        });
+        self.input_mode = InputMode::HistorySearch;
+        self.dirty = true;
+    }
+
+    /// Update history search results based on query
+    pub fn update_history_search(&mut self) {
+        if let Some(state) = &mut self.history_search_state {
+            let query = state.query.to_lowercase();
+            // Filter history, rudimentary fuzzy search (contains)
+            state.results = self
+                .input_history
+                .iter()
+                .rev()
+                .filter(|cmd| cmd.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+            state.selected_index = 0; // Reset selection
+        }
         self.dirty = true;
     }
 

@@ -10,7 +10,8 @@ use tracing::debug;
 use crate::diff_review::DiffReviewPayload;
 use crate::tui::diff_review::DiffReviewState;
 use crate::tui::event_handlers::{
-    handle_normal_mode_key, handle_session_list_key, handle_shell_mode_key,
+    handle_history_search_key, handle_normal_mode_key, handle_session_list_key,
+    handle_shell_mode_key,
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
 use serde::Deserialize;
@@ -580,6 +581,9 @@ impl TuiApp {
                                 if handle_session_list_key(self, k, terminal)? {
                                     return Ok(());
                                 }
+                            }
+                            InputMode::HistorySearch => {
+                                handle_history_search_key(self, k)?;
                             }
                         }
                     }
