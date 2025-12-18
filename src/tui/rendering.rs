@@ -1,6 +1,7 @@
 use crate::tui::diff_review::DiffLineKind;
 use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
+use ansi_to_tui::IntoText;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
@@ -403,21 +404,20 @@ impl TuiApp {
             .title("Shell Output")
             .style(theme.log_style);
 
-        // Convert shell_output_buffer to lines
-        // For now, simpler implementation: just text.
-        // Ideally we'd use ansi-to-tui here if we wanted colors.
-        // We'll just show the last N lines that fit.
-
-        let lines: Vec<Line> = self.shell_output_buffer.lines().map(Line::raw).collect();
+        // Try to parse ANSI, fallback to raw text if it fails
+        let text = match self.shell_output_buffer.as_bytes().into_text() {
+            Ok(t) => t,
+            Err(_) => Text::raw(&self.shell_output_buffer),
+        };
 
         let height = area.height.saturating_sub(2) as usize; // remove borders
-        let scroll = if lines.len() > height {
-            (lines.len() - height) as u16
+        let scroll = if text.lines.len() > height {
+            (text.lines.len() - height) as u16
         } else {
             0
         };
 
-        let paragraph = Paragraph::new(lines).block(block).scroll((scroll, 0));
+        let paragraph = Paragraph::new(text).block(block).scroll((scroll, 0));
 
         f.render_widget(paragraph, area);
     }
