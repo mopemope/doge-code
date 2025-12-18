@@ -10,8 +10,8 @@ use tracing::debug;
 use crate::diff_review::DiffReviewPayload;
 use crate::tui::diff_review::DiffReviewState;
 use crate::tui::event_handlers::{
-    handle_history_search_key, handle_normal_mode_key, handle_session_list_key,
-    handle_shell_mode_key,
+    handle_file_search_key, handle_history_search_key, handle_normal_mode_key,
+    handle_session_list_key, handle_shell_mode_key,
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
 use serde::Deserialize;
@@ -69,6 +69,18 @@ impl TuiApp {
                     if let Some(output) = msg.strip_prefix("::shell_output:") {
                         for line in output.lines() {
                             self.push_log(line.to_string());
+                        }
+                        self.dirty = true;
+                        continue;
+                    }
+
+                    if let Some(payload) = msg.strip_prefix("::file_list_loaded:") {
+                        if let Ok(files) = serde_json::from_str::<Vec<String>>(payload)
+                            && let Some(state) = &mut self.file_search_state
+                        {
+                            state.all_files = files;
+                            state.loading = false;
+                            self.update_file_search();
                         }
                         self.dirty = true;
                         continue;
@@ -584,6 +596,9 @@ impl TuiApp {
                             }
                             InputMode::HistorySearch => {
                                 handle_history_search_key(self, k)?;
+                            }
+                            InputMode::FileSearch => {
+                                handle_file_search_key(self, k)?;
                             }
                         }
                     }
