@@ -5,10 +5,11 @@ use tui_textarea::{Input, TextArea};
 use crate::tui::state::{InputMode, TuiApp, save_input_history};
 
 /// Handle keys when in Shell input mode.
-pub fn handle_shell_mode_key(
+/// Handle keys when in Shell input mode.
+pub fn handle_shell_mode_key<B: ratatui::backend::Backend>(
     app: &mut TuiApp,
     k: ratatui::crossterm::event::KeyEvent,
-    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut ratatui::Terminal<B>,
 ) -> Result<()> {
     match k.code {
         ratatui::crossterm::event::KeyCode::Esc => {
@@ -121,4 +122,117 @@ pub fn handle_shell_mode_key(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::TuiApp;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::KeyCode;
+
+    #[test]
+    fn test_shell_history_navigation() {
+        let mut app = TuiApp::new("test", None, "dark").unwrap();
+        app.input_history = vec!["echo 1".to_string(), "echo 2".to_string()];
+        app.history_index = 2; // Pointing to new input
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Up arrow: should show "echo 2"
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Up),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines()[0], "echo 2");
+        assert_eq!(app.history_index, 1);
+
+        // 2. Up arrow: should show "echo 1"
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Up),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines()[0], "echo 1");
+        assert_eq!(app.history_index, 0);
+
+        // 3. Up arrow again: should stay at "echo 1"
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Up),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines()[0], "echo 1");
+        assert_eq!(app.history_index, 0);
+
+        // 4. Down arrow: should return to "echo 2"
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Down),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines()[0], "echo 2");
+        assert_eq!(app.history_index, 1);
+
+        // 5. Down arrow: should return to empty draft
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Down),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(app.textarea.lines()[0].is_empty());
+        assert_eq!(app.history_index, 2);
+    }
+
+    #[test]
+    fn test_shell_scrolling() {
+        let mut app = TuiApp::new("test", None, "dark").unwrap();
+
+        // Fill log with enough lines to scroll
+        for i in 0..100 {
+            app.push_log(format!("line {}", i));
+        }
+
+        // Set window width for height calculation
+        app.window_width = 80;
+        app.recalculate_all_heights();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Initially at bottom
+        app.scroll_to_bottom();
+        assert!(app.scroll_state.auto_scroll);
+        assert_eq!(app.scroll_state.offset, 0);
+
+        // PageUp
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::PageUp),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(!app.scroll_state.auto_scroll);
+        assert!(app.scroll_state.offset > 0);
+
+        let offset_after_page_up = app.scroll_state.offset;
+
+        // PageDown
+        handle_shell_mode_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::PageDown),
+            &mut terminal,
+        )
+        .unwrap();
+        // Should scroll back down, offset should be less
+        assert!(app.scroll_state.offset < offset_after_page_up);
+    }
 }
