@@ -66,6 +66,16 @@ impl TuiApp {
                 }
                 for msg in drained {
                     // Shell command outputs
+                    if let Some(encoded) = msg.strip_prefix("::shell_output_bin:") {
+                        use base64::{Engine as _, engine::general_purpose};
+                        if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
+                            let text = String::from_utf8_lossy(&decoded);
+                            self.shell_output_buffer.push_str(&text);
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
+                    // Legacy shell output handling (keep for compatibility if needed)
                     if let Some(output) = msg.strip_prefix("::shell_output:") {
                         for line in output.lines() {
                             self.push_log(line.to_string());

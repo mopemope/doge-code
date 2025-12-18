@@ -1,4 +1,7 @@
-use crate::{config::IGNORE_FILE, tui::diff_review::DiffReviewState, tui::theme::Theme};
+use crate::{
+    config::IGNORE_FILE, tui::diff_review::DiffReviewState, tui::shell::ShellSession,
+    tui::theme::Theme,
+};
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -246,7 +249,11 @@ pub struct TuiApp {
     /// Final elapsed time string for display after processing completes (remains until next instruction)
     pub last_elapsed_time: Option<String>,
     /// Configuration for the application; used to access context window size
+    /// Configuration for the application; used to access context window size
     pub cfg: Option<crate::config::AppConfig>,
+    // PTY Shell session
+    pub shell_session: Option<ShellSession>,
+    pub shell_output_buffer: String,
 }
 
 impl TuiApp {
@@ -374,6 +381,8 @@ impl TuiApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let (input_history, history_index) = load_input_history();
 
+        let shell_session = ShellSession::new(tx.clone()).ok();
+
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
             _ => Theme::dark(),
@@ -439,6 +448,8 @@ impl TuiApp {
             processing_start_time: None,
             last_elapsed_time: None,
             cfg: None,
+            shell_session,
+            shell_output_buffer: String::new(),
         };
 
         Ok(app)
