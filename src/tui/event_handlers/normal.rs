@@ -130,6 +130,15 @@ pub fn handle_normal_mode_key(
         }
 
         KeyEvent {
+            code: KeyCode::Char('r'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.enter_history_search();
+            app.dirty = true;
+        }
+
+        KeyEvent {
             code: KeyCode::PageUp,
             ..
         } => {
