@@ -18,7 +18,7 @@ impl TuiExecutor {
 
         // Get conversation history
         let history = match self.conversation_history.lock() {
-            Ok(h) => h.clone(),
+            Ok(h) => h.build_messages(),
             Err(_) => {
                 ui.push_log("[ERROR] Failed to access conversation history.");
                 return;
@@ -72,11 +72,12 @@ impl TuiExecutor {
                         // Update conversation history with just the compacted message
                         if let Ok(mut history) = conversation_history.lock() {
                             history.clear();
-                            history.push(result.compacted_message.clone());
+                            history.append_message(result.compacted_message.clone());
 
                             // Also save conversation history to session
+                            let msgs_vec = history.build_messages();
                             if let Ok(mut sm) = session_manager.lock()
-                                && let Err(e) = sm.update_current_session_with_history(&history)
+                                && let Err(e) = sm.update_current_session_with_history(&msgs_vec)
                             {
                                 tracing::error!(
                                     ?e,

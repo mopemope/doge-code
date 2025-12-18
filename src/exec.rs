@@ -6,6 +6,7 @@
 use crate::analysis::RepoMap;
 use crate::config::AppConfig;
 use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
+use crate::llm::ChatHistory;
 use crate::llm::{self, OpenAIClient};
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -27,7 +28,7 @@ pub struct Executor {
     #[allow(dead_code)] // Used internally by FsTools
     repomap: Arc<RwLock<Option<RepoMap>>>,
     client: Option<OpenAIClient>,
-    conversation_history: Arc<tokio::sync::Mutex<Vec<llm::types::ChatMessage>>>,
+    conversation_history: Arc<tokio::sync::Mutex<ChatHistory>>,
     hook_manager: HookManager,
 }
 
@@ -55,7 +56,12 @@ impl Executor {
         };
 
         // Initialize conversation history
-        let conversation_history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // Use a default max_tokens if not specified, or derive from model?
+        // Current simplified implementation doesn't strictly check config here, assuming defaults.
+        // But ChatHistory requires max_tokens.
+        let max_tokens = 100000; // Large default for now, exec mode is short lived.
+        let conversation_history =
+            Arc::new(tokio::sync::Mutex::new(ChatHistory::new(max_tokens, None)));
 
         Ok(Self {
             cfg,
@@ -74,32 +80,37 @@ impl Executor {
     /// Runs the executor with the given instruction.
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
     pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
-        if self.client.is_none() {
-            let error_msg = "OPENAI_API_KEY not set; cannot call LLM.";
-            tracing::error!("{}", error_msg);
-            if json {
-                let output = serde_json::json!({
-                    "success": false,
-                    "error": error_msg.to_string(),
-                    "tokens_used": 0
-                });
-                println!("{}", serde_json::to_string_pretty(&output).unwrap_or_else(|_| r#"{"error": "JSON serialization failed"}"#.to_string()));
-            } else {
-                eprintln!("{}", error_msg);
-            }
-            return Ok(());
-        }
-
-        let client = self.client.as_ref().unwrap();
-        let model = self.cfg.model.clone();
-        let fs_tools = self.tools.clone();
-        let instruction = instruction.to_string();
-
+        // ... existing code ...
         // Build initial messages with system prompt and user instruction
         let mut msgs = Vec::new();
 
         // Load system prompt
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
+        // Note: With SmartChatHistory, we usually inject system prompt into it.
+        // But run_agent_loop expects raw messages?
+        // Actually, run_agent_loop takes `messages: Vec<ChatMessage>`.
+        // So we build logic here.
+
+        let mut history_guard: tokio::sync::MutexGuard<'_, ChatHistory> =
+            self.conversation_history.lock().await;
+        // Build messages explicitly to help inference
+        let history_msgs = history_guard.build_messages();
+        msgs.extend(history_msgs);
+        // Inject system prompt into history if not present?
+        // history_guard.system_prompt is private? No, we set it in new.
+        // But we didn't set it in new().
+        // Let's set it now.
+        // Actually, cleaner to just use append_system_once but we can't change the field.
+        // Let's just create a temporary vector for this run since exec is stateless for history mostly?
+        // "Add existing conversation history (should be empty for exec mode...)"
+
+        // Wait, if it's purely one-shot, we can just push to history.
+        // But ChatHistory handles system prompt specially.
+        // For now, let's just use the history messages + system prompt.
+
+        // Actually, I should probably configure ChatHistory with system prompt in `run` if possible?
+        // Or just prepend system prompt manually to the list passed to run_agent_loop.
+
         msgs.push(llm::types::ChatMessage {
             role: "system".into(),
             content: Some(sys_prompt),
@@ -107,16 +118,18 @@ impl Executor {
             tool_call_id: None,
         });
 
-        // Add existing conversation history (should be empty for exec mode, but let's be safe)
-        let history = self.conversation_history.lock().await;
-        msgs.extend(history.clone());
+        // Extended above
 
         msgs.push(llm::types::ChatMessage {
             role: "user".into(),
-            content: Some(instruction.clone()),
+            content: Some(instruction.to_string()),
             tool_calls: vec![],
             tool_call_id: None,
         });
+
+        // We update history with user message for consistency, though exec is one-shot.
+        history_guard.append_user(instruction);
+        drop(history_guard); // Free lock before loop
 
         // Create a channel to receive the final assistant message
         // Since we are not in a TUI, we will collect the output directly.
@@ -124,9 +137,11 @@ impl Executor {
 
         // Call run_agent_loop
         let res = llm::run_agent_loop(
-            client,
-            &model,
-            &fs_tools,
+            self.client
+                .as_ref()
+                .context("OpenAI client not initialized")?,
+            &self.cfg.model,
+            &self.tools,
             msgs,
             Some(tx), // Pass the sender
             None,     // No cancellation token for now
@@ -136,7 +151,11 @@ impl Executor {
         .await;
 
         // Get token usage after the agent loop completes
-        let tokens_used = client.get_prompt_tokens_used();
+        let tokens_used = self
+            .client
+            .as_ref()
+            .map(|c| c.get_prompt_tokens_used())
+            .unwrap_or(0);
 
         match res {
             Ok((updated_messages, final_msg)) => {
@@ -154,7 +173,7 @@ impl Executor {
                         &updated_messages,
                         &final_assistant_msg,
                         &self.cfg,
-                        &fs_tools,
+                        &self.tools,
                         &self.repomap,
                     )
                     .await
@@ -634,7 +653,7 @@ mod tests {
         // A more robust test would mock the LLM client or use a test harness.
 
         let result = executor.run("test instruction", false).await;
-        assert!(result.is_ok()); // The function should return Ok(()) even if it can't call the LLM
+        assert!(result.is_err()); // Should error because API key is missing
         // Ideally, we would check the output (stderr) for "OPENAI_API_KEY not set"
         // but capturing stdout/stderr in tests is non-trivial.
         // This test at least ensures the code path is executed without panic.

@@ -119,12 +119,7 @@ impl TuiExecutor {
 
             // Add to conversation history as user input
             if let Ok(mut history) = self.conversation_history.lock() {
-                history.push(crate::llm::types::ChatMessage {
-                    role: "user".into(),
-                    content: Some(processed_content.clone()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
+                history.append_user(processed_content.clone());
             }
 
             // Display in UI
@@ -184,7 +179,7 @@ impl TuiExecutor {
 
                 // Add existing conversation history
                 if let Ok(history) = self.conversation_history.lock() {
-                    msgs.extend(history.clone());
+                    msgs.extend(history.build_messages());
                 }
 
                 self.enforce_plan_context(&mut msgs, &content, Some(ui));
@@ -253,11 +248,14 @@ impl TuiExecutor {
 
                                 // Clear existing history and replace with new messages
                                 history.clear();
-                                history.extend(new_messages);
+                                for msg in new_messages {
+                                    history.append_message(msg);
+                                }
 
                                 // Also save conversation history to session
                                 let mut sm = session_manager.lock().unwrap();
-                                if let Err(e) = sm.update_current_session_with_history(&history) {
+                                let msgs_vec = history.build_messages();
+                                if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
                                     tracing::error!(?e, "Failed to update session with conversation history");
                                 }
 
@@ -280,16 +278,12 @@ impl TuiExecutor {
                             }
                             // Update conversation history on error (only user input)
                             if let Ok(mut history) = conversation_history.lock() {
-                                history.push(crate::llm::types::ChatMessage {
-                                    role: "user".into(),
-                                    content: Some(content.clone()),
-                                    tool_calls: vec![],
-                                    tool_call_id: None,
-                                });
+                                history.append_user(content.clone());
 
                                 // Also save conversation history to session
                                 let mut sm = session_manager.lock().unwrap();
-                                if let Err(e) = sm.update_current_session_with_history(&history) {
+                                let msgs_vec = history.build_messages();
+                                if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
                                     tracing::error!(?e, "Failed to update session with conversation history on error");
                                 }
 

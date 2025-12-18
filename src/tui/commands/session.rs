@@ -76,7 +76,7 @@ impl TuiExecutor {
                         if let Ok(msg) = serde_json::from_value::<crate::llm::types::ChatMessage>(
                             serde_json::Value::Object(map),
                         ) {
-                            history.push(msg);
+                            history.append_message(msg);
                         }
                     }
                 }
