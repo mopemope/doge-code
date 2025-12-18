@@ -4,6 +4,7 @@ pub mod edit;
 pub mod execute;
 pub mod find_file;
 pub mod list;
+pub mod memory;
 pub mod plan;
 pub mod read;
 pub mod read_many;

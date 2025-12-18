@@ -4,6 +4,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::tools::search_repomap::{RepomapSearchTools, SearchRepomapArgs};
+
 impl TuiExecutor {
     /// Send message to LLM for processing
     pub fn send_to_llm(&mut self, ui: &mut TuiApp, content: String) {
@@ -32,8 +34,6 @@ impl TuiExecutor {
                     if cancel_rx.changed().await.is_ok() && *cancel_rx.borrow() {
                         info!("Cancellation signal received, cancelling token.");
                         child_token.cancel();
-                        info!("Cancellation signal received, cancelling token.");
-                        child_token.cancel();
                     }
                 });
 
@@ -53,9 +53,55 @@ impl TuiExecutor {
                     tool_call_id: None,
                 });
 
+                // Auto-RAG: Proactive Repomap Search
+                if let Ok(guard) = self.repomap.try_read() {
+                    if let Some(map) = guard.as_ref() {
+                        let keywords: Vec<String> = content.split_whitespace()
+                            .map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+                            .filter(|s| s.len() > 2)
+                            .collect();
+                        
+                        if !keywords.is_empty() {
+                            let args = SearchRepomapArgs {
+                                keyword_search: Some(keywords),
+                                limit: Some(5),
+                                include_snippets: Some(true),
+                                snippet_max_chars: Some(800),
+                                ranking_strategy: Some("hybrid".to_string()),
+                                ..Default::default()
+                            };
+
+                            let tools = RepomapSearchTools::new();
+                            if let Ok(mut results) = tools.search_repomap(map, args) {
+                                if !results.results.is_empty() {
+                                    // Format results compactly
+                                    let mut ctx_str = String::from("Relevant Codebase Context:\n");
+                                    for res in results.results.iter().take(3) {
+                                         ctx_str.push_str(&format!("File: {}\nScore: {:.2}\n", res.file.display(), res.file_match_score.unwrap_or(0.0)));
+                                         for sym in &res.symbols {
+                                             if !sym.code_snippet.is_empty() {
+                                                 ctx_str.push_str(&format!("Symbol: {} ({})\nSnippet:\n{}\n", sym.name, sym.kind, sym.code_snippet));
+                                             }
+                                         }
+                                         }
+                                         ctx_str.push_str("---\n");
+                                    }
+
+                                    msgs.push(crate::llm::types::ChatMessage {
+                                        role: "system".into(),
+                                        content: Some(ctx_str),
+                                        tool_calls: vec![],
+                                        tool_call_id: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Add existing conversation history
                 if let Ok(history) = self.conversation_history.lock() {
-                    msgs.extend(history.clone());
+                    msgs.extend(history.build_messages());
                 }
 
                 self.enforce_plan_context(&mut msgs, &content, Some(ui));
@@ -77,9 +123,15 @@ impl TuiExecutor {
 
                     // Increment request count in session
                     {
-                        let mut sm = session_manager.lock().unwrap();
-                        if let Err(e) = sm.update_current_session_with_request_count() {
-                            tracing::error!(?e, "Failed to update session with request count");
+                        match session_manager.lock() {
+                            Ok(mut sm) => {
+                                if let Err(e) = sm.update_current_session_with_request_count() {
+                                    tracing::error!(?e, "Failed to update session with request count");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to lock session manager for request count: {}", e);
+                            }
                         }
                     }
 
@@ -170,17 +222,26 @@ impl TuiExecutor {
 
                                 // Clear existing history and replace with new messages
                                 history.clear();
-                                history.extend(new_messages);
+                                for msg in new_messages {
+                                    history.append_message(msg);
+                                }
 
                                 // Also save conversation history to session
-                                let mut sm = session_manager.lock().unwrap();
-                                if let Err(e) = sm.update_current_session_with_history(&history) {
-                                    tracing::error!(?e, "Failed to update session with conversation history");
-                                }
-                                
-                                // Update token count in session
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
-                                    tracing::error!(?e, "Failed to update session with token count");
+                                match session_manager.lock() {
+                                    Ok(mut sm) => {
+                                        let msgs_vec = history.build_messages();
+                                        if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
+                                            tracing::error!(?e, "Failed to update session with conversation history");
+                                        }
+                                        
+                                        // Update token count in session
+                                        if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                            tracing::error!(?e, "Failed to update session with token count");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to lock session manager for history update: {}", e);
+                                    }
                                 }
                                 // Repomap updates are now handled by hooks after instruction completion
                             }
@@ -226,22 +287,24 @@ impl TuiExecutor {
                             }
                             // Update conversation history on error (only user input)
                             if let Ok(mut history) = conversation_history.lock() {
-                                history.push(crate::llm::types::ChatMessage {
-                                    role: "user".into(),
-                                    content: Some(content.clone()),
-                                    tool_calls: vec![],
-                                    tool_call_id: None,
-                                });
+                                history.append_user(content.clone());
 
                                 // Also save conversation history to session
-                                let mut sm = session_manager.lock().unwrap();
-                                if let Err(e) = sm.update_current_session_with_history(&history) {
-                                    tracing::error!(?e, "Failed to update session with conversation history on error");
-                                }
-                                
-                                // Update token count in session even on error
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
-                                    tracing::error!(?e, "Failed to update session with token count on error");
+                                match session_manager.lock() {
+                                    Ok(mut sm) => {
+                                        let msgs_vec = history.build_messages();
+                                        if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
+                                            tracing::error!(?e, "Failed to update session with conversation history on error");
+                                        }
+                                        
+                                        // Update token count in session even on error
+                                        if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                            tracing::error!(?e, "Failed to update session with token count on error");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to lock session manager for error handling: {}", e);
+                                    }
                                 }
                                 // Repomap updates are now handled by hooks after instruction completion
                             }

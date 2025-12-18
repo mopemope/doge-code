@@ -22,31 +22,26 @@ impl TuiExecutor {
         if parts.is_empty() {
             return;
         }
-        
+
         let command_name = parts[0].trim_start_matches('/');
         let args = &parts[1..];
-        
+
         // Load custom commands
         let custom_commands = load_custom_commands(&self.cfg.project_root);
-        
+
         // Check if command exists
         if let Some(command) = custom_commands.get(command_name) {
             // Process command content with arguments
             let processed_content = process_command_content(&command.content, args);
-            
+
             // Add to conversation history as user input
             if let Ok(mut history) = self.conversation_history.lock() {
-                history.push(crate::llm::types::ChatMessage {
-                    role: "user".into(),
-                    content: Some(processed_content.clone()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
+                history.append_user(processed_content.clone());
             }
-            
+
             // Display in UI
             ui.push_log(format!("> {}", line));
-            
+
             // Send to LLM for processing
             self.send_to_llm(ui, processed_content);
         } else {
@@ -58,40 +53,48 @@ impl TuiExecutor {
 /// Process command content by replacing placeholders with arguments
 pub fn process_command_content(content: &str, args: &[&str]) -> String {
     let mut processed = content.to_string();
-    
+
     // Replace $ARGUMENTS with all arguments joined by space
     if !args.is_empty() {
         let all_args = args.join(" ");
         processed = processed.replace("$ARGUMENTS", &all_args);
-        
+
         // Replace $1, $2, etc. with specific arguments
         for (i, arg) in args.iter().enumerate() {
             let placeholder = format!("${}", i + 1);
             processed = processed.replace(&placeholder, arg);
         }
     }
-    
+
     processed
 }
 
 /// Load custom commands from project and user directories
 pub fn load_custom_commands(project_root: &Path) -> HashMap<String, CustomCommand> {
     let mut commands = HashMap::new();
-    
+
     // Load project commands (.doge/commands/)
     let project_commands_dir = project_root.join(".doge").join("commands");
     if project_commands_dir.exists() {
-        load_commands_from_directory(&project_commands_dir, crate::tui::commands::handlers::dispatch::CommandScope::Project, &mut commands);
+        load_commands_from_directory(
+            &project_commands_dir,
+            crate::tui::commands::handlers::dispatch::CommandScope::Project,
+            &mut commands,
+        );
     }
-    
+
     // Load user commands (~/.config/doge-code/commands/)
     if let Some(home_dir) = dirs::home_dir() {
         let user_commands_dir = home_dir.join(".config").join("doge-code").join("commands");
         if user_commands_dir.exists() {
-            load_commands_from_directory(&user_commands_dir, crate::tui::commands::handlers::dispatch::CommandScope::User, &mut commands);
+            load_commands_from_directory(
+                &user_commands_dir,
+                crate::tui::commands::handlers::dispatch::CommandScope::User,
+                &mut commands,
+            );
         }
     }
-    
+
     commands
 }
 
@@ -116,9 +119,10 @@ fn load_commands_from_directory(
                         } else {
                             format!("Custom command: {}", file_name)
                         };
-                        
+
                         // Determine namespace from relative path
-                        let namespace = path.parent()
+                        let namespace = path
+                            .parent()
                             .and_then(|parent| parent.strip_prefix(dir).ok())
                             .and_then(|rel_path| {
                                 if rel_path.components().count() > 0 {
@@ -127,9 +131,9 @@ fn load_commands_from_directory(
                                     None
                                 }
                             });
-                        
+
                         let full_content = content;
-                        
+
                         commands.insert(
                             file_name.to_string(),
                             CustomCommand {

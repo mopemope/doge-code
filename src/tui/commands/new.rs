@@ -88,7 +88,7 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             cancel_tx: None,
             last_user_prompt: None,
-            conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history
+            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(100000, None))), // Initialize conversation history
             session_manager,
 
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
@@ -150,7 +150,7 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             cancel_tx: None,
             last_user_prompt: None,
-            conversation_history: Arc::new(Mutex::new(Vec::new())), // Initialize conversation history
+            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(100000, None))), // Initialize conversation history
             session_manager,
 
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(

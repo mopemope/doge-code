@@ -208,3 +208,36 @@ pub async fn undo(
         }
     }
 }
+
+pub async fn read_memory(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    match runtime.fs.read_memory(key).await {
+        Ok(content) => Ok(json!({ "content": content })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+pub async fn write_memory(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    match runtime.fs.write_memory(key, content).await {
+        Ok(msg) => Ok(json!({ "message": msg })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+pub async fn list_memories(
+    runtime: &ToolRuntime<'_>,
+    _args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    match runtime.fs.list_memories().await {
+        Ok(msg) => Ok(json!({ "result": msg })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}

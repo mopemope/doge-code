@@ -31,7 +31,7 @@ pub struct TuiExecutor {
     pub(crate) cancel_tx: Option<watch::Sender<bool>>,
     pub(crate) last_user_prompt: Option<String>,
     // Message vector for holding conversation history
-    pub(crate) conversation_history: Arc<Mutex<Vec<crate::llm::types::ChatMessage>>>,
+    pub(crate) conversation_history: Arc<Mutex<crate::llm::ChatHistory>>,
     // Session management
     pub(crate) session_manager: Arc<Mutex<SessionManager>>,
 

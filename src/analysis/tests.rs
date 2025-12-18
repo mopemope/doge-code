@@ -792,4 +792,39 @@ int process_point(struct Point *p, int count) {{
         // Forward declarations without bodies should not be extracted as Function symbols
         // but we should verify they don't cause parsing errors
     }
+
+    #[test]
+    fn test_keyword_extraction_stop_words() {
+        use crate::analysis::collector::extract_keywords_from_comment;
+
+        let comment = "// user login map log pay key job row set win net web oil raw red";
+        let keywords = extract_keywords_from_comment(comment);
+
+        // These words were previously filtered but should now be present
+        assert!(
+            keywords.contains(&"user".to_string()),
+            "user should be kept"
+        );
+        assert!(
+            keywords.contains(&"login".to_string()),
+            "login should be kept"
+        );
+        assert!(keywords.contains(&"map".to_string()), "map should be kept");
+        assert!(keywords.contains(&"log".to_string()), "log should be kept");
+        assert!(keywords.contains(&"pay".to_string()), "pay should be kept");
+        assert!(keywords.contains(&"key".to_string()), "key should be kept");
+        assert!(keywords.contains(&"job".to_string()), "job should be kept");
+        assert!(keywords.contains(&"row".to_string()), "row should be kept");
+        assert!(keywords.contains(&"set".to_string()), "set should be kept");
+        assert!(keywords.contains(&"win".to_string()), "win should be kept");
+        assert!(keywords.contains(&"net".to_string()), "net should be kept");
+
+        // Check for words that SHOULD be filtered
+        let stop_comment = "// the and of with if else for while return fn function class";
+        let stop_keywords = extract_keywords_from_comment(stop_comment);
+        assert!(!stop_keywords.contains(&"the".to_string()));
+        assert!(!stop_keywords.contains(&"and".to_string()));
+        assert!(!stop_keywords.contains(&"if".to_string()));
+        assert!(!stop_keywords.contains(&"fn".to_string()));
+    }
 }

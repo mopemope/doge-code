@@ -18,10 +18,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
+use crate::tools::memory::MemoryTools;
+// ... imports ...
+
 #[derive(Debug, Clone)]
 pub struct FsTools {
     search_repomap_tools: search_repomap::RepomapSearchTools,
+    memory_tools: MemoryTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
+    // ...
     session_manager_wrapper: SessionManagerWrapper,
     pub config: Arc<AppConfig>,
     remote_tool_manager: RemoteToolManager,
@@ -40,6 +45,7 @@ impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
+            memory_tools: MemoryTools::new(config.clone()),
             context_manager: Arc::new(RwLock::new(ContextManager::new(repomap.clone()))),
             repomap,
             session_manager_wrapper: SessionManagerWrapper::new(None),
@@ -418,6 +424,47 @@ impl FsTools {
             Ok(None) => Ok(None), // No tool found with this alias
             Err(e) => {
                 self.record_tool_call_failure(alias)?;
+                Err(e)
+            }
+        }
+    }
+    pub async fn read_memory(&self, key: &str) -> Result<String> {
+        self.update_session_with_tool_call_count()?;
+        match self.memory_tools.read_memory(key).await {
+            Ok(content) => {
+                self.record_tool_call_success("read_memory")?;
+                Ok(content)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("read_memory")?;
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn write_memory(&self, key: &str, content: &str) -> Result<String> {
+        self.update_session_with_tool_call_count()?;
+        match self.memory_tools.write_memory(key, content).await {
+            Ok(msg) => {
+                self.record_tool_call_success("write_memory")?;
+                Ok(msg)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("write_memory")?;
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn list_memories(&self) -> Result<String> {
+        self.update_session_with_tool_call_count()?;
+        match self.memory_tools.list_memories().await {
+            Ok(msg) => {
+                self.record_tool_call_success("list_memories")?;
+                Ok(msg)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("list_memories")?;
                 Err(e)
             }
         }
