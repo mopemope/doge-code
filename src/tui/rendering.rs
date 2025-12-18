@@ -166,6 +166,8 @@ impl TuiApp {
             self.render_log_panel(f, area, plan, theme);
             // Render file search overlay on top
             self.render_file_search(f, area, file_search_state, theme);
+        } else if self.input_mode == crate::tui::state::InputMode::Shell {
+            self.render_shell_view(f, area, theme);
         } else if self.diff_review.is_some() {
             // For diff review mode, we use a horizontal split
             let columns = Layout::default()
@@ -391,6 +393,33 @@ impl TuiApp {
                 f.render_widget(blank_paragraph, blank_area);
             }
         }
+    }
+
+    fn render_shell_view(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Shell Output")
+            .style(theme.log_style);
+
+        // Convert shell_output_buffer to lines
+        // For now, simpler implementation: just text.
+        // Ideally we'd use ansi-to-tui here if we wanted colors.
+        // We'll just show the last N lines that fit.
+
+        let lines: Vec<Line> = self.shell_output_buffer.lines().map(Line::raw).collect();
+
+        let height = area.height.saturating_sub(2) as usize; // remove borders
+        let scroll = if lines.len() > height {
+            (lines.len() - height) as u16
+        } else {
+            0
+        };
+
+        let paragraph = Paragraph::new(lines).block(block).scroll((scroll, 0));
+
+        f.render_widget(paragraph, area);
     }
 
     fn render_input_area(&mut self, f: &mut Frame, area: Rect) {
