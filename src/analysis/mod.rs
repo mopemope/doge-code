@@ -37,6 +37,8 @@ pub use ts_js_collector::{JavaScriptExtractor, TypeScriptExtractor};
 pub mod context;
 pub use context::ContextManager;
 
+pub mod semantic;
+
 pub mod loop_detector;
 pub mod task_sentinel;
 pub use loop_detector::LoopDetector;

@@ -18,6 +18,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::analysis::semantic::SemanticService;
+
 // Tool parameter structures
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SearchRepomapParams {
@@ -32,6 +34,7 @@ pub struct SearchRepomapParams {
     pub sort_desc: Option<bool>,
     pub limit: Option<u32>,
     pub keyword_search: Option<Vec<String>>,
+    pub semantic_query: Option<String>,
     pub name: Option<Vec<String>>,
     pub fields: Option<Vec<String>>,
     pub include_snippets: Option<bool>,
@@ -97,6 +100,7 @@ pub struct DogeMcpService {
     repomap: Arc<RwLock<Option<RepoMap>>>,
     search_repomap_tools: RepomapSearchTools,
     config: Arc<AppConfig>,
+    semantic_service: Option<SemanticService>,
 }
 
 impl Default for DogeMcpService {
@@ -110,8 +114,9 @@ impl DogeMcpService {
         Self {
             tool_router: Self::tool_router(),
             repomap: Arc::new(RwLock::new(None)),
-            search_repomap_tools: RepomapSearchTools::new(),
+            search_repomap_tools: RepomapSearchTools::new(None),
             config: Arc::new(config),
+            semantic_service: None,
         }
     }
 
@@ -121,6 +126,17 @@ impl DogeMcpService {
             repomap,
             search_repomap_tools: self.search_repomap_tools,
             config: self.config,
+            semantic_service: self.semantic_service,
+        }
+    }
+
+    pub fn with_semantic_service(self, service: Option<SemanticService>) -> Self {
+        Self {
+            tool_router: self.tool_router,
+            repomap: self.repomap,
+            search_repomap_tools: RepomapSearchTools::new(service.clone()),
+            config: self.config,
+            semantic_service: service,
         }
     }
 
@@ -185,6 +201,7 @@ impl DogeMcpService {
                 limit: params.limit.map(|v| v as usize),
                 response_budget_chars: params.response_budget_chars.map(|v| v as usize),
                 keyword_search: params.keyword_search,
+                semantic_query: params.semantic_query,
                 name: params.name,
                 fields: params.fields,
                 include_snippets: params.include_snippets,
@@ -196,7 +213,11 @@ impl DogeMcpService {
                 page_size: params.page_size.map(|v| v as usize),
             };
 
-            match self.search_repomap_tools.search_repomap(map, args) {
+            match self
+                .search_repomap_tools
+                .search_repomap(map, args, &self.config.project_root)
+                .await
+            {
                 Ok(results) => self.format_json_result(results),
                 Err(e) => {
                     Err(self.format_error("Search repomap failed ", Some(json!(e.to_string()))))

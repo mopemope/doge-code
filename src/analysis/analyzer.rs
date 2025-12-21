@@ -3,6 +3,7 @@ use crate::analysis::cache::{RepomapCache, RepomapStore};
 use crate::analysis::file_finder::find_target_files;
 use crate::analysis::hash::{calculate_file_hashes, calculate_hash_diff};
 use crate::analysis::parser::{parse_single_file, process_single_file};
+use crate::analysis::semantic::SemanticService;
 use anyhow::{Context, Result};
 use num_cpus;
 use std::{collections::HashMap, path::PathBuf};
@@ -15,22 +16,39 @@ pub struct Analyzer {
     parser: Parser,
     current_lang: Language,
     cache_store: RepomapStore,
+    semantic_service: Option<SemanticService>,
 }
 
 impl Analyzer {
     pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        let mut parser = Parser::new();
-        let lang: Language = tree_sitter_rust::LANGUAGE.into();
-        parser.set_language(&lang).context("set rust language")?;
         let cache_store = RepomapStore::new(root.clone())
             .await
             .context("Failed to create RepomapStore")?;
+
+        let semantic_service = Some(SemanticService::new(
+            cache_store.get_db_connection().clone(),
+        ));
+
+        Self::new_with_store(root, cache_store, semantic_service).await
+    }
+
+    pub async fn new_with_store(
+        root: impl Into<PathBuf>,
+        cache_store: RepomapStore,
+        semantic_service: Option<SemanticService>,
+    ) -> Result<Self> {
+        let root = root.into();
+        let mut parser = Parser::new();
+        let lang: Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&lang).context("set rust language")?;
+
         Ok(Self {
             root,
             parser,
             current_lang: lang,
             cache_store,
+            semantic_service,
         })
     }
 
@@ -252,6 +270,17 @@ impl Analyzer {
         let cache = RepomapCache::new(self.root.clone(), repomap.clone(), current_hashes);
         if let Err(e) = self.cache_store.save(&cache).await {
             warn!("Failed to save repomap cache: {}", e);
+        } else {
+            // Trigger semantic embedding update in background
+            if let Some(service) = &self.semantic_service {
+                let service = service.clone();
+                let root = self.root.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = service.update_embeddings(&root).await {
+                        warn!("Failed to update semantic embeddings: {}", e);
+                    }
+                });
+            }
         }
 
         let duration = start_time.elapsed();
