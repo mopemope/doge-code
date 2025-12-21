@@ -29,6 +29,15 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(has_one = "super::symbol_embedding::Entity")]
+    SymbolEmbedding,
+}
+
+impl Related<super::symbol_embedding::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SymbolEmbedding.def()
+    }
+}
 
 impl ActiveModelBehavior for ActiveModel {}

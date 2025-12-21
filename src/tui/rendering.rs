@@ -545,8 +545,8 @@ impl TuiApp {
         theme: &Theme,
     ) {
         // Create an overlay area centered or near input
-        let overlay_height = (area.height as usize).min(15).max(5) as u16;
-        let overlay_width = (area.width as usize).min(100).max(40) as u16;
+        let overlay_height = (area.height as usize).clamp(5, 15) as u16;
+        let overlay_width = (area.width as usize).clamp(40, 100) as u16;
 
         // Center the overlay
         let overlay_area = Rect {
@@ -592,8 +592,8 @@ impl TuiApp {
         theme: &Theme,
     ) {
         // Create an overlay area centered
-        let overlay_height = (area.height as usize).min(20).max(10) as u16;
-        let overlay_width = (area.width as usize).min(120).max(60) as u16;
+        let overlay_height = (area.height as usize).clamp(10, 20) as u16;
+        let overlay_width = (area.width as usize).clamp(60, 120) as u16;
 
         let overlay_area = Rect {
             x: area.x + (area.width.saturating_sub(overlay_width)) / 2,

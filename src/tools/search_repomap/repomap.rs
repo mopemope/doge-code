@@ -17,8 +17,10 @@ This is an advanced, structural code search tool that you MUST use as the first 
 It is your primary tool for understanding the codebase. Unlike simple text search, it understands code structure (symbols, comments) and helps you locate relevant code with surgical precision.
 
 **Workflow:**
-1.  **ALWAYS start with this tool.** Analyze the user's request to identify keywords (features, concepts, variable names).
-2.  Use these keywords in the `keyword_search` or `name` parameter to find the most relevant code locations.
+1.  **ALWAYS start with this tool.**
+2.  **Determine the type of query:**
+    - If the request is **conceptual** or asks "how" something works (e.g., "how is authentication handled?", "find the logic for retry"), use `semantic_query`.
+    - If the request refers to **specific names** or identifiers (e.g., "UserFactory", "login_button", "auth_middleware"), use `keyword_search` or `name`.
 3.  Analyze the results to determine your next step.
 
 **Primary Use Cases:**
@@ -27,10 +29,14 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
 
 **Key Parameters:**
 
+- `semantic_query`:
+  - **Use this for natural language queries.**
+  - Best for finding code based on *meaning* rather than exact matches.
+  - Example: `semantic_query: "how are API requests authenticated?"`
 - `keyword_search`:
-  - **Your primary search parameter.** Use this to find symbols and comments related to a feature or concept.
+  - **Use this for specific terms.**
   - Extract keywords from the user's request and provide them as a list.
-  - Example: For a request like "fix the login button", you would use `keyword_search: ["login", "button", "auth"]`.
+  - Example: `keyword_search: ["login", "button", "auth"]`
 - `name`:
   - Use this when you are looking for a specific, named symbol (function, class, etc.).
 - `symbol_kinds`:
@@ -141,6 +147,10 @@ pub fn tool_def() -> ToolDef {
                 "type": ["array", "null"],
                 "items": {"type": "string"},
                 "description": "A list of search for symbols containing specific keywords in their associated comments"
+            },
+            "semantic_query": {
+                "type": ["string", "null"],
+                "description": "Natural language query to search for code by meaning (e.g. 'how is authentication handled?')"
             },
                     "name": {
                         "type": ["array", "null"],

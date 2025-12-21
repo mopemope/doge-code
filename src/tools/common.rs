@@ -44,7 +44,7 @@ impl Default for FsTools {
 impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
-            search_repomap_tools: search_repomap::RepomapSearchTools::new(),
+            search_repomap_tools: search_repomap::RepomapSearchTools::new(None),
             memory_tools: MemoryTools::new(config.clone()),
             context_manager: Arc::new(RwLock::new(ContextManager::new(repomap.clone()))),
             repomap,
@@ -352,7 +352,9 @@ impl FsTools {
         // Use a more robust approach to handle potential RwLock poisoning
         let repomap_guard = self.repomap.read().await;
         let result = match if let Some(map) = &*repomap_guard {
-            self.search_repomap_tools.search_repomap(map, args)
+            self.search_repomap_tools
+                .search_repomap(map, args, &self.config.project_root)
+                .await
         } else {
             Err(anyhow::anyhow!("repomap is still generating"))
         } {

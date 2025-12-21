@@ -72,6 +72,7 @@ impl RepomapCache {
 }
 
 /// Store that manages repomap persistence
+#[derive(Clone)]
 pub struct RepomapStore {
     project_root: PathBuf,
     db_conn: DatabaseConnection,
@@ -229,6 +230,10 @@ impl RepomapStore {
 
         debug!("Found {} changed files", changed_files.len());
         Ok(changed_files)
+    }
+    /// Get a reference to the database connection
+    pub fn get_db_connection(&self) -> &DatabaseConnection {
+        &self.db_conn
     }
 }
 

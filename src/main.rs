@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     // info!(?cfg, "app config");
 
     // Initialize repomap
-    let (repomap, status_rx) = if !cfg.no_repomap {
+    let (repomap, status_rx, semantic_service) = if !cfg.no_repomap {
         let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
         let repomap_clone = repomap.clone();
         let project_root = cfg.project_root.clone();
@@ -136,50 +136,84 @@ async fn main() -> Result<()> {
         // Create a channel for sending status messages
         let (status_tx, status_rx) = std::sync::mpsc::channel::<String>();
 
-        // Spawn an asynchronous task to build the repomap
-        tokio::spawn(async move {
-            match crate::analysis::Analyzer::new(&project_root).await {
-                Ok(mut analyzer) => match analyzer.build().await {
-                    Ok(map) => {
-                        let start_time = std::time::Instant::now();
-                        let symbol_count = map.symbols.len();
-                        *repomap_clone.write().await = Some(map);
-                        tracing::debug!(
-                            "Background repomap generation completed in {:?} with {} symbols",
-                            start_time.elapsed(),
-                            symbol_count
-                        );
-                        // Send a message to notify that the repomap is ready
-                        if let Err(e) = status_tx.send("::status:repomap_ready".to_string()) {
-                            tracing::error!("Failed to send repomap ready message: {:?}", e);
+        // Initialize persistent store and semantic service
+        let store_result = crate::analysis::cache::RepomapStore::new(project_root.clone()).await;
+
+        let (store, semantic_service) = match store_result {
+            Ok(s) => {
+                let service =
+                    crate::analysis::semantic::SemanticService::new(s.get_db_connection().clone());
+                (Some(s), Some(service))
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize RepomapStore: {:?}", e);
+                if let Err(send_err) = status_tx.send("::status:repomap_error".to_string()) {
+                    tracing::error!("Failed to send repomap error message: {:?}", send_err);
+                }
+                (None, None)
+            }
+        };
+
+        if let Some(store) = store {
+            let semantic_clone = semantic_service.clone();
+            let root_clone = project_root.clone();
+
+            // Spawn an asynchronous task to build the repomap
+            tokio::spawn(async move {
+                match crate::analysis::Analyzer::new_with_store(root_clone, store, semantic_clone)
+                    .await
+                {
+                    Ok(mut analyzer) => match analyzer.build().await {
+                        Ok(map) => {
+                            let start_time = std::time::Instant::now();
+                            let symbol_count = map.symbols.len();
+                            *repomap_clone.write().await = Some(map);
+                            tracing::debug!(
+                                "Background repomap generation completed in {:?} with {} symbols",
+                                start_time.elapsed(),
+                                symbol_count
+                            );
+                            // Send a message to notify that the repomap is ready
+                            if let Err(e) = status_tx.send("::status:repomap_ready".to_string()) {
+                                tracing::error!("Failed to send repomap ready message: {:?}", e);
+                            }
                         }
-                    }
+                        Err(e) => {
+                            tracing::error!("Failed to build RepoMap: {:?}", e);
+                            // Send an error message
+                            if let Err(send_err) =
+                                status_tx.send("::status:repomap_error".to_string())
+                            {
+                                tracing::error!(
+                                    "Failed to send repomap error message: {:?}",
+                                    send_err
+                                );
+                            }
+                        }
+                    },
                     Err(e) => {
-                        tracing::error!("Failed to build RepoMap: {:?}", e);
+                        tracing::error!("Failed to create Analyzer: {:?}", e);
                         // Send an error message
                         if let Err(send_err) = status_tx.send("::status:repomap_error".to_string())
                         {
                             tracing::error!("Failed to send repomap error message: {:?}", send_err);
                         }
                     }
-                },
-                Err(e) => {
-                    tracing::error!("Failed to create Analyzer: {:?}", e);
-                    // Send an error message
-                    if let Err(send_err) = status_tx.send("::status:repomap_error".to_string()) {
-                        tracing::error!("Failed to send repomap error message: {:?}", send_err);
-                    }
                 }
-            }
-        });
-        (repomap, Some(status_rx))
+            });
+        }
+        (repomap, Some(status_rx), semantic_service)
     } else {
-        (std::sync::Arc::new(tokio::sync::RwLock::new(None)), None)
+        (
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            None,
+            None,
+        )
     };
 
     // Start the MCP server if enabled
     let _mcp_server_handle = if let Some(mcp_server) = cfg.mcp_servers.first() {
-        mcp::server::start_mcp_server(mcp_server, repomap.clone())
+        mcp::server::start_mcp_server(mcp_server, repomap.clone(), semantic_service.clone())
     } else {
         None
     };
@@ -205,7 +239,7 @@ async fn main() -> Result<()> {
                 address: addr,
                 transport: "http".to_string(),
             };
-            mcp::server::start_mcp_server(&config, repomap.clone());
+            mcp::server::start_mcp_server(&config, repomap.clone(), semantic_service.clone());
             Ok(())
         }
     }
