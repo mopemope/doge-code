@@ -141,8 +141,10 @@ async fn main() -> Result<()> {
 
         let (store, semantic_service) = match store_result {
             Ok(s) => {
-                let service =
-                    crate::analysis::semantic::SemanticService::new(s.get_db_connection().clone());
+                let service = crate::analysis::semantic::SemanticService::new(
+                    s.get_db_connection().clone(),
+                    cfg.rag.clone(),
+                );
                 (Some(s), Some(service))
             }
             Err(e) => {

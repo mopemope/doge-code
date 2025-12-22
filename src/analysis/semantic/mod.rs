@@ -2,6 +2,7 @@ pub mod embedder;
 
 use super::database::entities::{symbol_embedding, symbol_info};
 use crate::analysis::semantic::embedder::Embedder;
+use crate::config::RagConfig;
 use anyhow::{Context, Result};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::collections::HashMap;
@@ -14,13 +15,15 @@ use tracing::{debug, info, warn};
 pub struct SemanticService {
     db_conn: DatabaseConnection,
     embedder: Arc<Mutex<Option<Embedder>>>,
+    config: RagConfig,
 }
 
 impl SemanticService {
-    pub fn new(db_conn: DatabaseConnection) -> Self {
+    pub fn new(db_conn: DatabaseConnection, config: RagConfig) -> Self {
         Self {
             db_conn,
             embedder: Arc::new(Mutex::new(None)),
+            config,
         }
     }
 
@@ -135,7 +138,7 @@ impl SemanticService {
 
         // 3. Generate Embeddings (Batch)
         // Batches of 32 or 64
-        let batch_size = 32;
+        let batch_size = self.config.batch_size;
         for (chunk_texts, chunk_ids) in texts.chunks(batch_size).zip(symbol_ids.chunks(batch_size))
         {
             let embeddings = embedder.embed(chunk_texts.to_vec())?;

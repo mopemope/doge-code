@@ -33,6 +33,18 @@ pub struct AppConfig {
     pub allowed_paths: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
+    pub rag: RagConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RagConfig {
+    pub batch_size: usize,
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self { batch_size: 8 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +88,7 @@ impl Default for AppConfig {
             allowed_paths: vec![],
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
+            rag: RagConfig::default(),
         }
     }
 }
@@ -185,6 +198,12 @@ pub struct FileConfig {
     pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
     pub rewrite_timeout_sec: Option<u64>,
+    pub rag: Option<PartialRagConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialRagConfig {
+    pub batch_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -507,6 +526,22 @@ impl AppConfig {
             watch_cfg
         };
 
+        let rag = {
+            let default_rag = RagConfig::default();
+            let mut rag_cfg = default_rag.clone();
+
+            if let Some(file_rag) = &file_cfg.rag
+                && let Some(batch_size) = file_rag.batch_size {
+                    rag_cfg.batch_size = batch_size;
+                }
+
+            if let Some(project_rag) = &project_cfg.rag
+                && let Some(batch_size) = project_rag.batch_size {
+                    rag_cfg.batch_size = batch_size;
+                }
+            rag_cfg
+        };
+
         Ok(Self {
             base_url,
             model,
@@ -546,6 +581,7 @@ impl AppConfig {
                 .rewrite_timeout_sec
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
+            rag,
         })
     }
 }
@@ -570,6 +606,10 @@ retry_jitter_ms = 5000
 respect_retry_after = true
 timeout_ms = 600000  # 10 minutes
 # context_window_size = 128000  # Optional context window size for the model
+
+# RAG settings
+[rag]
+batch_size = 8
 
 # Watch mode settings
 [watch]
