@@ -59,3 +59,37 @@ fn test_get_all_commands_with_custom_commands() {
         assert!(all_commands.contains(custom_cmd));
     }
 }
+
+#[test]
+fn test_plan_list_completed_hides_on_next_dispatch() {
+    let mut app = TuiApp::new("Test App", None, "dark").unwrap();
+
+    let plan = vec![super::PlanItem {
+        id: "step-1".to_string(),
+        content: "Done".to_string(),
+        status: "completed".to_string(),
+    }];
+
+    app.apply_plan_list_update(plan.clone());
+    assert_eq!(app.plan_list, plan);
+    assert!(app.hide_plan_on_next_instruction);
+
+    app.dispatch("next");
+    assert!(app.plan_list.is_empty());
+    assert!(!app.hide_plan_on_next_instruction);
+}
+
+#[test]
+fn test_plan_list_in_progress_does_not_hide() {
+    let mut app = TuiApp::new("Test App", None, "dark").unwrap();
+
+    let plan = vec![super::PlanItem {
+        id: "step-1".to_string(),
+        content: "Working".to_string(),
+        status: "in_progress".to_string(),
+    }];
+
+    app.apply_plan_list_update(plan.clone());
+    assert_eq!(app.plan_list, plan);
+    assert!(!app.hide_plan_on_next_instruction);
+}

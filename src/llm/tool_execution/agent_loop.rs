@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use super::ui_rendering::truncate_string_with_graphemes;
 use crate::llm::message_utils::truncate_tool_output;
-use crate::llm::prompts::SYSTEM_PROMPT;
+use crate::tui::commands::prompt::build_system_prompt;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
@@ -37,7 +37,7 @@ pub async fn run_agent_loop(
             debug!("Injecting default system prompt");
             let system_msg = ChatMessage {
                 role: "system".into(),
-                content: Some(SYSTEM_PROMPT.to_string()),
+                content: Some(build_system_prompt(cfg)),
                 tool_calls: vec![],
                 tool_call_id: None,
             };
@@ -247,7 +247,9 @@ pub async fn run_agent_loop(
                 && file_was_written
                 && let Some(tx) = &ui_tx
             {
-                match crate::llm::tool_execution::collect_diff_review_payload().await {
+                match crate::llm::tool_execution::collect_diff_review_payload(&cfg.project_root)
+                    .await
+                {
                     Ok(Some(payload)) => match serde_json::to_string(&payload) {
                         Ok(json) => {
                             let _ = tx.send(format!("::diff_review:{}", json));

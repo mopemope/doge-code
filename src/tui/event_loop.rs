@@ -469,16 +469,7 @@ impl TuiApp {
                                 Vec<crate::tui::state::PlanItem>,
                             >(plan_list_json)
                             {
-                                let all_completed = !plan_list.is_empty()
-                                    && plan_list.iter().all(|t| t.status == "completed");
-                                if all_completed {
-                                    self.plan_list.clear();
-                                    self.hide_plan_on_next_instruction = false;
-                                } else {
-                                    self.plan_list = plan_list.clone();
-                                    self.hide_plan_on_next_instruction = false;
-                                }
-                                self.dirty = true;
+                                self.apply_plan_list_update(plan_list);
                             }
                             continue;
                         }

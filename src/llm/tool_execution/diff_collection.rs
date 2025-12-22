@@ -6,36 +6,51 @@
 
 use crate::diff_review::DiffReviewPayload;
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::debug;
 
 /// Collects diff review payload by examining git diffs and status
-pub async fn collect_diff_review_payload() -> Result<Option<DiffReviewPayload>> {
-    debug!("Collecting diff review payload");
+pub async fn collect_diff_review_payload(project_root: &Path) -> Result<Option<DiffReviewPayload>> {
+    debug!(project_root = %project_root.display(), "Collecting diff review payload");
+
+    let project_root: PathBuf = project_root.to_path_buf();
 
     // Spawn parallel tasks for git commands
-    let tracked_diff_task = tokio::spawn(async {
-        Command::new("git")
-            .arg("diff")
-            .arg("--color=never")
-            .output()
-            .context("failed to run git diff --color=never")
+    let tracked_diff_task = tokio::spawn({
+        let project_root = project_root.clone();
+        async move {
+            Command::new("git")
+                .arg("diff")
+                .arg("--color=never")
+                .current_dir(&project_root)
+                .output()
+                .context("failed to run git diff --color=never")
+        }
     });
 
-    let names_task = tokio::spawn(async {
-        Command::new("git")
-            .arg("diff")
-            .arg("--name-only")
-            .output()
-            .context("failed to run git diff --name-only")
+    let names_task = tokio::spawn({
+        let project_root = project_root.clone();
+        async move {
+            Command::new("git")
+                .arg("diff")
+                .arg("--name-only")
+                .current_dir(&project_root)
+                .output()
+                .context("failed to run git diff --name-only")
+        }
     });
 
-    let status_task = tokio::spawn(async {
-        Command::new("git")
-            .arg("status")
-            .arg("--porcelain=v1")
-            .output()
-            .context("failed to run git status --porcelain")
+    let status_task = tokio::spawn({
+        let project_root = project_root.clone();
+        async move {
+            Command::new("git")
+                .arg("status")
+                .arg("--porcelain=v1")
+                .current_dir(&project_root)
+                .output()
+                .context("failed to run git status --porcelain")
+        }
     });
 
     // Wait for all tasks to complete
@@ -78,16 +93,20 @@ pub async fn collect_diff_review_payload() -> Result<Option<DiffReviewPayload>> 
         }
 
         let path = path.trim().to_string();
-        let task = tokio::spawn(async move {
-            let untracked_diff = Command::new("git")
-                .arg("diff")
-                .arg("--color=never")
-                .arg("--no-index")
-                .arg("/dev/null")
-                .arg(&path)
-                .output()
-                .with_context(|| format!("failed to diff untracked file {path}"));
-            (path, untracked_diff)
+        let task = tokio::spawn({
+            let project_root = project_root.clone();
+            async move {
+                let untracked_diff = Command::new("git")
+                    .arg("diff")
+                    .arg("--color=never")
+                    .arg("--no-index")
+                    .arg("/dev/null")
+                    .arg(&path)
+                    .current_dir(&project_root)
+                    .output()
+                    .with_context(|| format!("failed to diff untracked file {path}"));
+                (path, untracked_diff)
+            }
         });
         untracked_tasks.push(task);
     }
@@ -129,16 +148,70 @@ pub async fn collect_diff_review_payload() -> Result<Option<DiffReviewPayload>> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_collect_diff_review_payload_no_changes() {
-        // Test when there are no changes
-        // This would need mocking in a real test environment
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    #[test]
-    fn test_collect_diff_review_payload_with_changes() {
-        // Test when there are changes
-        // This would need mocking in a real test environment
+    fn write_file(dir: &Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    fn init_repo(dir: &Path) {
+        run_git(dir, &["init", "-q"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test User"]);
+    }
+
+    #[tokio::test]
+    async fn test_collect_diff_review_payload_no_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        init_repo(root);
+        write_file(root, "foo.txt", "hello\n");
+        run_git(root, &["add", "foo.txt"]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+
+        let payload = collect_diff_review_payload(root).await.unwrap();
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_collect_diff_review_payload_with_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        init_repo(root);
+        write_file(root, "foo.txt", "hello\n");
+        run_git(root, &["add", "foo.txt"]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+
+        // tracked change
+        write_file(root, "foo.txt", "hello world\n");
+        // untracked change
+        write_file(root, "bar.txt", "new file\n");
+
+        let payload = collect_diff_review_payload(root).await.unwrap();
+        let payload = payload.expect("expected diff payload");
+
+        assert!(payload.files.iter().any(|f| f == "foo.txt"));
+        assert!(payload.files.iter().any(|f| f == "bar.txt"));
+        assert!(payload.diff.contains("foo.txt"));
+        assert!(payload.diff.contains("bar.txt"));
     }
 }

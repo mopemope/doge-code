@@ -139,10 +139,6 @@ impl Executor {
         history_guard.append_user(instruction);
         drop(history_guard); // Free lock before loop
 
-        // Create a channel to receive the final assistant message
-        // Since we are not in a TUI, we will collect the output directly.
-        let (tx, _rx) = std::sync::mpsc::channel::<String>(); // Buffer size is unbounded for std::sync::mpsc
-
         // Call run_agent_loop
         let res = llm::run_agent_loop(
             self.client
@@ -151,8 +147,8 @@ impl Executor {
             &self.cfg.model,
             &self.tools,
             msgs,
-            Some(tx), // Pass the sender
-            None,     // No cancellation token for now
+            None,
+            None, // No cancellation token for now
             &self.cfg,
             None, // No TuiExecutor for exec mode
         )
@@ -190,12 +186,13 @@ impl Executor {
                 }
 
                 if json {
+                    let tools_called = collect_tools_called(&updated_messages);
                     let response = &final_msg.content;
                     let output = serde_json::json!({
                         "success": true,
                         "response": response,
                         "tokens_used": tokens_used,
-                        "tools_called": [], // TODO: Track tools called during execution
+                        "tools_called": tools_called,
                         "conversation_length": updated_messages.len()
                     });
                     println!(
@@ -312,20 +309,9 @@ impl Executor {
             tool_call_id: None,
         });
 
-        let (tx, _rx) = std::sync::mpsc::channel::<String>();
-
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(self.cfg.rewrite_timeout_sec),
-            llm::run_agent_loop(
-                client,
-                &model,
-                &fs_tools,
-                msgs,
-                Some(tx),
-                None,
-                &self.cfg,
-                None,
-            ),
+            llm::run_agent_loop(client, &model, &fs_tools, msgs, None, None, &self.cfg, None),
         )
         .await;
 
@@ -333,6 +319,7 @@ impl Executor {
 
         match res {
             Ok(Ok((updated_messages, final_msg))) => {
+                let tools_called = collect_tools_called(&updated_messages);
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
                     role: "assistant".into(),
@@ -393,6 +380,7 @@ impl Executor {
                             "mode": "rewrite",
                             "rewritten_code": rewritten,
                             "tokens_used": tokens_used,
+                            "tools_called": tools_called,
                             "raw_response": raw_response,
                             "file_path": original_file_path,
                             "display_path": display_path,
@@ -502,6 +490,14 @@ impl Executor {
     }
 }
 
+fn collect_tools_called(messages: &[crate::llm::types::ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .map(|tc| tc.function.name.clone())
+        .collect()
+}
+
 const REWRITE_MARKER_START: &str = "<REWRITTEN_CODE>";
 const REWRITE_MARKER_END: &str = "</REWRITTEN_CODE>";
 const SNIPPET_MARKER_START: &str = "<ORIGINAL_SNIPPET>";
@@ -585,6 +581,7 @@ pub async fn run_rewrite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::types::{ChatMessage, ToolCall, ToolCallFunction};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -711,6 +708,63 @@ mod tests {
         let file_path = PathBuf::from("/var/tmp/other.rs");
         let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
         assert_eq!(hint, "other.rs");
+    }
+
+    #[test]
+    fn test_collect_tools_called_preserves_order_and_duplicates() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: Some("call-1".to_string()),
+                    r#type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "fs_read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: Some("call-2".to_string()),
+                        r#type: "function".to_string(),
+                        function: ToolCallFunction {
+                            name: "fs_write".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: Some("call-3".to_string()),
+                        r#type: "function".to_string(),
+                        function: ToolCallFunction {
+                            name: "fs_read".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                tool_call_id: Some("call-1".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            collect_tools_called(&messages),
+            vec![
+                "fs_read".to_string(),
+                "fs_write".to_string(),
+                "fs_read".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
