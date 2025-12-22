@@ -226,47 +226,39 @@ impl Analyzer {
         let current_hashes = calculate_file_hashes(&files).await;
         info!("Calculated hashes for {} files", current_hashes.len());
 
-        // Check cache validity
-        if self
-            .cache_store
-            .is_cache_valid(&current_hashes)
-            .await
-            .context("Failed to check cache validity")?
-        {
-            info!("Cache is valid, loading from cache");
-            if let Some(cache) = self
-                .cache_store
-                .load()
-                .await
-                .context("Failed to load cache")?
-            {
-                let duration = start_time.elapsed();
-                info!(
-                    "Loaded RepoMap from cache in {:?}. Found {} symbols from {} files.",
-                    duration,
-                    cache.repomap.symbols.len(),
-                    cache.file_hashes.len()
-                );
-                return Ok(cache.repomap);
-            }
-        }
-
-        // If the cache is invalid or does not exist, try a differential update
-        let repomap = if let Some(cached_data) = self
+        // Load cache once (if any) and decide whether to reuse or incrementally rebuild.
+        let repomap = match self
             .cache_store
             .load()
             .await
             .context("Failed to load cache")?
         {
-            info!("Cache exists but is invalid, attempting incremental update");
-            self.build_incremental(cached_data, &current_hashes).await?
-        } else {
-            info!("No cache found, building from scratch");
-            self.build_parallel().await?
+            Some(cached_data) => {
+                if cached_data.file_hashes == current_hashes {
+                    let duration = start_time.elapsed();
+                    info!(
+                        "Loaded RepoMap from cache in {:?}. Found {} symbols from {} files.",
+                        duration,
+                        cached_data.repomap.symbols.len(),
+                        cached_data.file_hashes.len()
+                    );
+                    return Ok(cached_data.repomap);
+                }
+
+                info!("Cache exists but is invalid, attempting incremental update");
+                self.build_incremental(cached_data, &current_hashes).await?
+            }
+            None => {
+                info!("No cache found, building from scratch");
+                self.build_parallel().await?
+            }
         };
 
-        // Save new cache
-        let cache = RepomapCache::new(self.root.clone(), repomap.clone(), current_hashes);
+        // Save new cache (avoid cloning the full repomap).
+        let cache = RepomapCache::new(self.root.clone(), repomap, current_hashes);
+        let symbol_count = cache.repomap.symbols.len();
+        let file_count = files.len();
+
         if let Err(e) = self.cache_store.save(&cache).await {
             warn!("Failed to save repomap cache: {}", e);
         } else {
@@ -285,11 +277,10 @@ impl Analyzer {
         let duration = start_time.elapsed();
         info!(
             "Built RepoMap with cache in {:?}. Found {} symbols from {} files.",
-            duration,
-            repomap.symbols.len(),
-            files.len()
+            duration, symbol_count, file_count
         );
 
+        let RepomapCache { repomap, .. } = cache;
         Ok(repomap)
     }
 

@@ -2,7 +2,10 @@ use crate::analysis::RepoMap;
 use anyhow::Result;
 use regex::Regex;
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::Node;
+
+static WORD_REGEX: OnceLock<Regex> = OnceLock::new();
 
 // Helper functions (kept generic)
 pub(super) fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
@@ -34,7 +37,9 @@ pub(super) fn extract_keywords_from_comment(comment: &str) -> Vec<String> {
     // - ASCII letters and numbers
     // - Japanese hiragana, katakana, and kanji characters
     // - Underscores
-    let word_regex = Regex::new(r"[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF_]+").unwrap();
+    let word_regex = WORD_REGEX.get_or_init(|| {
+        Regex::new(r"[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF_]+").expect("valid word regex")
+    });
 
     for mat in word_regex.find_iter(clean_comment) {
         let word = mat.as_str().trim();
@@ -191,7 +196,9 @@ fn is_common_programming_keyword(word: &str) -> bool {
         "include",
     ];
 
-    common_keywords.contains(&word.to_lowercase().as_str())
+    common_keywords
+        .iter()
+        .any(|&kw| kw.eq_ignore_ascii_case(word))
 }
 
 // Trait for language-specific symbol extraction
