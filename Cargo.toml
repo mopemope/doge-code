@@ -46,7 +46,7 @@ futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 fastrand = "2"
 diffy = "0.3"
-sha2 = "0.10"
+blake3 = "1.5"
 rust-embed = "8"
 tera = "1.20"
 num_cpus = "1.0"

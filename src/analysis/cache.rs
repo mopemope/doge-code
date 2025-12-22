@@ -136,10 +136,11 @@ impl RepomapStore {
     pub async fn load(&self) -> Result<Option<RepomapCache>> {
         info!("Loading repomap cache from database");
 
-        match RepomapDAO::load_repomap(&self.db_conn, &self.project_root)
-            .await
-            .context("Failed to load repomap from database")?
-        {
+        // Load repomap from cache
+        let loaded: Option<(RepoMap, HashMap<PathBuf, String>)> =
+            RepomapDAO::load_repomap(&self.db_conn, &self.project_root).await?;
+
+        match loaded {
             Some((repomap, file_hashes)) => {
                 let metadata = RepomapMetadata::new(
                     self.project_root.clone(),
@@ -171,14 +172,13 @@ impl RepomapStore {
             cache.metadata.total_symbols, cache.metadata.total_files
         );
 
-        RepomapDAO::save_repomap(
+        let _res: () = RepomapDAO::save_repomap(
             &self.db_conn,
             &cache.repomap,
             &cache.file_hashes,
             &self.project_root,
         )
-        .await
-        .context("Failed to save repomap to database")?;
+        .await?;
 
         info!("Repomap cache saved successfully");
         Ok(())
@@ -188,9 +188,9 @@ impl RepomapStore {
     pub async fn clear(&self) -> Result<()> {
         info!("Clearing repomap cache from database");
 
-        RepomapDAO::clear_repomap(&self.db_conn, &self.project_root)
-            .await
-            .context("Failed to clear repomap from database")?;
+        let _res: () =
+            RepomapDAO::clear_repomap::<DatabaseConnection>(&self.db_conn, &self.project_root)
+                .await?;
 
         info!("Repomap cache cleared successfully");
         Ok(())
@@ -205,10 +205,9 @@ impl RepomapStore {
         // TODO: Need logic to save version information in the database and compare
 
         // Check if the file hash has changed
-        let is_valid =
+        let is_valid: bool =
             RepomapDAO::is_repomap_valid(&self.db_conn, &self.project_root, current_file_hashes)
-                .await
-                .context("Failed to check repomap validity")?;
+                .await?;
 
         if is_valid {
             debug!("Cache is valid");
@@ -223,10 +222,9 @@ impl RepomapStore {
         &self,
         current_file_hashes: &HashMap<PathBuf, String>,
     ) -> Result<Vec<PathBuf>> {
-        let changed_files =
+        let changed_files: Vec<PathBuf> =
             RepomapDAO::get_changed_files(&self.db_conn, &self.project_root, current_file_hashes)
-                .await
-                .context("Failed to get changed files")?;
+                .await?;
 
         debug!("Found {} changed files", changed_files.len());
         Ok(changed_files)

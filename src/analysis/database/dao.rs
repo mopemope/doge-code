@@ -1,9 +1,7 @@
 use crate::analysis::database::entities::{FileHashEntity, SymbolInfoEntity};
 use crate::analysis::{RepoMap, SymbolInfo as AnalysisSymbolInfo};
 use anyhow::{Context, Result};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, TransactionTrait,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, TransactionTrait};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -46,31 +44,46 @@ impl RepomapDAO {
         // Clear existing data for this project root to ensure a clean save
         Self::clear_repomap(&txn, project_root).await?;
 
-        // Insert symbols
+        // Insert symbols in batches
+        let mut symbol_models = Vec::with_capacity(repomap.symbols.len());
         for symbol in &repomap.symbols {
-            let symbol_model = crate::analysis::database::dao_conversions::symbol_to_active_model(
-                symbol,
-                project_root_str,
-            )?;
-            symbol_model
-                .insert(&txn)
-                .await
-                .context("Failed to insert symbol")?;
+            symbol_models.push(
+                crate::analysis::database::dao_conversions::symbol_to_active_model(
+                    symbol,
+                    project_root_str,
+                )?,
+            );
         }
 
-        // Insert file hashes
+        if !symbol_models.is_empty() {
+            for chunk in symbol_models.chunks(1000) {
+                SymbolInfoEntity::insert_many(chunk.to_vec())
+                    .exec(&txn)
+                    .await
+                    .context("Failed to batch insert symbols")?;
+            }
+        }
+
+        // Insert file hashes in batches
+        let mut file_hash_models = Vec::with_capacity(hashes.len());
         for (file_path, hash) in hashes {
             let file_path_str = file_path.to_str().context("File path is not valid UTF-8")?;
-            let file_hash_model =
+            file_hash_models.push(
                 crate::analysis::database::dao_conversions::file_hash_to_active_model(
                     file_path_str,
                     hash,
                     project_root_str,
-                );
-            file_hash_model
-                .insert(&txn)
-                .await
-                .context("Failed to insert file hash")?;
+                ),
+            );
+        }
+
+        if !file_hash_models.is_empty() {
+            for chunk in file_hash_models.chunks(1000) {
+                FileHashEntity::insert_many(chunk.to_vec())
+                    .exec(&txn)
+                    .await
+                    .context("Failed to batch insert file hashes")?;
+            }
         }
 
         // Commit the transaction
@@ -495,5 +508,55 @@ mod tests {
             .expect("Failed to get changed files");
         assert_eq!(changed.len(), 1);
         assert!(changed.contains(&PathBuf::from("/test/project/src/lib.rs")));
+    }
+    #[tokio::test]
+    async fn test_save_repomap_batch_processing() {
+        let (_tmp_dir, db) = setup_test_db().await;
+        let project_root = PathBuf::from("/test/project");
+
+        // Generate more than 1000 symbols to trigger batching (limit is 1000)
+        let mut symbols = Vec::new();
+        for i in 0..1500 {
+            symbols.push(AnalysisSymbolInfo {
+                name: format!("function_{}", i),
+                kind: SymbolKind::Function,
+                file: PathBuf::from(format!("/test/project/src/file_{}.rs", i)),
+                start_line: 1,
+                start_col: 0,
+                end_line: 10,
+                end_col: 0,
+                parent: None,
+                file_total_lines: 100,
+                function_lines: Some(10),
+                keywords: vec![],
+            });
+        }
+        let repomap = RepoMap { symbols };
+
+        // Generate more than 1000 file hashes
+        let mut hashes = HashMap::new();
+        for i in 0..1500 {
+            hashes.insert(
+                PathBuf::from(format!("/test/project/src/file_{}.rs", i)),
+                format!("hash_{}", i),
+            );
+        }
+
+        // Save (should process in chunks)
+        assert!(
+            RepomapDAO::save_repomap(&db, &repomap, &hashes, &project_root)
+                .await
+                .is_ok()
+        );
+
+        // Load and verify counts
+        let loaded = RepomapDAO::load_repomap(&db, &project_root)
+            .await
+            .expect("Failed to load repomap");
+        assert!(loaded.is_some());
+        let (loaded_repomap, loaded_hashes) = loaded.unwrap();
+
+        assert_eq!(loaded_repomap.symbols.len(), 1500);
+        assert_eq!(loaded_hashes.len(), 1500);
     }
 }
