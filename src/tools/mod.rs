@@ -16,6 +16,8 @@ pub mod session_manager;
 pub mod undo;
 pub mod write;
 
+pub mod shell;
+
 pub use common::FsTools;
 
 #[cfg(test)]

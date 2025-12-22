@@ -362,3 +362,116 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_execute_shell_persistence() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec![],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+    // 1. Set variable
+    let res1_str = fs_tools.execute_shell("export TEST_VAR=persistent").await?;
+    let res1: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res1_str)?;
+    assert!(res1.success);
+
+    // 2. Read variable
+    let res2_str = fs_tools.execute_shell("echo $TEST_VAR").await?;
+    let res2: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res2_str)?;
+    assert!(res2.success);
+    assert_eq!(res2.stdout.trim(), "persistent");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_shell_cwd() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let subdir = project_root.join("subdir");
+    tokio::fs::create_dir(&subdir).await?;
+
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec![],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+    // 1. CD into subdir
+    // Note: The shell starts in project_root.
+    let res1_str = fs_tools.execute_shell("cd subdir").await?;
+    let res1: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res1_str)?;
+    assert!(res1.success);
+
+    // 2. Check PWD
+    let res2_str = fs_tools.execute_shell("pwd").await?;
+    let res2: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res2_str)?;
+    assert!(res2.success);
+    // On some systems /tmp might be a symlink, so we verify it ends with "subdir"
+    assert!(res2.stdout.trim().ends_with("subdir"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_shell_error() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec![],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+    // 1. Run invalid command
+    let res1_str = fs_tools.execute_shell("non_existent_command_123").await?;
+    let res1: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res1_str)?;
+    assert!(!res1.success);
+    assert!(res1.exit_code.is_some());
+    assert_ne!(res1.exit_code.unwrap(), 0);
+    assert!(!res1.stderr.is_empty());
+
+    // 2. Shell should still be alive
+    let res2_str = fs_tools.execute_shell("echo alive").await?;
+    let res2: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res2_str)?;
+    assert!(res2.success);
+    assert_eq!(res2.stdout.trim(), "alive");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_shell_large_output() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec![],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+    // Generate large output (e.g., 64KB)
+    // 64 * 1024 = 65536 bytes.
+    // We use a simple loop in python or similar, or just seq.
+    // relying on `seq` might be non-portable if minimal environment, but likely fine in this context.
+    // Let's use printf to be safe-ish.
+    let cmd = "for i in {1..10000}; do echo 'line '$i; done";
+    let res_str = fs_tools.execute_shell(cmd).await?;
+    let res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res_str)?;
+
+    assert!(res.success);
+    assert!(res.stdout.len() > 10000); // Rough check
+    assert!(res.stdout.contains("line 10000"));
+
+    Ok(())
+}

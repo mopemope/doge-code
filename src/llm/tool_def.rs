@@ -9,6 +9,7 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::write::tool_def(),
         tools::search_repomap::tool_def(),
         tools::execute::tool_def(),
+        tools::shell::tool_def(),
         tools::edit::tool_def(),
         tools::apply_patch::tool_def(),
         tools::find_file::tool_def(),
