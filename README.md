@@ -99,7 +99,7 @@ instructions_file = "PROJECT.md"
 - `edit_symbol`: シンボル全体（関数、構造体等）を編集
 
 ### セッション管理
-- `todo_write`/`todo_read`: タスクリスト管理
+- `plan_write`/`plan_read`: タスク/実行計画の保存・読み込み（セッションに紐付く）
 - `session`: 自動セッション永続化と再開
 
 ## 🎯 使用例

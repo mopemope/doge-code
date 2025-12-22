@@ -101,6 +101,29 @@ impl FsTools {
         self.session_manager_wrapper.get_session_info()
     }
 
+    fn ensure_current_session_id(&self) -> Result<String> {
+        if let Some(session) = self.get_current_session() {
+            return Ok(session.meta.id);
+        }
+
+        let session_manager = self
+            .session_manager_wrapper
+            .get_session_manager()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No session manager"))?;
+
+        let mut mgr = session_manager.lock().unwrap();
+        if mgr.current_session.is_none() {
+            mgr.create_session(None)?;
+        }
+
+        mgr.current_session
+            .as_ref()
+            .map(|s| s.meta.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("No current session"))
+    }
+
     /// Get reference to remote tool manager
     pub fn get_remote_tool_manager(&self) -> &RemoteToolManager {
         &self.remote_tool_manager
@@ -382,31 +405,12 @@ impl FsTools {
         items: Vec<plan::PlanItem>,
         mode: plan::PlanWriteMode,
     ) -> Result<plan::PlanList> {
-        self.update_session_with_tool_call_count()?;
-
-        let session_id = self
-            .get_current_session()
-            .map(|session| session.meta.id)
-            .ok_or_else(|| anyhow::anyhow!("No current session"))?;
-
-        match plan::plan_write(items, mode, &session_id, &self.config) {
-            Ok(res) => {
-                self.record_tool_call_success("plan_write")?;
-                Ok(res)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("plan_write")?;
-                Err(e)
-            }
-        }
+        let session_id = self.ensure_current_session_id()?;
+        plan::plan_write(items, mode, &session_id, &self.config)
     }
 
     pub fn plan_read(&self) -> Result<plan::PlanList> {
-        let session_id = self
-            .get_current_session()
-            .map(|session| session.meta.id)
-            .ok_or_else(|| anyhow::anyhow!("No current session"))?;
-
+        let session_id = self.ensure_current_session_id()?;
         plan::plan_read(&session_id, &self.config)
     }
 

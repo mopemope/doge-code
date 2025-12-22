@@ -463,13 +463,8 @@ impl TuiApp {
                             // Reset processing_start_time to stop the timer
                             self.processing_start_time = None;
                         }
-                        _ if msg.starts_with("::plan_list:") || msg.starts_with("::todo_list:") => {
-                            let prefix = if msg.starts_with("::plan_list:") {
-                                "::plan_list:"
-                            } else {
-                                "::todo_list:"
-                            };
-                            let plan_list_json = &msg[prefix.len()..];
+                        _ if msg.starts_with("::plan_list:") => {
+                            let plan_list_json = &msg["::plan_list:".len()..];
                             if let Ok(plan_list) = serde_json::from_str::<
                                 Vec<crate::tui::state::PlanItem>,
                             >(plan_list_json)
