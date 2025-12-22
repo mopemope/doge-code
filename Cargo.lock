@@ -1393,6 +1393,7 @@ dependencies = [
  "notify",
  "notify-rust",
  "num_cpus",
+ "percent-encoding",
  "portable-pty",
  "rand 0.8.5",
  "ratatui",
@@ -1428,6 +1429,7 @@ dependencies = [
  "tui-textarea",
  "unicode-segmentation",
  "unicode-width 0.2.0",
+ "url",
  "uuid",
 ]
 

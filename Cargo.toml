@@ -72,6 +72,8 @@ rmcp = { version = "0.8", features = ["transport-streamable-http-server", "trans
 axum = "0.7"
 schemars = "1.0"
 fastembed = "5.5.0"
+url = "2.5.7"
+percent-encoding = "2.3.2"
 
 [dev-dependencies]
 httptest = "0.16"
