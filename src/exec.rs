@@ -613,6 +613,7 @@ mod tests {
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
+            rag: crate::config::RagConfig::default(),
         };
 
         let executor = Executor::new(cfg);
@@ -648,6 +649,7 @@ mod tests {
             allowed_commands: vec![], // Add allowed_commands
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
+            rag: crate::config::RagConfig::default(),
         };
 
         let mut executor = Executor::new(cfg).unwrap();

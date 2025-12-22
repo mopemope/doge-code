@@ -28,6 +28,7 @@ impl Analyzer {
 
         let semantic_service = Some(SemanticService::new(
             cache_store.get_db_connection().clone(),
+            crate::config::RagConfig::default(),
         ));
 
         Self::new_with_store(root, cache_store, semantic_service).await
