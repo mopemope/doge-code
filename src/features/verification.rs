@@ -31,16 +31,11 @@ impl AutoVerifier {
         let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).ok()?;
 
         // Extract file path from arguments
-        let path_str = if function_name == "fs_write" {
-            args.get("path").and_then(|v| v.as_str())
-        } else if function_name == "edit" {
-            args.get("file_path").and_then(|v| v.as_str())
-        } else {
-            // apply_patch might assume path is in the patch or context, but usually it's about a file
-            // For now, let's focus on fs_write/edit where path is explicit.
-            // If apply_patch doesn't take a path arg (it takes patch content), we might skip it or parse patch.
-            // Let's check tool definitions later. For now skip apply_patch if path isn't obvious.
-            args.get("path").and_then(|v| v.as_str())
+        let path_str = match function_name {
+            "fs_write" => args.get("path").and_then(|v| v.as_str()),
+            "edit" => args.get("file_path").and_then(|v| v.as_str()),
+            "apply_patch" => args.get("file_path").and_then(|v| v.as_str()),
+            _ => None,
         }?;
 
         let path = Path::new(path_str);

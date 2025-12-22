@@ -162,7 +162,7 @@ fn scan_directory_for_languages(dir: &Path, languages: &mut std::collections::Ha
 }
 
 /// Get lint configurations for supported languages
-fn get_lint_configs() -> HashMap<String, LintConfig> {
+fn get_lint_configs(project_root: &Path) -> HashMap<String, LintConfig> {
     let mut configs = HashMap::new();
 
     // Go linters
@@ -208,10 +208,61 @@ fn get_lint_configs() -> HashMap<String, LintConfig> {
         },
     );
 
-    // TODO TypeScript/JavaScript linters biome etc
-    configs.insert("typescript".to_string(), LintConfig { commands: vec![] });
+    configs.insert(
+        "typescript".to_string(),
+        LintConfig {
+            commands: typescript_lint_commands(project_root),
+        },
+    );
 
     configs
+}
+
+fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
+    let package_json_path = project_root.join("package.json");
+    let Ok(package_json) = std::fs::read_to_string(package_json_path) else {
+        return Vec::new();
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&package_json) else {
+        return Vec::new();
+    };
+
+    let Some(scripts) = value.get("scripts").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut commands = Vec::new();
+
+    if scripts.contains_key("format") {
+        commands.push(LintCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "format".to_string()],
+            auto_fix_flag: None,
+        });
+    } else if scripts.contains_key("fmt") {
+        commands.push(LintCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "fmt".to_string()],
+            auto_fix_flag: None,
+        });
+    }
+
+    if scripts.contains_key("lint:fix") {
+        commands.push(LintCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "lint:fix".to_string()],
+            auto_fix_flag: None,
+        });
+    } else if scripts.contains_key("lint") {
+        commands.push(LintCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "lint".to_string()],
+            auto_fix_flag: None,
+        });
+    }
+
+    commands
 }
 
 fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
@@ -241,12 +292,21 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     let mut all_command_outputs = Vec::new(); // Track all command outputs
     let mut has_any_warnings_or_errors = false; // Track if we found any issues
 
+    let lint_configs = get_lint_configs(&project_root);
+
     // Run linters for each detected language
     for lang in detected_languages {
-        let _ = ui_tx.send(format!("::shell_output:\\n--- Linting {} ---", lang));
+        let _ = ui_tx.send(format!("::shell_output:\n--- Linting {} ---", lang));
 
-        let lint_configs = get_lint_configs();
         if let Some(config) = lint_configs.get(&lang) {
+            if config.commands.is_empty() {
+                let _ = ui_tx.send(format!(
+                    "::shell_output:No lint commands configured for language '{}' (missing package.json scripts like 'lint' or 'lint:fix').",
+                    lang
+                ));
+                continue;
+            }
+
             for lint_cmd in &config.commands {
                 let result =
                     run_command_sync_with_output(&project_root, &lint_cmd.command, &lint_cmd.args);
@@ -286,7 +346,7 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                 }
 
                 if !result.stdout.is_empty() {
-                    let _ = ui_tx.send(format!("::shell_output:Output:\\n{}", result.stdout));
+                    let _ = ui_tx.send(format!("::shell_output:Output:\n{}", result.stdout));
                 }
 
                 if !result.stderr.is_empty() {
@@ -351,7 +411,7 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     // If there are issues, send them to LLM for fixing
     if !all_issues.is_empty() {
         let _ = ui_tx.send(format!(
-            "::shell_output:\\nFound {} total issues. Sending to LLM for analysis and fixes...",
+            "::shell_output:\nFound {} total issues. Sending to LLM for analysis and fixes...",
             all_issues.len()
         ));
 
@@ -375,7 +435,7 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
 
         let _ = ui_tx.send(
-            "::shell_output:\\nSending full lint output to LLM for analysis and fixes..."
+            "::shell_output:\nSending full lint output to LLM for analysis and fixes..."
                 .to_string(),
         );
         // Use the existing dispatch pattern by sending the prompt via the user input mechanism
@@ -654,5 +714,63 @@ mod tests {
         assert!(detected.contains(&"rust".to_string()));
         assert!(detected.contains(&"go".to_string()));
         assert!(detected.contains(&"typescript".to_string()));
+    }
+
+    #[test]
+    fn test_typescript_lint_commands_prefers_format_and_lint_fix() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path();
+
+        std::fs::write(
+            project_path.join("package.json"),
+            r#"{"scripts":{"format":"prettier -w .","lint:fix":"eslint --fix ."}}"#,
+        )
+        .unwrap();
+
+        let commands = typescript_lint_commands(project_path);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].command, "npm");
+        assert_eq!(
+            commands[0].args,
+            vec!["run".to_string(), "format".to_string()]
+        );
+        assert_eq!(commands[1].command, "npm");
+        assert_eq!(
+            commands[1].args,
+            vec!["run".to_string(), "lint:fix".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_typescript_lint_commands_fallbacks_to_fmt_and_lint() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path();
+
+        std::fs::write(
+            project_path.join("package.json"),
+            r#"{"scripts":{"fmt":"prettier -w .","lint":"eslint ."}}"#,
+        )
+        .unwrap();
+
+        let commands = typescript_lint_commands(project_path);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].command, "npm");
+        assert_eq!(commands[0].args, vec!["run".to_string(), "fmt".to_string()]);
+        assert_eq!(commands[1].command, "npm");
+        assert_eq!(
+            commands[1].args,
+            vec!["run".to_string(), "lint".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_typescript_lint_commands_empty_when_missing_scripts() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path();
+
+        std::fs::write(project_path.join("package.json"), r#"{"name":"x"}"#).unwrap();
+
+        let commands = typescript_lint_commands(project_path);
+        assert!(commands.is_empty());
     }
 }

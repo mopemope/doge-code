@@ -257,6 +257,20 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
+    pub(crate) fn apply_plan_list_update(&mut self, plan_list: Vec<PlanItem>) {
+        if plan_list.is_empty() {
+            self.plan_list.clear();
+            self.hide_plan_on_next_instruction = false;
+            self.dirty = true;
+            return;
+        }
+
+        let all_completed = plan_list.iter().all(|t| t.status == "completed");
+        self.plan_list = plan_list;
+        self.hide_plan_on_next_instruction = all_completed;
+        self.dirty = true;
+    }
+
     pub fn get_all_commands(&self) -> Vec<String> {
         let mut commands = vec![
             "/help".to_string(),
