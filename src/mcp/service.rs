@@ -5,6 +5,7 @@ use crate::tools::read::{FsReadMode, FsReadOptions};
 use crate::tools::read_many::FsReadManyOptions;
 use crate::tools::search_repomap::RepomapSearchTools;
 use crate::tools::search_repomap::repomap::{ResultDensity, SearchRepomapArgs};
+use percent_encoding::percent_decode_str;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -138,6 +139,115 @@ impl DogeMcpService {
             config: self.config,
             semantic_service: service,
         }
+    }
+
+    pub async fn list_resources_impl(&self) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            resources: vec![Resource::new(
+                RawResource {
+                    uri: "doge://repomap/summary".to_string(),
+                    name: "RepoMap Summary".to_string(),
+                    description: Some(
+                        "Summary of the repository map, including statistics and top symbols."
+                            .to_string(),
+                    ),
+                    mime_type: Some("application/json".to_string()),
+                    icons: None,
+                    size: None,
+                    title: None,
+                },
+                None,
+            )],
+            next_cursor: None,
+        })
+    }
+
+    pub async fn list_resource_templates_impl(
+        &self,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult {
+            next_cursor: None,
+            resource_templates: vec![
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "doge://files/{path}".to_string(),
+                        name: "File Content".to_string(),
+                        description: Some("Read the content of a file in the project.".to_string()),
+                        mime_type: Some("text/plain".to_string()),
+                        title: None,
+                    },
+                    None,
+                ),
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "doge://symbols/{path}".to_string(),
+                        name: "File Symbols".to_string(),
+                        description: Some("Get the symbol map for a specific file.".to_string()),
+                        mime_type: Some("application/json".to_string()),
+                        title: None,
+                    },
+                    None,
+                ),
+            ],
+        })
+    }
+
+    pub async fn read_resource_impl(&self, uri: String) -> Result<ReadResourceResult, McpError> {
+        if uri == "doge://repomap/summary" {
+            let repomap_guard = self.repomap.read().await;
+            if let Some(map) = &*repomap_guard {
+                let summary = json!({
+                    "total_symbols": map.symbols.len(),
+                    "files_count": map.symbols.iter().map(|s| &s.file).collect::<std::collections::HashSet<_>>().len(),
+                });
+                let content = serde_json::to_string_pretty(&summary).unwrap();
+                return Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(content, uri)],
+                });
+            } else {
+                return Err(McpError::internal_error("Repomap not ready", None));
+            }
+        }
+
+        if let Some(path_str) = uri.strip_prefix("doge://files/") {
+            let decoded_path = percent_decode_str(path_str).decode_utf8_lossy();
+            let path = self.config.project_root.join(decoded_path.as_ref());
+
+            if path.exists() {
+                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                    McpError::internal_error(format!("Failed to read file: {}", e), None)
+                })?;
+                return Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(content, uri.clone())],
+                });
+            } else {
+                return Err(McpError::resource_not_found(uri, None));
+            }
+        }
+
+        if let Some(path_str) = uri.strip_prefix("doge://symbols/") {
+            let decoded_path = percent_decode_str(path_str).decode_utf8_lossy();
+            let target_path = self.config.project_root.join(decoded_path.as_ref());
+
+            let repomap_guard = self.repomap.read().await;
+            if let Some(map) = &*repomap_guard {
+                let symbols: Vec<_> = map
+                    .symbols
+                    .iter()
+                    .filter(|s| s.file == target_path)
+                    .collect();
+                let content = serde_json::to_string_pretty(&symbols).map_err(|e| {
+                    McpError::internal_error(format!("Serialization error: {}", e), None)
+                })?;
+                return Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(content, uri.clone())],
+                });
+            } else {
+                return Err(McpError::internal_error("Repomap not ready", None));
+            }
+        }
+
+        Err(McpError::resource_not_found(uri, None))
     }
 
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
@@ -349,10 +459,18 @@ impl ServerHandler for DogeMcpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "This server provides file system and code analysis tools.".to_string(),
+                "This server provides file system and code analysis tools. \
+                 Resources available: \
+                 - doge://repomap/summary: Overview of the codebase. \
+                 - doge://files/{path}: Read file content. \
+                 - doge://symbols/{path}: Get symbols for a file."
+                    .to_string(),
             ),
         }
     }
@@ -362,11 +480,7 @@ impl ServerHandler for DogeMcpService {
         _request: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        // Not implemented yet
-        Ok(ListResourcesResult {
-            resources: vec![],
-            next_cursor: None,
-        })
+        self.list_resources_impl().await
     }
 
     async fn read_resource(
@@ -374,13 +488,7 @@ impl ServerHandler for DogeMcpService {
         request: ReadResourceRequestParam,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        // Not implemented yet
-        Err(McpError::resource_not_found(
-            "resource_not_found",
-            Some(serde_json::Value::Object(serde_json::Map::from_iter(vec![
-                ("uri".to_string(), serde_json::Value::String(request.uri)),
-            ]))),
-        ))
+        self.read_resource_impl(request.uri).await
     }
 
     async fn list_resource_templates(
@@ -388,11 +496,7 @@ impl ServerHandler for DogeMcpService {
         _request: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        // Not implemented yet
-        Ok(ListResourceTemplatesResult {
-            next_cursor: None,
-            resource_templates: Vec::new(),
-        })
+        self.list_resource_templates_impl().await
     }
 
     async fn initialize(

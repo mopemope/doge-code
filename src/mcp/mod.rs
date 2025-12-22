@@ -176,6 +176,34 @@ mod tests {
         let error = service.format_error("Test error", Some(serde_json::json!("details")));
         assert_eq!(error.message, "Test error");
     }
+
+    #[tokio::test]
+    async fn test_list_resources_impl() {
+        let service = service::DogeMcpService::default();
+        let result = service.list_resources_impl().await;
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].uri, "doge://repomap/summary");
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_impl_summary_empty() {
+        let service = service::DogeMcpService::default();
+        let result = service
+            .read_resource_impl("doge://repomap/summary".to_string())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_impl_file_not_found() {
+        let service = service::DogeMcpService::default();
+        let result = service
+            .read_resource_impl("doge://files/nonexistent".to_string())
+            .await;
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]
