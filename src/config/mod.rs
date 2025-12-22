@@ -531,14 +531,16 @@ impl AppConfig {
             let mut rag_cfg = default_rag.clone();
 
             if let Some(file_rag) = &file_cfg.rag
-                && let Some(batch_size) = file_rag.batch_size {
-                    rag_cfg.batch_size = batch_size;
-                }
+                && let Some(batch_size) = file_rag.batch_size
+            {
+                rag_cfg.batch_size = batch_size;
+            }
 
             if let Some(project_rag) = &project_cfg.rag
-                && let Some(batch_size) = project_rag.batch_size {
-                    rag_cfg.batch_size = batch_size;
-                }
+                && let Some(batch_size) = project_rag.batch_size
+            {
+                rag_cfg.batch_size = batch_size;
+            }
             rag_cfg
         };
 

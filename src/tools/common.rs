@@ -12,6 +12,7 @@ use crate::tools::search_repomap;
 use crate::tools::search_text;
 use crate::tools::security::SecurityChecker;
 use crate::tools::session_manager::SessionManagerWrapper;
+use crate::tools::shell::{self, SharedShellSession};
 use crate::tools::write;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ pub struct FsTools {
     security_checker: SecurityChecker,
     pub context_manager: Arc<RwLock<ContextManager>>,
     pub undo_stack: Arc<RwLock<crate::tools::undo::UndoStack>>,
+    pub shell_session: SharedShellSession,
 }
 
 impl Default for FsTools {
@@ -51,8 +53,9 @@ impl FsTools {
             session_manager_wrapper: SessionManagerWrapper::new(None),
             config: config.clone(),
             remote_tool_manager: RemoteToolManager::new(config.clone()),
-            security_checker: SecurityChecker::new(config),
+            security_checker: SecurityChecker::new(config.clone()),
             undo_stack: Arc::new(RwLock::new(crate::tools::undo::UndoStack::new())),
+            shell_session: SharedShellSession::new(config.project_root.clone()),
         }
     }
 
@@ -300,6 +303,41 @@ impl FsTools {
                 self.record_tool_call_failure("execute_bash")?;
                 // Return a structured result with the error details
                 let result = execute::ExecuteBashResult {
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: None,
+                    success: false,
+                };
+                Ok(serde_json::to_string(&result)?)
+            }
+        }
+    }
+
+    pub async fn execute_shell(&self, command: &str) -> Result<String> {
+        // Update session with tool call count
+        self.update_session_with_tool_call_count()?;
+
+        // Check if the command is allowed
+        if !self.is_command_allowed(command) {
+            tracing::warn!("Command '{}' is not allowed", command);
+            self.record_tool_call_failure("execute_shell")?;
+            let result = shell::ExecuteShellResult {
+                stdout: String::new(),
+                stderr: format!("Command '{}' is not allowed", command),
+                exit_code: None,
+                success: false,
+            };
+            return Ok(serde_json::to_string(&result)?);
+        }
+
+        match self.shell_session.exec(command).await {
+            Ok(result) => {
+                self.record_tool_call_success("execute_shell")?;
+                Ok(result)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("execute_shell")?;
+                let result = shell::ExecuteShellResult {
                     stdout: String::new(),
                     stderr: e.to_string(),
                     exit_code: None,
