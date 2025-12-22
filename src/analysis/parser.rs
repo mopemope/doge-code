@@ -38,13 +38,13 @@ pub fn parse_single_file(
 }
 
 pub fn process_single_file(
-    file_path: std::path::PathBuf,
+    file_path: &std::path::Path,
     parse_result: (Tree, String, &'static LanguageConfig),
 ) -> Result<RepoMap> {
     let (tree, src, config) = parse_result;
     let mut map = RepoMap::default();
     config
         .collector
-        .extract_symbols(&mut map, &tree, &src, &file_path)?;
+        .extract_symbols(&mut map, &tree, &src, file_path)?;
     Ok(map)
 }

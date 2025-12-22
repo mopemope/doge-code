@@ -65,12 +65,10 @@ impl Analyzer {
 
         for file_path in files {
             match parse_single_file(&file_path, &mut self.parser, &mut self.current_lang) {
-                Ok(Some(parse_result)) => {
-                    match process_single_file(file_path.clone(), parse_result) {
-                        Ok(map) => maps.push(map),
-                        Err(e) => error!("Failed to process file {}: {:?}", file_path.display(), e),
-                    }
-                }
+                Ok(Some(parse_result)) => match process_single_file(&file_path, parse_result) {
+                    Ok(map) => maps.push(map),
+                    Err(e) => error!("Failed to process file {}: {:?}", file_path.display(), e),
+                },
                 Ok(None) => {
                     debug!("Skipped file (no parser): {}", file_path.display());
                 }
@@ -148,7 +146,7 @@ impl Analyzer {
                     for file_path in chunk {
                         match parse_single_file(&file_path, &mut parser, &mut current_lang) {
                             Ok(Some(parse_result)) => {
-                                match process_single_file(file_path.clone(), parse_result) {
+                                match process_single_file(&file_path, parse_result) {
                                     Ok(single_file_map) => map = map.merge(single_file_map),
                                     Err(e) => error!(
                                         "Failed to process file {}: {:?}",
@@ -353,7 +351,7 @@ impl Analyzer {
                         for file_path in chunk {
                             match parse_single_file(&file_path, &mut parser, &mut current_lang) {
                                 Ok(Some(parse_result)) => {
-                                    match process_single_file(file_path.clone(), parse_result) {
+                                    match process_single_file(&file_path, parse_result) {
                                         Ok(single_file_map) => map = map.merge(single_file_map),
                                         Err(e) => error!(
                                             "Failed to process file {}: {:?}",
