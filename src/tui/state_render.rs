@@ -160,18 +160,18 @@ pub fn build_render_plan(
         current_row += 1;
 
         // Items
-        for todo in plan_list {
+        for item in plan_list {
             if current_row >= view_end_row {
                 break;
             }
 
-            let status_symbol = match todo.status.as_str() {
+            let status_symbol = match item.status.as_str() {
                 "pending" => "◌",
                 "in_progress" => "◔",
                 "completed" => "✓",
                 _ => "○",
             };
-            let line_text = format!("{} {}", status_symbol, todo.content);
+            let line_text = format!("{} {}", status_symbol, item.content);
 
             if let Some(line) = render_plain(line_text, current_row) {
                 log_lines.push(line);

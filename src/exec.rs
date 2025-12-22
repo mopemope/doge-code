@@ -38,8 +38,16 @@ impl Executor {
     pub fn new(cfg: AppConfig) -> Result<Self> {
         info!("Initializing Executor for exec subcommand");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
-        // Initialize session manager for exec mode (even though it won't be used for persistence)
+        // Initialize session manager for exec mode
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
+
+        // Create a default session if none exists
+        {
+            let mut session_mgr = session_manager.lock().unwrap();
+            if session_mgr.current_session.is_none() {
+                session_mgr.create_session(None)?;
+            }
+        }
         let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
             .with_session_manager(session_manager);
 
