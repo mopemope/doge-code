@@ -210,7 +210,7 @@ impl TuiApp {
             })
             .collect();
 
-        let paragraph = Paragraph::new(lines.clone())
+        let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
             .block(Block::default());
         f.render_widget(paragraph, area);
@@ -363,8 +363,10 @@ impl TuiApp {
             })
             .collect();
 
+        // Fill any remaining space with blank lines to prevent artifacts
+        let list_height = items.len();
         let list =
-            List::new(items.clone())
+            List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(
                     "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
                 ))
@@ -373,8 +375,6 @@ impl TuiApp {
 
         f.render_widget(list, area);
 
-        // Fill any remaining space with blank lines to prevent artifacts
-        let list_height = items.len();
         let border_height = 2; // top and bottom border
         if list_height + border_height < area.height as usize {
             let blank_lines_needed = (area.height as usize - list_height - border_height).max(0);
@@ -617,7 +617,7 @@ impl TuiApp {
                     } else {
                         theme.completion_style
                     };
-                    ListItem::new(path.clone()).style(style)
+                    ListItem::new(path.as_str()).style(style)
                 })
                 .collect()
         };
