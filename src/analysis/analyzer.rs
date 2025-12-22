@@ -331,7 +331,7 @@ impl Analyzer {
             let chunk_size = std::cmp::max(1, changed_files.len().div_ceil(num_chunks));
             let chunks: Vec<Vec<PathBuf>> = changed_files
                 .chunks(chunk_size)
-                .map(|chunk| chunk.to_vec())
+                .map(|chunk: &[PathBuf]| chunk.to_vec())
                 .collect();
 
             let mut tasks = Vec::new();

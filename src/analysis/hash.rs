@@ -1,17 +1,16 @@
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-/// Calculate SHA256 hash of a file using streaming to reduce memory usage
+/// Calculate BLAKE3 hash of a file using streaming to reduce memory usage
 pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     let file = File::open(file_path)
         .with_context(|| format!("Failed to open file: {}", file_path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     let mut buffer = [0; 8192]; // 8KB buffer
 
     loop {
@@ -23,7 +22,7 @@ pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     }
 
     let hash = hasher.finalize();
-    Ok(format!("{:x}", hash))
+    Ok(hash.to_hex().to_string())
 }
 
 /// Calculate hashes of multiple files in parallel
@@ -44,7 +43,7 @@ pub async fn calculate_file_hashes(file_paths: &[PathBuf]) -> HashMap<PathBuf, S
     let chunk_size = std::cmp::max(1, file_paths.len().div_ceil(num_chunks));
     let chunks: Vec<Vec<PathBuf>> = file_paths
         .chunks(chunk_size)
-        .map(|chunk| chunk.to_vec())
+        .map(|chunk: &[PathBuf]| chunk.to_vec())
         .collect();
 
     debug!(
@@ -172,10 +171,10 @@ mod tests {
         fs::write(&file_path, "Hello, World!").unwrap();
 
         let hash = calculate_file_hash(&file_path).unwrap();
-        // SHA256 hash of "Hello, World!"
+        // BLAKE3 hash of "Hello, World!"
         assert_eq!(
             hash,
-            "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+            "288a86a79f20a3d6dccdca7713beaed178798296bdfa7913fa2a62d9727bf8f8"
         );
     }
 
@@ -232,5 +231,18 @@ mod tests {
         assert_eq!(diff.removed, vec![file3]);
         assert!(diff.has_changes());
         assert_eq!(diff.total_changes(), 3);
+    }
+    #[test]
+    fn test_calculate_hash_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("empty.txt");
+        File::create(&file_path).unwrap();
+
+        let hash = calculate_file_hash(&file_path).unwrap();
+        // BLAKE3 hash of empty string: AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262
+        assert_eq!(
+            hash,
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
     }
 }
