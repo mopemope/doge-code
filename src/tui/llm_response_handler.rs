@@ -1,30 +1,53 @@
 use crate::tui::state::TuiApp; // import TuiApp
 use regex::Regex;
+use std::sync::OnceLock;
 use tracing::debug; // import tracing
+
+static CSI_RE: OnceLock<Regex> = OnceLock::new();
+static OSC_RE: OnceLock<Regex> = OnceLock::new();
+
+// Sanitize incoming token/content to avoid terminal-control sequences that can break raw mode.
+fn sanitize_for_display(input: &str) -> String {
+    // Fast path: no escape sequences, no CR, and no other control chars.
+    if !input.contains('\x1b')
+        && !input.contains('\r')
+        && !input
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return input.to_string();
+    }
+
+    let mut s = input.to_string();
+
+    if s.contains('\x1b') {
+        let csi_re = CSI_RE
+            .get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("valid CSI regex"));
+        let osc_re = OSC_RE
+            .get_or_init(|| Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").expect("valid OSC regex"));
+
+        // Remove common ANSI CSI sequences.
+        let stripped = csi_re.replace_all(&s, "");
+        // Remove OSC sequences: ESC ] ... BEL or ESC \\
+        let stripped = osc_re.replace_all(&stripped, "");
+        s = stripped.into_owned();
+    }
+
+    // Handle carriage returns - convert \r\n to \n and remove standalone \r
+    if s.contains('\r') {
+        s = s.replace("\r\n", "\n").replace('\r', "");
+    }
+
+    // Remove other control chars except newline and tab
+    s.chars()
+        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .collect()
+}
 
 // Implement LLM response handling logic for TuiApp
 impl TuiApp {
     // New: structured handling for LLM streaming tokens (immediate log addition)
     pub fn append_stream_token_structured(&mut self, s: &str) {
-        // Sanitize incoming token to avoid terminal-control sequences that can break raw mode
-        fn sanitize_for_display(input: &str) -> String {
-            // Remove common ANSI CSI sequences
-            let csi_re = Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap();
-            // Remove OSC sequences: ESC ] ... BEL or ESC \
-            let osc_re = Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").unwrap();
-
-            let mut s = csi_re.replace_all(input, "").to_string();
-            s = osc_re.replace_all(&s, "").to_string();
-
-            // Handle carriage returns - convert \r\n to \n and remove standalone \r
-            let s = s.replace("\r\n", "\n").replace('\r', "");
-
-            // Remove other control chars except newline and tab
-            s.chars()
-                .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
-                .collect()
-        }
-
         let clean = sanitize_for_display(s);
 
         // Append received (sanitized) token to the parsing buffer for final processing
@@ -36,23 +59,23 @@ impl TuiApp {
         }
 
         // Accumulate content in last_llm_response_content for duplicate checking
-        let accumulated_content = match &self.last_llm_response_content {
-            Some(existing) => format!("{}{}", existing, clean),
-            None => clean.clone(),
-        };
-        self.last_llm_response_content = Some(accumulated_content);
+        if let Some(existing) = &mut self.last_llm_response_content {
+            existing.push_str(&clean);
+        } else {
+            self.last_llm_response_content = Some(clean.clone());
+        }
 
         // For immediate display during streaming, add the sanitized token with margin
         // This will be replaced by structured content when streaming completes
         if !clean.trim().is_empty() {
             // Handle content with newlines by preserving the exact structure
             // But use split('\n') instead of lines() to preserve trailing newlines
-            let parts: Vec<&str> = clean.split('\n').collect();
-            for (i, part) in parts.iter().enumerate() {
+            let mut parts = clean.split('\n').peekable();
+            while let Some(part) = parts.next() {
                 let line_with_margin = format!("  {}", part); // 2-space margin for streaming content
                 self.push_log(line_with_margin);
                 // Add empty line for all but the last part
-                if i < parts.len() - 1 {
+                if parts.peek().is_some() {
                     self.push_log("  ".to_string()); // Empty line with margin
                 }
             }
@@ -95,6 +118,8 @@ impl TuiApp {
     pub fn finalize_and_append_llm_response(&mut self, content: &str) {
         debug!("finalize_and_append_llm_response called");
 
+        let content = sanitize_for_display(content);
+
         // Check if LLM response is already being displayed to prevent duplicates
         if self.is_llm_response_active {
             debug!(
@@ -113,7 +138,7 @@ impl TuiApp {
             Some(existing) => {
                 // If the existing content is not the same as the new content, add it
                 // This handles both streaming and non-streaming cases
-                existing != content
+                existing != &content
             }
             None => {
                 // If there's no existing content, add the new content
@@ -130,8 +155,8 @@ impl TuiApp {
                 self.log.truncate(start);
             }
 
-            self.push_markdown_response(content);
-            self.last_llm_response_content = Some(content.to_string());
+            self.push_markdown_response(&content);
+            self.last_llm_response_content = Some(content);
         } else {
             debug!("Skipping content addition due to duplicate check");
             self.current_stream_start = None;

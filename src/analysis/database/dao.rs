@@ -10,6 +10,25 @@ use tracing::{debug, info};
 pub struct RepomapDAO;
 
 impl RepomapDAO {
+    async fn load_file_hashes_only(
+        conn: &DatabaseConnection,
+        project_root_str: &str,
+    ) -> Result<HashMap<PathBuf, String>> {
+        let file_hash_models = FileHashEntity::find()
+            .filter(
+                crate::analysis::database::entities::file_hash::Column::ProjectRoot
+                    .eq(project_root_str),
+            )
+            .all(conn)
+            .await
+            .context("Failed to load file hashes from database")?;
+
+        Ok(file_hash_models
+            .into_iter()
+            .map(|m| (PathBuf::from(m.file_path), m.hash))
+            .collect())
+    }
+
     /// Saves a RepoMap and its associated file hashes to the database.
     ///
     /// # Arguments
@@ -44,46 +63,62 @@ impl RepomapDAO {
         // Clear existing data for this project root to ensure a clean save
         Self::clear_repomap(&txn, project_root).await?;
 
-        // Insert symbols in batches
-        let mut symbol_models = Vec::with_capacity(repomap.symbols.len());
+        const BATCH_SIZE: usize = 1000;
+
+        // Insert symbols in batches without cloning large vectors.
+        let mut symbol_batch = Vec::with_capacity(BATCH_SIZE);
         for symbol in &repomap.symbols {
-            symbol_models.push(
+            symbol_batch.push(
                 crate::analysis::database::dao_conversions::symbol_to_active_model(
                     symbol,
                     project_root_str,
                 )?,
             );
-        }
 
-        if !symbol_models.is_empty() {
-            for chunk in symbol_models.chunks(1000) {
-                SymbolInfoEntity::insert_many(chunk.to_vec())
+            if symbol_batch.len() == BATCH_SIZE {
+                let batch = std::mem::take(&mut symbol_batch);
+                SymbolInfoEntity::insert_many(batch)
                     .exec(&txn)
                     .await
                     .context("Failed to batch insert symbols")?;
+                symbol_batch = Vec::with_capacity(BATCH_SIZE);
             }
         }
 
-        // Insert file hashes in batches
-        let mut file_hash_models = Vec::with_capacity(hashes.len());
+        if !symbol_batch.is_empty() {
+            SymbolInfoEntity::insert_many(symbol_batch)
+                .exec(&txn)
+                .await
+                .context("Failed to batch insert symbols")?;
+        }
+
+        // Insert file hashes in batches without cloning.
+        let mut file_hash_batch = Vec::with_capacity(BATCH_SIZE);
         for (file_path, hash) in hashes {
             let file_path_str = file_path.to_str().context("File path is not valid UTF-8")?;
-            file_hash_models.push(
+            file_hash_batch.push(
                 crate::analysis::database::dao_conversions::file_hash_to_active_model(
                     file_path_str,
                     hash,
                     project_root_str,
                 ),
             );
-        }
 
-        if !file_hash_models.is_empty() {
-            for chunk in file_hash_models.chunks(1000) {
-                FileHashEntity::insert_many(chunk.to_vec())
+            if file_hash_batch.len() == BATCH_SIZE {
+                let batch = std::mem::take(&mut file_hash_batch);
+                FileHashEntity::insert_many(batch)
                     .exec(&txn)
                     .await
                     .context("Failed to batch insert file hashes")?;
+                file_hash_batch = Vec::with_capacity(BATCH_SIZE);
             }
+        }
+
+        if !file_hash_batch.is_empty() {
+            FileHashEntity::insert_many(file_hash_batch)
+                .exec(&txn)
+                .await
+                .context("Failed to batch insert file hashes")?;
         }
 
         // Commit the transaction
@@ -234,12 +269,15 @@ impl RepomapDAO {
             .to_str()
             .context("Project root path is not valid UTF-8")?;
 
-        // Load stored hashes
-        let stored_data = Self::load_repomap(conn, project_root).await?;
-        let Some((_, stored_hashes)) = stored_data else {
-            debug!("No stored repomap found for project: {}", project_root_str);
+        // Load only stored hashes (avoid loading all symbols)
+        let stored_hashes = Self::load_file_hashes_only(conn, project_root_str).await?;
+        if stored_hashes.is_empty() {
+            debug!(
+                "No stored file hashes found for project: {}",
+                project_root_str
+            );
             return Ok(false);
-        };
+        }
 
         // Compare hashes
         let is_valid = stored_hashes == *current_hashes;
@@ -268,12 +306,12 @@ impl RepomapDAO {
             .to_str()
             .context("Project root path is not valid UTF-8")?;
 
-        // Load stored hashes
-        let stored_data = Self::load_repomap(conn, project_root).await?;
-        let Some((_, stored_hashes)) = stored_data else {
+        // Load only stored hashes (avoid loading all symbols)
+        let stored_hashes = Self::load_file_hashes_only(conn, project_root_str).await?;
+        if stored_hashes.is_empty() {
             // If no stored data, all current files are considered changed
             return Ok(current_hashes.keys().cloned().collect());
-        };
+        }
 
         let mut changed_files = Vec::new();
 
