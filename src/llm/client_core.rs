@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -103,6 +104,14 @@ impl OpenAIClient {
     ) -> Result<ChoiceMessage> {
         // Delegate to network module implementation for clarity and to keep this file small
         crate::llm::client_core::network::chat_once(self, model, messages, cancel).await
+    }
+
+    pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
+        &self,
+        req: &T,
+        cancel: Option<CancellationToken>,
+    ) -> Result<ChoiceMessage> {
+        crate::llm::client_core::network::chat_once_request(self, req, cancel).await
     }
 
     #[allow(dead_code)]

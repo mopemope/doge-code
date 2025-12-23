@@ -1,41 +1,32 @@
 //! Compaction Module
 //! This module handles conversation history compaction when context limits are reached.
 
-use crate::llm::{self, CompactParams, CompactResult};
+use crate::llm;
 use crate::llm::types::ChatMessage;
 use crate::config::AppConfig;
 use crate::llm::client_core::OpenAIClient;
 use crate::tools::FsTools;
 use anyhow::Result;
 use std::sync::mpsc;
-use tracing::{info, warn, error};
+use tracing::{error, info};
 
 /// Handles conversation history compaction when context limits are approached or exceeded.
 /// This function checks if compaction is needed and performs the compaction process.
 pub async fn handle_compaction(
     client: &OpenAIClient,
     model: &str,
-    fs: &FsTools,
+    _fs: &FsTools,
     messages: &mut Vec<ChatMessage>,
     ui_tx: &Option<mpsc::Sender<String>>,
-    cfg: &AppConfig,
+    _cfg: &AppConfig,
 ) -> Result<bool> {
     // Send status message to UI
     if let Some(tx) = ui_tx {
         let _ = tx.send("::status:compacting:Context limits approaching, summarizing history...".to_string());
     }
 
-    // Prepare compaction parameters
-    let params = CompactParams {
-        client: client.clone(),
-        model: model.to_string(),
-        fs_tools: fs.clone(),
-        history: messages.clone(),
-        cfg: cfg.clone(),
-    };
-
     // Perform compaction
-    match llm::compact_conversation_history(params).await {
+    match llm::compact_conversation_history_ref(client, model, messages.as_slice()).await {
         Ok(compact_result) => {
             if compact_result.metadata.success {
                 info!("History compaction successful");

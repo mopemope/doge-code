@@ -5,9 +5,12 @@
 //! token usage for future LLM interactions.
 
 use crate::config::AppConfig;
+use crate::llm::types::ChatMessage;
 use crate::llm::{self, OpenAIClient};
 use crate::tools::FsTools;
 use anyhow::Result;
+use serde::Serialize;
+use serde::ser::{SerializeSeq, Serializer};
 
 /// The prompt used for compacting conversation history
 pub const COMPACT_PROMPT: &str = r#"Summarize the conversation history into a concise, dense Markdown snapshot.
@@ -58,6 +61,35 @@ pub struct CompactMetadata {
     pub error_message: Option<String>,
 }
 
+struct MessagesWithSystem<'a> {
+    system: ChatMessage,
+    history: &'a [ChatMessage],
+}
+
+impl Serialize for MessagesWithSystem<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.history.len().saturating_add(1)))?;
+        seq.serialize_element(&self.system)?;
+        for msg in self.history {
+            seq.serialize_element(msg)?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Serialize)]
+struct ChatRequestRef<'a> {
+    model: &'a str,
+    messages: MessagesWithSystem<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
 /// Compacts conversation history by summarizing it using an LLM.
 ///
 /// This function takes a conversation history and uses an LLM to summarize it
@@ -72,8 +104,15 @@ pub struct CompactMetadata {
 ///
 /// A result containing the compacted message or an error
 pub async fn compact_conversation_history(params: CompactParams) -> Result<CompactResult> {
+    let CompactParams {
+        client,
+        model,
+        history,
+        ..
+    } = params;
+
     // Build messages for the summarization request
-    let mut msgs = Vec::new();
+    let mut msgs = Vec::with_capacity(history.len().saturating_add(1));
 
     // Add system prompt for summarization
     msgs.push(llm::types::ChatMessage {
@@ -84,18 +123,19 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
     });
 
     // Add the conversation history to be summarized
-    msgs.extend(params.history.clone());
+    msgs.extend(history);
 
     // Send the summarization request to the LLM using run_agent_loop
     // Send the summarization request to the LLM using chat_once (no tool usage needed/allowed for compaction)
-    match params.client.chat_once(&params.model, msgs, None).await {
+    match client.chat_once(&model, msgs, None).await {
         Ok(final_msg) => {
             // Extract the summary from the final message
-            if !final_msg.content.is_empty() {
+            let summary = final_msg.content;
+            if !summary.is_empty() {
                 // Create a new compacted message with the summary
                 let compacted_message = llm::types::ChatMessage {
                     role: "user".into(),
-                    content: Some(final_msg.content.clone()),
+                    content: Some(summary),
                     tool_calls: vec![],
                     tool_call_id: None,
                 };
@@ -143,10 +183,77 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
     }
 }
 
+pub async fn compact_conversation_history_ref(
+    client: &OpenAIClient,
+    model: &str,
+    history: &[ChatMessage],
+) -> Result<CompactResult> {
+    let req = ChatRequestRef {
+        model,
+        messages: MessagesWithSystem {
+            system: ChatMessage {
+                role: "system".into(),
+                content: Some(COMPACT_PROMPT.to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            history,
+        },
+        temperature: None,
+        stream: None,
+    };
+
+    match client.chat_once_request(&req, None).await {
+        Ok(final_msg) => {
+            let summary = final_msg.content;
+            if !summary.is_empty() {
+                Ok(CompactResult {
+                    compacted_message: ChatMessage {
+                        role: "user".into(),
+                        content: Some(summary),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    },
+                    metadata: CompactMetadata {
+                        success: true,
+                        error_message: None,
+                    },
+                })
+            } else {
+                Ok(CompactResult {
+                    compacted_message: ChatMessage {
+                        role: "user".into(),
+                        content: Some("".to_string()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    },
+                    metadata: CompactMetadata {
+                        success: false,
+                        error_message: Some(
+                            "Received empty response from LLM during compaction.".to_string(),
+                        ),
+                    },
+                })
+            }
+        }
+        Err(e) => Ok(CompactResult {
+            compacted_message: ChatMessage {
+                role: "user".into(),
+                content: Some("".to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            metadata: CompactMetadata {
+                success: false,
+                error_message: Some(format!("Failed to compact conversation: {e}")),
+            },
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::types::ChatMessage;
 
     #[test]
     fn test_compact_prompt_constant() {

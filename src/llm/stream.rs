@@ -59,14 +59,22 @@ impl OpenAIClient {
     pub async fn chat_stream(
         &self,
         model: &str,
-        messages: Vec<ChatMessage>,
+        messages: &[ChatMessage],
         cancel: Option<CancellationToken>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        use crate::llm::types::ChatRequest;
+        #[derive(Serialize)]
+        struct ChatRequestRef<'a> {
+            model: &'a str,
+            messages: &'a [ChatMessage],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            stream: Option<bool>,
+        }
 
         let url = self.endpoint();
-        let req = ChatRequest {
-            model: model.to_string(),
+        let req = ChatRequestRef {
+            model,
             messages,
             temperature: None,
             stream: Some(true),
@@ -84,8 +92,10 @@ impl OpenAIClient {
             format!("Bearer {}", self.api_key).parse().unwrap(),
         );
 
-        if let Ok(payload) = serde_json::to_string_pretty(&req) {
-            debug!(payload=%payload, endpoint=%url, "sending chat.completions payload (stream)");
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(payload) = serde_json::to_string_pretty(&req)
+        {
+            debug!(payload = %payload, endpoint = %url, "sending chat.completions payload (stream)");
         }
 
         let cancel_token = cancel.unwrap_or_default();

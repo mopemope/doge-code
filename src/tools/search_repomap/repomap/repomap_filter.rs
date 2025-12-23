@@ -222,6 +222,21 @@ pub(super) fn filter_and_group_symbols(
     args.snippet_max_chars = Some(snippet_max_chars);
     args.include_snippets = Some(include_snippets);
 
+    let allowed_fields: std::collections::HashSet<String> = args
+        .fields
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
+        .unwrap_or_else(|| {
+            ["name", "keyword", "code", "doc"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect()
+        });
+
+    let needs_code_or_doc_search = (args.name.as_ref().is_some_and(|v| !v.is_empty())
+        || args.keyword_search.as_ref().is_some_and(|v| !v.is_empty()))
+        && (allowed_fields.contains("code") || allowed_fields.contains("doc"));
+
     // Group symbols by file
     let mut file_groups: HashMap<PathBuf, Vec<&SymbolInfo>> = HashMap::new();
     for symbol in symbols {
@@ -276,8 +291,12 @@ pub(super) fn filter_and_group_symbols(
             continue;
         }
 
-        // Read file content once for code/doc matching and snippet extraction
-        let file_content = fs::read_to_string(&file_path).ok();
+        // Read file content only when needed for code/doc matching or snippet extraction.
+        let file_content = if include_snippets || needs_code_or_doc_search {
+            fs::read_to_string(&file_path).ok()
+        } else {
+            None
+        };
         let file_lines: Option<Vec<&str>> = file_content.as_ref().map(|c| c.lines().collect());
 
         // Filter symbols within the file and collect SymbolSearchResult directly with match info
@@ -286,7 +305,7 @@ pub(super) fn filter_and_group_symbols(
             // Apply symbol kind filter
             if let Some(kinds) = &args.symbol_kinds
                 && !kinds.is_empty()
-                && !kinds.contains(&symbol.kind.as_str().to_string())
+                && !kinds.iter().any(|k| k == symbol.kind.as_str())
             {
                 continue;
             }
@@ -317,18 +336,6 @@ pub(super) fn filter_and_group_symbols(
             // Prepare match spans and scoring
             let mut match_spans: Vec<MatchSpan> = Vec::new();
             let mut score: f64 = 0.0;
-
-            // Determine allowed fields to search (default: all)
-            let allowed_fields: std::collections::HashSet<String> = args
-                .fields
-                .as_ref()
-                .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
-                .unwrap_or_else(|| {
-                    ["name", "keyword", "code", "doc"]
-                        .into_iter()
-                        .map(|s| s.to_string())
-                        .collect()
-                });
 
             // Helper to find term in symbol's code region (returns (field, line_no, col, matched_text))
             let find_in_code = |term_lower: &str| -> Option<(String, usize, usize, String)> {
@@ -556,48 +563,59 @@ pub(super) fn filter_and_group_symbols(
         }
 
         // Add code snippets if requested
-        let include_snippets = args.include_snippets.unwrap_or(true);
-        if include_snippets && let Ok(content) = fs::read_to_string(&file_path) {
-            let lines: Vec<&str> = content.lines().collect();
-            let context_lines = args.context_lines.unwrap_or(0);
-            let snippet_max_chars = args.snippet_max_chars.unwrap_or(1000);
+        if include_snippets {
+            // Prefer the content we already read (for matching). If it wasn't loaded earlier,
+            // fall back to a one-off read to preserve previous behavior.
+            let fallback_content: Option<String>;
+            let content = if let Some(content) = file_content.as_deref() {
+                Some(content)
+            } else {
+                fallback_content = fs::read_to_string(&file_path).ok();
+                fallback_content.as_deref()
+            };
 
-            for symbol_result in &mut filtered_symbol_results {
-                let start_line = symbol_result.start_line.saturating_sub(1);
-                let end_line = symbol_result.end_line.min(lines.len());
+            if let Some(content) = content {
+                let lines: Vec<&str> = content.lines().collect();
+                let context_lines = args.context_lines.unwrap_or(0);
+                let snippet_max_chars = args.snippet_max_chars.unwrap_or(1000);
 
-                let start = start_line.saturating_sub(context_lines);
-                let end = (end_line + context_lines).min(lines.len());
+                for symbol_result in &mut filtered_symbol_results {
+                    let start_line = symbol_result.start_line.saturating_sub(1);
+                    let end_line = symbol_result.end_line.min(lines.len());
 
-                if start < end {
-                    let mut snippet = lines[start..end].join("\n");
-                    if snippet.len() > snippet_max_chars {
-                        // Safely truncate to the nearest character boundary that doesn't exceed snippet_max_chars
-                        let mut valid_truncate_at = 0;
-                        let mut char_count = 0;
+                    let start = start_line.saturating_sub(context_lines);
+                    let end = (end_line + context_lines).min(lines.len());
 
-                        // Iterate through characters and find the position after snippet_max_chars characters
-                        for (byte_idx, _) in snippet.char_indices() {
+                    if start < end {
+                        let mut snippet = lines[start..end].join("\n");
+                        if snippet.len() > snippet_max_chars {
+                            // Safely truncate to the nearest character boundary that doesn't exceed snippet_max_chars
+                            let mut valid_truncate_at = 0;
+                            let mut char_count = 0;
+
+                            // Iterate through characters and find the position after snippet_max_chars characters
+                            for (byte_idx, _) in snippet.char_indices() {
+                                if char_count >= snippet_max_chars {
+                                    break;
+                                }
+                                valid_truncate_at = byte_idx;
+                                char_count += 1;
+                            }
+
+                            // At this point, valid_truncate_at is the byte position of the last character to keep
+                            // Now we need to advance to the end of that last character to get the truncation point
                             if char_count >= snippet_max_chars {
-                                break;
+                                // Get the byte length of the character at valid_truncate_at, to move to next position
+                                if let Some(ch) = snippet[valid_truncate_at..].chars().next() {
+                                    valid_truncate_at += ch.len_utf8();
+                                }
                             }
-                            valid_truncate_at = byte_idx;
-                            char_count += 1;
-                        }
 
-                        // At this point, valid_truncate_at is the byte position of the last character to keep
-                        // Now we need to advance to the end of that last character to get the truncation point
-                        if char_count >= snippet_max_chars {
-                            // Get the byte length of the character at valid_truncate_at, to move to next position
-                            if let Some(ch) = snippet[valid_truncate_at..].chars().next() {
-                                valid_truncate_at += ch.len_utf8();
-                            }
+                            snippet.truncate(valid_truncate_at);
+                            snippet.push_str("...");
                         }
-
-                        snippet.truncate(valid_truncate_at);
-                        snippet.push_str("...");
+                        symbol_result.code_snippet = snippet;
                     }
-                    symbol_result.code_snippet = snippet;
                 }
             }
         }

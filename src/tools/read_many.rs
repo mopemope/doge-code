@@ -193,14 +193,15 @@ pub fn fs_read_many_files(
         f.read_to_string(&mut s)
             .with_context(|| format!("read {}", p.display()))?;
         let total_lines = s.lines().count();
-        let mut snippet = s.clone();
         let mut truncated = false;
 
-        if options.mode == FsReadMode::Summary {
+        let mut snippet = if options.mode == FsReadMode::Summary {
             let snippet_lines: Vec<&str> = s.lines().take(DEFAULT_MULTI_SNIPPET_LINES).collect();
-            snippet = snippet_lines.join("\n");
             truncated = total_lines > snippet_lines.len();
-        }
+            snippet_lines.join("\n")
+        } else {
+            s
+        };
 
         if snippet.len() > snippet_char_cap {
             let mut truncate_at = snippet_char_cap;

@@ -125,9 +125,7 @@ impl Analyzer {
 
         let mut tasks = Vec::new();
         for chunk in chunks {
-            let _root_clone = self.root.clone();
-
-            let task = task::spawn(async move {
+            let task = task::spawn_blocking(move || {
                 // Wrap the task logic in a catch_unwind to handle potential panics
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Create parser and language in the task
@@ -325,7 +323,7 @@ impl Analyzer {
 
             let mut tasks = Vec::new();
             for chunk in chunks {
-                let task = task::spawn(async move {
+                let task = task::spawn_blocking(move || {
                     // Wrap the task logic in a catch_unwind to handle potential panics
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // Create parser and language in the task

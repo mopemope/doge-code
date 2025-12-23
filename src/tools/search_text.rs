@@ -3,15 +3,36 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 
 use anyhow::{Context, Result};
 
-use glob::glob;
-
 use serde::Deserialize;
 
 use serde_json::json;
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use std::process::Command;
+
+fn glob_search_root(pattern: &str) -> PathBuf {
+    if let Some(meta_pos) = pattern.find(['*', '?', '[', '{']) {
+        let before_meta = &pattern[..meta_pos];
+        let before_meta = before_meta.trim_end_matches('/');
+        if before_meta.is_empty() {
+            return PathBuf::from(".");
+        }
+
+        Path::new(before_meta)
+            .parent()
+            .unwrap_or(Path::new(before_meta))
+            .to_path_buf()
+    } else {
+        let path = Path::new(pattern);
+        if path.as_os_str().is_empty() {
+            return PathBuf::from(".");
+        }
+
+        path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    }
+}
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -73,23 +94,25 @@ pub fn search_text(
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
     let project_root = &config.project_root;
+    cmd.current_dir(project_root);
     if let Some(glob_pattern) = file_glob {
-        // Expand the glob pattern to get a list of files
-        for entry in glob(glob_pattern).context("Failed to read glob pattern")? {
-            match entry {
-                Ok(path) => {
-                    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    if canonical_path.starts_with(project_root) {
-                        // Ensure the path is absolute
-                        let absolute_path = path.canonicalize().unwrap_or(path);
-                        // Add each file path as an argument to ripgrep
-                        cmd.arg(absolute_path);
-                    }
-                    // If the path is outside the project root, we simply don't add it to the command
-                }
-                Err(e) => println!("Error reading glob entry: {e}"),
+        let glob_pattern = if Path::new(glob_pattern).is_absolute() {
+            let abs = Path::new(glob_pattern);
+            match abs.strip_prefix(project_root) {
+                Ok(rel) => rel.to_string_lossy().to_string(),
+                Err(_) => return Ok(Vec::new()),
             }
-        }
+        } else {
+            glob_pattern.to_string()
+        };
+
+        // Avoid building a gigantic argument list (E2BIG) by letting ripgrep filter files itself.
+        cmd.arg("--glob").arg(&glob_pattern);
+
+        // Narrow traversal when the glob has a clear prefix.
+        let search_root = glob_search_root(&glob_pattern);
+
+        cmd.arg(search_root);
     } else {
         // If no glob pattern is provided, search in the current directory
         cmd.arg(".");
@@ -131,11 +154,13 @@ pub fn search_text(
             && let (Some(path_text), Some(lines_text), Some(line_number)) =
                 (parsed.data.path, parsed.data.lines, parsed.data.line_number)
         {
-            results.push((
-                PathBuf::from(path_text.text),
-                line_number,
-                lines_text.text.trim().to_string(),
-            ));
+            let raw_path = PathBuf::from(path_text.text);
+            let abs_path = if raw_path.is_absolute() {
+                raw_path
+            } else {
+                project_root.join(raw_path)
+            };
+            results.push((abs_path, line_number, lines_text.text.trim().to_string()));
         }
     }
 

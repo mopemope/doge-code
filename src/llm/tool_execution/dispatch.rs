@@ -9,7 +9,7 @@ mod tools;
 
 pub async fn dispatch_tool_call(
     runtime: &ToolRuntime<'_>,
-    call: ToolCall,
+    call: &ToolCall,
 ) -> Result<serde_json::Value> {
     debug!("dispatching tool call");
     if call.r#type != "function" {

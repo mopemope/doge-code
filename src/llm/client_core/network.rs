@@ -1,5 +1,6 @@
 use anyhow::Result;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
+use serde::Serialize;
 use serde_json;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -15,13 +16,22 @@ pub async fn chat_once(
     messages: Vec<ChatMessage>,
     cancel: Option<CancellationToken>,
 ) -> Result<ChoiceMessage> {
-    let url = client.endpoint();
     let req = ChatRequest {
         model: model.to_string(),
         messages,
         temperature: None,
         stream: None,
     };
+
+    chat_once_request(client, &req, cancel).await
+}
+
+pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
+    client: &OpenAIClient,
+    req: &T,
+    cancel: Option<CancellationToken>,
+) -> Result<ChoiceMessage> {
+    let url = client.endpoint();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -35,8 +45,10 @@ pub async fn chat_once(
         format!("Bearer {}", client.api_key).parse().unwrap(),
     );
 
-    if let Ok(payload) = serde_json::to_string_pretty(&req) {
-        debug!(payload=%payload, endpoint=%url, "sending chat.completions payload");
+    if tracing::enabled!(tracing::Level::DEBUG)
+        && let Ok(payload) = serde_json::to_string_pretty(req)
+    {
+        debug!(payload = %payload, endpoint = %url, "sending chat.completions payload");
     }
 
     let max_attempts = client.llm_cfg.max_retries.saturating_add(1);
@@ -45,7 +57,7 @@ pub async fn chat_once(
     let cancel_token = cancel.unwrap_or_default();
 
     for attempt in 1..=max_attempts {
-        let req_builder = client.inner.post(&url).headers(headers.clone()).json(&req);
+        let req_builder = client.inner.post(&url).headers(headers.clone()).json(req);
 
         let resp_res = tokio::select! {
             biased;

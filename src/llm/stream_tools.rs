@@ -95,6 +95,6 @@ pub async fn execute_tool_call(
 ) -> Result<serde_json::Value> {
     let sc = buf.finalize_sync_call(index)?;
     debug!("executing reconstructed tool call");
-    let res = dispatch_sync_tool_call(runtime, sc).await?;
+    let res = dispatch_sync_tool_call(runtime, &sc).await?;
     Ok(res)
 }
