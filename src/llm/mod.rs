@@ -28,6 +28,7 @@ pub use tool_execution::{run_agent_loop, run_agent_streaming_once};
 // Re-export the compact_history module components
 pub use compact_history::{
     CompactMetadata, CompactParams, CompactResult, compact_conversation_history,
+    compact_conversation_history_ref,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -108,15 +108,9 @@ pub async fn run_agent_loop(
                 );
             }
 
-            let params = crate::llm::CompactParams {
-                client: client.clone(),
-                model: model.to_string(),
-                fs_tools: fs.clone(),
-                history: messages.clone(),
-                cfg: cfg.clone(),
-            };
-
-            match crate::llm::compact_conversation_history(params).await {
+            match crate::llm::compact_conversation_history_ref(client, model, messages.as_slice())
+                .await
+            {
                 Ok(compact_result) => {
                     if compact_result.metadata.success {
                         info!("Proactive history compaction successful.");
@@ -159,7 +153,7 @@ pub async fn run_agent_loop(
             res = crate::llm::tool_execution::requests::chat_tools_once(
                 client,
                 model,
-                messages.clone(),
+                messages.as_slice(),
                 &runtime.tools,
                 Some(cancel_token.clone()),
             ) => {
@@ -175,16 +169,13 @@ pub async fn run_agent_loop(
                                 let _ = tx.send("::status:compacting:Context limits reached, summarizing history...".to_string());
                             }
 
-                            // Perform compaction
-                            let params = crate::llm::CompactParams {
-                                client: client.clone(),
-                                model: model.to_string(),
-                                fs_tools: fs.clone(), // FsTools is cheap to clone
-                                history: messages.clone(),
-                                cfg: cfg.clone(),
-                            };
-
-                            match crate::llm::compact_conversation_history(params).await {
+                            match crate::llm::compact_conversation_history_ref(
+                                client,
+                                model,
+                                messages.as_slice(),
+                            )
+                            .await
+                            {
                                 Ok(compact_result) => {
                                     if compact_result.metadata.success {
                                         info!("History compaction successful. Resuming with compacted history.");
@@ -312,95 +303,37 @@ pub async fn run_agent_loop(
                 let _ = tx.send("::status:processing".into());
             }
 
-            // Prepare and sanitize arguments for logging
-            let args_str = tc.function.arguments.clone();
-            if let Ok(mut args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
-                if let Some(obj) = args_val.as_object_mut() {
-                    if tc.function.name == "fs_write" {
-                        obj.remove("content");
-                    }
-
-                    for key in ["path", "paths", "file_path", "filename"].iter() {
-                        if let Some(value) = obj.get_mut(*key) {
-                            if value.is_string() {
-                                if let Some(path_str) = value.as_str() {
-                                    // Convert to relative path from project root
-                                    let project_root = std::env::current_dir()
-                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                    if let Ok(relative_path) =
-                                        std::path::Path::new(path_str).strip_prefix(&project_root)
-                                    {
-                                        *value = format!("@{}", relative_path.display()).into();
-                                    } else {
-                                        // If we can't get a relative path, at least show the file name
-                                        if let Some(file_name) = std::path::Path::new(path_str)
-                                            .file_name()
-                                            .and_then(|s| s.to_str())
-                                        {
-                                            *value = file_name.to_string().into();
-                                        }
-                                    }
-                                }
-                            } else if value.is_array()
-                                && let Some(arr) = value.as_array_mut()
-                            {
-                                for item in arr.iter_mut() {
-                                    if let Some(path_str) = item.as_str() {
-                                        // Convert to relative path from project root
-                                        let project_root = std::env::current_dir()
-                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                        if let Ok(relative_path) = std::path::Path::new(path_str)
-                                            .strip_prefix(&project_root)
-                                        {
-                                            *item = format!("@{}", relative_path.display()).into();
-                                        } else {
-                                            // If we can't get a relative path, at least show the file name
-                                            if let Some(file_name) = std::path::Path::new(path_str)
-                                                .file_name()
-                                                .and_then(|s| s.to_str())
-                                            {
-                                                *item = file_name.to_string().into();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let _ = serde_json::to_string(&args_val);
-            }
-
-            let mut args_str_truncated = args_str;
-            const MAX_ARG_LEN: usize = 120;
-            if args_str_truncated.len() > MAX_ARG_LEN {
-                args_str_truncated = format!(
-                    "{}...",
-                    args_str_truncated
-                        .chars()
-                        .take(MAX_ARG_LEN - 3)
-                        .collect::<String>()
-                );
-            }
-
-            // Currently args_str_truncated is only used for potential future logging.
-            let _ = &args_str_truncated;
+            let tool_name = tc.function.name.as_str();
             let res = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
                     warn!("run_agent_loop cancelled before dispatch_tool_call");
                     return Err(anyhow!(LlmErrorKind::Cancelled));
                 }
-                res = crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, tc.clone()) => res,
+                res = crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, &tc) => res,
+            };
+
+            let success = res.is_ok();
+            let modifies_files = matches!(tool_name, "fs_write" | "edit" | "apply_patch");
+
+            let ui_args = if success
+                && ui_tx.is_some()
+                && matches!(
+                    tool_name,
+                    "fs_read"
+                        | "edit"
+                        | "fs_list"
+                        | "search_text"
+                        | "search_repomap"
+                        | "execute_bash"
+                ) {
+                serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()
+            } else {
+                None
             };
 
             // Set file_was_written flag for tools that modify files
-            if (tc.function.name == "fs_write"
-                || tc.function.name == "edit"
-                || tc.function.name == "apply_patch")
-                && res.is_ok()
-            {
+            if modifies_files && success {
                 file_was_written = true;
             }
 
@@ -410,7 +343,7 @@ pub async fn run_agent_loop(
                     let json_str = serde_json::to_string(value).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize tool result\"}".to_string()
                     });
-                    truncate_tool_output(json_str, &tc.function.name)
+                    truncate_tool_output(json_str, tool_name)
                 }
                 Err(e) => {
                     error!(error = %e, "tool execution failed");
@@ -418,16 +351,12 @@ pub async fn run_agent_loop(
                     let json_str = serde_json::to_string(&err_json).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize error\"}".to_string()
                     });
-                    truncate_tool_output(json_str, &tc.function.name)
+                    truncate_tool_output(json_str, tool_name)
                 }
             };
 
             // Inject verification note if file was written
-            if (tc.function.name == "fs_write"
-                || tc.function.name == "edit"
-                || tc.function.name == "apply_patch")
-                && res.is_ok()
-            {
+            if modifies_files && success {
                 // Run AutoVerifier
                 if let Some(err_msg) = verifier.verify(&tc, true).await {
                     let warning = format!(
@@ -462,10 +391,7 @@ File modification detected. You MUST now verify your changes:
 
             // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
-                let success = res.is_ok();
                 let status_text = if success { "✅ SUCCESS" } else { "❌ FAILED" };
-
-                let tool_name = tc.function.name.as_str();
 
                 // Map tool names to appropriate icons
                 let tool_icon = match tool_name {
@@ -497,49 +423,44 @@ File modification detected. You MUST now verify your changes:
 
                 // For fs_read, show the file path right after SUCCESS
                 if tool_name == "fs_read"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
                     && success
+                    && let Some(args) = ui_args.as_ref()
+                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(path.to_string());
                 }
 
                 // For edit, show the file path right after SUCCESS
                 if tool_name == "edit"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(path) = args.get("file_path").and_then(|v| v.as_str())
                     && success
+                    && let Some(args) = ui_args.as_ref()
+                    && let Some(path) = args.get("file_path").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(path.to_string());
                 }
 
                 // For fs_list, show the directory path right after SUCCESS
                 if tool_name == "fs_list"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
                     && success
+                    && let Some(args) = ui_args.as_ref()
+                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(path.to_string());
                 }
 
                 // For search_text, show the search keyword right after SUCCESS
                 if tool_name == "search_text"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(keyword) = args.get("search_pattern").and_then(|v| v.as_str())
                     && success
+                    && let Some(args) = ui_args.as_ref()
+                    && let Some(keyword) = args.get("search_pattern").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(format!("Keyword: {}", keyword));
                 }
 
                 // For search_repomap, show the search keywords right after SUCCESS
                 if tool_name == "search_repomap"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                     && success
+                    && let Some(args) = ui_args.as_ref()
                 {
                     // Check keyword_search field
                     if let Some(keyword_search) =
@@ -559,10 +480,9 @@ File modification detected. You MUST now verify your changes:
 
                 // For execute_bash, show the command that was executed right after SUCCESS
                 if tool_name == "execute_bash"
-                    && let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(command) = args.get("command").and_then(|v| v.as_str())
                     && success
+                    && let Some(args) = ui_args.as_ref()
+                    && let Some(command) = args.get("command").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(format!("Command: {}", command));
                 }

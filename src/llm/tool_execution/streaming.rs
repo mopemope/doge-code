@@ -22,7 +22,7 @@ pub async fn run_agent_streaming_once(
 
     // Start stream
     let mut stream = client
-        .chat_stream(model, messages.clone(), Some(cancel_token.clone()))
+        .chat_stream(model, messages.as_slice(), Some(cancel_token.clone()))
         .await?;
     let runtime = ToolRuntime::build(fs).await?;
     let mut buf = ToolDeltaBuffer::new();

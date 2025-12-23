@@ -1,19 +1,34 @@
 use crate::llm::LlmErrorKind;
-use crate::llm::chat_with_tools::{
-    ChatRequestWithTools, ChatResponseWithTools, ChoiceMessageWithTools, Reasoning,
-};
+use crate::llm::chat_with_tools::{ChatResponseWithTools, ChoiceMessageWithTools, Reasoning};
 use crate::llm::client_core::OpenAIClient;
-use crate::llm::types::ChatMessage;
+use crate::llm::types::{ChatMessage, ToolDef};
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 use std::ops::Mul;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, warn};
 
+#[derive(Debug, Serialize)]
+struct ChatRequestWithToolsRef<'a> {
+    model: &'a str,
+    messages: &'a [ChatMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ToolDef]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>, // {"type":"auto"}
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>, // OpenRouter reasoning parameter
+}
+
 pub async fn chat_tools_once(
     client: &OpenAIClient,
     model: &str,
-    messages: Vec<ChatMessage>,
-    tools: &[crate::llm::types::ToolDef],
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
     const MAX_RETRIES: u64 = 100;
@@ -22,7 +37,7 @@ pub async fn chat_tools_once(
     let mut timeout_retries = 0u64;
 
     for attempt in 1..=MAX_RETRIES {
-        match chat_tools_once_inner(client, model, messages.clone(), tools, cancel.clone()).await {
+        match chat_tools_once_inner(client, model, messages, tools, cancel.clone()).await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_error = e;
@@ -65,18 +80,14 @@ pub async fn chat_tools_once(
 async fn chat_tools_once_inner(
     client: &OpenAIClient,
     model: &str,
-    messages: Vec<ChatMessage>,
-    tools: &[crate::llm::types::ToolDef],
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<ChoiceMessageWithTools> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
     let url = client.endpoint();
-    let reasoning_effort = if client.reason_enable {
-        Some("high".to_owned())
-    } else {
-        None
-    };
+    let reasoning_effort = client.reason_enable.then_some("high");
 
     let reasoning = if model.contains("grok-4-fast") {
         Some(Reasoning {
@@ -87,11 +98,11 @@ async fn chat_tools_once_inner(
     } else {
         None
     };
-    let req = ChatRequestWithTools {
-        model: model.to_string(),
+    let req = ChatRequestWithToolsRef {
+        model,
         messages,
         temperature: None,
-        tools: Some(tools.to_vec()),
+        tools: (!tools.is_empty()).then_some(tools),
         tool_choice: None,
         reasoning_effort,
         reasoning,
