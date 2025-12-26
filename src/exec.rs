@@ -63,11 +63,9 @@ impl Executor {
             None => None,
         };
 
-        // Initialize conversation history
-        // Use a default max_tokens if not specified, or derive from model?
-        // Current simplified implementation doesn't strictly check config here, assuming defaults.
-        // But ChatHistory requires max_tokens.
-        let max_tokens = 100000; // Large default for now, exec mode is short lived.
+        // Initialize conversation history with model-aware context sizing.
+        // Fall back to a large default if no model context size is known.
+        let max_tokens = cfg.get_context_window_size().unwrap_or(100_000) as usize;
         let conversation_history =
             Arc::new(tokio::sync::Mutex::new(ChatHistory::new(max_tokens, None)));
 

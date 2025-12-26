@@ -114,6 +114,9 @@ pub struct WatchConfig {
     pub debounce_delay_ms: Option<u64>,
     pub rate_limit_duration_ms: Option<u64>,
     pub ai_comment_pattern: Option<String>,
+    pub backup_enabled: Option<bool>,
+    pub backup_dir: Option<String>,
+    pub backup_keep: Option<usize>,
 }
 
 impl Default for WatchConfig {
@@ -149,6 +152,9 @@ impl Default for WatchConfig {
             debounce_delay_ms: Some(500),
             rate_limit_duration_ms: Some(2000),
             ai_comment_pattern: Some("// AI!:".to_string()),
+            backup_enabled: Some(true),
+            backup_dir: Some(".doge/backup".to_string()),
+            backup_keep: Some(5),
         }
     }
 }
@@ -213,6 +219,9 @@ pub struct PartialWatchConfig {
     pub debounce_delay_ms: Option<u64>,
     pub rate_limit_duration_ms: Option<u64>,
     pub ai_comment_pattern: Option<String>,
+    pub backup_enabled: Option<bool>,
+    pub backup_dir: Option<String>,
+    pub backup_keep: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -502,6 +511,15 @@ impl AppConfig {
                 if let Some(ai_comment_pattern) = &file_watch.ai_comment_pattern {
                     watch_cfg.ai_comment_pattern = Some(ai_comment_pattern.clone());
                 }
+                if let Some(backup_enabled) = file_watch.backup_enabled {
+                    watch_cfg.backup_enabled = Some(backup_enabled);
+                }
+                if let Some(backup_dir) = &file_watch.backup_dir {
+                    watch_cfg.backup_dir = Some(backup_dir.clone());
+                }
+                if let Some(backup_keep) = file_watch.backup_keep {
+                    watch_cfg.backup_keep = Some(backup_keep);
+                }
             }
 
             // Apply project config values if present (overrides file config)
@@ -520,6 +538,15 @@ impl AppConfig {
                 }
                 if let Some(ai_comment_pattern) = &project_watch.ai_comment_pattern {
                     watch_cfg.ai_comment_pattern = Some(ai_comment_pattern.clone());
+                }
+                if let Some(backup_enabled) = project_watch.backup_enabled {
+                    watch_cfg.backup_enabled = Some(backup_enabled);
+                }
+                if let Some(backup_dir) = &project_watch.backup_dir {
+                    watch_cfg.backup_dir = Some(backup_dir.clone());
+                }
+                if let Some(backup_keep) = project_watch.backup_keep {
+                    watch_cfg.backup_keep = Some(backup_keep);
                 }
             }
 
@@ -620,6 +647,9 @@ batch_size = 8
 # debounce_delay_ms = 500
 # rate_limit_duration_ms = 2000
 # ai_comment_pattern = "// AI!:"
+# backup_enabled = true
+# backup_dir = ".doge/backup"
+# backup_keep = 5
 
 # UI settings
 theme = "dark"  # "dark" or "light"

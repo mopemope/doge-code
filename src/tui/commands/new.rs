@@ -62,7 +62,8 @@ impl TuiExecutor {
         };
         // Load system prompt
         let sys_prompt = build_system_prompt(&cfg);
-        let mut history = crate::llm::ChatHistory::new(12_000, Some(sys_prompt));
+        let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;
+        let mut history = crate::llm::ChatHistory::new(history_max_tokens, Some(sys_prompt));
         history.append_system_once();
 
         // Initialize session manager
@@ -88,7 +89,10 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             cancel_tx: None,
             last_user_prompt: None,
-            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(100000, None))), // Initialize conversation history
+            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
+                cfg.get_context_window_size().unwrap_or(100_000) as usize,
+                None,
+            ))), // Initialize conversation history
             session_manager,
 
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
@@ -124,7 +128,8 @@ impl TuiExecutor {
         };
         // Load system prompt
         let sys_prompt = build_system_prompt(&cfg);
-        let mut history = crate::llm::ChatHistory::new(12_000, Some(sys_prompt));
+        let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;
+        let mut history = crate::llm::ChatHistory::new(history_max_tokens, Some(sys_prompt));
         history.append_system_once();
 
         // Initialize session manager
@@ -150,7 +155,10 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             cancel_tx: None,
             last_user_prompt: None,
-            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(100000, None))), // Initialize conversation history
+            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
+                cfg.get_context_window_size().unwrap_or(100_000) as usize,
+                None,
+            ))), // Initialize conversation history
             session_manager,
 
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
