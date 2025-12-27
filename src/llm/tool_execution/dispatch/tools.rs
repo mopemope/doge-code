@@ -83,7 +83,7 @@ pub async fn apply_patch(
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    match crate::tools::apply_patch::apply_patch(params, &runtime.fs.config).await {
+    match crate::tools::apply_patch::apply_patch_with_recovery(params, &runtime.fs.config).await {
         Ok(res) => {
             // Treat only a logically successful patch as a successful tool call.
             // Non-successful ApplyPatchResult values are recorded as failures

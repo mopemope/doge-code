@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::error_recovery::{ErrorContext, ErrorRecoveryTool, FixResult};
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use diffy;
@@ -10,7 +11,7 @@ use tokio::fs;
 // ===== データ構造体 =====
 
 /// apply_patchツールの入力パラメータ
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApplyPatchParams {
     /// 対象ファイルの絶対パス
     pub file_path: String,
@@ -72,6 +73,77 @@ fn create_tool_parameters() -> Value {
 /// apply_patchツールの主要インターフェース関数
 pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result<ApplyPatchResult> {
     apply_patch_impl(params, config).await
+}
+
+/// apply_patchツールの主要インターフェース関数（エラー回復機能付き）
+pub async fn apply_patch_with_recovery(
+    params: ApplyPatchParams,
+    config: &AppConfig,
+) -> Result<ApplyPatchResult> {
+    let result = apply_patch_impl(params.clone(), config).await;
+
+    match result {
+        Ok(success_result) => Ok(success_result),
+        Err(e) => {
+            // エラー回復を試みる
+            let error_recovery_tool = ErrorRecoveryTool::new(config.clone());
+            let error_context = ErrorContext {
+                error_source: "apply_patch".to_string(),
+                file_path: params.file_path.clone(),
+                patch_content: params.patch_content.clone(),
+                command: "".to_string(),
+                output: e.to_string(),
+            };
+
+            match error_recovery_tool
+                .attempt_recovery(&e.to_string(), error_context)
+                .await
+            {
+                Ok(fix_result) => {
+                    match fix_result {
+                        FixResult::PatchAdjustment { new_patch } => {
+                            // 修正されたパッチで再試行
+                            let new_params = ApplyPatchParams {
+                                file_path: params.file_path,
+                                patch_content: new_patch,
+                            };
+                            apply_patch_impl(new_params, config).await
+                        }
+                        FixResult::RequiresHumanIntervention { message } => Ok(ApplyPatchResult {
+                            success: false,
+                            message,
+                            original_content: None,
+                            modified_content: None,
+                        }),
+                        FixResult::Failed { reason } => Ok(ApplyPatchResult {
+                            success: false,
+                            message: reason,
+                            original_content: None,
+                            modified_content: None,
+                        }),
+                        FixResult::Success { message } => Ok(ApplyPatchResult {
+                            success: true,
+                            message,
+                            original_content: None,
+                            modified_content: None,
+                        }),
+                    }
+                }
+                Err(recovery_error) => {
+                    // 回復処理自体が失敗した場合
+                    Ok(ApplyPatchResult {
+                        success: false,
+                        message: format!(
+                            "Patch application failed: {}. Error recovery also failed: {}",
+                            e, recovery_error
+                        ),
+                        original_content: None,
+                        modified_content: None,
+                    })
+                }
+            }
+        }
+    }
 }
 
 // ===== 実装関数群 =====
