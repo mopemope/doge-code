@@ -150,7 +150,32 @@ When a rewrite is requested, Doge-Code now normalizes the reported file path rel
 - `doge-code-show-progress`: Show progress messages during execution.
 - `doge-code-timeout`: Timeout for Doge-Code execution in seconds.
 
-### 2. MCP Server Mode
+- `doge-code-timeout`: Timeout for Doge-Code execution in seconds.
+
+### 2. Org-Mode Integration (Org-Doge)
+Interactive "Laboratory" mode using Org-babel.
+
+1.  Add `ob-doge.el` to your load path.
+2.  Add `(require 'ob-doge)` to your init file.
+3.  Register the language:
+    ```elisp
+    (org-babel-do-load-languages
+     'org-babel-load-languages
+     '((doge . t)))
+    ```
+
+#### Usage
+Create a source block with `doge` language:
+
+```org
+#+BEGIN_SRC doge
+Explain how `Option<T>` works in Rust.
+#+END_SRC
+```
+
+Execute with `C-c C-c`. The output will be inserted below the block.
+
+### 3. MCP Server Mode
 Run Doge-Code as an HTTP server (`dgc --mcp-server [address]`). Directly call tools from Emacs client for real-time analysis.
 
 #### Server Startup
