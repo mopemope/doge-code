@@ -8,6 +8,7 @@ mod tests {
     use crate::mcp::{server, service};
     use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
     use std::sync::Arc;
+    use tempfile;
     use tokio::sync::RwLock;
 
     #[tokio::test]
@@ -127,7 +128,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_repomap_tool_without_repomap() {
-        let service = service::DogeMcpService::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("main.rs");
+        tokio::fs::write(&file_path, "fn main() {}\n")
+            .await
+            .unwrap();
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.project_root = temp_dir.path().to_path_buf();
+
+        let service = service::DogeMcpService::new(cfg);
         let params = service::SearchRepomapParams {
             result_density: None,
             max_file_lines: None,
@@ -154,8 +164,7 @@ mod tests {
         };
 
         let result = service.search_repomap(Parameters(params)).await;
-        // This should fail because the repomap is not initialized
-        assert!(result.is_err());
+        assert!(result.is_ok(), "Repomap should auto-build for MCP search");
     }
 
     #[tokio::test]
@@ -183,8 +192,19 @@ mod tests {
         let result = service.list_resources_impl().await;
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.resources.len(), 1);
-        assert_eq!(result.resources[0].uri, "doge://repomap/summary");
+        assert_eq!(result.resources.len(), 2);
+        assert!(
+            result
+                .resources
+                .iter()
+                .any(|r| r.uri == "doge://repomap/summary")
+        );
+        assert!(
+            result
+                .resources
+                .iter()
+                .any(|r| r.uri == "doge://repomap/status")
+        );
     }
 
     #[tokio::test]

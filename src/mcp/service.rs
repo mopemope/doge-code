@@ -1,4 +1,5 @@
 use crate::analysis::RepoMap;
+use crate::analysis::cache::ensure_repomap_ready;
 use crate::config::AppConfig;
 use crate::tools::list::{FsListMode, FsListOptions};
 use crate::tools::read::{FsReadMode, FsReadOptions};
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::analysis::semantic::SemanticService;
 
@@ -102,6 +103,7 @@ pub struct DogeMcpService {
     search_repomap_tools: RepomapSearchTools,
     config: Arc<AppConfig>,
     semantic_service: Option<SemanticService>,
+    repomap_build_lock: Arc<Mutex<()>>,
 }
 
 impl Default for DogeMcpService {
@@ -118,6 +120,7 @@ impl DogeMcpService {
             search_repomap_tools: RepomapSearchTools::new(None),
             config: Arc::new(config),
             semantic_service: None,
+            repomap_build_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -128,6 +131,7 @@ impl DogeMcpService {
             search_repomap_tools: self.search_repomap_tools,
             config: self.config,
             semantic_service: self.semantic_service,
+            repomap_build_lock: self.repomap_build_lock,
         }
     }
 
@@ -138,26 +142,65 @@ impl DogeMcpService {
             search_repomap_tools: RepomapSearchTools::new(service.clone()),
             config: self.config,
             semantic_service: service,
+            repomap_build_lock: self.repomap_build_lock,
         }
     }
 
+    async fn ensure_repomap_ready(&self) -> Result<RepoMap, McpError> {
+        if let Some(map) = self.repomap.read().await.clone() {
+            return Ok(map);
+        }
+
+        let _guard = self.repomap_build_lock.lock().await;
+        if let Some(map) = self.repomap.read().await.clone() {
+            return Ok(map);
+        }
+
+        ensure_repomap_ready(
+            &self.repomap,
+            &self.config.project_root,
+            self.semantic_service.clone(),
+        )
+        .await
+        .map_err(|e| self.format_error("Repomap build failed", Some(json!(e.to_string()))))
+    }
+
     pub async fn list_resources_impl(&self) -> Result<ListResourcesResult, McpError> {
+        let ready = self.repomap.read().await.is_some();
+        let status_description = format!(
+            "Repomap status: {}",
+            if ready { "ready" } else { "warming" }
+        );
         Ok(ListResourcesResult {
-            resources: vec![Resource::new(
-                RawResource {
-                    uri: "doge://repomap/summary".to_string(),
-                    name: "RepoMap Summary".to_string(),
-                    description: Some(
-                        "Summary of the repository map, including statistics and top symbols."
-                            .to_string(),
-                    ),
-                    mime_type: Some("application/json".to_string()),
-                    icons: None,
-                    size: None,
-                    title: None,
-                },
-                None,
-            )],
+            resources: vec![
+                Resource::new(
+                    RawResource {
+                        uri: "doge://repomap/summary".to_string(),
+                        name: "RepoMap Summary".to_string(),
+                        description: Some(
+                            "Summary of the repository map, including statistics and top symbols."
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                        icons: None,
+                        size: None,
+                        title: None,
+                    },
+                    None,
+                ),
+                Resource::new(
+                    RawResource {
+                        uri: "doge://repomap/status".to_string(),
+                        name: "RepoMap Status".to_string(),
+                        description: Some(status_description),
+                        mime_type: Some("application/json".to_string()),
+                        icons: None,
+                        size: None,
+                        title: None,
+                    },
+                    None,
+                ),
+            ],
             next_cursor: None,
         })
     }
@@ -193,20 +236,27 @@ impl DogeMcpService {
     }
 
     pub async fn read_resource_impl(&self, uri: String) -> Result<ReadResourceResult, McpError> {
+        if uri == "doge://repomap/status" {
+            let ready = self.repomap.read().await.is_some();
+            let summary = json!({
+                "status": if ready { "ready" } else { "warming" }
+            });
+            let content = serde_json::to_string_pretty(&summary).unwrap();
+            return Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(content, uri)],
+            });
+        }
+
         if uri == "doge://repomap/summary" {
-            let repomap_guard = self.repomap.read().await;
-            if let Some(map) = &*repomap_guard {
-                let summary = json!({
-                    "total_symbols": map.symbols.len(),
-                    "files_count": map.symbols.iter().map(|s| &s.file).collect::<std::collections::HashSet<_>>().len(),
-                });
-                let content = serde_json::to_string_pretty(&summary).unwrap();
-                return Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::text(content, uri)],
-                });
-            } else {
-                return Err(McpError::internal_error("Repomap not ready", None));
-            }
+            let map = self.ensure_repomap_ready().await?;
+            let summary = json!({
+                "total_symbols": map.symbols.len(),
+                "files_count": map.symbols.iter().map(|s| &s.file).collect::<std::collections::HashSet<_>>().len(),
+            });
+            let content = serde_json::to_string_pretty(&summary).unwrap();
+            return Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(content, uri)],
+            });
         }
 
         if let Some(path_str) = uri.strip_prefix("doge://files/") {
@@ -229,22 +279,18 @@ impl DogeMcpService {
             let decoded_path = percent_decode_str(path_str).decode_utf8_lossy();
             let target_path = self.config.project_root.join(decoded_path.as_ref());
 
-            let repomap_guard = self.repomap.read().await;
-            if let Some(map) = &*repomap_guard {
-                let symbols: Vec<_> = map
-                    .symbols
-                    .iter()
-                    .filter(|s| s.file == target_path)
-                    .collect();
-                let content = serde_json::to_string_pretty(&symbols).map_err(|e| {
-                    McpError::internal_error(format!("Serialization error: {}", e), None)
-                })?;
-                return Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::text(content, uri.clone())],
-                });
-            } else {
-                return Err(McpError::internal_error("Repomap not ready", None));
-            }
+            let map = self.ensure_repomap_ready().await?;
+            let symbols: Vec<_> = map
+                .symbols
+                .iter()
+                .filter(|s| s.file == target_path)
+                .collect();
+            let content = serde_json::to_string_pretty(&symbols).map_err(|e| {
+                McpError::internal_error(format!("Serialization error: {}", e), None)
+            })?;
+            return Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(content, uri)],
+            });
         }
 
         Err(McpError::resource_not_found(uri, None))
@@ -288,56 +334,48 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<SearchRepomapParams>,
     ) -> Result<CallToolResult, McpError> {
-        let repomap_guard = self.repomap.read().await;
-        if let Some(map) = &*repomap_guard {
-            let result_density = params
-                .result_density
-                .as_deref()
-                .and_then(|raw| ResultDensity::from_str(raw).ok());
-            let args = SearchRepomapArgs {
-                result_density,
-                min_file_lines: None,
-                max_file_lines: params.max_file_lines.map(|v| v as usize),
-                min_function_lines: None,
-                max_function_lines: params.max_function_lines.map(|v| v as usize),
-                symbol_kinds: params.symbol_kinds,
-                file_pattern: params.file_pattern,
-                exclude_patterns: params.exclude_patterns,
-                language_filters: params.language_filters,
-                min_symbols_per_file: None,
-                max_symbols_per_file: params.max_symbols_per_file.map(|v| v as usize),
-                sort_by: params.sort_by,
-                sort_desc: params.sort_desc,
-                limit: params.limit.map(|v| v as usize),
-                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
-                keyword_search: params.keyword_search,
-                semantic_query: params.semantic_query,
-                name: params.name,
-                fields: params.fields,
-                include_snippets: params.include_snippets,
-                context_lines: params.context_lines.map(|v| v as usize),
-                snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
-                ranking_strategy: None,
-                match_score_threshold: params.match_score_threshold,
-                cursor: params.cursor.map(|v| v as usize),
-                page_size: params.page_size.map(|v| v as usize),
-            };
+        let map = self.ensure_repomap_ready().await?;
 
-            match self
-                .search_repomap_tools
-                .search_repomap(map, args, &self.config.project_root)
-                .await
-            {
-                Ok(results) => self.format_json_result(results),
-                Err(e) => {
-                    Err(self.format_error("Search repomap failed ", Some(json!(e.to_string()))))
-                }
-            }
-        } else {
-            Err(self.format_error(
-                "Repomap is not available ",
-                Some(json!("Repomap is still generating or not initialized ")),
-            ))
+        let result_density = params
+            .result_density
+            .as_deref()
+            .and_then(|raw| ResultDensity::from_str(raw).ok());
+        let args = SearchRepomapArgs {
+            result_density,
+            min_file_lines: None,
+            max_file_lines: params.max_file_lines.map(|v| v as usize),
+            min_function_lines: None,
+            max_function_lines: params.max_function_lines.map(|v| v as usize),
+            symbol_kinds: params.symbol_kinds,
+            file_pattern: params.file_pattern,
+            exclude_patterns: params.exclude_patterns,
+            language_filters: params.language_filters,
+            min_symbols_per_file: None,
+            max_symbols_per_file: params.max_symbols_per_file.map(|v| v as usize),
+            sort_by: params.sort_by,
+            sort_desc: params.sort_desc,
+            limit: params.limit.map(|v| v as usize),
+            response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+            keyword_search: params.keyword_search,
+            semantic_query: params.semantic_query,
+            name: params.name,
+            fields: params.fields,
+            include_snippets: params.include_snippets,
+            context_lines: params.context_lines.map(|v| v as usize),
+            snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
+            ranking_strategy: None,
+            match_score_threshold: params.match_score_threshold,
+            cursor: params.cursor.map(|v| v as usize),
+            page_size: params.page_size.map(|v| v as usize),
+        };
+
+        match self
+            .search_repomap_tools
+            .search_repomap(&map, args, &self.config.project_root)
+            .await
+        {
+            Ok(results) => self.format_json_result(results),
+            Err(e) => Err(self.format_error("Search repomap failed ", Some(json!(e.to_string())))),
         }
     }
 

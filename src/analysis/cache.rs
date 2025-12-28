@@ -1,7 +1,9 @@
+use crate::analysis::Analyzer;
 use crate::analysis::RepoMap;
 use crate::analysis::database::connection::{connect_database, get_default_db_path};
 use crate::analysis::database::dao::RepomapDAO;
 use crate::analysis::database::migration::run_migrations;
+use crate::analysis::semantic::SemanticService;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
@@ -9,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +237,31 @@ impl RepomapStore {
     pub fn get_db_connection(&self) -> &DatabaseConnection {
         &self.db_conn
     }
+}
+
+/// Ensure a shared RepoMap instance is available, building and caching it if missing.
+pub async fn ensure_repomap_ready(
+    repomap: &Arc<RwLock<Option<RepoMap>>>,
+    project_root: &Path,
+    semantic_service: Option<SemanticService>,
+) -> Result<RepoMap> {
+    if let Some(existing) = repomap.read().await.clone() {
+        return Ok(existing);
+    }
+
+    let store = RepomapStore::new(project_root.to_path_buf()).await?;
+    let mut analyzer =
+        Analyzer::new_with_store(project_root.to_path_buf(), store, semantic_service.clone())
+            .await?;
+
+    let map = analyzer.build().await?;
+
+    {
+        let mut guard = repomap.write().await;
+        *guard = Some(map.clone());
+    }
+
+    Ok(map)
 }
 
 #[cfg(test)]

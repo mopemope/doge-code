@@ -80,70 +80,90 @@ pub async fn apply_patch_with_recovery(
     params: ApplyPatchParams,
     config: &AppConfig,
 ) -> Result<ApplyPatchResult> {
-    let result = apply_patch_impl(params.clone(), config).await;
-
-    match result {
-        Ok(success_result) => Ok(success_result),
+    match apply_patch_impl(params.clone(), config).await {
+        Ok(result) if result.success => Ok(result),
+        Ok(result) => {
+            if let Some(recovered) = attempt_recovery(&params, config, &result.message).await? {
+                Ok(recovered)
+            } else {
+                Ok(result)
+            }
+        }
         Err(e) => {
-            // エラー回復を試みる
-            let error_recovery_tool = ErrorRecoveryTool::new(config.clone());
-            let error_context = ErrorContext {
-                error_source: "apply_patch".to_string(),
-                file_path: params.file_path.clone(),
-                patch_content: params.patch_content.clone(),
-                command: "".to_string(),
-                output: e.to_string(),
-            };
-
-            match error_recovery_tool
-                .attempt_recovery(&e.to_string(), error_context)
-                .await
-            {
-                Ok(fix_result) => {
-                    match fix_result {
-                        FixResult::PatchAdjustment { new_patch } => {
-                            // 修正されたパッチで再試行
-                            let new_params = ApplyPatchParams {
-                                file_path: params.file_path,
-                                patch_content: new_patch,
-                            };
-                            apply_patch_impl(new_params, config).await
-                        }
-                        FixResult::RequiresHumanIntervention { message } => Ok(ApplyPatchResult {
-                            success: false,
-                            message,
-                            original_content: None,
-                            modified_content: None,
-                        }),
-                        FixResult::Failed { reason } => Ok(ApplyPatchResult {
-                            success: false,
-                            message: reason,
-                            original_content: None,
-                            modified_content: None,
-                        }),
-                        FixResult::Success { message } => Ok(ApplyPatchResult {
-                            success: true,
-                            message,
-                            original_content: None,
-                            modified_content: None,
-                        }),
-                    }
-                }
-                Err(recovery_error) => {
-                    // 回復処理自体が失敗した場合
-                    Ok(ApplyPatchResult {
-                        success: false,
-                        message: format!(
-                            "Patch application failed: {}. Error recovery also failed: {}",
-                            e, recovery_error
-                        ),
-                        original_content: None,
-                        modified_content: None,
-                    })
-                }
+            if let Some(recovered) = attempt_recovery(&params, config, &e.to_string()).await? {
+                Ok(recovered)
+            } else {
+                Ok(ApplyPatchResult {
+                    success: false,
+                    message: format!("Patch application failed: {}", e),
+                    original_content: None,
+                    modified_content: None,
+                })
             }
         }
     }
+}
+
+async fn attempt_recovery(
+    params: &ApplyPatchParams,
+    config: &AppConfig,
+    error_message: &str,
+) -> Result<Option<ApplyPatchResult>> {
+    let error_recovery_tool = ErrorRecoveryTool::new(config.clone());
+    let error_context = ErrorContext {
+        error_source: "apply_patch".to_string(),
+        file_path: params.file_path.clone(),
+        patch_content: params.patch_content.clone(),
+        command: "".to_string(),
+        output: error_message.to_string(),
+    };
+
+    let fix_result = match error_recovery_tool
+        .attempt_recovery(error_message, error_context)
+        .await
+    {
+        Ok(res) => res,
+        Err(_) => return Ok(None),
+    };
+
+    let recovered = match fix_result {
+        FixResult::PatchAdjustment { new_patch } => {
+            let new_params = ApplyPatchParams {
+                file_path: params.file_path.clone(),
+                patch_content: new_patch,
+            };
+            Some(
+                apply_patch_impl(new_params, config)
+                    .await
+                    .unwrap_or_else(|e| ApplyPatchResult {
+                        success: false,
+                        message: format!("Adjusted patch failed to apply: {}", e),
+                        original_content: None,
+                        modified_content: None,
+                    }),
+            )
+        }
+        FixResult::RequiresHumanIntervention { message } => Some(ApplyPatchResult {
+            success: false,
+            message,
+            original_content: None,
+            modified_content: None,
+        }),
+        FixResult::Failed { reason } => Some(ApplyPatchResult {
+            success: false,
+            message: reason,
+            original_content: None,
+            modified_content: None,
+        }),
+        FixResult::Success { message } => Some(ApplyPatchResult {
+            success: true,
+            message,
+            original_content: None,
+            modified_content: None,
+        }),
+    };
+
+    Ok(recovered)
 }
 
 // ===== 実装関数群 =====
@@ -360,8 +380,39 @@ fn apply_patch_to_content(
 
 const MAX_FUZZ_LINES: usize = 2;
 const MAX_FUZZ_OFFSET_LINES: usize = 20;
+const RECOVERY_MAX_FUZZ_LINES: usize = 6;
+const RECOVERY_MAX_FUZZ_OFFSET_LINES: usize = 200;
 
-fn apply_patch_with_fuzz(original_content: &str, patch: &diffy::Patch<'_, str>) -> Result<String> {
+pub(crate) fn apply_patch_with_fuzz(
+    original_content: &str,
+    patch: &diffy::Patch<'_, str>,
+) -> Result<String> {
+    apply_patch_with_fuzz_params(
+        original_content,
+        patch,
+        MAX_FUZZ_LINES,
+        MAX_FUZZ_OFFSET_LINES,
+    )
+}
+
+pub(crate) fn apply_patch_with_aggressive_fuzz(
+    original_content: &str,
+    patch: &diffy::Patch<'_, str>,
+) -> Result<String> {
+    apply_patch_with_fuzz_params(
+        original_content,
+        patch,
+        RECOVERY_MAX_FUZZ_LINES,
+        RECOVERY_MAX_FUZZ_OFFSET_LINES,
+    )
+}
+
+fn apply_patch_with_fuzz_params(
+    original_content: &str,
+    patch: &diffy::Patch<'_, str>,
+    max_fuzz_lines: usize,
+    max_fuzz_offset_lines: usize,
+) -> Result<String> {
     let mut image = split_lines_preserve_newline(original_content);
     let mut line_shift: isize = 0;
 
@@ -372,8 +423,8 @@ fn apply_patch_with_fuzz(original_content: &str, patch: &diffy::Patch<'_, str>) 
         let base_expected = hunk.new_range().start().saturating_sub(1);
         let expected_pos = clamp_expected_pos(base_expected as isize + line_shift, image.len());
 
-        for leading_trim in 0..=MAX_FUZZ_LINES {
-            for trailing_trim in 0..=MAX_FUZZ_LINES {
+        for leading_trim in 0..=max_fuzz_lines {
+            for trailing_trim in 0..=max_fuzz_lines {
                 let trimmed = match trim_context_lines(lines, leading_trim, trailing_trim) {
                     Some(trimmed) => trimmed,
                     None => continue,
@@ -383,7 +434,7 @@ fn apply_patch_with_fuzz(original_content: &str, patch: &diffy::Patch<'_, str>) 
                 let pos = if pre.is_empty() {
                     std::cmp::min(expected_pos, image.len())
                 } else if let Some(pos) =
-                    find_best_subsequence(&image, &pre, expected_pos, MAX_FUZZ_OFFSET_LINES)
+                    find_best_subsequence(&image, &pre, expected_pos, max_fuzz_offset_lines)
                 {
                     pos
                 } else {
@@ -1208,6 +1259,45 @@ second line modified
 
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, modified_content);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_recovery_large_offset() {
+        let base_lines: Vec<String> = (0..10).map(|i| format!("line{}\n", i)).collect();
+        let original_content = base_lines.join("");
+
+        let mut modified_lines = base_lines.clone();
+        modified_lines[5] = "changed line\n".to_string();
+        let modified_content = modified_lines.join("");
+
+        // Actual file has many lines inserted before, so hunk offset drifts beyond default fuzz
+        let mut actual_lines: Vec<String> = (0..60).map(|i| format!("extra{}\n", i)).collect();
+        actual_lines.extend(base_lines.clone());
+        let actual_content = actual_lines.join("");
+
+        let (_temp_file, file_path) = create_temp_file(&actual_content);
+        let patch_content = create_patch_content(&original_content, &modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+
+        let test_config = create_test_config_with_temp_dir();
+        let result = apply_patch_with_recovery(params, &test_config)
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "Recovery should succeed: {}",
+            result.message
+        );
+
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert!(final_content.contains("changed line"));
+        // Ensure extras are preserved
+        assert!(final_content.starts_with("extra0\nextra1"));
     }
 
     #[tokio::test]
