@@ -37,18 +37,22 @@ After installation you can enable the minor mode wherever you want (e.g. by addi
    cargo build --release
    ```
    - Binary generated at: `target/release/dgc` (recommended to add to PATH, e.g., `export PATH="$PATH:$HOME/.cargo/bin:./target/release"`).
-4. Set API key (environment variable):
-   ```
-   export OPENAI_API_KEY="sk-your-key-here"
-   ```
    - For persistence: Add to `~/.bashrc` or `~/.zshrc`.
+   - Note: If you launch Emacs from GUI/Launcher, ensure the environment variable is visible to Emacs (e.g., using `exec-path-from-shell` package).
 
 ### 2. Install Emacs Packages
-#### Option 1: Manual Installation (Recommended and Easy)
-1. Save the following files to `~/.emacs.d/lisp/`:
+
+#### Option 1: Manual Installation (Recommended)
+1. Copy the following files to your `load-path` (e.g. `~/.emacs.d/lisp/`):
    - `doge-code.el` (CLI integration).
    - `doge-mcp.el` (MCP client).
-2. Add to `init.el` (or equivalent):
+2. Install required dependencies via package manager (M-x package-install):
+   - `json` (built-in)
+   - `async`
+   - `popup`
+   - `request`
+   - `deferred`
+3. Add to `init.el` (or equivalent):
    ```elisp
    ;; Load Doge-Code integration
    (add-to-list 'load-path "~/.emacs.d/lisp/")
@@ -179,10 +183,17 @@ Doge-Code tools available via MCP:
 
 ## Troubleshooting
 
-- **API Key Error**: Set `OPENAI_API_KEY`. JSON output shows `{"success": false, "error": "..."}`.
-- **Server Connection Failure**: Check if MCP server is running (port 8000). Check firewall.
-- **Emacs Errors**: Manually load with `M-x load-file`. Debug with `M-x toggle-debug-on-error`.
-- **Output Display**: Check *doge-output* buffer, or enable popup with `C-h v doge-code-use-popup`.
+- **"Doge-Code executable not found"**:
+  - Ensure `dgc` (or `doge-code`) is in your PATH.
+  - Or set `(setq doge-code-executable "/full/path/to/target/release/dgc")` in Emacs.
+- **"JSON parse error" / Raw Output**:
+  - Often indicates the process panicked or the API key is missing. Check the `*doge-output*` buffer or the error message for details like "OPENAI_API_KEY not set".
+- **MCP Connection Failed**:
+  - Is the server running? Run `dgc --mcp-server` in a terminal.
+  - Check the port (default 8000).
+- **Encoding Issues (Japanese characters)**:
+  - The integration now explicitly decodes output as UTF-8. If garbled text persists, check your `process-coding-system-alist`.
+
 
 ## Future Enhancements
 

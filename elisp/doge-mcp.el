@@ -61,10 +61,11 @@
                      (funcall callback nil)
                      (message "MCP JSON parse error: %s\nResponse: %s" err (buffer-string))))))
       :error (cl-function
-              (lambda (&rest _args)
-                (doge-mcp--show-progress (format "%s failed" tool-name))
-                (funcall callback nil)
-                (message "MCP call failed: %s" (buffer-string)))))))
+              (lambda (&rest args)
+                (let ((err-msg (plist-get args :error-thrown)))
+                    (doge-mcp--show-progress (format "%s failed" tool-name))
+                    (funcall callback nil)
+                    (message "MCP call failed: %s. Is the server running?" (if err-msg (format "%s" err-msg) "Unknown error"))))))))
 
 (defun doge-mcp-list-tools ()
   "List available MCP tools."

@@ -106,7 +106,7 @@ CALLBACK is called with the raw stdout string when the process completes."
                     (buffer-string)))))
            (lambda (output)
              (setq doge-code--current-process nil)
-             (funcall callback output))))))
+             (funcall callback (decode-coding-string output 'utf-8))))))
 
 (defun doge-code--exec (instruction &optional region json-output callback)
   "Execute Doge-Code with INSTRUCTION on REGION.
@@ -136,7 +136,7 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
                    (funcall handler nil (or (assoc-default 'error result) "Failed to execute") 0)))
              (funcall handler t output 0))
          (error
-          (funcall handler nil (format "JSON parse error: %s\nResponse: %s" err output) 0)))))))
+          (funcall handler nil (format "JSON parse error: %s\nRaw Output: %s" err output) 0)))))))
 
 (defun doge-code--handle-response (success response tokens)
   "Handle response from Doge-Code."
