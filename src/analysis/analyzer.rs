@@ -262,13 +262,17 @@ impl Analyzer {
         } else {
             // Trigger semantic embedding update in background
             if let Some(service) = &self.semantic_service {
-                let service = service.clone();
-                let root = self.root.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = service.update_embeddings(&root).await {
-                        warn!("Failed to update semantic embeddings: {}", e);
-                    }
-                });
+                if service.auto_update_enabled() {
+                    let service = service.clone();
+                    let root = self.root.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = service.update_embeddings(&root).await {
+                            warn!("Failed to update semantic embeddings: {}", e);
+                        }
+                    });
+                } else {
+                    debug!("Semantic embeddings auto-update disabled; skipping background update.");
+                }
             }
         }
 

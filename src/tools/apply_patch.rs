@@ -334,6 +334,14 @@ fn apply_patch_to_content(
         Ok(content) => Ok(content),
         Err(e) => {
             let error_str = e.to_string();
+            if (error_str.contains("error applying hunk")
+                || error_str.contains("context lines do not match"))
+                && let Ok(fuzzy_content) = apply_patch_with_fuzz(original_content, patch)
+            {
+                tracing::warn!("apply_patch: fallback fuzzy application succeeded");
+                return Ok(fuzzy_content);
+            }
+
             let detailed_message = if error_str.contains("error applying hunk")
                 || error_str.contains("context lines do not match")
             {
@@ -347,6 +355,217 @@ fn apply_patch_to_content(
 
             anyhow::bail!("{}", detailed_message)
         }
+    }
+}
+
+const MAX_FUZZ_LINES: usize = 2;
+const MAX_FUZZ_OFFSET_LINES: usize = 20;
+
+fn apply_patch_with_fuzz(original_content: &str, patch: &diffy::Patch<'_, str>) -> Result<String> {
+    let mut image = split_lines_preserve_newline(original_content);
+    let mut line_shift: isize = 0;
+
+    for hunk in patch.hunks() {
+        let lines = hunk.lines();
+        let mut applied = false;
+        let mut applied_delta: isize = 0;
+        let base_expected = hunk.new_range().start().saturating_sub(1);
+        let expected_pos = clamp_expected_pos(base_expected as isize + line_shift, image.len());
+
+        for leading_trim in 0..=MAX_FUZZ_LINES {
+            for trailing_trim in 0..=MAX_FUZZ_LINES {
+                let trimmed = match trim_context_lines(lines, leading_trim, trailing_trim) {
+                    Some(trimmed) => trimmed,
+                    None => continue,
+                };
+
+                let pre = pre_image_lines(trimmed);
+                let pos = if pre.is_empty() {
+                    std::cmp::min(expected_pos, image.len())
+                } else if let Some(pos) =
+                    find_best_subsequence(&image, &pre, expected_pos, MAX_FUZZ_OFFSET_LINES)
+                {
+                    pos
+                } else {
+                    continue;
+                };
+
+                let post = build_post_lines_with_context(&image, pos, trimmed);
+                let delta = post.len() as isize - pre.len() as isize;
+                image.splice(pos..pos + pre.len(), post);
+                applied = true;
+                applied_delta = delta;
+                break;
+            }
+
+            if applied {
+                break;
+            }
+        }
+
+        if !applied {
+            anyhow::bail!("Failed to apply patch: context mismatch remained after fuzzy matching");
+        }
+
+        line_shift = line_shift.saturating_add(applied_delta);
+    }
+
+    Ok(image.concat())
+}
+
+fn split_lines_preserve_newline(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    content
+        .split_inclusive('\n')
+        .map(|line| line.to_string())
+        .collect()
+}
+
+fn trim_context_lines<'a>(
+    lines: &'a [diffy::Line<'a, str>],
+    leading_trim: usize,
+    trailing_trim: usize,
+) -> Option<&'a [diffy::Line<'a, str>]> {
+    let mut start = 0usize;
+    let mut end = lines.len();
+
+    for _ in 0..leading_trim {
+        match lines.get(start)? {
+            diffy::Line::Context(_) => start += 1,
+            _ => return None,
+        }
+    }
+
+    for _ in 0..trailing_trim {
+        if end == 0 {
+            return None;
+        }
+        match lines.get(end - 1)? {
+            diffy::Line::Context(_) => end = end.saturating_sub(1),
+            _ => return None,
+        }
+    }
+
+    if start > end {
+        return None;
+    }
+
+    Some(&lines[start..end])
+}
+
+fn pre_image_lines(lines: &[diffy::Line<'_, str>]) -> Vec<String> {
+    lines
+        .iter()
+        .filter_map(|line| match line {
+            diffy::Line::Context(text) | diffy::Line::Delete(text) => Some((*text).to_string()),
+            diffy::Line::Insert(_) => None,
+        })
+        .collect()
+}
+
+fn build_post_lines_with_context(
+    image: &[String],
+    pos: usize,
+    lines: &[diffy::Line<'_, str>],
+) -> Vec<String> {
+    let mut post = Vec::new();
+    let mut pre_index = 0usize;
+
+    for line in lines {
+        match line {
+            diffy::Line::Context(text) => {
+                let fallback = (*text).to_string();
+                let value = image.get(pos + pre_index).cloned().unwrap_or(fallback);
+                post.push(value);
+                pre_index += 1;
+            }
+            diffy::Line::Delete(_) => {
+                pre_index += 1;
+            }
+            diffy::Line::Insert(text) => {
+                post.push((*text).to_string());
+            }
+        }
+    }
+
+    post
+}
+
+fn find_best_subsequence(
+    haystack: &[String],
+    needle: &[String],
+    expected_pos: usize,
+    max_distance: usize,
+) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+
+    let mut matches = Vec::new();
+    for pos in 0..=haystack.len().saturating_sub(needle.len()) {
+        if lines_match_at(haystack, needle, pos) {
+            matches.push(pos);
+        }
+    }
+
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 {
+        return Some(matches[0]);
+    }
+
+    let mut best: Option<(usize, usize)> = None;
+    let mut tie = false;
+    for pos in matches {
+        let distance = pos.abs_diff(expected_pos);
+        if distance > max_distance {
+            continue;
+        }
+        match best {
+            None => {
+                best = Some((distance, pos));
+                tie = false;
+            }
+            Some((best_dist, _)) => {
+                if distance < best_dist {
+                    best = Some((distance, pos));
+                    tie = false;
+                } else if distance == best_dist {
+                    tie = true;
+                }
+            }
+        }
+    }
+
+    if tie {
+        return None;
+    }
+
+    best.map(|(_, pos)| pos)
+}
+
+fn lines_match_at(haystack: &[String], needle: &[String], pos: usize) -> bool {
+    haystack[pos..pos + needle.len()]
+        .iter()
+        .zip(needle)
+        .all(|(a, b)| line_eq(a, b))
+}
+
+fn line_eq(a: &str, b: &str) -> bool {
+    a.trim_end() == b.trim_end()
+}
+
+fn clamp_expected_pos(pos: isize, len: usize) -> usize {
+    if pos < 0 {
+        0
+    } else if pos as usize > len {
+        len
+    } else {
+        pos as usize
     }
 }
 
@@ -557,6 +776,85 @@ line C
         // Ensure the file content remains unchanged
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, actual_content_in_file);
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_fuzzy_context_recovery() {
+        let original_content = r#"line 1
+line 2
+line 3
+line 4
+"#;
+        let modified_content = r#"line 1
+line 2 changed
+line 3
+line 4
+"#;
+        let actual_content_in_file = r#"line 1 modified
+line 2
+line 3
+line 4
+"#;
+
+        let (_temp_file, file_path) = create_temp_file(actual_content_in_file);
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        assert!(result.success);
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(
+            final_content,
+            r#"line 1 modified
+line 2 changed
+line 3
+line 4
+"#
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_fuzzy_trailing_whitespace() {
+        let original_content = "line 1\nline 2\n";
+        let modified_content = "line 1\nline 2 changed\n";
+        let actual_content_in_file = "line 1  \nline 2\n";
+
+        let (_temp_file, file_path) = create_temp_file(actual_content_in_file);
+        let patch_content = create_patch_content(original_content, modified_content);
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content,
+        };
+        let result = apply_patch(params).await.unwrap();
+
+        assert!(result.success);
+        let final_content = std::fs::read_to_string(file_path).unwrap();
+        assert_eq!(final_content, "line 1  \nline 2 changed\n");
+    }
+
+    #[test]
+    fn test_find_best_subsequence_prefers_near_expected() {
+        let haystack = vec![
+            "alpha\n".to_string(),
+            "needle\n".to_string(),
+            "beta\n".to_string(),
+            "gamma\n".to_string(),
+            "delta\n".to_string(),
+            "epsilon\n".to_string(),
+            "needle\n".to_string(),
+            "zeta\n".to_string(),
+        ];
+        let needle = vec!["needle\n".to_string()];
+        let expected_pos = 6;
+
+        let pos = find_best_subsequence(&haystack, &needle, expected_pos, MAX_FUZZ_OFFSET_LINES)
+            .expect("should find near expected");
+        assert_eq!(pos, 6);
     }
 
     #[tokio::test]
