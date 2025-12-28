@@ -192,7 +192,28 @@ Run Doge-Code as an HTTP server (`dgc --mcp-server [address]`). Directly call to
 - **doge-mcp-list-tools** (`C-c d m l`):
   - Display list of available tools.
 
-#### Usage Example
+### 4. Semantic HUD
+Ghost-text overlays showing symbol information.
+
+1.  Add `doge-hud.el` to load path.
+2.  `(require 'doge-hud)`.
+3.  Enable with `(doge-hud-mode 1)`.
+
+### 5. Self-Healing Flymake
+Automatic error fixing integration.
+
+1.  Add `doge-flymake.el` to load path.
+2.  `(require 'doge-flymake)`.
+3.  Bind the fix command to a convenient key:
+    ```elisp
+    (with-eval-after-load 'flymake
+      (define-key flymake-mode-map (kbd "C-c d f") 'doge-flymake-fix-at-point))
+    ```
+
+#### Usage
+Move cursor to a Flymake error and press `C-c d f`. Doge will attempt to rewrite the code to fix the specific error message.
+
+### 6. Usage Example
 1. Start the MCP server.
 2. In Emacs: `M-x doge-mcp-search-repomap` → Enter keywords → Display symbols/code in result buffer.
 3. Response: JSON format search results (file paths, symbols).

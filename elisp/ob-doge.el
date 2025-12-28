@@ -62,9 +62,9 @@ Supported headers:
             (let ((output (buffer-string)))
                ;; Determine if we should format it (e.g. if json)
                ;; For now, raw string output is best for Org.
-               output)
+               (decode-coding-string output 'utf-8))
           ;; Error
-          (format "Error (exit code %d): %s" exit-code (buffer-string)))))))
+          (format "Error (exit code %d): %s" exit-code (decode-coding-string (buffer-string) 'utf-8))))))
 
 (provide 'ob-doge)
 
