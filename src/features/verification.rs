@@ -1,25 +1,39 @@
+use crate::config::{AppConfig, VerificationConfig};
 use crate::llm::types::ToolCall;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
-pub struct AutoVerifier;
+pub struct AutoVerifier {
+    config: VerificationConfig,
+    project_root: PathBuf,
+}
 
 impl Default for AutoVerifier {
     fn default() -> Self {
-        Self::new()
+        Self::new(&AppConfig::default())
     }
 }
 
 impl AutoVerifier {
-    pub fn new() -> Self {
-        Self
+    pub fn new(config: &AppConfig) -> Self {
+        Self {
+            config: config.verification.clone(),
+            project_root: config.project_root.clone(),
+        }
     }
 
     /// Checks if the tool call warrants verification and runs it.
     /// Returns Some(warning_message) if verification fails.
     pub async fn verify(&self, tool_call: &ToolCall, success: bool) -> Option<String> {
         if !success {
+            return None;
+        }
+
+        if !self.config.enabled {
             return None;
         }
 
@@ -46,34 +60,62 @@ impl AutoVerifier {
         let extension = path.extension().and_then(|e| e.to_str())?;
 
         match extension {
-            "rs" => self.verify_rust(path).await,
-            "py" => self.verify_python(path).await,
-            "js" | "ts" | "jsx" | "tsx" => self.verify_node(path).await,
-            "go" => self.verify_go(path).await,
+            "rs" => {
+                self.verify_command("Rust", &self.config.commands.rust, path)
+                    .await
+            }
+            "py" => {
+                self.verify_command("Python", &self.config.commands.python, path)
+                    .await
+            }
+            "js" | "jsx" => {
+                self.verify_command("Node.js", &self.config.commands.node, path)
+                    .await
+            }
+            "ts" | "tsx" => {
+                self.verify_command("TypeScript", &self.config.commands.typescript, path)
+                    .await
+            }
+            "go" => {
+                self.verify_command("Go", &self.config.commands.go, path)
+                    .await
+            }
             _ => None,
         }
     }
 
-    async fn verify_rust(&self, _path: &Path) -> Option<String> {
-        // Run cargo check
-        // We assume we are in the project root or cargo can find the manifest using --manifest-path or just current dir.
-        // Since the agent runs in project root, `cargo check` should work.
-        debug!("Running cargo check verification");
-        let output = Command::new("cargo")
-            .arg("check")
-            .arg("--quiet")
-            .arg("--message-format=short")
-            .output()
-            .await
-            .ok()?;
+    async fn verify_command(&self, label: &str, command: &[String], path: &Path) -> Option<String> {
+        if command.is_empty() {
+            return None;
+        }
+
+        let rendered = self.render_command(command, path);
+        let (program, args) = rendered.split_first()?;
+
+        debug!("Running verification command for {}: {:?}", label, rendered);
+
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .current_dir(&self.project_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = match self.run_with_timeout(cmd).await {
+            Ok(output) => output,
+            Err(message) => {
+                return Some(format!(
+                    "<verification_error>\n{} Check Failed:\n{}\n</verification_error>",
+                    label, message
+                ));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            // Combine output
             let msg = format!(
-                "<verification_error>\nCargo Check Failed:\n{}{}\n</verification_error>",
-                stdout, stderr
+                "<verification_error>\n{} Check Failed:\n{}{}\n</verification_error>",
+                label, stdout, stderr
             );
             warn!("Verification failed: {}", msg);
             return Some(msg);
@@ -81,99 +123,40 @@ impl AutoVerifier {
         None
     }
 
-    async fn verify_python(&self, path: &Path) -> Option<String> {
-        // syntax check
-        debug!("Running python syntax check on {:?}", path);
-        let output = Command::new("python3")
-            .arg("-m")
-            .arg("py_compile")
-            .arg(path)
-            .output()
-            .await
-            .ok()?;
+    async fn run_with_timeout(&self, mut cmd: Command) -> Result<std::process::Output, String> {
+        let timeout_ms = self.config.timeout_ms;
+        cmd.kill_on_drop(true);
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn verification command: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Some(format!(
-                "<verification_error>\nPython Syntax Check Failed:\n{}\n</verification_error>",
-                stderr
-            ));
+        if timeout_ms == 0 {
+            return child
+                .wait_with_output()
+                .await
+                .map_err(|e| format!("Failed to wait for verification command: {}", e));
         }
-        None
+
+        match timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
+            Ok(result) => {
+                result.map_err(|e| format!("Failed to wait for verification command: {}", e))
+            }
+            Err(_) => Err(format!(
+                "Verification command timed out after {} ms",
+                timeout_ms
+            )),
+        }
     }
 
-    async fn verify_node(&self, path: &Path) -> Option<String> {
-        // syntax check using node --check
-        // Works for .js. For .ts, we might need tsc.
-        // Let's try `node --check` for js/mjs
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if ext == "js" || ext == "mjs" {
-            debug!("Running node syntax check on {:?}", path);
-            let output = Command::new("node")
-                .arg("--check")
-                .arg(path)
-                .output()
-                .await
-                .ok()?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Some(format!(
-                    "<verification_error>\nNode.js Syntax Check Failed:\n{}\n</verification_error>",
-                    stderr
-                ));
-            }
-        }
-
-        // TypeScript verification using tsc
-        if ext == "ts" || ext == "tsx" {
-            debug!("Running tsc check on {:?}", path);
-            // We use --noEmit to only check types/syntax without generating files
-            // We also try to run it on the specific file.
-            // Note: running tsc on a single file ignores tsconfig.json by default usually,
-            // but it's better than nothing for syntax checks.
-            let output = Command::new("tsc")
-                .arg("--noEmit")
-                .arg("--allowSyntheticDefaultImports")
-                .arg("--target")
-                .arg("esnext")
-                .arg("--moduleResolution")
-                .arg("node")
-                .arg(path)
-                .output()
-                .await
-                .ok()?;
-
-            if !output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // tsc outputs errors to stdout usually
-                return Some(format!(
-                    "<verification_error>\nTypeScript Check Failed:\n{}\n</verification_error>",
-                    stdout
-                ));
-            }
-        }
-        None
-    }
-
-    async fn verify_go(&self, path: &Path) -> Option<String> {
-        // go vet or build
-        // go build -o /dev/null path/to/file.go often complains about package main if not main.
-        // using `go vet` might be better.
-        debug!("Running go vet on {:?}", path);
-        let output = Command::new("go")
-            .arg("vet")
-            .arg(path)
-            .output()
-            .await
-            .ok()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Some(format!(
-                "<verification_error>\nGo Vet Failed:\n{}\n</verification_error>",
-                stderr
-            ));
-        }
-        None
+    fn render_command(&self, command: &[String], path: &Path) -> Vec<String> {
+        let path_str = path.to_string_lossy();
+        let root_str = self.project_root.to_string_lossy();
+        command
+            .iter()
+            .map(|part| {
+                part.replace("{path}", &path_str)
+                    .replace("{project_root}", &root_str)
+            })
+            .collect()
     }
 }

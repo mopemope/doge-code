@@ -31,19 +31,89 @@ pub struct AppConfig {
     pub allowed_commands: Vec<String>,
     // Allowed paths for file access
     pub allowed_paths: Vec<PathBuf>,
+    // Timeout for tool-executed commands (execute_bash/execute_shell)
+    pub command_timeout_ms: u64,
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
+    pub verification: VerificationConfig,
     pub rag: RagConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RagConfig {
     pub batch_size: usize,
+    pub enabled: bool,
+    pub auto_update: bool,
 }
 
 impl Default for RagConfig {
     fn default() -> Self {
-        Self { batch_size: 8 }
+        Self {
+            batch_size: 8,
+            enabled: true,
+            auto_update: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerificationConfig {
+    pub enabled: bool,
+    pub timeout_ms: u64,
+    pub commands: VerificationCommands,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerificationCommands {
+    pub rust: Vec<String>,
+    pub python: Vec<String>,
+    pub node: Vec<String>,
+    pub typescript: Vec<String>,
+    pub go: Vec<String>,
+}
+
+impl Default for VerificationCommands {
+    fn default() -> Self {
+        Self {
+            rust: vec![
+                "cargo".to_string(),
+                "check".to_string(),
+                "--quiet".to_string(),
+                "--message-format=short".to_string(),
+            ],
+            python: vec![
+                "python3".to_string(),
+                "-m".to_string(),
+                "py_compile".to_string(),
+                "{path}".to_string(),
+            ],
+            node: vec![
+                "node".to_string(),
+                "--check".to_string(),
+                "{path}".to_string(),
+            ],
+            typescript: vec![
+                "tsc".to_string(),
+                "--noEmit".to_string(),
+                "--allowSyntheticDefaultImports".to_string(),
+                "--target".to_string(),
+                "esnext".to_string(),
+                "--moduleResolution".to_string(),
+                "node".to_string(),
+                "{path}".to_string(),
+            ],
+            go: vec!["go".to_string(), "vet".to_string(), "{path}".to_string()],
+        }
+    }
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_ms: 120_000,
+            commands: VerificationCommands::default(),
+        }
     }
 }
 
@@ -86,8 +156,10 @@ impl Default for AppConfig {
             show_diff: false,
             allowed_commands: vec![],
             allowed_paths: vec![],
+            command_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
+            verification: VerificationConfig::default(),
             rag: RagConfig::default(),
         }
     }
@@ -177,6 +249,7 @@ impl Default for LlmConfig {
 
 // Default threshold for auto-compacting conversation history
 pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 250_000;
+pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 300_000;
 
 // Threshold constant removed; use AppConfig.auto_compact_prompt_token_threshold at runtime
 
@@ -204,12 +277,32 @@ pub struct FileConfig {
     pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
     pub rewrite_timeout_sec: Option<u64>,
+    pub command_timeout_ms: Option<u64>,
+    pub verification: Option<PartialVerificationConfig>,
     pub rag: Option<PartialRagConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct PartialRagConfig {
     pub batch_size: Option<usize>,
+    pub enabled: Option<bool>,
+    pub auto_update: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialVerificationConfig {
+    pub enabled: Option<bool>,
+    pub timeout_ms: Option<u64>,
+    pub commands: Option<PartialVerificationCommands>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialVerificationCommands {
+    pub rust: Option<Vec<String>>,
+    pub python: Option<Vec<String>>,
+    pub node: Option<Vec<String>>,
+    pub typescript: Option<Vec<String>>,
+    pub go: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -557,19 +650,95 @@ impl AppConfig {
             let default_rag = RagConfig::default();
             let mut rag_cfg = default_rag.clone();
 
-            if let Some(file_rag) = &file_cfg.rag
-                && let Some(batch_size) = file_rag.batch_size
-            {
-                rag_cfg.batch_size = batch_size;
+            if let Some(file_rag) = &file_cfg.rag {
+                if let Some(batch_size) = file_rag.batch_size {
+                    rag_cfg.batch_size = batch_size;
+                }
+                if let Some(enabled) = file_rag.enabled {
+                    rag_cfg.enabled = enabled;
+                }
+                if let Some(auto_update) = file_rag.auto_update {
+                    rag_cfg.auto_update = auto_update;
+                }
             }
 
-            if let Some(project_rag) = &project_cfg.rag
-                && let Some(batch_size) = project_rag.batch_size
-            {
-                rag_cfg.batch_size = batch_size;
+            if let Some(project_rag) = &project_cfg.rag {
+                if let Some(batch_size) = project_rag.batch_size {
+                    rag_cfg.batch_size = batch_size;
+                }
+                if let Some(enabled) = project_rag.enabled {
+                    rag_cfg.enabled = enabled;
+                }
+                if let Some(auto_update) = project_rag.auto_update {
+                    rag_cfg.auto_update = auto_update;
+                }
             }
             rag_cfg
         };
+
+        let verification = {
+            let default_verification = VerificationConfig::default();
+            let mut verification_cfg = default_verification.clone();
+
+            if let Some(file_verification) = &file_cfg.verification {
+                if let Some(enabled) = file_verification.enabled {
+                    verification_cfg.enabled = enabled;
+                }
+                if let Some(timeout_ms) = file_verification.timeout_ms {
+                    verification_cfg.timeout_ms = timeout_ms;
+                }
+                if let Some(commands) = &file_verification.commands {
+                    if let Some(rust) = &commands.rust {
+                        verification_cfg.commands.rust = rust.clone();
+                    }
+                    if let Some(python) = &commands.python {
+                        verification_cfg.commands.python = python.clone();
+                    }
+                    if let Some(node) = &commands.node {
+                        verification_cfg.commands.node = node.clone();
+                    }
+                    if let Some(typescript) = &commands.typescript {
+                        verification_cfg.commands.typescript = typescript.clone();
+                    }
+                    if let Some(go) = &commands.go {
+                        verification_cfg.commands.go = go.clone();
+                    }
+                }
+            }
+
+            if let Some(project_verification) = &project_cfg.verification {
+                if let Some(enabled) = project_verification.enabled {
+                    verification_cfg.enabled = enabled;
+                }
+                if let Some(timeout_ms) = project_verification.timeout_ms {
+                    verification_cfg.timeout_ms = timeout_ms;
+                }
+                if let Some(commands) = &project_verification.commands {
+                    if let Some(rust) = &commands.rust {
+                        verification_cfg.commands.rust = rust.clone();
+                    }
+                    if let Some(python) = &commands.python {
+                        verification_cfg.commands.python = python.clone();
+                    }
+                    if let Some(node) = &commands.node {
+                        verification_cfg.commands.node = node.clone();
+                    }
+                    if let Some(typescript) = &commands.typescript {
+                        verification_cfg.commands.typescript = typescript.clone();
+                    }
+                    if let Some(go) = &commands.go {
+                        verification_cfg.commands.go = go.clone();
+                    }
+                }
+            }
+
+            verification_cfg
+        };
+
+        let command_timeout_ms = project_cfg
+            .command_timeout_ms
+            .or(file_cfg.command_timeout_ms)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS);
 
         Ok(Self {
             base_url,
@@ -605,11 +774,13 @@ impl AppConfig {
                 .allowed_paths
                 .or(file_cfg.allowed_paths)
                 .unwrap_or_default(),
+            command_timeout_ms,
             mcp_servers,
             rewrite_timeout_sec: project_cfg
                 .rewrite_timeout_sec
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
+            verification,
             rag,
         })
     }
@@ -639,6 +810,20 @@ timeout_ms = 600000  # 10 minutes
 # RAG settings
 [rag]
 batch_size = 8
+# enabled = true
+# auto_update = true
+
+# Verification settings
+[verification]
+enabled = true
+timeout_ms = 120000
+
+[verification.commands]
+rust = ["cargo", "check", "--quiet", "--message-format=short"]
+python = ["python3", "-m", "py_compile", "{path}"]
+node = ["node", "--check", "{path}"]
+typescript = ["tsc", "--noEmit", "--allowSyntheticDefaultImports", "--target", "esnext", "--moduleResolution", "node", "{path}"]
+go = ["go", "vet", "{path}"]
 
 # Watch mode settings
 [watch]
@@ -663,6 +848,7 @@ auto_compact_prompt_token_threshold = 250000
 # auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
 resume = false
 rewrite_timeout_sec = 30
+command_timeout_ms = 300000
 
 # Allowed commands for execute_bash tool
 # allowed_commands = ["git", "ls", "cat", "grep", "find"]

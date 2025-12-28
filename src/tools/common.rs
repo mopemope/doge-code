@@ -55,7 +55,10 @@ impl FsTools {
             remote_tool_manager: RemoteToolManager::new(config.clone()),
             security_checker: SecurityChecker::new(config.clone()),
             undo_stack: Arc::new(RwLock::new(crate::tools::undo::UndoStack::new())),
-            shell_session: SharedShellSession::new(config.project_root.clone()),
+            shell_session: SharedShellSession::new(
+                config.project_root.clone(),
+                config.command_timeout_ms,
+            ),
         }
     }
 

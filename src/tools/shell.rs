@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tracing::info;
 use uuid::Uuid;
 
@@ -48,6 +50,7 @@ pub struct ShellSession {
     // Let's try to read both.
     stderr: Option<BufReader<tokio::process::ChildStderr>>,
     project_root: std::path::PathBuf,
+    command_timeout_ms: u64,
 }
 
 // Global or shared state wrapper
@@ -55,8 +58,11 @@ pub struct ShellSession {
 pub struct SharedShellSession(Arc<Mutex<ShellSession>>);
 
 impl SharedShellSession {
-    pub fn new(project_root: std::path::PathBuf) -> Self {
-        Self(Arc::new(Mutex::new(ShellSession::new(project_root))))
+    pub fn new(project_root: std::path::PathBuf, command_timeout_ms: u64) -> Self {
+        Self(Arc::new(Mutex::new(ShellSession::new(
+            project_root,
+            command_timeout_ms,
+        ))))
     }
 
     pub async fn exec(&self, command: &str) -> Result<String> {
@@ -71,13 +77,14 @@ impl SharedShellSession {
 }
 
 impl ShellSession {
-    pub fn new(project_root: std::path::PathBuf) -> Self {
+    pub fn new(project_root: std::path::PathBuf, command_timeout_ms: u64) -> Self {
         Self {
             child: None,
             stdin: None,
             stdout: None,
             stderr: None,
             project_root,
+            command_timeout_ms,
         }
     }
 
@@ -147,10 +154,29 @@ impl ShellSession {
         let stdout_prefix = "__DOGE_SENTINEL:".to_string();
         let stderr_prefix = "__DOGE_SENTINEL_ERR:".to_string();
 
-        let (out_res, err_res) = tokio::join!(
-            read_until_sentinel(stdout_reader, &stdout_prefix, &sentinel),
-            read_until_sentinel(stderr_reader, &stderr_prefix, &sentinel)
-        );
+        let read_task = async {
+            tokio::join!(
+                read_until_sentinel(stdout_reader, &stdout_prefix, &sentinel),
+                read_until_sentinel(stderr_reader, &stderr_prefix, &sentinel)
+            )
+        };
+
+        let (out_res, err_res) = if self.command_timeout_ms == 0 {
+            read_task.await
+        } else {
+            match timeout(Duration::from_millis(self.command_timeout_ms), read_task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.reset_session().await;
+                    return Ok(ExecuteShellResult {
+                        stdout: String::new(),
+                        stderr: format!("Command timed out after {} ms", self.command_timeout_ms),
+                        exit_code: None,
+                        success: false,
+                    });
+                }
+            }
+        };
 
         let (stdout, exit_code) = out_res?;
         let (stderr, _) = err_res?;
@@ -163,6 +189,16 @@ impl ShellSession {
             exit_code,
             success,
         })
+    }
+
+    async fn reset_session(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        self.stdin = None;
+        self.stdout = None;
+        self.stderr = None;
     }
 }
 
@@ -210,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_session_basic() {
         let temp_dir = TempDir::new().unwrap();
-        let mut session = ShellSession::new(temp_dir.path().to_path_buf());
+        let mut session = ShellSession::new(temp_dir.path().to_path_buf(), 0);
         session.start().unwrap();
 
         let res = session.exec_command("echo hello").await.unwrap();
@@ -221,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_session_state() {
         let temp_dir = TempDir::new().unwrap();
-        let mut session = ShellSession::new(temp_dir.path().to_path_buf());
+        let mut session = ShellSession::new(temp_dir.path().to_path_buf(), 0);
         session.start().unwrap();
 
         session.exec_command("export FOO=bar").await.unwrap();
@@ -232,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_session_cwd() {
         let temp_dir = TempDir::new().unwrap();
-        let mut session = ShellSession::new(temp_dir.path().to_path_buf());
+        let mut session = ShellSession::new(temp_dir.path().to_path_buf(), 0);
         session.start().unwrap();
 
         let subdir = temp_dir.path().join("subdir");
@@ -249,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_session_error() {
         let temp_dir = TempDir::new().unwrap();
-        let mut session = ShellSession::new(temp_dir.path().to_path_buf());
+        let mut session = ShellSession::new(temp_dir.path().to_path_buf(), 0);
         session.start().unwrap();
 
         let res = session.exec_command("nonexistent_command").await.unwrap();

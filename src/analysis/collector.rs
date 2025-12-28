@@ -19,7 +19,7 @@ pub(super) fn name_from(node: Node, field: &str, src: &str) -> Option<String> {
 
 /// Extract keywords from comment text
 /// This function extracts meaningful words from comments, including both English and Japanese words.
-pub(super) fn extract_keywords_from_comment(comment: &str) -> Vec<String> {
+pub fn extract_keywords_from_comment(comment: &str) -> Vec<String> {
     let mut keywords = Vec::new();
 
     // Remove comment markers (//, /*, */, #, etc.)

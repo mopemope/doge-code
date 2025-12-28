@@ -4,7 +4,10 @@ use super::database::entities::{symbol_embedding, symbol_info};
 use crate::analysis::semantic::embedder::Embedder;
 use crate::config::RagConfig;
 use anyhow::{Context, Result};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, PaginatorTrait, QueryFilter,
+    QuerySelect, RelationTrait, Set,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +44,11 @@ impl SemanticService {
 
     /// Generates embeddings for symbols that don't have them yet.
     pub async fn update_embeddings(&self, project_root: &Path) -> Result<()> {
+        if !self.config.enabled {
+            debug!("Semantic embeddings disabled; skipping update.");
+            return Ok(());
+        }
+
         let project_root_str = project_root.to_str().unwrap_or_default();
 
         // 1. Find symbols without embeddings
@@ -176,6 +184,10 @@ impl SemanticService {
         limit: usize,
         project_root: &Path,
     ) -> Result<Vec<(symbol_info::Model, f32)>> {
+        if !self.config.enabled {
+            return Ok(Vec::new());
+        }
+
         self.ensure_embedder_ready().await?;
         let mut guard = self.embedder.lock().await;
         let embedder = guard.as_mut().unwrap();
@@ -213,6 +225,29 @@ impl SemanticService {
         scored_results.truncate(limit);
 
         Ok(scored_results)
+    }
+
+    pub async fn has_embeddings(&self, project_root: &Path) -> Result<bool> {
+        if !self.config.enabled {
+            return Ok(false);
+        }
+
+        let project_root_str = project_root.to_str().unwrap_or_default();
+        let count = symbol_embedding::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                symbol_embedding::Relation::SymbolInfo.def(),
+            )
+            .filter(symbol_info::Column::ProjectRoot.eq(project_root_str))
+            .count(&self.db_conn)
+            .await
+            .context("Failed to count symbol embeddings")?;
+
+        Ok(count > 0)
+    }
+
+    pub fn auto_update_enabled(&self) -> bool {
+        self.config.auto_update
     }
 
     fn serialize_embedding(vec: &[f32]) -> Vec<u8> {

@@ -609,8 +609,10 @@ mod tests {
             show_diff: true,
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
+            command_timeout_ms: crate::config::DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
+            verification: crate::config::VerificationConfig::default(),
             rag: crate::config::RagConfig::default(),
         };
 
@@ -645,8 +647,10 @@ mod tests {
             show_diff: true,
             allowed_paths: vec![],
             allowed_commands: vec![], // Add allowed_commands
+            command_timeout_ms: crate::config::DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
+            verification: crate::config::VerificationConfig::default(),
             rag: crate::config::RagConfig::default(),
         };
 

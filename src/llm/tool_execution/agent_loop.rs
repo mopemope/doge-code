@@ -69,7 +69,7 @@ pub async fn run_agent_loop(
     }
 
     let runtime = ToolRuntime::build(fs).await?;
-    let verifier = crate::features::verification::AutoVerifier::new();
+    let verifier = crate::features::verification::AutoVerifier::new(cfg);
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;

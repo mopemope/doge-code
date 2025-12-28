@@ -142,11 +142,15 @@ async fn main() -> Result<()> {
 
         let (store, semantic_service) = match store_result {
             Ok(s) => {
-                let service = crate::analysis::semantic::SemanticService::new(
-                    s.get_db_connection().clone(),
-                    cfg.rag.clone(),
-                );
-                (Some(s), Some(service))
+                let service = if cfg.rag.enabled {
+                    Some(crate::analysis::semantic::SemanticService::new(
+                        s.get_db_connection().clone(),
+                        cfg.rag.clone(),
+                    ))
+                } else {
+                    None
+                };
+                (Some(s), service)
             }
             Err(e) => {
                 tracing::error!("Failed to initialize RepomapStore: {:?}", e);
