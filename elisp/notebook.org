@@ -1,0 +1,20 @@
+#+TITLE: Doge-Code Notebook
+#+AUTHOR: Doge-Code Agent
+
+* Introduction
+This notebook demonstrates the *Org-Doge* integration.
+Ensure you have loaded `ob-doge` (`(require 'ob-doge)`) and configured `doge-code-executable`.
+
+* Analysis Experiment
+I want to analyze the `main.rs` file of the compiled project.
+
+#+BEGIN_SRC doge :context "src/main.rs"
+Explain the main function of this project briefly.
+#+END_SRC
+
+* Code Generation Experiment
+Let's ask for a Python script example.
+
+#+BEGIN_SRC doge
+Generate a Python script that calculates Fibonacci numbers recursively.
+#+END_SRC
