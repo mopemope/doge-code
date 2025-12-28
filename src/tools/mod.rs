@@ -1,5 +1,6 @@
 pub mod apply_patch;
 mod common;
+pub mod doc;
 pub mod edit;
 pub mod execute;
 pub mod find_file;
