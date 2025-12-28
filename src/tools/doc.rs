@@ -1,3 +1,4 @@
+use crate::analysis::RepoMap;
 use crate::config::AppConfig;
 use crate::features::doc_skill::generator::DocGenerator;
 use crate::llm::OpenAIClient;
@@ -5,7 +6,7 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -26,25 +27,29 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub async fn doc_generate(path: &str, symbol: Option<&str>, config: &AppConfig) -> Result<String> {
+pub async fn doc_generate(
+    path: &str,
+    symbol: Option<&str>,
+    config: &AppConfig,
+    repomap: Arc<RwLock<Option<RepoMap>>>,
+) -> Result<String> {
     // Check API key first
     let api_key = config
         .api_key
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-    // Instantiate OpenAIClient
-    let client = OpenAIClient::new(config.base_url.clone(), api_key)?;
+    // Instantiate OpenAIClient with configured timeouts
+    let client =
+        OpenAIClient::new(config.base_url.clone(), api_key)?.with_llm_config(config.llm.clone());
     let client_arc = Arc::new(client);
 
-    // Instantiate Analyzer
-    // Note: Re-creating Analyzer might be expensive if cache is not effective or if project is huge.
-    // Ideally we reuse the one from Executor if accessible, but here we don't have it.
-    // relying on Analyzer's internal cache logic.
-    let analyzer = crate::analysis::Analyzer::new(config.project_root.clone()).await?;
-    let analyzer_arc = Arc::new(Mutex::new(analyzer));
-
-    let generator = DocGenerator::new(analyzer_arc, client_arc);
+    let generator = DocGenerator::new(
+        repomap,
+        client_arc,
+        config.model.clone(),
+        config.project_root.clone(),
+    );
     let path_obj = std::path::Path::new(path);
 
     if let Some(sym) = symbol {

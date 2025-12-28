@@ -7,6 +7,7 @@ pub enum ErrorType {
         file_path: String,
         expected_context: Option<String>,
         actual_context: Option<String>,
+        patch_content: String,
     },
     CompilationError {
         language: String,

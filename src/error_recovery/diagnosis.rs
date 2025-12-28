@@ -16,6 +16,7 @@ impl DiagnosisEngine {
                 file_path: file_path.to_string(),
                 expected_context: Self::extract_expected_context(patch_content),
                 actual_context: Self::read_current_file_context(file_path),
+                patch_content: patch_content.to_string(),
             }
         } else if error_message.contains("line numbers do not match") {
             ErrorType::PatchApplicationError {
@@ -23,6 +24,7 @@ impl DiagnosisEngine {
                 file_path: file_path.to_string(),
                 expected_context: None,
                 actual_context: None,
+                patch_content: patch_content.to_string(),
             }
         } else if error_message.contains("File does not exist") {
             ErrorType::PatchApplicationError {
@@ -30,6 +32,7 @@ impl DiagnosisEngine {
                 file_path: file_path.to_string(),
                 expected_context: None,
                 actual_context: None,
+                patch_content: patch_content.to_string(),
             }
         } else if error_message.contains("read-only")
             || error_message.contains("no write permissions")
@@ -39,6 +42,7 @@ impl DiagnosisEngine {
                 file_path: file_path.to_string(),
                 expected_context: None,
                 actual_context: None,
+                patch_content: patch_content.to_string(),
             }
         } else {
             ErrorType::PatchApplicationError {
@@ -46,6 +50,7 @@ impl DiagnosisEngine {
                 file_path: file_path.to_string(),
                 expected_context: None,
                 actual_context: None,
+                patch_content: patch_content.to_string(),
             }
         }
     }
@@ -66,9 +71,7 @@ impl DiagnosisEngine {
         }
     }
 
-    fn read_current_file_context(_file_path: &str) -> Option<String> {
-        // This would normally read the actual file, but for now return None
-        // In a real implementation, this would read the current file content
-        None
+    fn read_current_file_context(file_path: &str) -> Option<String> {
+        std::fs::read_to_string(file_path).ok()
     }
 }
