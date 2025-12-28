@@ -41,6 +41,7 @@ pub async fn dispatch_tool_call(
         "read_memory" => tools::read_memory(runtime, &args_val).await,
         "write_memory" => tools::write_memory(runtime, &args_val).await,
         "list_memories" => tools::list_memories(runtime, &args_val).await,
+        "doc_generate" => tools::doc_generate(runtime, &args_val).await,
 
         other => {
             if let Some(result) = runtime.fs.call_remote_tool(other, &args_val).await? {

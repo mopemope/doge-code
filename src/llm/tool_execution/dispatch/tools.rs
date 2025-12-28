@@ -241,3 +241,20 @@ pub async fn list_memories(
         Err(e) => Err(anyhow!("{e}")),
     }
 }
+
+pub async fn doc_generate(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let args = args.as_object().ok_or_else(|| anyhow!("invalid args"))?;
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("path is required"))?;
+    let symbol = args.get("symbol").and_then(|v| v.as_str());
+
+    match runtime.fs.doc_generate(path, symbol).await {
+        Ok(result) => Ok(json!({ "ok": true, "doc": result })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}

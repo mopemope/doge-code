@@ -11,8 +11,7 @@ pub struct ErrorRecoveryTool {
 
 impl ErrorRecoveryTool {
     pub fn new(config: AppConfig) -> Self {
-        let mut strategies: Vec<Box<dyn FixStrategy>> = vec![];
-        strategies.push(Box::new(PatchFixStrategy));
+        let strategies: Vec<Box<dyn FixStrategy>> = vec![Box::new(PatchFixStrategy)];
 
         // Future expansion: add other strategies
         // strategies.push(Box::new(CompilationFixStrategy));

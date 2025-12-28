@@ -516,6 +516,19 @@ impl FsTools {
             }
         }
     }
+    pub async fn doc_generate(&self, path: &str, symbol: Option<&str>) -> Result<String> {
+        self.update_session_with_tool_call_count()?;
+        match crate::tools::doc::doc_generate(path, symbol, &self.config).await {
+            Ok(msg) => {
+                self.record_tool_call_success("doc_generate")?;
+                Ok(msg)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("doc_generate")?;
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
