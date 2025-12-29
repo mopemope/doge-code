@@ -49,7 +49,7 @@ impl CommandHandler for TuiExecutor {
                 Err(e) => ui.push_log(format!("Error: {}", e)),
             },
             line if line.starts_with("/open ") => handle_open(self, line, ui),
-            line if line.starts_with("/theme ") => handle_theme(self, line, ui),
+            line if line.starts_with("/theme ") => handle_theme(line, ui),
             _ => {
                 // Rest of content moved to exec.rs
                 self.handle_dispatch_rest(line, ui);
