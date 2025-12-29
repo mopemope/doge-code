@@ -14,6 +14,7 @@ use crate::tui::commands::handlers::slash_commands::map::handle_map;
 use crate::tui::commands::handlers::slash_commands::open::handle_open;
 use crate::tui::commands::handlers::slash_commands::quit::handle_quit;
 use crate::tui::commands::handlers::slash_commands::rebuild_repomap::handle_rebuild_repomap;
+use crate::tui::commands::handlers::slash_commands::test::handle_test;
 use crate::tui::commands::handlers::slash_commands::theme::handle_theme;
 use crate::tui::commands::handlers::slash_commands::tokens::handle_tokens;
 use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
@@ -44,6 +45,7 @@ impl CommandHandler for TuiExecutor {
             "/map" => handle_map(self, ui),
             "/edit-symbol" => handle_edit_symbol(self, ui),
             "/lint" => handle_lint(self, ui),
+            "/test" => handle_test(self, ui),
             "/git-worktree" => match handle_git_worktree() {
                 Ok(message) => ui.push_log(message),
                 Err(e) => ui.push_log(format!("Error: {}", e)),
