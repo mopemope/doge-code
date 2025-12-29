@@ -134,8 +134,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mut cfg = crate::config::AppConfig::default();
-        cfg.project_root = temp_dir.path().to_path_buf();
+        let cfg = crate::config::AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let service = service::DogeMcpService::new(cfg);
         let params = service::SearchRepomapParams {

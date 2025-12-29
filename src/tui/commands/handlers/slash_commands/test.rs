@@ -1,3 +1,4 @@
+use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
 use regex::Regex;
@@ -234,7 +235,7 @@ fn python_test_commands(project_root: &Path) -> Vec<TestCommand> {
 }
 
 fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
-    let _ = ui_tx.send(format!(
+    ui_tx.send_logged(format!(
         "::shell_output:Project root: {}",
         project_root.display()
     ));
@@ -242,17 +243,16 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     // Detect languages in the project
     let detected_languages = detect_project_languages(&project_root);
 
-    let _ = ui_tx.send(format!(
+    ui_tx.send_logged(format!(
         "::shell_output:Detected languages: {:?}",
         detected_languages
     ));
 
     if detected_languages.is_empty() {
-        let _ = ui_tx.send(
-            "::shell_output:No supported languages (Go, Rust, TypeScript, Python) detected."
-                .to_string(),
+        ui_tx.send_logged(
+            "::shell_output:No supported languages (Go, Rust, TypeScript, Python) detected.",
         );
-        let _ = ui_tx.send("::status:idle".to_string());
+        ui_tx.send_logged("::status:idle");
         return;
     }
 
@@ -264,11 +264,11 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
     // Run tests for each detected language
     for lang in detected_languages {
-        let _ = ui_tx.send(format!("::shell_output:\n--- Running {} tests ---", lang));
+        ui_tx.send_logged(format!("::shell_output:\n--- Running {} tests ---", lang));
 
         if let Some(config) = test_configs.get(&lang) {
             if config.commands.is_empty() {
-                let _ = ui_tx.send(format!(
+                ui_tx.send_logged(format!(
                     "::shell_output:No test commands configured for language '{}'.",
                     lang
                 ));
@@ -296,13 +296,13 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
                 // Send output to UI
                 if result.success {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:✓ All tests passed: {} {}",
                         test_cmd.command,
                         test_cmd.args.join(" ")
                     ));
                 } else {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:✗ Tests failed: {} {}",
                         test_cmd.command,
                         test_cmd.args.join(" ")
@@ -310,17 +310,17 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                 }
 
                 if !result.stdout.is_empty() {
-                    let _ = ui_tx.send(format!("::shell_output:Output:\n{}", result.stdout));
+                    ui_tx.send_logged(format!("::shell_output:Output:\n{}", result.stdout));
                 }
 
                 if !result.stderr.is_empty() {
-                    let _ = ui_tx.send(format!("::shell_output:STDERR:\n{}", result.stderr));
+                    ui_tx.send_logged(format!("::shell_output:STDERR:\n{}", result.stderr));
                 }
 
                 // Parse failed tests
                 let failed_tests = parse_test_output(&result, &test_cmd.command, &lang);
                 if !failed_tests.is_empty() {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:Found {} failed test(s)",
                         failed_tests.len()
                     ));
@@ -329,7 +329,7 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                 all_failed_tests.extend(failed_tests);
             }
         } else {
-            let _ = ui_tx.send(format!(
+            ui_tx.send_logged(format!(
                 "::shell_output:No test configuration found for language: {}",
                 lang
             ));
@@ -367,16 +367,15 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
         prompt.push_str("\n\nPlease analyze the test failures above. For each failure:\n1. Identify the root cause\n2. Read the relevant source files if needed\n3. Provide specific code fixes\n\nFocus on fixing the actual code bugs, not modifying the tests (unless the tests themselves are incorrect).");
 
-        let _ = ui_tx.send(
-            "::shell_output:\nSending test failures to LLM for analysis and fixes...".to_string(),
-        );
-        let _ = ui_tx.send(format!("::test_failures_analysis:{}", prompt));
+        ui_tx
+            .send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
+        ui_tx.send_logged(format!("::test_failures_analysis:{}", prompt));
     } else {
-        let _ = ui_tx.send("::shell_output:\n✓ All tests passed!".to_string());
+        ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
     }
 
-    let _ = ui_tx.send("::shell_output:Test run completed.".to_string());
-    let _ = ui_tx.send("::status:idle".to_string());
+    ui_tx.send_logged("::shell_output:Test run completed.");
+    ui_tx.send_logged("::status:idle");
 }
 
 fn run_command_sync_with_output(project_root: &Path, cmd: &str, args: &[String]) -> TestResult {
