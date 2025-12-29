@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
             json,
         }) => run_rewrite(cfg, prompt, code_file, file_path.as_deref(), *json).await,
         Some(Commands::Fix { command, retry }) => run_fix(cfg, command, *retry).await,
-        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
+        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx, semantic_service).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
                 .clone()
@@ -256,6 +256,7 @@ async fn run_tui(
     cfg: AppConfig,
     repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
     status_rx: Option<std::sync::mpsc::Receiver<String>>,
+    semantic_service: Option<crate::analysis::semantic::SemanticService>,
 ) -> Result<()> {
     let mut app = TuiApp::new(
         "🦮 doge-code 🐕‍🦺 /help",
@@ -277,7 +278,7 @@ async fn run_tui(
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");
 
-    let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
+    let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap, semantic_service) {
         Ok(exec) => {
             // If resume flag is set, load the latest session
             if cfg.resume {
