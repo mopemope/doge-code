@@ -2,10 +2,12 @@
 pub mod m20230101_000001_create_tables;
 pub mod m20230101_000002_add_keywords_to_symbol_info;
 pub mod m20251222_000001_create_embedding_table;
+pub mod m20251230_000001_create_action_log_table;
 
 use crate::analysis::database::migration::m20230101_000001_create_tables::Migration as CreateTablesMigration;
 use crate::analysis::database::migration::m20230101_000002_add_keywords_to_symbol_info::Migration as AddKeywordsMigration;
 use crate::analysis::database::migration::m20251222_000001_create_embedding_table::Migration as CreateEmbeddingTableMigration;
+use crate::analysis::database::migration::m20251230_000001_create_action_log_table::Migration as CreateActionLogTableMigration;
 use sea_orm::{DatabaseConnection, DbErr};
 use sea_orm_migration::MigratorTrait;
 
@@ -19,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateTablesMigration),
             Box::new(AddKeywordsMigration),
             Box::new(CreateEmbeddingTableMigration),
+            Box::new(CreateActionLogTableMigration),
         ]
     }
 }

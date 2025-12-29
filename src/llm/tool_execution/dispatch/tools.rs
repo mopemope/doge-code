@@ -49,10 +49,21 @@ pub async fn edit(
                 {
                     tracing::error!(?e, "Failed to update session with lines edited count");
                 }
-
                 runtime
                     .fs
                     .update_context(std::path::PathBuf::from(&file_path));
+
+                let _ = runtime
+                    .fs
+                    .log_action(
+                        "edit",
+                        &format!("Edited file: {}", file_path),
+                        Some(serde_json::json!({
+                            "path": file_path,
+                            "lines_edited": res.lines_edited,
+                        })),
+                    )
+                    .await;
             } else if let Err(e) = runtime.fs.record_tool_call_failure("edit") {
                 tracing::error!(?e, "Failed to record tool call failure for edit");
             }
@@ -92,6 +103,18 @@ pub async fn apply_patch(
                 if let Err(e) = runtime.fs.record_tool_call_success("apply_patch") {
                     tracing::error!(?e, "Failed to record tool call success for apply_patch");
                 }
+
+                let _ = runtime
+                    .fs
+                    .log_action(
+                        "apply_patch",
+                        "Applied patch",
+                        Some(serde_json::json!({
+                            "success": true
+                        })),
+                    )
+                    .await;
+
                 // We should probably track context for all files in patch, but params doesn't easily give list?
                 // Actually apply_patch params is defined in src/tools/apply_patch.rs.
                 // Let's assume for now we don't track context for apply_patch (multi-file) or implemented later.
@@ -138,6 +161,18 @@ pub async fn plan_write(
             if let Err(e) = runtime.fs.record_tool_call_success("plan_write") {
                 tracing::error!(?e, "Failed to record tool call success for plan_write");
             }
+
+            let _ = runtime
+                .fs
+                .log_action(
+                    "plan_write",
+                    "Updated plan",
+                    Some(serde_json::json!({
+                        "items_count": plan_items.len(),
+                        "mode": format!("{:?}", params.mode)
+                    })),
+                )
+                .await;
 
             // Return the plan as the tool result so the agent loop can forward them to the UI
             Ok(serde_json::to_value(res)?)
@@ -255,6 +290,19 @@ pub async fn doc_generate(
 
     match runtime.fs.doc_generate(path, symbol).await {
         Ok(result) => Ok(json!({ "ok": true, "doc": result })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+pub async fn search_history(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+    match runtime.fs.search_history(query, limit).await {
+        Ok(result) => Ok(json!({ "result": result })),
         Err(e) => Err(anyhow!("{e}")),
     }
 }
