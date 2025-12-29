@@ -128,6 +128,7 @@ impl SemanticService {
                     // Truncate to avoid token limits? fastembed handles truncation usually.
                     // But excessively long functions might dilute the vector.
                     // Let's limit to ~50 lines of code roughly or 2000 chars.
+                    // TODO: Consider a more sophisticated chunking strategy (e.g., overlapping windows or AST-based semantic chunking).
                     let truncated_text = if text.len() > 2000 {
                         text.chars().take(2000).collect()
                     } else {
@@ -201,6 +202,8 @@ impl SemanticService {
         // 2. Fetch all embeddings for project
         // Note: For large repos, this should use an index or vector DB.
         // For < 10k symbols, bruteforce is acceptable.
+        // TODO: Performance bottle-neck. Loading ALL embeddings into memory for every search is inefficient for large codebases.
+        // Consider integrating `sqlite-vec` or using an external vector store (e.g., Qdrant, Chroma) if scaling is needed.
         let project_root_str = project_root.to_str().unwrap_or_default();
 
         let results = symbol_embedding::Entity::find()

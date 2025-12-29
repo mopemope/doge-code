@@ -67,6 +67,14 @@ impl FsTools {
         self
     }
 
+    pub fn with_semantic_service(
+        mut self,
+        service: Option<crate::analysis::semantic::SemanticService>,
+    ) -> Self {
+        self.search_repomap_tools = search_repomap::RepomapSearchTools::new(service);
+        self
+    }
+
     /// Update the current session with tool call count
     pub fn update_session_with_tool_call_count(&self) -> Result<()> {
         self.session_manager_wrapper
