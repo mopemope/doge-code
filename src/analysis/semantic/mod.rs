@@ -1,6 +1,6 @@
 pub mod embedder;
 
-use super::database::entities::{symbol_embedding, symbol_info};
+use super::database::entities::{action_log, symbol_embedding, symbol_info};
 use crate::analysis::semantic::embedder::Embedder;
 use crate::config::RagConfig;
 use anyhow::{Context, Result};
@@ -270,6 +270,85 @@ impl SemanticService {
         }
         vec
     }
+    pub async fn log_action(
+        &self,
+        session_id: &str,
+        action_type: &str,
+        content: &str,
+        metadata: serde_json::Value,
+    ) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        self.ensure_embedder_ready().await?;
+        let mut guard = self.embedder.lock().await;
+        let embedder = guard.as_mut().unwrap();
+
+        // Embed content (and maybe thought from metadata?)
+        // For now, embed the content + metadata string representation for context
+        let text_to_embed = format!("{}\n{}", content, metadata);
+        let embedding = embedder
+            .embed(vec![text_to_embed])?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Failed to embed action"))?;
+
+        let blob = Self::serialize_embedding(&embedding);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let active_model = action_log::ActiveModel {
+            session_id: Set(session_id.to_string()),
+            timestamp: Set(now),
+            action_type: Set(action_type.to_string()),
+            content: Set(content.to_string()),
+            metadata: Set(metadata),
+            embedding: Set(blob),
+            ..Default::default()
+        };
+
+        action_log::Entity::insert(active_model)
+            .exec(&self.db_conn)
+            .await
+            .context("Failed to insert action log")?;
+
+        Ok(())
+    }
+
+    pub async fn search_action_history(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(action_log::Model, f32)>> {
+        if !self.config.enabled {
+            return Ok(Vec::new());
+        }
+
+        self.ensure_embedder_ready().await?;
+        let mut guard = self.embedder.lock().await;
+        let embedder = guard.as_mut().unwrap();
+
+        let query_embedding = embedder
+            .embed(vec![query.to_string()])?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Failed to embed query"))?;
+
+        // Fetch all action logs (Optimization: Filter by session? Or search global knowledge?)
+        // For "learning", global search is better.
+        // TODO: Optimization needed for large history.
+        let logs = action_log::Entity::find().all(&self.db_conn).await?;
+
+        let mut scored_results = Vec::new();
+        for log in logs {
+            let vec = Self::deserialize_embedding(&log.embedding);
+            let score = cosine_similarity(&query_embedding, &vec);
+            scored_results.push((log, score));
+        }
+
+        scored_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_results.truncate(limit);
+
+        Ok(scored_results)
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -315,3 +394,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod test_history;
