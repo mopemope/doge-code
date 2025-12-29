@@ -13,34 +13,28 @@ impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
 
-        // Clear full frame to avoid ghost artifacts when layout/content changes.
-        f.render_widget(Clear, size);
+        // Apply theme background to entire screen
+        let background_block = Block::default().style(self.theme.background_style);
+        f.render_widget(background_block, size);
 
-        //debug!("Screen size: {}x{}", size.width, size.height);
+        // Use cyberpunk-specific layout if theme is cyberpunk
+        if self.theme.name == "cyberpunk" {
+            self.view_cyberpunk(f, model);
+            return;
+        }
 
-        // Adjust layout for multi-line input area
+        // Standard layout for other themes
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // Header
                 Constraint::Min(1),    // Main content
-                Constraint::Length(1), // Status Footer (single line)
-                Constraint::Length(5), // Input area (increased to 5 for 3 visible lines)
+                Constraint::Length(1), // Status Footer
+                Constraint::Length(5), // Input area
             ])
             .split(size);
 
         let main_content_height = chunks[1].height;
-        // debug!(
-        //     "Layout chunks: header={}x{}, main={}x{}, footer={}x{}",
-        //     chunks[0].width,
-        //     chunks[0].height,
-        //     chunks[1].width,
-        //     chunks[1].height,
-        //     chunks[2].width,
-        //     chunks[2].height
-        // );
-        // debug!("Main content area height: {}", main_content_height);
-        // debug!("Total log lines: {}", self.log.len());
 
         if self.window_width != size.width as usize {
             self.window_width = size.width as usize;
@@ -62,25 +56,303 @@ impl TuiApp {
         };
         let plan = build_render_plan(params);
 
-        // debug!(
-        //     "Render plan: log_lines={}, scroll_info={:?}",
-        //     plan.log_lines.len(),
-        //     plan.scroll_info
-        // );
-
         self.render_header(f, chunks[0], &plan, &self.theme);
         self.render_main_content(f, chunks[1], &plan, &self.theme);
-
         self.render_status_footer(f, chunks[2], &self.theme);
         self.render_input_area(f, chunks[3]);
+    }
 
-        // The cursor is now handled by the TextArea widget, so no need to set it manually.
+    /// Cyberpunk-specific layout - Cyberdeck HUD style
+    fn view_cyberpunk(&mut self, f: &mut Frame, model: Option<&str>) {
+        let size = f.area();
+
+        // Layout: Title bar, Status bar, Main content, System bar, Input
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title bar (minimal)
+                Constraint::Length(2), // Status indicators
+                Constraint::Min(1),    // Main content
+                Constraint::Length(2), // System status bar
+                Constraint::Length(5), // Input area
+            ])
+            .split(size);
+
+        let main_content_height = main_chunks[2].height;
+
+        if self.window_width != size.width as usize {
+            self.window_width = size.width as usize;
+            self.recalculate_all_heights();
+        }
+
+        let params = crate::tui::state::BuildRenderPlanParams {
+            title: &self.title,
+            status: self.status,
+            log: &self.log,
+            width: size.width,
+            main_content_height,
+            model,
+            spinner_state: self.spinner_state,
+            scroll_state: &self.scroll_state,
+            plan_list: &self.plan_list,
+            theme: &self.theme,
+            log_heights: &self.log_heights,
+        };
+        let plan = build_render_plan(params);
+
+        // Render cyberdeck components
+        self.render_cyber_title_bar(f, main_chunks[0], &self.theme);
+        self.render_cyber_status_bar(f, main_chunks[1], &plan, &self.theme);
+        self.render_main_content(f, main_chunks[2], &plan, &self.theme);
+        self.render_cyber_system_bar(f, main_chunks[3], &self.theme);
+        self.render_input_area(f, main_chunks[4]);
+    }
+
+    /// Minimal title bar with animated glitch-style decoration
+    fn render_cyber_title_bar(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let width = area.width as usize;
+
+        // Animated glitch blocks - cycle through different patterns
+        let glitch_patterns = [
+            "▓▓▓ DOGE//CODE ▓▓▓",
+            "▓░▓ DOGE//CODE ▓░▓",
+            "░▓░ DOGE//CODE ░▓░",
+            "▓▓░ DOGE//CODE ░▓▓",
+        ];
+        let pattern_idx = (self.spinner_state / 3) % glitch_patterns.len();
+        let title = glitch_patterns[pattern_idx];
+
+        // Animated status indicator
+        let status_frames = match self.status {
+            crate::tui::state::Status::Idle => {
+                ["◇ STANDBY ◇", "◈ STANDBY ◈", "◆ STANDBY ◆", "◈ STANDBY ◈"]
+            }
+            crate::tui::state::Status::Streaming => [
+                "◇ STREAMING ◇",
+                "◈ STREAMING ◈",
+                "◆ STREAMING ◆",
+                "◈ STREAMING ◈",
+            ],
+            crate::tui::state::Status::Processing => [
+                "◇ PROCESSING ◇",
+                "◈ PROCESSING ◈",
+                "◆ PROCESSING ◆",
+                "◈ PROCESSING ◈",
+            ],
+            crate::tui::state::Status::Waiting => {
+                ["◇ WAITING ◇", "◈ WAITING ◈", "◆ WAITING ◆", "◈ WAITING ◈"]
+            }
+            _ => ["◇ ACTIVE ◇", "◈ ACTIVE ◈", "◆ ACTIVE ◆", "◈ ACTIVE ◈"],
+        };
+        let status_idx = (self.spinner_state / 2) % status_frames.len();
+        let status_indicator = status_frames[status_idx];
+
+        // Calculate padding
+        let content_len = title.chars().count() + status_indicator.chars().count() + 4;
+        let padding = width.saturating_sub(content_len);
+        let left_pad = " ".to_string();
+        let mid_pad = " ".repeat(padding);
+
+        let line = format!("{}{}{}{} ", left_pad, title, mid_pad, status_indicator);
+
+        let para = Paragraph::new(line).style(theme.title_style);
+        f.render_widget(para, area);
+    }
+
+    /// Status bar with metrics and progress indicators
+    fn render_cyber_status_bar(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+
+        // Line 1: Animated scanline separator
+        let sep_width = area.width as usize;
+        let scan_pos = self.spinner_state % sep_width;
+        let mut separator = String::with_capacity(sep_width * 3);
+        for i in 0..sep_width {
+            if i == scan_pos || i == (scan_pos + 1) % sep_width {
+                separator.push('█');
+            } else if i == (scan_pos + sep_width - 1) % sep_width {
+                separator.push('▓');
+            } else {
+                separator.push('═');
+            }
+        }
+        let sep_para = Paragraph::new(separator).style(theme.border_style);
+        f.render_widget(sep_para, chunks[0]);
+
+        // Line 2: Status indicators
+        let scroll_info = if let Some(si) = &plan.scroll_info {
+            format!("▸ LINES:{}/{}", si.current_line, si.total_lines)
+        } else {
+            "▸ LINES:0/0".to_string()
+        };
+
+        let tokens = format!("▸ TOKENS:{}", self.tokens_prompt_used);
+
+        // Context usage progress bar (if available)
+        let context_bar = if let (Some(remaining), Some(cfg)) =
+            (self.remaining_context_tokens, self.cfg.as_ref())
+        {
+            if let Some(window) = cfg.get_context_window_size() {
+                let used = window.saturating_sub(remaining);
+                let pct = (used as f32 / window as f32 * 100.0) as u32;
+                let filled = (pct / 10) as usize;
+                let empty = 10 - filled;
+                format!(
+                    "▸ CTX:[{}{}] {}%",
+                    "█".repeat(filled),
+                    "░".repeat(empty),
+                    pct
+                )
+            } else {
+                "▸ CTX:[░░░░░░░░░░]".to_string()
+            }
+        } else {
+            "▸ CTX:[░░░░░░░░░░]".to_string()
+        };
+
+        let elapsed = if let Some(start) = self.processing_start_time {
+            format!("▸ T+{:.1}s", start.elapsed().as_secs_f32())
+        } else if let Some(ref last) = self.last_elapsed_time {
+            format!("▸ T:{}", last)
+        } else {
+            String::new()
+        };
+
+        let status_line = format!(
+            " {} │ {} │ {} {}",
+            scroll_info, tokens, context_bar, elapsed
+        );
+        let status_para = Paragraph::new(status_line).style(theme.footer_style);
+        f.render_widget(status_para, chunks[1]);
+    }
+
+    /// System status bar at bottom
+    fn render_cyber_system_bar(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+
+        // Line 1: Animated scanline separator (moves opposite direction)
+        let sep_width = area.width as usize;
+        let scan_pos = (sep_width.saturating_sub(self.spinner_state % sep_width)) % sep_width;
+        let mut separator = String::with_capacity(sep_width * 3);
+        for i in 0..sep_width {
+            if i == scan_pos || i == (scan_pos + 1) % sep_width {
+                separator.push('█');
+            } else if i == (scan_pos + 2) % sep_width {
+                separator.push('▓');
+            } else {
+                separator.push('═');
+            }
+        }
+        let sep_para = Paragraph::new(separator).style(theme.border_style);
+        f.render_widget(sep_para, chunks[0]);
+
+        // Line 2: System indicators with pulsing effect
+        // Pulse indicator cycles through different symbols
+        let pulse_icons = ['◉', '◎', '○', '◎'];
+        let pulse_idx = (self.spinner_state / 2) % pulse_icons.len();
+        let pulse_char = pulse_icons[pulse_idx];
+
+        let uplink = format!("{} NEURAL-LINK:ACTIVE", pulse_char);
+
+        let map_status = match self.repomap_status {
+            crate::tui::state::RepomapStatus::NotStarted => format!("{} MAP:INIT", pulse_char),
+            crate::tui::state::RepomapStatus::Building => format!("{} MAP:SYNC", pulse_char),
+            crate::tui::state::RepomapStatus::Ready => "◉ MAP:READY".to_string(),
+            crate::tui::state::RepomapStatus::Error => "◉ MAP:ERROR".to_string(),
+        };
+
+        let mode = match self.input_mode {
+            crate::tui::state::InputMode::Normal => "◉ INPUT:NORMAL",
+            crate::tui::state::InputMode::Shell => "◉ INPUT:SHELL",
+            crate::tui::state::InputMode::SessionList => "◉ INPUT:SESSION",
+            crate::tui::state::InputMode::HistorySearch => "◉ INPUT:HISTORY",
+            crate::tui::state::InputMode::FileSearch => "◉ INPUT:FILES",
+        };
+
+        // Model indicator
+        let model_info = if let Some(cfg) = &self.cfg {
+            format!(
+                "◉ MODEL:{}",
+                cfg.model.split('/').next_back().unwrap_or(&cfg.model)
+            )
+        } else {
+            "◉ MODEL:N/A".to_string()
+        };
+
+        let system_line = format!(" {} │ {} │ {} │ {}", uplink, map_status, mode, model_info);
+        let system_para = Paragraph::new(system_line).style(theme.footer_style);
+        f.render_widget(system_para, chunks[1]);
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        // Clear header area fully to avoid artifacts when content shrinks.
+        // Clear header area fully
         f.render_widget(Clear, area);
 
+        // Cyberpunk Theme Special Header
+        if theme.name == "cyberpunk" {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                ])
+                .split(area);
+
+            // Left: Title/System
+            let title_text = format!(" SYSTEM_ONLINE // {}", self.title.to_uppercase());
+            let title = Paragraph::new(title_text)
+                .style(theme.footer_style.add_modifier(Modifier::BOLD))
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_type(theme.border_type)
+                        .border_style(theme.border_style),
+                );
+            f.render_widget(title, chunks[0]);
+
+            // Center: Scroll Info / Activity
+            let center_text = if let Some(scroll_info) = &plan.scroll_info {
+                format!(
+                    "DATA_STREAM: {}/{}",
+                    scroll_info.current_line, scroll_info.total_lines
+                )
+            } else {
+                "DATA_STREAM: IDLE".to_string()
+            };
+            let center = Paragraph::new(center_text)
+                .alignment(Alignment::Center)
+                .style(theme.footer_style)
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_type(theme.border_type)
+                        .border_style(theme.border_style),
+                );
+            f.render_widget(center, chunks[1]);
+
+            // Right: Fake Metrics (Aesthetic)
+            let right_text = "CPU: [||||||  ]";
+            let right = Paragraph::new(right_text)
+                .alignment(Alignment::Right)
+                .style(theme.footer_style)
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_type(theme.border_type)
+                        .border_style(theme.border_style),
+                );
+            f.render_widget(right, chunks[2]);
+            return;
+        }
+
+        // Standard Header Logic (Existing)
         let header_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
@@ -267,6 +539,7 @@ impl TuiApp {
         let files_block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style)
+            .border_type(theme.border_type)
             .title("Changed Files (←/→ to focus)");
         let files_list = List::new(items).block(files_block);
         f.render_widget(files_list, layout[0]);
@@ -275,6 +548,7 @@ impl TuiApp {
         let diff_block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style)
+            .border_type(theme.border_type)
             .title("Diff Preview (↑/↓ scroll)");
 
         if let Some(file) = review.files.get(review.selected) {
@@ -336,7 +610,8 @@ impl TuiApp {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(theme.border_style),
+                .border_style(theme.border_style)
+                .border_type(theme.border_type),
         );
         f.render_widget(instructions, layout[2]);
     }
@@ -376,6 +651,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(theme.border_style)
+                    .border_type(theme.border_type)
                     .title(
                         "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
                     ),
@@ -412,6 +688,7 @@ impl TuiApp {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style)
+            .border_type(theme.border_type)
             .title("Shell Output")
             .style(theme.log_style);
 
@@ -469,6 +746,7 @@ impl TuiApp {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(self.theme.border_style)
+                .border_type(self.theme.border_type)
                 .title(block_title),
         );
 
@@ -526,6 +804,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(self.theme.border_style)
+                    .border_type(self.theme.border_type)
                     .title(title),
             );
 
@@ -601,6 +880,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(theme.border_style)
+                    .border_type(theme.border_type)
                     .title(title),
             )
             .highlight_style(theme.completion_selected_style);
@@ -661,6 +941,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(theme.border_style)
+                    .border_type(theme.border_type)
                     .title(title),
             )
             .highlight_style(theme.completion_selected_style);
