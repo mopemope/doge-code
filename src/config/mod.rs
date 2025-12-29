@@ -555,7 +555,7 @@ impl AppConfig {
         let theme = project_cfg
             .theme
             .or(file_cfg.theme)
-            .unwrap_or_else(|| "dark".to_string());
+            .unwrap_or_else(|| "cyberpunk".to_string());
 
         // Add project_instructions_file setting (CLI args take precedence)
         let project_instructions_file = cli
