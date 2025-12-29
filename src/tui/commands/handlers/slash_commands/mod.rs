@@ -9,6 +9,7 @@ pub mod map;
 pub mod open;
 pub mod quit;
 pub mod rebuild_repomap;
+pub mod test;
 pub mod theme;
 pub mod tokens;
 pub mod tools;
