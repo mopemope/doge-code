@@ -266,6 +266,7 @@ impl TuiApp {
 
         let files_block = Block::default()
             .borders(Borders::ALL)
+            .border_style(theme.border_style)
             .title("Changed Files (←/→ to focus)");
         let files_list = List::new(items).block(files_block);
         f.render_widget(files_list, layout[0]);
@@ -273,6 +274,7 @@ impl TuiApp {
         // diff content
         let diff_block = Block::default()
             .borders(Borders::ALL)
+            .border_style(theme.border_style)
             .title("Diff Preview (↑/↓ scroll)");
 
         if let Some(file) = review.files.get(review.selected) {
@@ -331,7 +333,11 @@ impl TuiApp {
             "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss",
         )
         .style(theme.footer_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.border_style),
+        );
         f.render_widget(instructions, layout[2]);
     }
 
@@ -365,13 +371,17 @@ impl TuiApp {
 
         // Fill any remaining space with blank lines to prevent artifacts
         let list_height = items.len();
-        let list =
-            List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(
-                    "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
-                ))
-                .highlight_style(theme.completion_selected_style)
-                .highlight_symbol(">> ");
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border_style)
+                    .title(
+                        "Sessions (↑↓ to navigate, Enter to switch, d to delete, q/ESC to close)",
+                    ),
+            )
+            .highlight_style(theme.completion_selected_style)
+            .highlight_symbol(">> ");
 
         f.render_widget(list, area);
 
@@ -401,6 +411,7 @@ impl TuiApp {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(theme.border_style)
             .title("Shell Output")
             .style(theme.log_style);
 
@@ -454,8 +465,12 @@ impl TuiApp {
             "Input"
         };
 
-        self.textarea
-            .set_block(Block::default().borders(Borders::ALL).title(block_title));
+        self.textarea.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(self.theme.border_style)
+                .title(block_title),
+        );
 
         f.render_widget(&self.textarea, area);
 
@@ -507,8 +522,12 @@ impl TuiApp {
                 _ => "Completion", // Fallback, should not happen if completion_active is true
             };
 
-            let list =
-                List::new(items.clone()).block(Block::default().borders(Borders::ALL).title(title));
+            let list = List::new(items.clone()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(self.theme.border_style)
+                    .title(title),
+            );
 
             f.render_widget(Clear, completion_area); // Clear the area behind the popup
             f.render_widget(list, completion_area);
@@ -578,7 +597,12 @@ impl TuiApp {
             state.query
         );
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border_style)
+                    .title(title),
+            )
             .highlight_style(theme.completion_selected_style);
 
         f.render_widget(list, overlay_area);
@@ -633,7 +657,12 @@ impl TuiApp {
         };
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border_style)
+                    .title(title),
+            )
             .highlight_style(theme.completion_selected_style);
 
         f.render_widget(list, overlay_area);

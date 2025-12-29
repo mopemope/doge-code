@@ -399,6 +399,7 @@ impl TuiApp {
 
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
+            "cyberpunk" => Theme::cyberpunk(),
             _ => Theme::dark(),
         };
 
