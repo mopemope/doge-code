@@ -1,3 +1,4 @@
+use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
 use regex::Regex;
@@ -48,7 +49,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("Running lint in background with TUI spinner...");
 
     if let Some(ui_tx) = &executor.ui_tx {
-        let _ = ui_tx.send("::status:shell_running".to_string());
+        ui_tx.send_logged("::status:shell_running".to_string());
 
         let ui_tx_clone = ui_tx.clone();
         let project_root_clone = project_root.clone();
@@ -266,7 +267,7 @@ fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
 }
 
 fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
-    let _ = ui_tx.send(format!(
+    ui_tx.send_logged(format!(
         "::shell_output:Project root: {}",
         project_root.display()
     ));
@@ -274,17 +275,17 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     // Detect languages in the project
     let detected_languages = detect_project_languages(&project_root);
 
-    let _ = ui_tx.send(format!(
+    ui_tx.send_logged(format!(
         "::shell_output:Detected languages: {:?}",
         detected_languages
     ));
 
     if detected_languages.is_empty() {
-        let _ = ui_tx.send(
+        ui_tx.send_logged(
             "::shell_output:No supported languages (Go, Rust, TypeScript) detected in the project."
                 .to_string(),
         );
-        let _ = ui_tx.send("::status:idle".to_string());
+        ui_tx.send_logged("::status:idle".to_string());
         return;
     }
 
@@ -296,11 +297,11 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
     // Run linters for each detected language
     for lang in detected_languages {
-        let _ = ui_tx.send(format!("::shell_output:\n--- Linting {} ---", lang));
+        ui_tx.send_logged(format!("::shell_output:\n--- Linting {} ---", lang));
 
         if let Some(config) = lint_configs.get(&lang) {
             if config.commands.is_empty() {
-                let _ = ui_tx.send(format!(
+                ui_tx.send_logged(format!(
                     "::shell_output:No lint commands configured for language '{}' (missing package.json scripts like 'lint' or 'lint:fix').",
                     lang
                 ));
@@ -333,30 +334,30 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
                 // Send output to UI
                 if result.success {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:Successfully ran: {} {}",
                         lint_cmd.command,
                         lint_cmd.args.join(" ")
                     ));
                 } else {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:Failed to run {}: Command exited with status",
                         lint_cmd.command
                     ));
                 }
 
                 if !result.stdout.is_empty() {
-                    let _ = ui_tx.send(format!("::shell_output:Output:\n{}", result.stdout));
+                    ui_tx.send_logged(format!("::shell_output:Output:\n{}", result.stdout));
                 }
 
                 if !result.stderr.is_empty() {
-                    let _ = ui_tx.send(format!("::shell_output:STDERR: {}", result.stderr));
+                    ui_tx.send_logged(format!("::shell_output:STDERR: {}", result.stderr));
                 }
 
                 // Parse lint issues
                 let issues = parse_lint_output(&result, &lint_cmd.command, &lang);
                 if !issues.is_empty() {
-                    let _ = ui_tx.send(format!(
+                    ui_tx.send_logged(format!(
                         "::shell_output:Found {} issues from {}",
                         issues.len(),
                         lint_cmd.command
@@ -376,13 +377,13 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                         run_command_sync_with_output(&project_root, &lint_cmd.command, &fix_args);
 
                     if fix_result.success {
-                        let _ = ui_tx.send(format!(
+                        ui_tx.send_logged(format!(
                             "::shell_output:Successfully ran auto-fix: {} {}",
                             lint_cmd.command,
                             fix_args.join(" ")
                         ));
                     } else {
-                        let _ = ui_tx.send(format!(
+                        ui_tx.send_logged(format!(
                             "::shell_output:Auto-fix also failed: {} {}",
                             lint_cmd.command,
                             fix_args.join(" ")
@@ -401,7 +402,7 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                 }
             }
         } else {
-            let _ = ui_tx.send(format!(
+            ui_tx.send_logged(format!(
                 "::shell_output:No linter configuration found for language: {}",
                 lang
             ));
@@ -410,13 +411,13 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
     // If there are issues, send them to LLM for fixing
     if !all_issues.is_empty() {
-        let _ = ui_tx.send(format!(
+        ui_tx.send_logged(format!(
             "::shell_output:\nFound {} total issues. Sending to LLM for analysis and fixes...",
             all_issues.len()
         ));
 
         // Send a message to trigger LLM processing
-        let _ = ui_tx.send(format!(
+        ui_tx.send_logged(format!(
             "::lint_issues:{:}",
             serde_json::to_string(&all_issues).unwrap_or_default()
         ));
@@ -434,17 +435,17 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         prompt.push_str(&all_outputs);
         prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
 
-        let _ = ui_tx.send(
+        ui_tx.send_logged(
             "::shell_output:\nSending full lint output to LLM for analysis and fixes..."
                 .to_string(),
         );
         // Use the existing dispatch pattern by sending the prompt via the user input mechanism
         // This will trigger the LLM to process the full output
-        let _ = ui_tx.send(format!("::lint_command_output_analysis:{}", prompt));
+        ui_tx.send_logged(format!("::lint_command_output_analysis:{}", prompt));
     }
 
-    let _ = ui_tx.send("::shell_output:Linting completed.".to_string());
-    let _ = ui_tx.send("::status:idle".to_string());
+    ui_tx.send_logged("::shell_output:Linting completed.".to_string());
+    ui_tx.send_logged("::status:idle".to_string());
 }
 
 fn run_command_sync_with_output(project_root: &Path, cmd: &str, args: &[String]) -> LintResult {
