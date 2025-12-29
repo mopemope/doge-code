@@ -461,21 +461,58 @@ impl TuiApp {
     }
 
     fn render_log_panel(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
-        // Clear log panel area to prevent artifacts when content height or layout changes
+        // Clear log panel area to prevent artifacts
         f.render_widget(Clear, area);
+
+        // For cyberpunk theme, add a styled frame
+        let is_cyberpunk = theme.name == "cyberpunk";
+
+        let (block, inner_area) = if is_cyberpunk {
+            // Cyberpunk styled block with decorative title
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(theme.border_type)
+                .border_style(theme.border_style)
+                .title("┤ DATA STREAM ├")
+                .title_style(theme.title_style);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            (true, inner)
+        } else {
+            (false, area)
+        };
 
         // Create paragraph with the content lines
         let lines: Vec<Line> = plan
             .log_lines
             .iter()
-            .map(|styled_line| {
-                let spans: Vec<Span> = styled_line
-                    .spans
-                    .iter()
-                    .map(|segment| Span::styled(segment.content.clone(), segment.style))
-                    .collect();
+            .enumerate()
+            .map(|(idx, styled_line)| {
+                let mut spans: Vec<Span> = Vec::new();
+
+                // Add line marker for cyberpunk theme
+                if is_cyberpunk && !styled_line.spans.is_empty() {
+                    // Alternate marker styles based on line index
+                    let marker = if idx % 3 == 0 {
+                        "│ "
+                    } else if idx % 3 == 1 {
+                        "┃ "
+                    } else {
+                        "▏ "
+                    };
+                    spans.push(Span::styled(marker, theme.border_style));
+                }
+
+                for segment in &styled_line.spans {
+                    spans.push(Span::styled(segment.content.clone(), segment.style));
+                }
+
                 if spans.is_empty() {
-                    Line::raw("")
+                    if is_cyberpunk {
+                        Line::from(vec![Span::styled("│", theme.border_style)])
+                    } else {
+                        Line::raw("")
+                    }
                 } else {
                     Line::from(spans)
                 }
@@ -485,7 +522,10 @@ impl TuiApp {
         let paragraph = Paragraph::new(lines)
             .style(theme.log_style)
             .block(Block::default());
-        f.render_widget(paragraph, area);
+        f.render_widget(paragraph, inner_area);
+
+        // For cyberpunk, ensure the block was rendered (it has been)
+        let _ = block;
     }
 
     fn render_diff_review(&self, f: &mut Frame, area: Rect, theme: &Theme) {
