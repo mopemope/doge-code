@@ -294,7 +294,7 @@ pub fn render_plain_entry(
             for span in line.spans {
                 segments.push(StyledSpan {
                     content: span.content.to_string(),
-                    style: span.style,
+                    style: convert_ansi_style(span.style),
                 });
             }
 
@@ -534,4 +534,103 @@ pub fn render_markdown_entry(
     }
 
     lines
+}
+
+pub fn convert_ansi_text(text: ratatui_core::text::Text) -> ratatui::text::Text {
+    let lines: Vec<ratatui::text::Line> = text.lines.into_iter().map(convert_ansi_line).collect();
+    ratatui::text::Text::from(lines).style(convert_ansi_style(text.style))
+}
+
+pub fn convert_ansi_line(line: ratatui_core::text::Line) -> ratatui::text::Line {
+    let spans: Vec<ratatui::text::Span> = line.spans.into_iter().map(convert_ansi_span).collect();
+    let mut l = ratatui::text::Line::from(spans);
+    if let Some(alignment) = convert_ansi_alignment(line.alignment) {
+        l = l.alignment(alignment);
+    }
+    l
+}
+
+pub fn convert_ansi_span(span: ratatui_core::text::Span) -> ratatui::text::Span {
+    ratatui::text::Span::styled(span.content, convert_ansi_style(span.style))
+}
+
+pub fn convert_ansi_alignment(
+    alignment: Option<ratatui_core::layout::Alignment>,
+) -> Option<ratatui::layout::Alignment> {
+    alignment.map(|a| match a {
+        ratatui_core::layout::Alignment::Left => ratatui::layout::Alignment::Left,
+        ratatui_core::layout::Alignment::Center => ratatui::layout::Alignment::Center,
+        ratatui_core::layout::Alignment::Right => ratatui::layout::Alignment::Right,
+    })
+}
+
+pub fn convert_ansi_style(style: ratatui_core::style::Style) -> ratatui::style::Style {
+    let mut s = ratatui::style::Style::default();
+    if let Some(fg) = convert_ansi_color(style.fg) {
+        s = s.fg(fg);
+    }
+    if let Some(bg) = convert_ansi_color(style.bg) {
+        s = s.bg(bg);
+    }
+    s = s.add_modifier(convert_ansi_modifier(style.add_modifier));
+    s = s.remove_modifier(convert_ansi_modifier(style.sub_modifier));
+    s
+}
+
+pub fn convert_ansi_color(
+    color: Option<ratatui_core::style::Color>,
+) -> Option<ratatui::style::Color> {
+    color.map(|c| match c {
+        ratatui_core::style::Color::Reset => ratatui::style::Color::Reset,
+        ratatui_core::style::Color::Black => ratatui::style::Color::Black,
+        ratatui_core::style::Color::Red => ratatui::style::Color::Red,
+        ratatui_core::style::Color::Green => ratatui::style::Color::Green,
+        ratatui_core::style::Color::Yellow => ratatui::style::Color::Yellow,
+        ratatui_core::style::Color::Blue => ratatui::style::Color::Blue,
+        ratatui_core::style::Color::Magenta => ratatui::style::Color::Magenta,
+        ratatui_core::style::Color::Cyan => ratatui::style::Color::Cyan,
+        ratatui_core::style::Color::Gray => ratatui::style::Color::Gray,
+        ratatui_core::style::Color::DarkGray => ratatui::style::Color::DarkGray,
+        ratatui_core::style::Color::LightRed => ratatui::style::Color::LightRed,
+        ratatui_core::style::Color::LightGreen => ratatui::style::Color::LightGreen,
+        ratatui_core::style::Color::LightYellow => ratatui::style::Color::LightYellow,
+        ratatui_core::style::Color::LightBlue => ratatui::style::Color::LightBlue,
+        ratatui_core::style::Color::LightMagenta => ratatui::style::Color::LightMagenta,
+        ratatui_core::style::Color::LightCyan => ratatui::style::Color::LightCyan,
+        ratatui_core::style::Color::White => ratatui::style::Color::White,
+        ratatui_core::style::Color::Indexed(n) => ratatui::style::Color::Indexed(n),
+        ratatui_core::style::Color::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
+    })
+}
+
+pub fn convert_ansi_modifier(modifier: ratatui_core::style::Modifier) -> ratatui::style::Modifier {
+    let mut m = ratatui::style::Modifier::empty();
+    if modifier.contains(ratatui_core::style::Modifier::BOLD) {
+        m.insert(ratatui::style::Modifier::BOLD);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::DIM) {
+        m.insert(ratatui::style::Modifier::DIM);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::ITALIC) {
+        m.insert(ratatui::style::Modifier::ITALIC);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::UNDERLINED) {
+        m.insert(ratatui::style::Modifier::UNDERLINED);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::SLOW_BLINK) {
+        m.insert(ratatui::style::Modifier::SLOW_BLINK);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::RAPID_BLINK) {
+        m.insert(ratatui::style::Modifier::RAPID_BLINK);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::REVERSED) {
+        m.insert(ratatui::style::Modifier::REVERSED);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::HIDDEN) {
+        m.insert(ratatui::style::Modifier::HIDDEN);
+    }
+    if modifier.contains(ratatui_core::style::Modifier::CROSSED_OUT) {
+        m.insert(ratatui::style::Modifier::CROSSED_OUT);
+    }
+    m
 }

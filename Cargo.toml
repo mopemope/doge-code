@@ -51,6 +51,7 @@ rust-embed = "8"
 tera = "1.20"
 num_cpus = "1.0"
 ratatui = { version = "0.29.0", features = ["crossterm", "serde"] }
+ratatui-core = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 ignore = "0.4"
 rand = "0.8"
@@ -66,7 +67,7 @@ async-stream = "0.3"
 notify = "6.1"
 notify-rust = "4"
 tui-textarea = { version = "0.7.0", features = ["crossterm"] }
-ansi-to-tui = "3.0"
+ansi-to-tui = "8.0"
 arboard = "3.4"
 rmcp = { version = "0.8", features = ["transport-streamable-http-server", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process", "client"] }
 axum = "0.7"
