@@ -6,7 +6,7 @@ use crate::config::RagConfig;
 use anyhow::{Context, Result};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, JoinType, PaginatorTrait, QueryFilter,
-    QuerySelect, RelationTrait, Set,
+    QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -332,13 +332,28 @@ impl SemanticService {
             .pop()
             .ok_or_else(|| anyhow::anyhow!("Failed to embed query"))?;
 
-        // Fetch all action logs (Optimization: Filter by session? Or search global knowledge?)
-        // For "learning", global search is better.
-        // TODO: Optimization needed for large history.
-        let logs = action_log::Entity::find().all(&self.db_conn).await?;
+        // Fetch action logs with pagination to avoid loading all records into memory
+        // This is a critical optimization for large history datasets
+        let batch_size = 1000; // Process 1000 records at a time
+        let mut all_logs = Vec::new();
+        let mut page = 1;
+
+        loop {
+            let paginator = action_log::Entity::find()
+                .order_by_asc(action_log::Column::Id)
+                .paginate(&self.db_conn, batch_size);
+
+            let logs_batch: Vec<action_log::Model> = paginator.fetch_page(page - 1).await?;
+            if logs_batch.is_empty() {
+                break;
+            }
+
+            all_logs.extend(logs_batch);
+            page += 1;
+        }
 
         let mut scored_results = Vec::new();
-        for log in logs {
+        for log in all_logs {
             let vec = Self::deserialize_embedding(&log.embedding);
             let score = cosine_similarity(&query_embedding, &vec);
             scored_results.push((log, score));
