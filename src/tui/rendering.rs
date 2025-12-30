@@ -733,9 +733,9 @@ impl TuiApp {
             .style(theme.log_style);
 
         // Try to parse ANSI, fallback to raw text if it fails
-        let text = match self.shell_output_buffer.as_bytes().into_text() {
-            Ok(t) => t,
-            Err(_) => Text::raw(&self.shell_output_buffer),
+        let text: ratatui::text::Text = match self.shell_output_buffer.as_bytes().into_text() {
+            Ok(t) => crate::tui::style_utils::convert_ansi_text(t),
+            Err(_) => ratatui::text::Text::raw(&self.shell_output_buffer),
         };
 
         let height = area.height.saturating_sub(2) as usize; // remove borders
