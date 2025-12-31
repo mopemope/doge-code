@@ -1,15 +1,26 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::analysis::SymbolSpan;
 use crate::llm::{ChatMessage, ChatRequest};
+
+/// 編集対象の範囲定義（シンボルまたは行範囲）
+#[derive(Debug, Clone)]
+pub struct EditTarget {
+    pub file: PathBuf,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// シンボル名（行範囲指定の場合はNoneまたは説明文）
+    pub name: Option<String>,
+    /// "function", "struct", "lines" など
+    pub kind: String,
+}
 
 /// シンボル限定編集用のLLM入力を表すリクエスト。
 #[derive(Debug, Clone)]
 pub struct SymbolEditRequest {
     pub model: String,
-    pub symbol: SymbolSpan,
+    pub target: EditTarget,
     pub original_code: String,
     pub instruction: String,
 }
@@ -32,8 +43,8 @@ pub fn build_symbol_edit_chat_request(req: &SymbolEditRequest) -> ChatRequest {
     let system = ChatMessage {
         role: "system".to_string(),
         content: Some(
-            "You are an AI code editor. Edit ONLY the specified symbol in the given Rust code. \
-             Respond with either a unified diff or a full replacement of that symbol. \
+            "You are an AI code editor. Edit ONLY the specified target in the given Rust code. \
+             Respond with either a unified diff or a full replacement of the target. \
              Do not modify any other parts of the file."
                 .to_string(),
         ),
@@ -41,13 +52,14 @@ pub fn build_symbol_edit_chat_request(req: &SymbolEditRequest) -> ChatRequest {
         tool_call_id: None,
     };
 
+    let target_name = req.target.name.as_deref().unwrap_or("specified lines");
     let user_content = format!(
-        "Target file: {file}\nTarget symbol: {name} ({kind}) lines {start}-{end}\n\nOriginal symbol code:\n```rust\n{code}\n```\n\nInstruction:\n{inst}\n\nOutput format:\n- Prefer unified diff starting with '```diff' and including only changes for this file; or\n- A full replacement of the symbol definition inside '```rust' code fences.\n- Do not include explanations outside code blocks.",
-        file = req.symbol.file.display(),
-        name = req.symbol.name,
-        kind = format_symbol_kind(&req.symbol),
-        start = req.symbol.start_line,
-        end = req.symbol.end_line,
+        "Target file: {file}\nTarget: {name} ({kind}) lines {start}-{end}\n\nOriginal code:\n```rust\n{code}\n```\n\nInstruction:\n{inst}\n\nOutput format:\n- Prefer unified diff starting with '```diff' and including only changes for this file; or\n- A full replacement of the target code inside '```rust' code fences.\n- Do not include explanations outside code blocks.",
+        file = req.target.file.display(),
+        name = target_name,
+        kind = req.target.kind,
+        start = req.target.start_line,
+        end = req.target.end_line,
         code = req.original_code,
         inst = req.instruction,
     );
@@ -64,22 +76,6 @@ pub fn build_symbol_edit_chat_request(req: &SymbolEditRequest) -> ChatRequest {
         messages: vec![system, user],
         temperature: Some(0.2),
         stream: Some(false),
-    }
-}
-
-fn format_symbol_kind(symbol: &SymbolSpan) -> &'static str {
-    use crate::analysis::SymbolKind;
-    match symbol.kind {
-        SymbolKind::Function => "function",
-        SymbolKind::Struct => "struct",
-        SymbolKind::Enum => "enum",
-        SymbolKind::Trait => "trait",
-        SymbolKind::Impl => "impl",
-        SymbolKind::Method => "method",
-        SymbolKind::AssocFn => "assoc_fn",
-        SymbolKind::Mod => "mod",
-        SymbolKind::Variable => "var",
-        SymbolKind::Comment => "comment",
     }
 }
 
@@ -137,14 +133,15 @@ fn extract_code_block(src: &str, lang: &str) -> Option<String> {
 
 /// ヘルパー: ファイルとシンボル範囲から元コードを抽出する。
 /// 呼び出し側でシンボル限定編集前に利用する想定。
-pub fn read_symbol_source(path: &Path, span: &SymbolSpan) -> Result<String> {
+/// ヘルパー: ファイルと範囲から元コードを抽出する。
+pub fn read_target_source(path: &Path, start_line: u32, end_line: u32) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read file {}", path.display()))?;
 
     let mut result = String::new();
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
-        if line_no >= span.start_line && line_no <= span.end_line {
+        if line_no >= start_line && line_no <= end_line {
             result.push_str(line);
             result.push('\n');
         }

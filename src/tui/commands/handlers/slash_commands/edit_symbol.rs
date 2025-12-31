@@ -10,8 +10,8 @@ use crate::analysis::{SymbolSpan, find_enclosing_symbol};
 use crate::config::AppConfig;
 use crate::diff_review::DiffReviewPayload;
 use crate::llm::{
-    SymbolEditRequest, SymbolEditResponse, build_symbol_edit_chat_request,
-    parse_symbol_edit_response, read_symbol_source,
+    EditTarget, SymbolEditRequest, SymbolEditResponse, build_symbol_edit_chat_request,
+    parse_symbol_edit_response, read_target_source,
 };
 use crate::tools::apply_patch::{ApplyPatchParams, apply_patch as apply_patch_tool};
 use crate::tui::commands::core::TuiExecutor;
@@ -57,7 +57,7 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         }
     };
 
-    let original = match read_symbol_source(&file_path, &symbol) {
+    let original = match read_target_source(&file_path, symbol.start_line, symbol.end_line) {
         Ok(code) => code,
         Err(e) => {
             ui.push_log(format!("Failed to read symbol source: {e}"));
@@ -81,15 +81,24 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let model = executor.cfg.model.clone();
     let req = SymbolEditRequest {
         model,
-        symbol,
+        target: EditTarget {
+            file: symbol.file.clone(),
+            start_line: symbol.start_line,
+            end_line: symbol.end_line,
+            name: Some(symbol.name.clone()),
+            kind: format_symbol_kind(&symbol).to_string(),
+        },
         original_code: original,
         instruction,
     };
 
-    let target_display = make_relative_display(&req.symbol.file, &executor.cfg.project_root);
+    let target_display = make_relative_display(&req.target.file, &executor.cfg.project_root);
     ui.push_log(format!(
         "[edit-symbol] Targeting {} ({}) lines {}-{}",
-        req.symbol.name, target_display, req.symbol.start_line, req.symbol.end_line
+        req.target.name.as_deref().unwrap_or("?"),
+        target_display,
+        req.target.start_line,
+        req.target.end_line
     ));
 
     let chat_req = build_symbol_edit_chat_request(&req);
@@ -108,7 +117,7 @@ fn current_file_and_line(ui: &TuiApp) -> Option<(String, u32)> {
     diff_review_cursor(ui).or_else(|| inline_path_reference(ui))
 }
 
-fn enqueue_symbol_edit_request(
+pub fn enqueue_symbol_edit_request(
     executor: &mut TuiExecutor,
     request: SymbolEditRequest,
     chat_req: crate::llm::ChatRequest,
@@ -132,8 +141,8 @@ fn enqueue_symbol_edit_request(
 
     let symbol_label = format!(
         "{} ({})",
-        request.symbol.name,
-        make_relative_display(&request.symbol.file, &cfg.project_root)
+        request.target.name.as_deref().unwrap_or("target"),
+        make_relative_display(&request.target.file, &cfg.project_root)
     );
 
     tokio::runtime::Handle::current().spawn(async move {
@@ -251,21 +260,25 @@ fn truncate_for_log(raw: &str) -> String {
     }
 }
 
-async fn apply_symbol_edit_response(
+pub async fn apply_symbol_edit_response(
     response: SymbolEditResponse,
     request: SymbolEditRequest,
     cfg: &AppConfig,
 ) -> Result<PathBuf> {
-    let absolute_path = resolve_absolute_path(&request.symbol.file, &cfg.project_root);
+    let absolute_path = resolve_absolute_path(&request.target.file, &cfg.project_root);
     let file_content = fs::read_to_string(&absolute_path)
         .await
         .with_context(|| format!("failed to read {}", absolute_path.display()))?;
 
     let normalized_file = normalize_newlines(&file_content);
     let normalized_original = normalize_newlines(&request.original_code);
-    let current_symbol = extract_symbol_block_from_content(&normalized_file, &request.symbol);
+    let current_target = extract_target_block_from_content(
+        &normalized_file,
+        request.target.start_line,
+        request.target.end_line,
+    );
 
-    if current_symbol != normalized_original {
+    if current_target != normalized_original {
         anyhow::bail!(
             "Symbol content changed on disk since the request was created. Please rerun /edit-symbol."
         );
@@ -274,7 +287,12 @@ async fn apply_symbol_edit_response(
     let patch_content = if let Some(patch) = response.patch {
         normalize_llm_patch(&patch, &absolute_path, &cfg.project_root)
     } else if let Some(replacement) = response.replacement {
-        build_patch_from_replacement(&normalized_file, &request.symbol, &replacement)?
+        build_patch_from_replacement(
+            &normalized_file,
+            request.target.start_line,
+            request.target.end_line,
+            &replacement,
+        )?
     } else {
         anyhow::bail!("LLM response did not include a diff or replacement block.");
     };
@@ -315,11 +333,11 @@ fn normalize_newlines(input: &str) -> String {
     input.replace("\r\n", "\n")
 }
 
-fn extract_symbol_block_from_content(content: &str, span: &SymbolSpan) -> String {
+fn extract_target_block_from_content(content: &str, start_line: u32, end_line: u32) -> String {
     let mut buf = String::new();
     for (idx, line) in content.lines().enumerate() {
         let line_no = idx as u32 + 1;
-        if line_no >= span.start_line && line_no <= span.end_line {
+        if line_no >= start_line && line_no <= end_line {
             buf.push_str(line);
             buf.push('\n');
         }
@@ -329,7 +347,8 @@ fn extract_symbol_block_from_content(content: &str, span: &SymbolSpan) -> String
 
 fn build_patch_from_replacement(
     normalized_file: &str,
-    span: &SymbolSpan,
+    start_line: u32,
+    end_line: u32,
     replacement: &str,
 ) -> Result<String> {
     let mut normalized_replacement = normalize_newlines(replacement);
@@ -337,7 +356,7 @@ fn build_patch_from_replacement(
         normalized_replacement.push('\n');
     }
 
-    let (start, end) = symbol_byte_range(normalized_file, span);
+    let (start, end) = target_byte_range(normalized_file, start_line, end_line);
     let mut updated = String::with_capacity(normalized_file.len());
     updated.push_str(&normalized_file[..start]);
     updated.push_str(&normalized_replacement);
@@ -350,18 +369,18 @@ fn build_patch_from_replacement(
     Ok(create_patch(normalized_file, &updated).to_string())
 }
 
-fn symbol_byte_range(content: &str, span: &SymbolSpan) -> (usize, usize) {
+fn target_byte_range(content: &str, start_line: u32, end_line: u32) -> (usize, usize) {
     let mut start = None;
     let mut end = None;
     let mut cursor = 0usize;
 
     for (idx, segment) in content.split_inclusive('\n').enumerate() {
         let line_no = idx as u32 + 1;
-        if line_no == span.start_line && start.is_none() {
+        if line_no == start_line && start.is_none() {
             start = Some(cursor);
         }
         cursor += segment.len();
-        if line_no == span.end_line {
+        if line_no == end_line {
             end = Some(cursor);
             break;
         }
@@ -613,6 +632,22 @@ fn parse_new_file_line(header: &str) -> Option<u32> {
     }
 }
 
+fn format_symbol_kind(symbol: &SymbolSpan) -> &'static str {
+    use crate::analysis::SymbolKind;
+    match symbol.kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Method => "method",
+        SymbolKind::AssocFn => "assoc_fn",
+        SymbolKind::Mod => "mod",
+        SymbolKind::Variable => "var",
+        SymbolKind::Comment => "comment",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +725,9 @@ mod tests {
             parent: None,
         };
         let replacement = "fn foo() { println!(\"ok\"); }\n";
-        let patch = build_patch_from_replacement(content, &symbol, replacement).unwrap();
+        let patch =
+            build_patch_from_replacement(content, symbol.start_line, symbol.end_line, replacement)
+                .unwrap();
         assert!(patch.contains("-fn foo() {}"));
         assert!(patch.contains("+fn foo() { println!(\"ok\"); }"));
     }
