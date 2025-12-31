@@ -7,6 +7,7 @@ use crate::tui::commands::handlers::slash_commands::cancel::handle_cancel;
 use crate::tui::commands::handlers::slash_commands::clear::handle_clear;
 use crate::tui::commands::handlers::slash_commands::compact::handle_compact;
 use crate::tui::commands::handlers::slash_commands::edit_symbol::handle_edit_symbol;
+use crate::tui::commands::handlers::slash_commands::fix::handle_fix;
 use crate::tui::commands::handlers::slash_commands::git_worktree::handle_git_worktree;
 use crate::tui::commands::handlers::slash_commands::help::handle_help;
 use crate::tui::commands::handlers::slash_commands::lint::handle_lint;
@@ -14,6 +15,7 @@ use crate::tui::commands::handlers::slash_commands::map::handle_map;
 use crate::tui::commands::handlers::slash_commands::open::handle_open;
 use crate::tui::commands::handlers::slash_commands::quit::handle_quit;
 use crate::tui::commands::handlers::slash_commands::rebuild_repomap::handle_rebuild_repomap;
+use crate::tui::commands::handlers::slash_commands::stack::handle_stack;
 use crate::tui::commands::handlers::slash_commands::test::handle_test;
 use crate::tui::commands::handlers::slash_commands::theme::handle_theme;
 use crate::tui::commands::handlers::slash_commands::tokens::handle_tokens;
@@ -46,12 +48,39 @@ impl CommandHandler for TuiExecutor {
             "/edit-symbol" => handle_edit_symbol(self, ui),
             "/lint" => handle_lint(self, ui),
             "/test" => handle_test(self, ui),
+            line if line.starts_with("/stack") => {
+                let args = line.strip_prefix("/stack").unwrap_or("").trim();
+                handle_stack(self, ui, args);
+            }
+            line if line.starts_with("/fix") => {
+                let args = line.strip_prefix("/fix").unwrap_or("").trim();
+                handle_fix(self, ui, args);
+            }
             "/git-worktree" => match handle_git_worktree() {
                 Ok(message) => ui.push_log(message),
                 Err(e) => ui.push_log(format!("Error: {}", e)),
             },
             line if line.starts_with("/open ") => handle_open(self, line, ui),
             line if line.starts_with("/theme ") => handle_theme(line, ui),
+            line if line.starts_with("/plan") => {
+                let args = line.strip_prefix("/plan").unwrap_or("").trim();
+                let session_id = self
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .get_current_session_id()
+                    .unwrap_or("default".to_string());
+
+                if let Err(e) = crate::tui::commands::handlers::slash_commands::plan::handle_plan(
+                    args,
+                    &session_id,
+                    &self.cfg, // TuiExecutor cfg
+                    ui,
+                    &self.cfg, // AppConfig
+                ) {
+                    ui.push_log(format!("Error handling plan command: {}", e));
+                }
+            }
             _ => {
                 // Rest of content moved to exec.rs
                 self.handle_dispatch_rest(line, ui);

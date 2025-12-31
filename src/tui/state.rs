@@ -254,6 +254,8 @@ pub struct TuiApp {
     // PTY Shell session
     pub shell_session: Option<ShellSession>,
     pub shell_output_buffer: String,
+    // Ephemeral task stack
+    pub task_queue: VecDeque<String>,
 }
 
 impl TuiApp {
@@ -465,6 +467,7 @@ impl TuiApp {
             cfg: None,
             shell_session,
             shell_output_buffer: String::new(),
+            task_queue: VecDeque::new(),
         };
 
         Ok(app)
