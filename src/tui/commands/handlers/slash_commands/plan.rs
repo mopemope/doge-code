@@ -63,7 +63,19 @@ pub fn handle_plan(
             }
 
             match plan_approve(session_id, config) {
-                Ok(_) => {
+                Ok(approved_plan) => {
+                    // Update UI immediately
+                    let ui_items: Vec<crate::tui::state::PlanItem> = approved_plan
+                        .items
+                        .into_iter()
+                        .map(|item| crate::tui::state::PlanItem {
+                            id: item.id,
+                            content: item.content,
+                            status: item.status,
+                        })
+                        .collect();
+                    ui.apply_plan_list_update(ui_items, true);
+
                     ui.push_log("[plan] 計画を承認しました。実装フェーズに進めます。");
                 }
                 Err(e) => {
