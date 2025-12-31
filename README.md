@@ -1,17 +1,17 @@
 # Doge-Code
 
-Doge-Code はインタラクティブ AI コーディングエージェントで、ターミナル UI と MCP (Model Context Protocol) サーバーの両方を通じて、高度なコード分析、編集、プロジェクト管理機能を提供します。Rust で構築されたモダンなアーキテクチャは、tree-sitter パース、LLM 統合、永続セッションを組み合わせて、強力なコーディングアシスタント体験を提供します。
+Doge-Code is an interactive AI coding agent that provides advanced code analysis, editing, and project management capabilities through both a terminal UI and MCP (Model Context Protocol) server. Built with Rust, its modern architecture combines tree-sitter parsing, LLM integration, and persistent sessions to deliver a powerful coding assistant experience.
 
-## 🚀 主な機能
+## 🚀 Key Features
 
-### コア機能
-- **インテリジェントコード分析**: tree-sitter ベースのコードパースとシンボル抽出（Rust、JavaScript/TypeScript、Python、Go、Java、C/C++、C#、Markdown を含む 10+ 言語対応）
-- **インタラクティブターミナル UI**: 様々なシンタックスハイライト、diff レビュー、リアルタイム LLM インタラクションを備えた完全機能の TUI
-- **MCP サーバー**: Claude Desktop などの MCP 対応クライアントと統合するための Model Context Protocol サーバー
-- **永続セッション**: SQLite ベースのセッションストレージで実行間のコンテキストを維持
-- **マルチモードインタラクション**: インタラクティブ TUI モードとコマンドライン実行の両方をサポート
+### Core Capabilities
+- **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction (10+ languages including Rust, JavaScript/TypeScript, Python, Go, Java, C/C++, C#, Markdown)
+- **Interactive Terminal UI**: Full-featured TUI with syntax highlighting, diff review, and real-time LLM interaction
+- **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
+- **Persistent Sessions**: SQLite-based session storage to maintain context across runs
+- **Multi-Mode Interaction**: Support for both interactive TUI mode and command-line execution
 
-### 対応言語
+### Supported Languages
 - **Rust** (tree-sitter-rust 0.24.0)
 - **JavaScript/TypeScript** (tree-sitter-javascript/typescript 0.25.0/0.23.2)
 - **Python** (tree-sitter-python 0.25.0)
@@ -21,55 +21,55 @@ Doge-Code はインタラクティブ AI コーディングエージェントで
 - **C#** (tree-sitter-c-sharp 0.23.1)
 - **Markdown** (tree-sitter-md 0.5.1)
 
-### 実行モード
+### Execution Modes
 
-#### 1. インタラクティブ TUI モード（デフォルト）
+#### 1. Interactive TUI Mode (Default)
 ```bash
 cargo run --release
-# または
+# or
 dgc
 ```
-コード探索・ナビゲーション、リアルタイム LLM チャットインターフェース、diff レビュー・承認ワークフロー、セッション管理、プロジェクト概要・シンボルブラウジングを提供する完全なターミナルインターフェースを起動します。
+Launches a full terminal interface providing code exploration/navigation, real-time LLM chat interface, diff review/approval workflow, session management, and project overview/symbol browsing.
 
-#### 2. コマンド実行モード
+#### 2. Command Execution Mode
 ```bash
-dgc exec "データベース接続関数にエラーハンドリングを追加"
+dgc exec "Add error handling to database connection function"
 ```
-単一の指示を実行して結果と共に終了します。
+Executes a single instruction and exits with results.
 
-#### 3. MCP サーバーモード
+#### 3. MCP Server Mode
 ```bash
 dgc mcp-server 127.0.0.1:8000
 ```
-Claude Desktop や他のクライアントとの統合用に MCP サーバーを起動します。
+Starts MCP server for integration with Claude Desktop and other clients.
 
-#### 4. ファイル監視モード
+#### 4. File Watch Mode
 ```bash
 dgc watch
 ```
-ファイル変更を監視し、自動的に LLM アシスタントを起動します。
+Monitors file changes and automatically triggers LLM assistant.
 
-#### 5. コードリライトモード
+#### 5. Code Rewrite Mode
 ```bash
-dgc rewrite --prompt "async/await に変換" --code-file /tmp/code.rs
+dgc rewrite --prompt "Convert to async/await" --code-file /tmp/code.rs
 ```
-LLM アシスタントで特定のコードスニペットをリライトします。
+Rewrites specific code snippets with LLM assistant.
 
-## 🔧 インストール
+## 🔧 Installation
 
-### 前提条件
+### Prerequisites
 - Rust 1.70+ (Rust Edition 2024)
-- OpenAI 互換 API キー（`OPENAI_API_KEY` 環境変数で設定）
+- OpenAI compatible API key (set via `OPENAI_API_KEY` environment variable)
 
-### ソースからビルド
+### Build from Source
 ```bash
 git clone https://github.com/mopemope/doge-code.git
 cd doge-code
 cargo build --release
 ```
 
-### 設定
-プロジェクトディレクトリに `.doge/config.toml` を作成：
+### Configuration
+Create `.doge/config.toml` in your project directory:
 ```toml
 [llm]
 model = "claude-3-5-sonnet-20241022"
@@ -79,152 +79,221 @@ base_url = "https://api.anthropic.com"
 instructions_file = "PROJECT.md"
 ```
 
-## 🛠️ ツールとコマンド
+## 🛠️ Tools and Commands
 
-### ファイルシステムツール
-- `fs_read`: 大きなファイル用にオプションのサマリーモードでファイルを読み込み
-- `fs_write`: ファイルの作成または上書き
-- `fs_list`: ページネーションでディレクトリ内容を一覧
-- `find_file`: glob パターンでファイルを検索
-- `execute_bash`: シェルコマンドを実行（安全警告付き）
+### File System Tools
+- `fs_read`: Read files with optional summary mode for large files
+- `fs_write`: Create or overwrite files
+- `fs_list`: List directory contents with pagination
+- `find_file`: Search files by glob pattern
+- `execute_bash`: Execute shell commands (with safety warnings)
 
-### コード分析ツール
-- `search_repomap`: 高度なフィルタリングでパースされたコードシンボルを検索
-- `search_text`: ファイル全体のテキストベース検索
-- `fs_read_many_files`: 予算管理でバッチファイル読み込み
+### Code Analysis Tools
+- `search_repomap`: Search parsed code symbols with advanced filtering
+- `search_text`: Text-based search across files
+- `fs_read_many_files`: Batch file reading with budget management
 
-### 編集ツール
-- `apply_patch`: 統一 diff パッチを適用（複数ファイル対応）
-- `edit`: 特定コードブロックを置換
-- `edit_symbol`: シンボル全体（関数、構造体等）を編集
+### Editing Tools
+- `apply_patch`: Apply unified diff patches (multi-file support)
+- `edit`: Replace specific code blocks
+- `edit_symbol`: Edit entire symbols (functions, structs, etc.)
 
-### セッション管理
-- `plan_write`/`plan_read`: タスク/実行計画の保存・読み込み（セッションに紐付く）
-- `session`: 自動セッション永続化と再開
+### Session Management
+- `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions)
+- `session`: Automatic session persistence and resume
 
-## 🎯 使用例
+### Memory Tools
+- `read_memory`: Read content from persistent memory (markdown files)
+- `write_memory`: Write content to persistent memory
+- `list_memories`: List all available memory keys
 
-### 基本インタラクティブ使用
+### Advanced Tools
+- `undo`: Revert the last file modification (edit or write)
+- `search_history`: Semantic search of agent action history (RAG-based)
+- `shell`: Persistent shell session for command execution
+
+## 🎯 Usage Examples
+
+### Basic Interactive Usage
 ```bash
-# インタラクティブセッション開始
+# Start interactive session
 dgc
 
-# 最後のセッションを再開
+# Resume last session
 dgc --resume
 
-# 高速起動のために repomap 生成をスキップ
+# Skip repomap generation for faster startup
 dgc --no-repomap
 ```
 
-### コマンドライン操作
+### Command Line Operations
 ```bash
-# 単一指示を実行
-dgc exec "ユーザ認証モジュールに単体テストを追加"
+# Execute single instruction
+dgc exec "Add unit tests to user authentication module"
 
-# プログラム使用用に JSON 出力（tools_called、トークン使用量など詳細を含む）
-dgc exec --json "データベースレイヤをリファクタ"
+# JSON output for programmatic use (includes tools_called, token usage, etc.)
+dgc exec --json "Refactor database layer"
 
-# 特定コードをリライト
-dgc rewrite --prompt "この関数をパフォーマンス最適化" \
+# Rewrite specific code
+dgc rewrite --prompt "Optimize this function for performance" \
     --code-file /tmp/algorithm.rs \
     --json
 ```
 
-### Claude Desktop 統合
-1. MCP サーバー開始: `dgc mcp-server 127.0.0.1:8000`
-2. Claude Desktop を `http://127.0.0.1:8000` に接続設定
-3. Claude Desktop のチャットインターフェースでプロジェクトツールに完全アクセス
+### Claude Desktop Integration
+1. Start MCP server: `dgc mcp-server 127.0.0.1:8000`
+2. Configure Claude Desktop to connect to `http://127.0.0.1:8000`
+3. Access project tools directly from Claude Desktop chat interface
 
-### Emacs 統合
-Doge-Code は Elisp による Emacs 統合を含みます：
+### Emacs Integration
+Doge-Code includes Elisp-based Emacs integration:
 ```elisp
-;; doge-code.el と doge-mcp.el をロード
-;; M-x doge-mcp-connect で MCP サーバーに接続
-;; M-x doge-chat でチャットインターフェースを開く
+;; Load doge-code.el and doge-mcp.el
+;; M-x doge-mcp-connect to connect to MCP server
+;; M-x doge-chat to open chat interface
 ```
 
-## 🔍 search_repomap チートシート
+## 📝 TUI Slash Commands
 
-- `result_density`: 既定の `"compact"` ではスニペットを返さず、1 ファイルあたり 5 シンボルに圧縮。詳細が欲しいファイルだけ `"full"` に切り替えるとコンテキスト節約になります。
-- `response_budget_chars`: 「5,000 文字以内」のように上限を渡すと、limit／シンボル数／スニペット長を自動で削り、結果が大きくなりすぎるのを防ぎます。予算内に収まらない場合は `warnings` と `next_cursor` で続きが取得できます。
-- `cursor` / `page_size`: ソート済み結果をページ分割できます。`cursor` は 0 ベースの次の位置、`page_size` は取得件数です。`next_cursor` が `Some(x)` なら次ページを同じクエリ + `cursor=x` で取得してください。
-- レスポンスは `SearchRepomapResponse` で返り、`results`（従来の `RepomapSearchResult` 群）に加えて `warnings` と `applied_budget`（実際に適用された制限の概要）が含まれます。
+The TUI provides various slash commands for quick operations:
 
-これらを組み合わせることで、LLM のコンテキストを圧迫せずに最大効果のコード探索が可能です。
+| Command | Description |
+|---------|-------------|
+| `/help` | Display available commands and help |
+| `/quit` | Exit the application |
+| `/clear` | Clear the screen |
+| `/cancel` | Cancel current processing |
+| `/compact` | Compact conversation history using LLM summarization |
+| `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
+| `/lint` | Run linters and apply auto-fixes |
+| `/test` | Run tests for the project |
+| `/map` | Display RepoMap |
+| `/rebuild-repomap` | Rebuild the RepoMap |
+| `/open` | Open a file |
+| `/git-worktree` | Git worktree operations |
+| `/theme` | Change color theme |
+| `/tokens` | Display token usage |
+| `/tools` | List available tools |
 
-## 📂 ファイル系ツールの軽量モード
+## 🔍 search_repomap Cheat Sheet
 
-- `fs_read`: 既定モードは `mode="summary"` で 400 行 & 6,000 文字までを返し、残りは `next_cursor` で追跡できます。全文が必要な時だけ `mode="full"` や `page_size`/`cursor` を指定してください。
-- `fs_read_many_files`: `paths` で解決されたファイル群を `mode="summary"` では 1 ページ 5 件・各ファイル 40 行までで返し、`response_budget_chars` を超えそうな場合は自動的に `warnings` + `next_cursor` を返します。
-- `fs_list`: ディレクトリ一覧も `FsListResponse` で返り、`entries` には `path` と `is_dir` だけを載せるためコンパクトです。`cursor`/`page_size`/`response_budget_chars` を活用して深い木構造を段階的に取得してください。
+- `result_density`: Default `"compact"` returns no snippets and compresses to 5 symbols per file. Switch to `"full"` only for files where you need details to save context.
+- `response_budget_chars`: Pass an upper limit like "5,000 characters" to automatically trim limit/symbol count/snippet length and prevent results from getting too large. If within budget, `warnings` and `next_cursor` allow fetching continuation.
+- `cursor` / `page_size`: Paginate sorted results. `cursor` is 0-based next position, `page_size` is fetch count. If `next_cursor` is `Some(x)`, fetch next page with same query + `cursor=x`.
+- Response is `SearchRepomapResponse`, returning `results` (conventional `RepomapSearchResult` collection) plus `warnings` and `applied_budget` (summary of actual limits applied).
 
-## 🎯 シンボル限定編集 /edit-symbol
+Combining these enables maximum code exploration effectiveness without overwhelming LLM context.
 
-- `/edit-symbol` を実行すると、現在表示中の差分レビューまたは直近の `@path:line`／`@path#Lline` で指定されたファイル・行からシンボル（関数/impl/struct など）を特定します。差分レビューが開いていればスクロール位置が対象になり、ファイル指定がなければ十分です。
-- 認識したシンボルを LLM に渡し、diff またはシンボル全体の置換を受け取って `apply_patch` で適用します。結果は `diff-review` ペインで確認でき、`a` で承認、`r` で戻すことで反映状況を確認できます。
-- 失敗（パッチがない、パーサが壊れている、ファイルが更新された）時にはログに生レスポンスが出力されるので、指示を修正して再度 `/edit-symbol` を呼び出してください。
+## 📂 File Tools Lightweight Mode
 
-## 🛡️ リンターと自動修正 /lint
+- `fs_read`: Default mode is `mode="summary"` returning up to 400 lines & 6,000 characters, with remaining tracked via `next_cursor`. Only specify `mode="full"` or `page_size`/`cursor` when full text is needed.
+- `fs_read_many_files`: Files resolved from `paths` are returned 5 per page with up to 40 lines each in `mode="summary"`, automatically returning `warnings` + `next_cursor` if `response_budget_chars` would be exceeded.
+- `fs_list`: Directory listings also return as `FsListResponse`, with `entries` containing only `path` and `is_dir` for compactness. Use `cursor`/`page_size`/`response_budget_chars` to progressively fetch deep tree structures.
 
-- `/lint` コマンドは、プロジェクト内の Go, Rust, TypeScript ファイルを自動検出し、設定されたリンター（`cargo clippy`, `golangci-lint`, `npm run lint` など）を実行します。
-- 検出された問題に対して自動修正（`--fix`）を試み、解決できない複雑な問題については LLM に分析を依頼して修正案を提示します。
-- 複数の言語が混在するプロジェクトでも一括してチェック可能です。
+## 🎯 Symbol-Specific Editing /edit-symbol
 
-## 🏗️ アーキテクチャ
+- Running `/edit-symbol` identifies symbols (functions/impl/struct etc.) from the currently displayed diff review or most recent `@path:line`/`@path#Lline` file/line specification. If diff review is open, scroll position becomes the target, and file specification is not needed.
+- Recognized symbols are passed to LLM, receiving diff or full symbol replacement applied via `apply_patch`. Results can be confirmed in `diff-review` pane, with `a` to approve and `r` to revert.
+- On failure (no patch, broken parser, file updated), raw response is output to log, so modify instructions and call `/edit-symbol` again.
 
-### モジュール構成
-- **`src/main.rs`**: CLI エントリーポイントとアプリケーションオーケストレーション
-- **`src/analysis/`**: tree-sitter ベースのコード分析とシンボル抽出
-- **`src/tools/`**: ファイルシステムとコード操作ツール
-- **`src/tui/`**: ratatui によるターミナルユーザインターフェース
-- **`src/llm/`**: OpenAI 互換 LLM クライアントとツール実行
-- **`src/session/`**: SQLite ベースのセッション永続化
-- **`src/mcp/`**: Model Context Protocol サーバー実装
-- **`src/config/`**: 設定管理と TOML パース
+## 🛡️ Linter and Auto-Fix /lint
 
-### 主な特徴
-- **非同期アーキテクチャ**: 高性能の Tokio ベース
-- **メモリ効率的**: 大規模コードベース用の遅延読み込みとページネーション
-- **拡張可能**: 追加言語とツールのプラグインシステム
-- **型安全**: Rust の強力な型付けで一般的なエラーを防止
-- **クロスプラットフォーム**: Linux、macOS、Windows で動作
+- `/lint` command auto-detects Go, Rust, TypeScript files in the project and runs configured linters (`cargo clippy`, `golangci-lint`, `npm run lint`, etc.).
+- Attempts auto-fix (`--fix`) for detected issues, and for complex issues that can't be resolved, delegates analysis to LLM to propose fixes.
+- Projects with multiple languages can be checked all at once.
 
-## 🔍 高度な機能
+## 🧪 Testing /test
 
-### RepoMap システム
-Doge-Code はプロジェクトの包括的シンボルマップを構築：
-- 自動言語検出
-- シンボル抽出（関数、構造体、クラス等）
-- 相互相関分析
-- ファイル変更時の増分更新
+- `/test` command automatically detects the project type and runs appropriate test commands:
+  - Rust: `cargo test`
+  - Go: `go test ./...`
+  - Node.js: `npm test`
+- Test output is captured and can be analyzed by LLM for failure diagnosis.
 
-### スマート編集
-- **シンボル認識編集**: 関数、クラス、モジュール全体を編集
-- **diff レビュー**: 変更適用前のプレビュー
-- **コンテキスト保持**: コードスタイルとパターンを維持
-- **複数ファイル協調**: 関連変更をファイル間で適用
+## 🔄 Advanced Features
 
-### LLM 統合
-- **OpenAI 互換**: OpenAI、Anthropic、他の API で動作
-- **ストリーミング応答**: LLM 生成中にリアルタイム出力
-- **ツール使用**: LLM が自律的にツールを呼び出し
-- **会話履歴**: インタラクション間のコンテキストを維持
+### RepoMap System
+Doge-Code builds a comprehensive symbol map of the project:
+- Automatic language detection
+- Symbol extraction (functions, structs, classes, etc.)
+- Cross-reference analysis
+- Incremental updates on file changes
 
-## 📚 設定
+### Smart Editing
+- **Symbol-aware editing**: Edit entire functions, classes, modules
+- **Diff review**: Preview changes before applying
+- **Context preservation**: Maintain code style and patterns
+- **Multi-file coordination**: Apply related changes across files
 
-### 環境変数
-- `OPENAI_API_KEY`: API キー
-- `OPENAI_BASE_URL`: API ベース URL（デフォルトは OpenAI）
-- `OPENAI_MODEL`: モデル名（デフォルトは gpt-4）
-- `DOGECODE_CONFIG`: 設定ファイルパス
+### LLM Integration
+- **OpenAI Compatible**: Works with OpenAI, Anthropic, and other APIs
+- **Streaming Responses**: Real-time output during LLM generation
+- **Tool Use**: LLM autonomously calls tools
+- **Conversation History**: Maintain context across interactions
 
-### 設定ファイル（`.doge/config.toml`）
+### Automatic Verification
+After file edits (`fs_write`, `edit`, `apply_patch`), automatic verification can run:
+- **Rust**: Runs `cargo check` (configurable)
+- **Python**: Syntax check (configurable)
+- **Go**: `go build` (configurable)
+- **TypeScript**: `tsc --noEmit` (configurable)
+
+Verification failures are returned to LLM for automatic correction.
+
+### Semantic Search (RAG)
+- **Embedding-based search**: Search code symbols semantically using FastEmbed
+- **Action history**: Track and search past agent actions
+- **Auto-update**: Embeddings update automatically on file changes
+
+### Remote MCP Tools
+- Connect to remote MCP servers for additional tool capabilities
+- Unified tool interface for local and remote tools
+- Automatic tool discovery and registration
+
+### Conversation History Compaction
+- Automatic compaction when token threshold is exceeded
+- LLM-based summarization preserves essential context
+- Structured format for files accessed, actions taken, and outcomes
+
+### Git Worktree Management
+- Create isolated worktrees for parallel development
+- Branch-based worktree creation
+- Automatic cleanup
+
+### Error Recovery System
+- Autonomous error detection and diagnosis
+- Recovery strategy selection
+- Self-debugging capabilities
+
+### Hook System
+- Execute custom processing after each instruction
+- Extensible hook interface
+- Built-in hooks for repomap updates
+
+### Custom Commands
+- Define custom slash commands in `.doge/commands/`
+- Template-based command definitions
+- Parameter support for dynamic commands
+
+## 📚 Configuration
+
+### Environment Variables
+- `OPENAI_API_KEY`: API key
+- `OPENAI_BASE_URL`: API base URL (default: OpenAI)
+- `OPENAI_MODEL`: Model name (default: gpt-4)
+- `DOGECODE_CONFIG`: Configuration file path
+
+### Configuration File (`.doge/config.toml`)
 ```toml
 [llm]
 model = "claude-3-5-sonnet-20241022"
 base_url = "https://api.anthropic.com"
 max_tokens = 4000
 temperature = 0.1
+# Context window size (auto-detected if not specified)
+context_window_size = 200000
+# Token threshold for auto compaction
+auto_compact_prompt_token_threshold = 250000
 
 [project]
 instructions_file = "PROJECT.md"
@@ -232,63 +301,117 @@ exclude_patterns = ["target/", "node_modules/", "*.log"]
 
 [mcp]
 address = "127.0.0.1:8000"
+
+[rag]
+enabled = true
+auto_update = true
+
+[verification]
+enabled = true
+timeout_ms = 30000
+
+[verification.commands]
+rust = ["cargo", "check"]
+python = ["python", "-m", "py_compile", "{path}"]
+go = ["go", "build", "-o", "/dev/null", "{path}"]
+typescript = ["npx", "tsc", "--noEmit", "-p", "{project_root}"]
+node = ["node", "--check", "{path}"]
+
+[watch]
+enabled = true
+debounce_ms = 500
+patterns = ["*.rs", "*.go", "*.ts", "*.py"]
+
+[mcp_servers]
+# Define remote MCP servers to connect to
+# name = { command = ["path/to/server"], args = ["--arg1"] }
 ```
 
-## 🧪 開発
+## 🧪 Development
 
-### ビルドとテスト
+### Build and Test
 ```bash
-# コードフォーマット
+# Code formatting
 cargo fmt --all
 
-# リンティング実行
+# Run linting
 cargo clippy --all-targets --all-features
 
-# テスト実行
+# Run tests
 cargo test
 
-# リリース版ビルド
+# Build release version
 cargo build --release
 ```
 
-### 新しい言語の追加
-1. `Cargo.toml` に tree-sitter パーサ依存を追加
-2. `LanguageSpecificExtractor` トレイトを実装
-3. `src/analysis/mod.rs` の言語検出に追加
-4. `src/analysis/tests/` でテストを追加
+### Adding New Languages
+1. Add tree-sitter parser dependency to `Cargo.toml`
+2. Implement `LanguageSpecificExtractor` trait
+3. Add to language detection in `src/analysis/mod.rs`
+4. Add tests in `src/analysis/tests/`
 
-### 新しいツールの追加
-1. `src/tools/` ディレクトリでツールを実装
-2. `FsTools` トレイト実装に追加
-3. `src/tools/mod.rs` で登録
-4. テストとドキュメントを追加
+### Adding New Tools
+1. Implement tool in `src/tools/` directory
+2. Add to `FsTools` trait implementation
+3. Register in `src/tools/mod.rs`
+4. Add tests and documentation
 
-## 📖 ドキュメント
+### Adding Custom Commands
+Create a TOML file in `.doge/commands/` directory:
+```toml
+name = "my-command"
+description = "Description of my command"
+template = "Execute the following task: {args}"
+```
 
-- **システムプロンプト**: `resources/system_prompt.md` - AI 行動ガイドライン
-- **エージェントガイドライン**: `AGENTS.md` - 統合手順
-- **Emacs 統合**: `elisp/emacs-integration.md`
-- **API ドキュメント**: `cargo doc` で生成
+## 📖 Documentation
 
-## 🤝 コントリビューション
+- **System Prompt**: `resources/system_prompt.md` - AI behavior guidelines
+- **Agent Guidelines**: `AGENTS.md` - Integration procedures
+- **Emacs Integration**: `elisp/emacs-integration.md`
+- **API Documentation**: Generate with `cargo doc`
 
-1. リポジトリをフォーク
-2. 機能ブランチを作成
-3. テスト付きで変更を実装
-4. `cargo fmt` と `cargo clippy` が通ることを確認
-5. プルリクエストを提出
+## 🏗️ Architecture
 
-## 📄 ライセンス
+### Module Structure
+- **`src/main.rs`**: CLI entry point and application orchestration
+- **`src/analysis/`**: tree-sitter based code analysis and symbol extraction
+- **`src/tools/`**: File system and code manipulation tools
+- **`src/tui/`**: ratatui-based terminal user interface
+- **`src/llm/`**: OpenAI-compatible LLM client and tool execution
+- **`src/session/`**: SQLite-based session persistence
+- **`src/mcp/`**: Model Context Protocol server implementation
+- **`src/config/`**: Configuration management and TOML parsing
+- **`src/features/`**: Additional feature modules (verification, worktree)
+- **`src/error_recovery/`**: Autonomous error recovery system
+- **`src/hooks/`**: Instruction hook system
 
-このプロジェクトは MIT ライセンスに基づきライセンスされています - 詳細は [LICENSE](LICENSE) ファイルをご覧ください。
+### Key Characteristics
+- **Async Architecture**: Tokio-based for high performance
+- **Memory Efficient**: Lazy loading and pagination for large codebases
+- **Extensible**: Plugin system for additional languages and tools
+- **Type Safe**: Rust's strong typing prevents common errors
+- **Cross-Platform**: Works on Linux, macOS, Windows
 
-## 🙏 謝辞
+## 🤝 Contributing
 
-- 優れたパース機能の tree-sitter
-- MCP 仕様の Claude Desktop チーム
-- 優れたツール群の Rust コミュニティ
-- 全てのコントリビュータとテストユーザ
+1. Fork the repository
+2. Create a feature branch
+3. Implement changes with tests
+4. Ensure `cargo fmt` and `cargo clippy` pass
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- tree-sitter for excellent parsing capabilities
+- Claude Desktop team for MCP specification
+- Rust community for excellent tools
+- All contributors and testers
 
 ---
 
-**注**: これは活発な研究プロジェクトです。AI サポート開発の境界を探る中で、機能は変更される可能性があります。
+**Note**: This is an active research project. Features may change as we explore the boundaries of AI-supported development.
