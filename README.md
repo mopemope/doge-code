@@ -174,6 +174,8 @@ The TUI provides various slash commands for quick operations:
 | `/theme` | Change color theme |
 | `/tokens` | Display token usage |
 | `/tools` | List available tools |
+| `/plan show` | Display current plan with approval status |
+| `/plan approve` | Approve the current plan to proceed with implementation |
 
 ## 🔍 search_repomap Cheat Sheet
 

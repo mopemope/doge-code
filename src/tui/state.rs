@@ -118,6 +118,7 @@ pub struct BuildRenderPlanParams<'a> {
     pub spinner_state: usize,
     pub scroll_state: &'a ScrollState,
     pub plan_list: &'a [PlanItem],
+    pub plan_approved: bool,
     pub theme: &'a Theme,
     pub log_heights: &'a [usize],
 }
@@ -229,6 +230,8 @@ pub struct TuiApp {
     pub diff_review: Option<DiffReviewState>,
     // plan list
     pub plan_list: Vec<PlanItem>,
+    /// Whether the current plan has been approved by the user
+    pub plan_approved: bool,
     /// If true, the plan list received from `plan_write` that contained only
     /// completed items should be hidden when the next user instruction is
     /// dispatched. This preserves the current display but clears the list on
@@ -259,9 +262,10 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
-    pub(crate) fn apply_plan_list_update(&mut self, plan_list: Vec<PlanItem>) {
+    pub(crate) fn apply_plan_list_update(&mut self, plan_list: Vec<PlanItem>, approved: bool) {
         if plan_list.is_empty() {
             self.plan_list.clear();
+            self.plan_approved = false;
             self.hide_plan_on_next_instruction = false;
             self.dirty = true;
             return;
@@ -269,6 +273,7 @@ impl TuiApp {
 
         let all_completed = plan_list.iter().all(|t| t.status == "completed");
         self.plan_list = plan_list;
+        self.plan_approved = approved;
         self.hide_plan_on_next_instruction = all_completed;
         self.dirty = true;
     }
@@ -289,6 +294,7 @@ impl TuiApp {
             "/compact".to_string(),
             "/lint".to_string(),
             "/git-worktree".to_string(),
+            "/plan".to_string(),
         ];
 
         // Get custom commands
@@ -453,6 +459,7 @@ impl TuiApp {
             diff_review: None,
             // plan list
             plan_list: Vec::new(),
+            plan_approved: false,
             hide_plan_on_next_instruction: false,
             // last user input for retrying after compact
             last_user_input: None,

@@ -47,7 +47,7 @@ mod tests {
                 // total_tokens: None, // 削除
                 scroll_state,
                 plan_list: &[],
-                // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+                plan_approved: false,
                 theme: &app.theme,
                 log_heights: &app.log_heights,
             };
@@ -104,7 +104,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
@@ -144,7 +144,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
@@ -218,7 +218,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
@@ -279,7 +279,7 @@ mod tests {
                 // total_tokens: None, // 削除
                 scroll_state,
                 plan_list: &[],
-                // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+                plan_approved: false,
                 theme: &app.theme,
                 log_heights: &app.log_heights,
             };
@@ -338,7 +338,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state: &app.scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
@@ -414,7 +414,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &theme,
             log_heights: &log_heights,
         };
@@ -447,7 +447,7 @@ mod tests {
             // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             plan_list: &[],
-            // repomap_status: crate::tui::state::RepomapStatus::NotStarted, // 削除
+            plan_approved: false,
             theme: &theme,
             log_heights: &log_heights,
         };

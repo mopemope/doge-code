@@ -64,7 +64,6 @@ mod tests {
     use crate::config::AppConfig;
     use crate::tui::commands::core::TuiExecutor;
     use crate::tui::view::TuiApp; // Changed from crate::tui::state::TuiApp to crate::tui::view::TuiApp
-    use std::collections::VecDeque;
 
     fn create_test_app() -> TuiApp {
         // TuiApp::new(title, model, theme_name)

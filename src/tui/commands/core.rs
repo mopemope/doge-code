@@ -76,17 +76,22 @@ impl TuiExecutor {
     /// Publish the persisted plan (if any) for the current session to the UI.
     pub fn publish_plan_list(&self) {
         if let Ok(plan_list) = self.tools.plan_read() {
-            self.send_plan_items_to_ui(&plan_list.items);
+            self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
         } else {
-            self.send_plan_items_to_ui(&[]);
+            self.send_plan_items_to_ui(&[], false);
         }
     }
 
-    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem]) {
-        if let Some(tx) = &self.ui_tx
-            && let Ok(json) = serde_json::to_string(items)
-        {
-            let _ = tx.send(format!("::plan_list:{}", json));
+    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem], approved: bool) {
+        if let Some(tx) = &self.ui_tx {
+            // Send as JSON object with items and approved status
+            let payload = serde_json::json!({
+                "items": items,
+                "approved": approved
+            });
+            if let Ok(json) = serde_json::to_string(&payload) {
+                let _ = tx.send(format!("::plan_list:{}", json));
+            }
         }
     }
 
@@ -112,7 +117,7 @@ impl TuiExecutor {
             tool_calls: vec![],
             tool_call_id: None,
         });
-        self.send_plan_items_to_ui(&[]);
+        self.send_plan_items_to_ui(&[], false);
     }
 
     pub fn enforce_plan_context(
@@ -149,11 +154,11 @@ impl TuiExecutor {
                         tool_call_id: None,
                     });
                 }
-                self.send_plan_items_to_ui(&plan_list.items);
+                self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
             }
             Ok(plan_list) => {
                 // Plan file exists but has no steps
-                self.send_plan_items_to_ui(&plan_list.items);
+                self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
                 self.push_plan_creation_directive(
                     msgs,
                     instruction,
