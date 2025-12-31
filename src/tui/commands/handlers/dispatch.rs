@@ -77,7 +77,7 @@ impl CommandHandler for TuiExecutor {
                     ui,
                     &self.cfg,
                 ) {
-                    ui.push_log(format!("Error handling plan command: {}", e));
+                    ui.push_log(format!("プランコマンド処理エラー: {}", e));
                 }
             }
             _ => {
