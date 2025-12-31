@@ -480,11 +480,23 @@ impl TuiApp {
                         }
                         _ if msg.starts_with("::plan_list:") => {
                             let plan_list_json = &msg["::plan_list:".len()..];
-                            if let Ok(plan_list) = serde_json::from_str::<
-                                Vec<crate::tui::state::PlanItem>,
-                            >(plan_list_json)
+                            // New format: { "items": [...], "approved": bool }
+                            #[derive(serde::Deserialize)]
+                            struct PlanListPayload {
+                                items: Vec<crate::tui::state::PlanItem>,
+                                approved: bool,
+                            }
+                            if let Ok(payload) =
+                                serde_json::from_str::<PlanListPayload>(plan_list_json)
                             {
-                                self.apply_plan_list_update(plan_list);
+                                self.apply_plan_list_update(payload.items, payload.approved);
+                            } else if let Ok(plan_list) =
+                                serde_json::from_str::<Vec<crate::tui::state::PlanItem>>(
+                                    plan_list_json,
+                                )
+                            {
+                                // Legacy format: just array of items
+                                self.apply_plan_list_update(plan_list, false);
                             }
                             continue;
                         }

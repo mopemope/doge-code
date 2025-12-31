@@ -51,6 +51,7 @@ impl TuiApp {
             spinner_state: self.spinner_state,
             scroll_state: &self.scroll_state,
             plan_list: &self.plan_list,
+            plan_approved: self.plan_approved,
             theme: &self.theme,
             log_heights: &self.log_heights,
         };
@@ -95,6 +96,7 @@ impl TuiApp {
             spinner_state: self.spinner_state,
             scroll_state: &self.scroll_state,
             plan_list: &self.plan_list,
+            plan_approved: self.plan_approved,
             theme: &self.theme,
             log_heights: &self.log_heights,
         };

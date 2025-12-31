@@ -31,6 +31,7 @@ mod tests {
             spinner_state,
             scroll_state: &crate::tui::state::ScrollState::default(),
             plan_list: &[],
+            plan_approved: false,
             theme: &theme,
             log_heights: &[],
         };

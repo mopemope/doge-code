@@ -74,9 +74,8 @@ impl CommandHandler for TuiExecutor {
                 if let Err(e) = crate::tui::commands::handlers::slash_commands::plan::handle_plan(
                     args,
                     &session_id,
-                    &self.cfg, // TuiExecutor cfg
                     ui,
-                    &self.cfg, // AppConfig
+                    &self.cfg,
                 ) {
                     ui.push_log(format!("Error handling plan command: {}", e));
                 }
