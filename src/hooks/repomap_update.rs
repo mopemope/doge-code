@@ -8,7 +8,7 @@ use crate::tools::FsTools;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, warn};
+use tracing::error;
 
 /// Hook that automatically updates the repomap after each instruction if files were changed
 #[derive(Clone)]
@@ -72,22 +72,16 @@ impl InstructionHook for RepomapUpdateHook {
 
                 // Create analyzer and rebuild repomap
                 match Analyzer::new(&project_root).await {
-                    Ok(mut analyzer) => {
-                        if let Err(e) = analyzer.clear_cache().await {
-                            warn!("Failed to clear cache before repomap rebuild: {}", e);
+                    Ok(mut analyzer) => match analyzer.build().await {
+                        Ok(new_map) => {
+                            let mut repomap_guard = repomap_clone.write().await;
+                            *repomap_guard = Some(new_map);
+                            tracing::info!("Repomap successfully updated after instruction");
                         }
-
-                        match analyzer.build_parallel().await {
-                            Ok(new_map) => {
-                                let mut repomap_guard = repomap_clone.write().await;
-                                *repomap_guard = Some(new_map);
-                                tracing::info!("Repomap successfully updated after instruction");
-                            }
-                            Err(e) => {
-                                error!("Failed to rebuild repomap: {:?}", e);
-                            }
+                        Err(e) => {
+                            error!("Failed to rebuild repomap: {:?}", e);
                         }
-                    }
+                    },
                     Err(e) => {
                         error!("Failed to create Analyzer for repomap rebuild: {:?}", e);
                     }

@@ -1,6 +1,4 @@
-use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use anyhow::Result;
 use serde_json::json;
 
 mod repomap_filter;
@@ -72,17 +70,6 @@ It is your primary tool for understanding the codebase. Unlike simple text searc
 **Return Value:**
 The tool returns a `SearchRepomapResponse` structure. The `results` field contains the familiar list of `RepomapSearchResult` objects (with names, kinds, locations, keywords, and optional **code_snippet** data). The response may also include a `next_cursor` for pagination, `warnings` when budgets force aggressive trimming, and an `applied_budget` summary so you know which constraints were tightened automatically.
 "#;
-
-/// Placeholder function to match the required function signature for search_repomap
-/// The actual implementation is in the RepomapSearchTools struct
-pub fn search_repomap(
-    _args: SearchRepomapArgs,
-    _config: &AppConfig,
-) -> Result<SearchRepomapResponse> {
-    // This is a placeholder implementation to match the required function signature
-    // The actual implementation is in the RepomapSearchTools struct
-    todo!("This function is not meant to be called directly. Use FsTools::search_repomap instead.")
-}
 
 pub fn tool_def() -> ToolDef {
     ToolDef {

@@ -1,4 +1,5 @@
 mod agent_loop;
+pub mod compaction;
 mod diff_collection;
 mod dispatch;
 mod error;

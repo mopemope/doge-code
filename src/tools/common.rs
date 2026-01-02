@@ -153,7 +153,12 @@ impl FsTools {
         self.session_manager_wrapper.get_session_info()
     }
 
-    fn ensure_current_session_id(&self) -> Result<String> {
+    pub fn ensure_plan_is_approved(&self) -> Result<()> {
+        let session_id = self.ensure_current_session_id()?;
+        plan::ensure_plan_is_approved(&session_id, &self.config)
+    }
+
+    pub fn ensure_current_session_id(&self) -> Result<String> {
         if let Some(session) = self.get_current_session() {
             return Ok(session.meta.id);
         }
@@ -307,6 +312,9 @@ impl FsTools {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
 
+        // Ensure plan is approved before writing
+        self.ensure_plan_is_approved()?;
+
         // Backup existing file before overwriting
         if let Err(e) = self.backup_file(std::path::Path::new(path)).await {
             tracing::warn!("Failed to backup file {}: {}", path, e);
@@ -338,6 +346,9 @@ impl FsTools {
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
         // Update session with tool call count
         self.update_session_with_tool_call_count()?;
+
+        // Ensure plan is approved before execution
+        self.ensure_plan_is_approved()?;
 
         // Check if the command is allowed
         if !self.is_command_allowed(command) {
@@ -605,9 +616,34 @@ mod tests {
     use crate::config::AppConfig;
     use anyhow::Result;
 
+    use crate::tools::plan::{PlanItem, PlanWriteMode};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    async fn setup_approved_plan(fs_tools: &FsTools, session_id: &str) -> Result<()> {
+        let items = vec![PlanItem {
+            id: "test-step".to_string(),
+            content: "Test step".to_string(),
+            status: "pending".to_string(),
+        }];
+        fs_tools.plan_write(items, PlanWriteMode::Replace)?;
+
+        // Manual approval logic mirroring the approve tool/command
+        let config = &fs_tools.config;
+        let mut list = crate::tools::plan::plan_read(session_id, config)?;
+        list.approved = true;
+
+        let base = &config.project_root;
+        let plan_file_path = base
+            .join(".doge")
+            .join("plans")
+            .join(format!("{}.json", session_id));
+        let json_content = serde_json::to_string_pretty(&list)?;
+        std::fs::write(&plan_file_path, &json_content)?;
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
@@ -621,7 +657,15 @@ mod tests {
             ..Default::default()
         };
 
-        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager);
+
+        setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
         // This should succeed because "echo" is in the allowed list
         let result = fs_tools.execute_bash("echo 'hello world'").await;
@@ -642,7 +686,15 @@ mod tests {
             ..Default::default()
         };
 
-        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager);
+
+        setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
         // This should return a JSON string with success = false because "rm" is not in the allowed list
         let result_str = fs_tools.execute_bash("rm -rf /").await.unwrap();
@@ -665,7 +717,15 @@ mod tests {
             ..Default::default()
         };
 
-        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager);
+
+        setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
         // This should be allowed because the allowed_commands list is empty
         let result = fs_tools.execute_bash("echo 'hello world'").await;
@@ -819,7 +879,15 @@ mod tests {
             ..Default::default()
         };
 
-        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager);
+
+        setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
         // This should succeed because the exact command is allowed
         let result = fs_tools.execute_bash("echo 'hello world'").await;
@@ -840,7 +908,15 @@ mod tests {
             ..Default::default()
         };
 
-        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager);
+
+        setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
         // All commands should be allowed when allowed_commands list is empty
         let result = fs_tools.execute_bash("echo 'test'").await;

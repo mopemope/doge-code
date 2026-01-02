@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
@@ -157,6 +157,21 @@ pub fn plan_approve(session_id: &str, config: &AppConfig) -> Result<PlanList> {
         .with_context(|| format!("Failed to write plan file: {}", plan_file_path.display()))?;
 
     Ok(list)
+}
+
+pub fn ensure_plan_is_approved(session_id: &str, config: &AppConfig) -> Result<()> {
+    let list = plan_read(session_id, config)?;
+    if list.items.is_empty() {
+        bail!(
+            "現在のセッションには計画(Plan)が存在しません。`plan_write` ツールを使用して計画を作成し、`/plan approve` で承認を得てから実装に進んでください。"
+        );
+    }
+    if !list.approved {
+        bail!(
+            "現在の計画(Plan)はまだ承認されていません。ユーザーに計画を提示し、`/plan approve` コマンドで承認を得てから実装に進んでください。"
+        );
+    }
+    Ok(())
 }
 
 pub fn plan_write_from_base_path(
