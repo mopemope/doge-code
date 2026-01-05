@@ -66,10 +66,12 @@ When you are done, produce a concise Markdown report including:
 
 # Tool Usage Guidelines
 
+*   **`search_repomap`**:
+    *   **PRIMARY SEARCH TOOL**. Use this FIRST to find relevant files and symbols. It is semantically aware and efficient.
 *   **`fs_read` / `fs_list`**:
     *   Use `mode="summary"` for initial exploration or when reading large files to save tokens.
     *   Only request `mode="full"` when you need precise line numbers for editing.
-*   **`find_file`**: Use this if you know the filename but not the path.
+*   **`find_file`**: Use this if you know the exact filename but not the path.
 *   **`plan_write`**: Your memory. Use it to document your plan and track progress.
 *   **`undo`**: Your safety net. Use it if you break something.
 *   **`apply_patch`**:
@@ -84,7 +86,8 @@ If a tool execution fails:
 1.  **Read the error message**. It usually tells you exactly what is wrong.
 2.  **Verify the state**. Did the file change? Is the path correct?
 3.  **Adjust Strategy**. Do not just retry the same failed command.
-    *   *Path Error* (File not found) -> Use `fs_list` or `find_file` to locate the correct path.
+    *   *Approval Required* -> You missed Step 2. Present the plan and wait for the user to say "Approve", then call `plan_approve`.
+    *   *Path Error* (File not found) -> Use `search_repomap` or `fs_list` to locate the correct path.
     *   *Context Error* (Patch failed) -> `fs_read` the file again to get fresh context -> Rebase the patch.
     *   *Logic Error* (Build failed) -> Read the error -> Analyze code -> simple fix.
     *   *Loop Detection* -> Stop. Take a step back. Read the tips in the warning message.
