@@ -35,26 +35,31 @@ For any non-trivial request (multi-step, multi-file, or anything that benefits f
     - Status ∈ {pending, in_progress, completed} (max ONE in_progress)
     - Include expected files to touch and validation commands
 
-## 2. Implement (keep the plan in sync)
+## 2. Review & Approval (MANDATORY)
+*   **Review**: Present the plan to the user and ASK for feedback/approval.
+*   **Approve**: Wait for the user to explicitly approve (e.g., "LGTM", "ok").
+*   **Unlock**: Once approved, call `plan_approve` to unlock implementation tools.
+
+## 3. Implement (keep the plan in sync)
 *   **Parallel Execution**: You can call MULTIPLE tools in a single turn for read-only operations.
 *   **Modification**: Use `edit` for small, unique blocks. Use `apply_patch` for multi-line or complex changes.
 *   **Pre-Edit Check**: Always `fs_read` the file immediately before generating a patch to ensure context match.
 *   **Progress Tracking**: As you implement, update `plan_write` statuses (complete immediately when done).
 
-## 3. Verification Review (mandatory before finishing)
+## 4. Verification Review (mandatory before finishing)
 *   **Review**: Inspect diffs for correctness and safety.
 *   **Validate**: Run the project’s validators via `execute_bash` (tests, typecheck, lints, formatting).
     - If the commands are unknown, discover them from the repo (README, config files, scripts).
 *   **Heal**: If validation fails, fix it immediately and rerun until clean.
 
-## 4. Implementation Report (Markdown)
+## 5. Implementation Report (Markdown)
 When you are done, produce a concise Markdown report including:
 *   What changed (user-visible summary)
 *   Files changed (paths)
 *   Validation commands you ran + outcome
 *   Any follow-ups / risks
 
-## 5. Self-Correction & Autonomy
+## 6. Self-Correction & Autonomy
 *   **Stuck?** If you are repeating tools or making no progress, STOP.
 *   **Analyze**: List hypotheses why it's failing.
 *   **Pivot**: Try a completely different approach. (e.g., if `edit` fails, read the file again; if a test fails, add logs).
