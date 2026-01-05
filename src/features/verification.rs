@@ -28,7 +28,8 @@ impl AutoVerifier {
 
     /// Checks if the tool call warrants verification and runs it.
     /// Returns Some(warning_message) if verification fails.
-    pub async fn verify(&self, tool_call: &ToolCall, success: bool) -> Option<String> {
+    /// If enforce is true, it returns an error message indicating that the change should be rolled back.
+    pub async fn verify(&self, tool_call: &ToolCall, success: bool) -> Option<VerificationResult> {
         if !success {
             return None;
         }
@@ -56,7 +57,7 @@ impl AutoVerifier {
         self.run_verification(path).await
     }
 
-    async fn run_verification(&self, path: &Path) -> Option<String> {
+    async fn run_verification(&self, path: &Path) -> Option<VerificationResult> {
         let extension = path.extension().and_then(|e| e.to_str())?;
 
         match extension {
@@ -84,7 +85,12 @@ impl AutoVerifier {
         }
     }
 
-    async fn verify_command(&self, label: &str, command: &[String], path: &Path) -> Option<String> {
+    async fn verify_command(
+        &self,
+        label: &str,
+        command: &[String],
+        path: &Path,
+    ) -> Option<VerificationResult> {
         if command.is_empty() {
             return None;
         }
@@ -103,10 +109,13 @@ impl AutoVerifier {
         let output = match self.run_with_timeout(cmd).await {
             Ok(output) => output,
             Err(message) => {
-                return Some(format!(
-                    "<verification_error>\n{} Check Failed:\n{}\n</verification_error>",
-                    label, message
-                ));
+                return Some(VerificationResult {
+                    message: format!(
+                        "<verification_error>\n{} Check Failed:\n{}\n</verification_error>",
+                        label, message
+                    ),
+                    should_revert: self.config.enforce,
+                });
             }
         };
 
@@ -118,7 +127,10 @@ impl AutoVerifier {
                 label, stdout, stderr
             );
             warn!("Verification failed: {}", msg);
-            return Some(msg);
+            return Some(VerificationResult {
+                message: msg,
+                should_revert: self.config.enforce,
+            });
         }
         None
     }
@@ -159,4 +171,9 @@ impl AutoVerifier {
             })
             .collect()
     }
+}
+
+pub struct VerificationResult {
+    pub message: String,
+    pub should_revert: bool,
 }

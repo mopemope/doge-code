@@ -358,17 +358,61 @@ pub async fn run_agent_loop(
             // Inject verification note if file was written
             if modifies_files && success {
                 // Run AutoVerifier
-                if let Some(err_msg) = verifier.verify(&tc, true).await {
-                    let warning = format!(
-                        "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
-                        err_msg
-                    );
-                    tool_message_content.push_str(&warning);
-                    if let Some(tx) = &ui_tx {
-                        let _ = tx.send(
-                            "::status:warning:Auto-verification failed. Correction required."
-                                .to_string(),
+                if let Some(result) = verifier.verify(&tc, true).await {
+                    if result.should_revert {
+                        // Attempt to revert the change using the undo stack
+                        let reverted = {
+                            let mut stack = fs.undo_stack.write().await;
+                            if let Some(entry) = stack.pop() {
+                                // Write back the original content
+                                if let Ok(_) = crate::tools::write::fs_write(
+                                    entry.path.to_str().unwrap(),
+                                    &entry.content,
+                                    cfg,
+                                ) {
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        let warning = if reverted {
+                            format!(
+                                "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected CRITICAL issues. \n\n⚠️ CHANGES HAVE BEEN AUTOMATICALLY REVERTED to protect the project state. \n\nAnalyze the error above and try again with a fix.</SYSTEM_NOTE>",
+                                result.message
+                            )
+                        } else {
+                            format!(
+                                "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. Automatic revert FAILED. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
+                                result.message
+                            )
+                        };
+
+                        tool_message_content.push_str(&warning);
+                        if let Some(tx) = &ui_tx {
+                            let status_msg = if reverted {
+                                "::status:error:Verification failed. Changes reverted."
+                            } else {
+                                "::status:error:Verification failed. Revert failed."
+                            };
+                            let _ = tx.send(status_msg.to_string());
+                        }
+                    } else {
+                        // Warning only (enforce = false)
+                        let warning = format!(
+                            "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
+                            result.message
                         );
+                        tool_message_content.push_str(&warning);
+                        if let Some(tx) = &ui_tx {
+                            let _ = tx.send(
+                                "::status:warning:Auto-verification failed. Correction required."
+                                    .to_string(),
+                            );
+                        }
                     }
                 } else {
                     // Only add generic reminder if no specific error was found (to reduce noise? or always?)

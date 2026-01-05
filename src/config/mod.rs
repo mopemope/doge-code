@@ -59,6 +59,7 @@ impl Default for RagConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct VerificationConfig {
     pub enabled: bool,
+    pub enforce: bool,
     pub timeout_ms: u64,
     pub commands: VerificationCommands,
 }
@@ -111,6 +112,7 @@ impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            enforce: true,
             timeout_ms: 120_000,
             commands: VerificationCommands::default(),
         }
@@ -292,6 +294,7 @@ pub struct PartialRagConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct PartialVerificationConfig {
     pub enabled: Option<bool>,
+    pub enforce: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub commands: Option<PartialVerificationCommands>,
 }
@@ -684,6 +687,9 @@ impl AppConfig {
                 if let Some(enabled) = file_verification.enabled {
                     verification_cfg.enabled = enabled;
                 }
+                if let Some(enforce) = file_verification.enforce {
+                    verification_cfg.enforce = enforce;
+                }
                 if let Some(timeout_ms) = file_verification.timeout_ms {
                     verification_cfg.timeout_ms = timeout_ms;
                 }
@@ -709,6 +715,9 @@ impl AppConfig {
             if let Some(project_verification) = &project_cfg.verification {
                 if let Some(enabled) = project_verification.enabled {
                     verification_cfg.enabled = enabled;
+                }
+                if let Some(enforce) = project_verification.enforce {
+                    verification_cfg.enforce = enforce;
                 }
                 if let Some(timeout_ms) = project_verification.timeout_ms {
                     verification_cfg.timeout_ms = timeout_ms;
@@ -816,6 +825,7 @@ batch_size = 8
 # Verification settings
 [verification]
 enabled = true
+enforce = true
 timeout_ms = 120000
 
 [verification.commands]
