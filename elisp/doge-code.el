@@ -49,6 +49,11 @@
   "Number of retries for the fix command."
   :type 'integer)
 
+
+(defcustom doge-code-resume nil
+  "Resume the latest session context (passed as --resume)."
+  :type 'boolean)
+
 (defvar doge-code-mode-map (make-sparse-keymap)
   "Keymap for doge-code-mode.")
 
@@ -131,7 +136,8 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
                       (format "%s\n\n%s" instruction code)
                     instruction))
          (global-args (append (when doge-code-model (list "--model" doge-code-model))
-                              (when doge-code-disable-repomap '("--no-repomap"))))
+                              (when doge-code-disable-repomap '("--no-repomap"))
+                              (when doge-code-resume '("--resume"))))
          (args (append global-args
                        (list "exec" payload)
                        (when json-output '("--json"))))
@@ -177,8 +183,11 @@ BUFFER is the target buffer that should receive the rewrite.
 START-MARKER and END-MARKER delimit the region to replace.
 FILE-PATH optionally provides context to the CLI.
 ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying the rewrite."
-  (let ((args (append (list "rewrite" "--prompt" prompt "--code-file" temp-file "--json")
-                      (when file-path (list "--file-path" file-path)))))
+  (let* ((global-args (append (when doge-code-model (list "--model" doge-code-model))
+                              (when doge-code-disable-repomap '("--no-repomap"))))
+         (args (append global-args
+                       (list "rewrite" "--prompt" prompt "--code-file" temp-file "--json")
+                       (when file-path (list "--file-path" file-path)))))
     (doge-code--async-run
      args
      (lambda (output)

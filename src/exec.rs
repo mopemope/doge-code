@@ -49,7 +49,7 @@ impl Executor {
             }
         }
         let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
-            .with_session_manager(session_manager);
+            .with_session_manager(session_manager.clone());
 
         // Only initialize repomap if not disabled
         // For the exec command, we rely on the main initialization to handle repomap building
@@ -68,6 +68,24 @@ impl Executor {
         let max_tokens = cfg.get_context_window_size().unwrap_or(100_000) as usize;
         let conversation_history =
             Arc::new(tokio::sync::Mutex::new(ChatHistory::new(max_tokens, None)));
+
+        // If resume is requested, load the latest session and populate history
+        if cfg.resume {
+            let mut session_mgr = session_manager.lock().unwrap();
+            if let Ok(()) = session_mgr.load_latest_session()
+                && let Some(session) = &session_mgr.current_session {
+                    info!("Resuming session: {}", session.meta.id);
+                    let mut history = conversation_history.blocking_lock();
+                    for entry in &session.conversation {
+                        if let Ok(value) = serde_json::to_value(entry)
+                            && let Ok(msg) =
+                                serde_json::from_value::<crate::llm::types::ChatMessage>(value)
+                            {
+                                history.append_message(msg);
+                            }
+                    }
+                }
+        }
 
         Ok(Self {
             cfg,
