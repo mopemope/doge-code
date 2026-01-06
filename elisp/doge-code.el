@@ -37,6 +37,18 @@
   "Timeout for Doge-Code execution in seconds."
   :type 'integer)
 
+(defcustom doge-code-model nil
+  "Model name to use (e.g. gpt-4o). If nil, use default from config/env."
+  :type '(choice (const :tag "Default" nil) string))
+
+(defcustom doge-code-disable-repomap nil
+  "Disable Repomap generation for faster startup (passed as --no-repomap)."
+  :type 'boolean)
+
+(defcustom doge-code-fix-retry 3
+  "Number of retries for the fix command."
+  :type 'integer)
+
 (defvar doge-code-mode-map (make-sparse-keymap)
   "Keymap for doge-code-mode.")
 
@@ -118,7 +130,10 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
          (payload (if (and code (> (length code) 0))
                       (format "%s\n\n%s" instruction code)
                     instruction))
-         (args (append (list "exec" payload)
+         (global-args (append (when doge-code-model (list "--model" doge-code-model))
+                              (when doge-code-disable-repomap '("--no-repomap"))))
+         (args (append global-args
+                       (list "exec" payload)
                        (when json-output '("--json"))))
          (handler (or callback #'doge-code--handle-response)))
     (doge-code--async-run
@@ -288,7 +303,10 @@ Runs the command via 'dgc fix' and displays output in a buffer."
       (make-process
        :name "doge-code-fix"
        :buffer buffer
-       :command (list doge-code-executable "fix" cmd)
+       :command (append (list doge-code-executable)
+                        (when doge-code-model (list "--model" doge-code-model))
+                        (when doge-code-disable-repomap '("--no-repomap"))
+                        (list "fix" cmd "--retry" (number-to-string doge-code-fix-retry)))
        :sentinel (lambda (proc event)
                    (when (string= event "finished\n")
                      (with-current-buffer (process-buffer proc)
