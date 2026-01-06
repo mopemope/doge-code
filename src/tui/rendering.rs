@@ -820,14 +820,31 @@ impl TuiApp {
             let block_height = 2 + 1; // 3 lines
             let total_height = list_height + block_height;
 
-            // Position the popup above the input area, considering the full height of the block
-            let popup_y = area.y.saturating_sub(total_height);
+            // Position the popup dynamics
+            let screen_height = f.area().height;
+            let space_above = area.y;
+            let space_below = screen_height.saturating_sub(area.y + area.height);
+
+            let (popup_y, final_height) = if space_above >= total_height {
+                // Prioritize above if it fits
+                (area.y.saturating_sub(total_height), total_height)
+            } else if space_below >= total_height {
+                // Put below if it fits
+                (area.y + area.height, total_height)
+            } else {
+                // If neither fits, pick the larger space and clamp
+                if space_above >= space_below {
+                    (0, space_above)
+                } else {
+                    (area.y + area.height, space_below)
+                }
+            };
 
             let completion_area = Rect {
                 x: area.x,
                 y: popup_y,
                 width: max_width + 2, // +2 for padding
-                height: total_height,
+                height: final_height,
             };
 
             let items: Vec<ListItem> = self

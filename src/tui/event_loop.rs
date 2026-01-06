@@ -499,6 +499,13 @@ impl TuiApp {
 
                 // Handle mouse events first, before any other events
                 match event {
+                    Event::Resize(w, h) => {
+                        self.window_width = w as usize;
+                        self.main_content_height = h.saturating_sub(4) as usize;
+                        self.log_heights.clear();
+                        self.dirty = true;
+                        continue;
+                    }
                     Event::Mouse(mouse_event) => {
                         tracing::debug!(
                             "Mouse event captured in main event loop: {:?}",
