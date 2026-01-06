@@ -11,6 +11,7 @@ pub mod open;
 pub mod plan;
 pub mod quit;
 pub mod rebuild_repomap;
+pub mod reset;
 pub mod stack;
 pub mod test;
 pub mod theme;

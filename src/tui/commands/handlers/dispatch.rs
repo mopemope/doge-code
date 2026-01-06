@@ -15,6 +15,7 @@ use crate::tui::commands::handlers::slash_commands::map::handle_map;
 use crate::tui::commands::handlers::slash_commands::open::handle_open;
 use crate::tui::commands::handlers::slash_commands::quit::handle_quit;
 use crate::tui::commands::handlers::slash_commands::rebuild_repomap::handle_rebuild_repomap;
+use crate::tui::commands::handlers::slash_commands::reset::handle_reset;
 use crate::tui::commands::handlers::slash_commands::stack::handle_stack;
 use crate::tui::commands::handlers::slash_commands::test::handle_test;
 use crate::tui::commands::handlers::slash_commands::theme::handle_theme;
@@ -42,6 +43,7 @@ impl CommandHandler for TuiExecutor {
             "/clear" => handle_clear(self, ui),
             "/tokens" => handle_tokens(self, ui),
             "/rebuild-repomap" => handle_rebuild_repomap(self, ui),
+            "/reset" => handle_reset(ui),
             "/cancel" => handle_cancel(self, ui),
             "/compact" => handle_compact(self, ui),
             "/map" => handle_map(self, ui),
