@@ -34,6 +34,8 @@ impl TaskSentinel {
                     || name == "apply_patch"
                     || name == "plan_write"
                     || name == "undo"
+                    || name == "execute_bash"
+                    || name == "search_repomap"
                 // undo is also an action
             );
 
@@ -47,7 +49,7 @@ impl TaskSentinel {
 
         if steps_since_progress >= STALL_THRESHOLD {
             return Some(format!(
-                "WARNING: No significant progress (file modification or plan update) detected for the last {} steps. You seem to be just reading or searching. Please reviewing your findings and take ACTION (edit code or update plan).",
+                "WARNING: No significant progress detected for the last {} steps. You seem to be stuck in a loop of reading or searching. Please review your findings and take ACTION (edit code, update plan, or execute a command).",
                 steps_since_progress
             ));
         }
