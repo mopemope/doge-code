@@ -677,11 +677,13 @@ impl TuiApp {
                 Ok(true)
             }
             KeyCode::PageUp => {
-                self.adjust_diff_scroll(-20);
+                let amount = self.main_content_height.saturating_sub(1).max(1) as isize;
+                self.adjust_diff_scroll(-amount);
                 Ok(true)
             }
             KeyCode::PageDown => {
-                self.adjust_diff_scroll(20);
+                let amount = self.main_content_height.saturating_sub(1).max(1) as isize;
+                self.adjust_diff_scroll(amount);
                 Ok(true)
             }
             KeyCode::Home => {

@@ -9,7 +9,7 @@ use crate::tui::state::{InputMode, TuiApp, save_input_history};
 pub fn handle_shell_mode_key<B: ratatui::backend::Backend>(
     app: &mut TuiApp,
     k: ratatui::crossterm::event::KeyEvent,
-    terminal: &mut ratatui::Terminal<B>,
+    _terminal: &mut ratatui::Terminal<B>,
 ) -> Result<()> {
     match k.code {
         ratatui::crossterm::event::KeyCode::Esc => {
@@ -72,17 +72,11 @@ pub fn handle_shell_mode_key<B: ratatui::backend::Backend>(
             }
         }
         ratatui::crossterm::event::KeyCode::PageUp => {
-            let visible_lines = terminal
-                .size()
-                .map(|s| s.height.saturating_sub(3) as usize)
-                .unwrap_or(20);
+            let visible_lines = app.main_content_height.saturating_sub(1).max(1);
             app.page_up(visible_lines);
         }
         ratatui::crossterm::event::KeyCode::PageDown => {
-            let visible_lines = terminal
-                .size()
-                .map(|s| s.height.saturating_sub(3) as usize)
-                .unwrap_or(20);
+            let visible_lines = app.main_content_height.saturating_sub(1).max(1);
             app.page_down(visible_lines);
         }
         ratatui::crossterm::event::KeyCode::Enter => {
@@ -204,6 +198,7 @@ mod tests {
         // Set window width for height calculation
         app.window_width = 80;
         app.recalculate_all_heights();
+        app.main_content_height = 20; // Set explicit height for page scroll calculation
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
