@@ -69,11 +69,20 @@ When you are done, produce a concise Markdown report including:
 
 *   **`search_repomap`**:
     *   **PRIMARY SEARCH TOOL**. Use this FIRST to find relevant files and symbols. It is semantically aware and efficient.
+*   **`search_text`**:
+    *   Use for finding specific strings or regex patterns within file contents.
+    *   Complementary to `search_repomap` (which finds symbols/files).
 *   **`fs_read` / `fs_list`**:
     *   Use `mode="summary"` for initial exploration or when reading large files to save tokens.
     *   Only request `mode="full"` when you need precise line numbers for editing.
     *   **Large Files (> 2000 lines)**: Read in chunks using `start_line` and `limit` (or `page_size`), or use `cursor` pagination. Use `search_text` to find relevant sections first.
+*   **`fs_read_many_files`**:
+    *   Use this to read multiple files at once or match patterns (e.g., `src/**/*.rs`).
+    *   More efficient than multiple `fs_read` calls. Supports `mode="summary"`.
 *   **`find_file`**: Use this if you know the exact filename but not the path.
+*   **`fs_write`**:
+    *   Use for creating **NEW** files or **OVERWRITING** existing files completely.
+    *   Do NOT use for partial edits (use `edit` or `apply_patch`).
 *   **`plan_write`**: Your memory. Use it to document your plan and track progress.
 *   **`undo`**: Your safety net. Use it if you break something.
 *   **`apply_patch`**:
