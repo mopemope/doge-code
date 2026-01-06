@@ -15,16 +15,21 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /compact - Compact conversation history to reduce token usage");
     ui.push_log("  /cancel - Cancel the current operation");
     ui.push_log("  /lint - Run linting tools for Go, Rust, and TypeScript");
+    ui.push_log("  /test - Run tests for the project");
+    ui.push_log("  /fix <instruction> - Attempt to fix code based on instruction");
+    ui.push_log("  /plan <instruction> - Creates an implementation plan based on the instruction");
     ui.push_log("");
 
     ui.push_log("Repository Analysis:");
     ui.push_log("  /map - Show repository analysis summary");
     ui.push_log("  /edit-symbol - Invoke symbol-scoped LLM edit and preview via the diff review");
     ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
+    ui.push_log("  /git-worktree - Create a new git worktree for independent task execution");
     ui.push_log("");
 
     ui.push_log("Session Management:");
     ui.push_log("  /session <new|list|switch|save|delete|current|clear> - Manage sessions");
+    ui.push_log("  /stack [add <task>|next|list] - Manage ephemeral task stack");
 
     ui.push_log("");
 

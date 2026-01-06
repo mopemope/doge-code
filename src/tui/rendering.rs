@@ -226,9 +226,16 @@ impl TuiApp {
             String::new()
         };
 
+        let repomap_str = match self.repomap_status {
+            crate::tui::state::RepomapStatus::NotStarted => "[MAP:INIT]",
+            crate::tui::state::RepomapStatus::Building => "[MAP:SYNC]",
+            crate::tui::state::RepomapStatus::Ready => "[MAP:READY]",
+            crate::tui::state::RepomapStatus::Error => "[MAP:ERROR]",
+        };
+
         let status_line = format!(
-            " {} │ {} │ {} {}",
-            scroll_info, tokens, context_bar, elapsed
+            " {} │ {} │ {} {} │ {}",
+            scroll_info, tokens, context_bar, elapsed, repomap_str
         );
         let status_para = Paragraph::new(status_line).style(theme.footer_style);
         f.render_widget(status_para, chunks[1]);
