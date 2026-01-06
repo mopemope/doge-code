@@ -81,8 +81,9 @@ impl TuiApp {
 
         let main_content_height = main_chunks[2].height;
 
-        if self.window_width != size.width as usize {
-            self.window_width = size.width as usize;
+        let effective_width = size.width.saturating_sub(2) as usize;
+        if self.window_width != effective_width {
+            self.window_width = effective_width;
             self.recalculate_all_heights();
         }
 
@@ -90,7 +91,7 @@ impl TuiApp {
             title: &self.title,
             status: self.status,
             log: &self.log,
-            width: size.width,
+            width: size.width.saturating_sub(2),
             main_content_height,
             model,
             spinner_state: self.spinner_state,
