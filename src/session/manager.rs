@@ -495,15 +495,16 @@ mod tests {
             .get_session_statistics()
             .expect("Should have session statistics");
 
-        assert!(stats.contains("Session Statistics"));
+        assert!(stats.contains("SESSION STATISTICS"));
         assert!(stats.contains("Test prompt"));
         assert!(stats.contains("1500"));
         assert!(stats.contains("test_tool"));
         assert!(stats.contains("another_tool"));
-        assert!(stats.contains("test.rs"));
-        assert!(stats.contains("📊"));
-        assert!(stats.contains("📈"));
-        assert!(stats.contains("✅"));
+        // Changed files now shown as count "1 files" not individual filenames
+        assert!(stats.contains("1 files"));
+        // Box format uses different emojis
+        assert!(stats.contains("📈")); // Requests
+        assert!(stats.contains("🛠️")); // Tool Calls
     }
 
     #[test]

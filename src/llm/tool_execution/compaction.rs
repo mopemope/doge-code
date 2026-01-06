@@ -12,6 +12,7 @@ use tracing::{error, info};
 
 /// Handles conversation history compaction when context limits are approached or exceeded.
 /// This function checks if compaction is needed and performs the compaction process.
+#[allow(dead_code)]
 pub async fn handle_compaction(
     client: &OpenAIClient,
     model: &str,
@@ -63,6 +64,7 @@ pub async fn handle_compaction(
 }
 
 /// Checks if compaction should be performed based on current token usage and configuration.
+#[allow(dead_code)]
 pub fn should_compact(current_tokens: u32, cfg: &AppConfig, messages: &Vec<ChatMessage>) -> bool {
     let threshold = cfg.auto_compact_prompt_token_threshold_for_current_model();
     let context_limit = cfg.get_context_window_size().unwrap_or(128_000);

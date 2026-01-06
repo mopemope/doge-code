@@ -129,67 +129,12 @@ pub async fn run_fix_loop(
             command, truncated_output
         );
 
-        let mut ai_summary = None;
-        // Run the executor
-        // We set json=false because we parse the result manually here if needed,
-        // but Executor::run prints to stdout if json=false.
-        // Actually Executor::run doesn't return the response string easily unless we use a lower level API
-        // or parse its output if we were calling it as a subprocess (which we aren't).
-        // Executor::run returns Result<()>.
-        // Wait, Executor::run prints output directly.
-        // We need to capture the LLM response if we want to include it in the report.
-        // The current Executor structure is a bit rigid.
-        // Let's modify Executor::run to be more flexible or just live with it for now.
-        // We can pass `json` flag to `executor.run` to suppress some output?
-        // `executor.run` logic:
-        // if json: prints json
-        // else: prints response text
-        // For `fix`, we want `executor` to do the work but maybe be quiet?
-        // Or we want it to act normally.
-        // If we want to capture the summary, we might need to change Executor::run signature to return the response.
-
-        // Since improving Executor API is out of scope for "Quick Fix", we will rely on side-effects.
-        // We'll trust that the fix was applied.
-        // We'll set ai_summary to "Check logs" for now.
-
-        // To prevent `executor.run` from messing up our JSON output, we should probably run it with json=true
-        // and capture stdout? No, it's in-process.
-        // We should temporarily redirect stdout? Too complex.
-
-        // Let's run with json=false to `executor.run`. It will print the summary to stdout.
-        // If we are in `json` mode for `fix`, this printed summary will corrupt our JSON output.
-        // This is a problem.
-
-        // FIX: We need `Executor::run` to return the response instead of printing it.
-        // But `Executor::run` is public API used by `exec`.
-        // Let's assume for now we can't easily change `Executor::run` return type without breaking things.
-        // Actually `exec::run` calls `llm::run_agent_loop` which returns `(Vec<ChatMessage>, ChatMessage)`.
-        // We can just call `llm::run_agent_loop` directly here?
-        // Or better, we can invoke `executor.run` but we need to silence it.
-
-        // Let's modify `executor.run` to output to a buffer? No.
-
-        // Alternative: If `json` is true for `fix`, we must ensure `executor.run` is silent.
-        // But `executor.run` takes a `json` flag.
-        // If we pass `json=true` to `executor.run`, it prints a JSON object.
-        // We could capture that?
-        // No, we are in the same process. Use `tracing` for logging and avoid `println!` in library code?
-        // `src/exec.rs` uses `println!` liberally.
-
-        // Workaround: We will update `Executor::run` to accept a "silent" mode or return the string.
-        // For this task, let's just allow `executor.run` to print to stderr?
-        // Or improved: Modify `Executor::run` to return the response string and ONLY print if requested.
-        // This seems like the right path for "Refactoring".
-
-        // But first, let's just make `fix` work with `json` flag assuming we can silence `executor`.
-        // The minimal changelist is to just run executor.
-
-        if let Err(e) = executor.run(&prompt, false).await {
+        let ai_summary = if let Err(e) = executor.run(&prompt, false).await {
             error!("Agent failed during fix attempt: {}", e);
-            ai_summary = Some(format!("Agent error: {}", e));
+            Some(format!("Agent error: {}", e))
         } else {
-            ai_summary = Some("Agent attempted fix (see logs)".to_string());
-        }
+            Some("Agent attempted fix (see logs)".to_string())
+        };
 
         attempts.push(FixAttempt {
             attempt,
