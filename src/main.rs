@@ -116,6 +116,9 @@ pub enum Commands {
         /// Maximum number of fix attempts
         #[arg(long, default_value_t = 3)]
         retry: usize,
+        /// Output structured JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -234,7 +237,11 @@ async fn main() -> Result<()> {
             file_path,
             json,
         }) => run_rewrite(cfg, prompt, code_file, file_path.as_deref(), *json).await,
-        Some(Commands::Fix { command, retry }) => run_fix(cfg, command, *retry).await,
+        Some(Commands::Fix {
+            command,
+            retry,
+            json,
+        }) => run_fix(cfg, command, *retry, *json).await,
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx, semantic_service).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
@@ -363,8 +370,13 @@ async fn run_rewrite(
     crate::exec::run_rewrite(cfg, prompt, code_file, file_path, json).await
 }
 
-async fn run_fix(cfg: crate::config::AppConfig, command: &str, retry: usize) -> anyhow::Result<()> {
+async fn run_fix(
+    cfg: crate::config::AppConfig,
+    command: &str,
+    retry: usize,
+    json: bool,
+) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg)?;
-    crate::exec::fix::run_fix_loop(&mut executor, command, retry).await?;
+    crate::exec::fix::run_fix_loop(&mut executor, command, retry, json).await?;
     Ok(())
 }

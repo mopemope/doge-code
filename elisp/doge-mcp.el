@@ -40,8 +40,9 @@
   (when doge-mcp-show-progress
     (message "Doge-MCP: %s" message)))
 
-(defun doge-mcp--call-tool (tool-name params callback)
-  "Call MCP tool TOOL-NAME with PARAMS, call CALLBACK with result."
+(defun doge-mcp--call-tool (tool-name params callback &optional error-callback)
+  "Call MCP tool TOOL-NAME with PARAMS, call CALLBACK with result.
+Optional ERROR-CALLBACK is called on failure. If nil, default error message is shown."
   (doge-mcp--show-progress (format "Calling %s..." tool-name))
   (let ((url (concat doge-mcp-server-url "/mcp/call_tool"))
         (data (json-encode `((name . ,tool-name) (arguments . ,params)))))
@@ -57,15 +58,19 @@
                   (condition-case err
                       (let ((response (json-read-from-string (buffer-string))))
                         (funcall callback (assoc-default 'result response)))
-                    (error
-                     (funcall callback nil)
-                     (message "MCP JSON parse error: %s\nResponse: %s" err (buffer-string))))))
+                     (error
+                      (if error-callback
+                          (funcall error-callback)
+                        (funcall callback nil)
+                        (message "MCP JSON parse error: %s\nResponse: %s" err (buffer-string))))))
       :error (cl-function
               (lambda (&rest args)
                 (let ((err-msg (plist-get args :error-thrown)))
-                    (doge-mcp--show-progress (format "%s failed" tool-name))
+                  (doge-mcp--show-progress (format "%s failed" tool-name))
+                  (if error-callback
+                      (funcall error-callback)
                     (funcall callback nil)
-                    (message "MCP call failed: %s. Is the server running?" (if err-msg (format "%s" err-msg) "Unknown error"))))))))
+                    (message "MCP call failed: %s. Is the server running?" (if err-msg (format "%s" err-msg) "Unknown error")))))))))
 
 (defun doge-mcp-list-tools ()
   "List available MCP tools."

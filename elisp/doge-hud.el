@@ -24,6 +24,8 @@
 
 (defvar doge-hud--timer nil)
 (defvar doge-hud--overlay nil)
+(defvar doge-hud--error-count 0 "Consecutive error count for backoff.")
+(defconst doge-hud--max-errors 3 "Max consecutive errors before suppressing messages.")
 
 (defun doge-hud--clear-overlay ()
   "Clear the current HUD overlay."
@@ -70,8 +72,16 @@
                                                ;; Otherwise use Kind + Name.
                                                (setq summary (format "%s (%s)" symbol kind))
                                                (throw 'found t))))))))
+                                               (setq summary (format "%s (%s)" symbol kind))
+                                               (throw 'found t))))))))
+                                 (setq doge-hud--error-count 0) ;; Reset error count on success
                                  (when summary
-                                   (doge-hud--show-overlay summary)))))))))
+                                   (doge-hud--show-overlay summary)))
+                             ;; Error callback (custom handling for HUD)
+                             (lambda (&rest _)
+                               (setq doge-hud--error-count (1+ doge-hud--error-count))
+                               (when (< doge-hud--error-count doge-hud--max-errors)
+                                 (message "Doge-HUD: Failed to fetch info (suppressing after %d errors)" doge-hud--max-errors)))))))))
 
 (defun doge-hud--timer-function ()
   "Run by idle timer."

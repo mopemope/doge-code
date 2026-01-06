@@ -73,18 +73,19 @@ impl Executor {
         if cfg.resume {
             let mut session_mgr = session_manager.lock().unwrap();
             if let Ok(()) = session_mgr.load_latest_session()
-                && let Some(session) = &session_mgr.current_session {
-                    info!("Resuming session: {}", session.meta.id);
-                    let mut history = conversation_history.blocking_lock();
-                    for entry in &session.conversation {
-                        if let Ok(value) = serde_json::to_value(entry)
-                            && let Ok(msg) =
-                                serde_json::from_value::<crate::llm::types::ChatMessage>(value)
-                            {
-                                history.append_message(msg);
-                            }
+                && let Some(session) = &session_mgr.current_session
+            {
+                info!("Resuming session: {}", session.meta.id);
+                let mut history = conversation_history.blocking_lock();
+                for entry in &session.conversation {
+                    if let Ok(value) = serde_json::to_value(entry)
+                        && let Ok(msg) =
+                            serde_json::from_value::<crate::llm::types::ChatMessage>(value)
+                    {
+                        history.append_message(msg);
                     }
                 }
+            }
         }
 
         Ok(Self {
