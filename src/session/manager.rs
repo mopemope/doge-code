@@ -276,90 +276,90 @@ impl SessionManager {
     /// Get detailed session statistics including tool call success/failure counts
     pub fn get_session_statistics(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
-            let mut stats = format!(
-                "\n📊 === Session Statistics ===\n\
-                 🔍 ID: {}\n\
-                 📑 Title: {}\n\
-                 📅 Created: {}\n\
-                 ⏰ Updated: {}\n\
-                 📈 Requests: {}\n\
-                 🏷️  Token count: {}\n\
-                 🛠️  Tool calls: {}\n\
-                 ✏️  Lines edited: {}\n\
-                 📁 Changed files: {}",
-                session.meta.id,
-                session.meta.title,
-                session.meta.created_at,
-                session.timestamp,
-                session.requests,
-                session.token_count,
-                session.tool_calls,
-                session.lines_edited,
-                session.changed_files.len()
+            // Calculate duration
+            let created = chrono::DateTime::parse_from_rfc3339(&session.meta.created_at)
+                .unwrap_or_else(|_| chrono::Utc::now().into());
+            let updated = chrono::DateTime::parse_from_rfc3339(&session.timestamp)
+                .unwrap_or_else(|_| chrono::Utc::now().into());
+            let duration = updated.signed_duration_since(created);
+
+            let duration_str = format!(
+                "{}m {}s",
+                duration.num_minutes(),
+                duration.num_seconds() % 60
             );
 
-            // Add visual progress indicators
-            let request_progress = "█".repeat(session.requests.min(20) as usize)
-                + &"░".repeat((20 - session.requests.min(20)) as usize);
-            let token_progress = "█".repeat((session.token_count / 100).min(20) as usize)
-                + &"░".repeat((20 - (session.token_count / 100).min(20)) as usize);
-
-            stats.push_str(&format!(
-                "\n\n📈 Request Progress: [{}] {}",
-                request_progress, session.requests
-            ));
-            stats.push_str(&format!(
-                "\n💾 Token Progress: [{}] {}",
-                token_progress, session.token_count
-            ));
-
-            // Add tool call summary
-            let mut success_count = 0;
-            let mut failure_count = 0;
-            for count in session.tool_call_successes.values() {
-                success_count += count;
-            }
-            for count in session.tool_call_failures.values() {
-                failure_count += count;
-            }
-            let total_tool_calls = success_count + failure_count;
-            let success_rate = if total_tool_calls > 0 {
-                (success_count as f64 / total_tool_calls as f64 * 100.0).round() as u64
+            // Truncate title manually
+            let title_display = if session.meta.title.chars().count() <= 36 {
+                session.meta.title.clone()
             } else {
-                0
+                format!(
+                    "{}...",
+                    session.meta.title.chars().take(33).collect::<String>()
+                )
             };
 
+            let mut stats = String::new();
+
+            // Header
+            stats.push_str("\n╭──────────────────────────────────────────────────────╮\n");
+            stats.push_str("│                 SESSION STATISTICS                   │\n");
+            stats.push_str("├──────────────────────────────────────────────────────┤\n");
+
+            // Core Info
+            stats.push_str(&format!("│ 🆔 Session ID : {:<36} │\n", session.meta.id));
+            stats.push_str(&format!("│ 📑 Title      : {:<36} │\n", title_display));
+            stats.push_str(&format!("│ ⏱️  Duration   : {:<36} │\n", duration_str));
+            stats.push_str("├──────────────────────────────────────────────────────┤\n");
+
+            // Metrics
+            stats.push_str(&format!("│ 📈 Requests   : {:<36} │\n", session.requests));
             stats.push_str(&format!(
-                "\n\n✅ Tool Success Rate: {}% ({} succeeded, {} failed)",
-                success_rate, success_count, failure_count
+                "│ 🏷️  Tokens     : {:<36} │\n",
+                session.token_count
+            ));
+            stats.push_str(&format!(
+                "│ ✏️  Edits      : {:<36} │\n",
+                format!(
+                    "{} lines ({} files)",
+                    session.lines_edited,
+                    session.changed_files.len()
+                )
+            ));
+            stats.push_str("├──────────────────────────────────────────────────────┤\n");
+
+            // Tools
+            stats.push_str(&format!(
+                "│ 🛠️  Tool Calls : {:<36} │\n",
+                session.tool_calls
             ));
 
-            // Add tool call details in a table-like format
-            if !session.tool_call_successes.is_empty() || !session.tool_call_failures.is_empty() {
-                stats.push_str("\n\n🔧 Tool Call Details:");
-
-                if !session.tool_call_successes.is_empty() {
-                    stats.push_str("\n   ✅ Successes:");
-                    for (tool_name, count) in &session.tool_call_successes {
-                        stats.push_str(&format!("\n      • {}: {}", tool_name, count));
-                    }
-                }
-
-                if !session.tool_call_failures.is_empty() {
-                    stats.push_str("\n   ❌ Failures:");
-                    for (tool_name, count) in &session.tool_call_failures {
-                        stats.push_str(&format!("\n      • {}: {}", tool_name, count));
-                    }
-                }
+            // Success/Failure breakdown
+            for (name, count) in &session.tool_call_successes {
+                stats.push_str(&format!(
+                    "│    • {:<9}: {:<25} │\n",
+                    name,
+                    format!("{} (OK)", count)
+                ));
             }
 
-            // Add file change summary
-            if !session.changed_files.is_empty() {
-                stats.push_str("\n\n📁 Changed Files:");
-                for file_path in &session.changed_files {
-                    stats.push_str(&format!("\n   • {}", file_path));
-                }
+            for (name, count) in &session.tool_call_failures {
+                stats.push_str(&format!(
+                    "│    • {:<9}: {:<25} │\n",
+                    name,
+                    format!("{} (Fail)", count)
+                ));
             }
+
+            // If no tool details but count > 0
+            if session.tool_calls > 0
+                && session.tool_call_successes.is_empty()
+                && session.tool_call_failures.is_empty()
+            {
+                stats.push_str("│    (No detailed tool stats available)                │\n");
+            }
+
+            stats.push_str("╰──────────────────────────────────────────────────────╯");
 
             stats
         })
