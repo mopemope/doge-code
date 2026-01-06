@@ -175,6 +175,7 @@ pub struct TuiApp {
     pub log: Vec<LogEntry>,
     pub log_heights: Vec<usize>, // Cache for wrapped line counts of log entries
     pub window_width: usize,     // Current window width for cache invalidation
+    pub main_content_height: usize, // Height of the main content area (log panel)
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
     pub(crate) inbox_tx: Option<Sender<String>>,
@@ -421,6 +422,7 @@ impl TuiApp {
             log: Vec::new(),
             log_heights: Vec::new(),
             window_width: 0,
+            main_content_height: 0,
             handler: None,
             inbox_rx: Some(rx),
             inbox_tx: Some(tx),

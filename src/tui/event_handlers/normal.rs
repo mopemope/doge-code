@@ -14,7 +14,7 @@ type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 pub fn handle_normal_mode_key(
     app: &mut TuiApp,
     k: KeyEvent,
-    terminal: &mut TerminalType,
+    _terminal: &mut TerminalType,
 ) -> Result<bool> {
     match k {
         KeyEvent {
@@ -151,10 +151,7 @@ pub fn handle_normal_mode_key(
             code: KeyCode::PageUp,
             ..
         } => {
-            let visible_lines = terminal
-                .size()
-                .map(|s| s.height.saturating_sub(3) as usize)
-                .unwrap_or(20);
+            let visible_lines = app.main_content_height.saturating_sub(1).max(1);
             app.page_up(visible_lines);
         }
 
@@ -162,10 +159,7 @@ pub fn handle_normal_mode_key(
             code: KeyCode::PageDown,
             ..
         } => {
-            let visible_lines = terminal
-                .size()
-                .map(|s| s.height.saturating_sub(3) as usize)
-                .unwrap_or(20);
+            let visible_lines = app.main_content_height.saturating_sub(1).max(1);
             app.page_down(visible_lines);
         }
 
