@@ -216,138 +216,9 @@ impl TuiApp {
                         continue;
                     }
 
-                    #[allow(unreachable_patterns)]
-                    match msg.as_str() {
-                        "::trigger_compact" => {
-                            self.push_log(
-                                "[AUTO] Triggering /compact due to context length exceeded."
-                                    .to_string(),
-                            );
-                            self.dispatch("/compact");
-                            self.dirty = true;
-                        }
-                        "[SUCCESS] Conversation history has been compacted." => {
-                            // Only clear pending flag on the specific compact success message
-                            self.auto_compact_pending = false;
-                            self.push_log(msg);
-                            self.dirty = true;
-
-                            // Retry the last user input after compacting
-                            if let Some(last_input) = self.last_user_input.clone() {
-                                self.push_log(
-                                    "[AUTO] Retrying last user input after compacting.".to_string(),
-                                );
-                                self.dispatch(&last_input);
-                            }
-                        }
-                        "::status:done" => {
-                            if is_streaming {
-                                self.finalize_and_append_llm_response("");
-                                is_streaming = false;
-                            }
-                            self.status = Status::Done;
-                            self.dirty = true;
-
-                            // Calculate and store final elapsed time
-                            if let Some(start_time) = self.processing_start_time.take() {
-                                let elapsed = start_time.elapsed();
-                                let elapsed_secs = elapsed.as_secs();
-                                let hours = elapsed_secs / 3600;
-                                let minutes = (elapsed_secs % 3600) / 60;
-                                let seconds = elapsed_secs % 60;
-                                self.last_elapsed_time =
-                                    Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
-                            }
-                        }
-                        "::status:cancelled" => {
-                            if is_streaming {
-                                self.finalize_and_append_llm_response("");
-                                is_streaming = false;
-                            }
-                            self.status = Status::Cancelled;
-                            self.dirty = true;
-                            // Reset processing_start_time to stop the timer
-                            self.processing_start_time = None;
-                        }
-                        "::status:preparing" => {
-                            self.status = Status::Preparing;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:sending" => {
-                            self.status = Status::Sending;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:waiting" => {
-                            self.status = Status::Waiting;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:streaming" => {
-                            if !is_streaming {
-                                self.llm_parsing_buffer.clear();
-                                is_streaming = true;
-                            }
-                            self.status = Status::Streaming;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:processing" => {
-                            self.status = Status::Processing;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:idle" => {
-                            self.status = Status::Idle;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:shell_running" => {
-                            self.status = Status::ShellCommandRunning;
-                            self.dirty = true;
-                            self.spinner_state = 0;
-                        }
-                        "::status:error" => {
-                            if is_streaming {
-                                self.finalize_and_append_llm_response("");
-                                is_streaming = false;
-                            }
-                            self.status = Status::Error;
-                            self.dirty = true;
-                            // Reset processing_start_time to stop the timer
-                            self.processing_start_time = None;
-                        }
-                        "::status:repomap_building" => {
-                            self.repomap_status = crate::tui::state::RepomapStatus::Building;
-                            self.dirty = true;
-                        }
-                        "::status:repomap_ready" => {
-                            self.repomap_status = crate::tui::state::RepomapStatus::Ready;
-                            self.dirty = true;
-                            // Optionally, you can change the status or perform other actions
-                            // self.status = Status::Idle; // Example: change status to Idle
-                        }
-                        "::status:repomap_error" => {
-                            self.repomap_status = crate::tui::state::RepomapStatus::Error;
-                            self.dirty = true;
-                        }
-
-                        // Clear auto-compact pending flag when compaction succeeds
-                        "[SUCCESS] Conversation history has been compacted." => {
-                            // Only clear pending flag on the specific compact success message
-                            self.auto_compact_pending = false;
-                            self.push_log(msg);
-                            self.dirty = true;
-                        }
-
-                        _ if msg.starts_with("::append:") => {
-                            let payload = &msg["::append:".len()..];
-                            self.append_stream_token_structured(payload);
-                            self.dirty = true;
-                        }
-                        _ if msg.starts_with("::status:done:") => {
-                            let content = &msg["::status:done:".len()..];
+                    // Handle status messages with payloads
+                    if let Some(rest) = msg.strip_prefix("::status:") {
+                        if let Some(content) = rest.strip_prefix("done:") {
                             debug!(
                                 "Received ::status:done: message. Content is empty: {}",
                                 content.is_empty()
@@ -367,167 +238,256 @@ impl TuiApp {
                                 self.last_elapsed_time =
                                     Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
                             }
+                            continue;
                         }
-                        _ if msg.starts_with("::tokens:") => {
-                            let tokens_str = &msg["::tokens:".len()..];
-                            // New format: ::tokens:prompt:{n},total:{m}
-                            if let Some(rest) = tokens_str.strip_prefix("prompt:") {
-                                // parse prompt and optionally total
-                                let mut prompt_val: Option<u32> = None;
-                                let mut total_val: Option<u32> = None;
-                                for part in rest.split(',') {
-                                    let p = part.trim();
-                                    if let Some(v) = p.strip_prefix("prompt:") {
-                                        if let Ok(n) = v.parse::<u32>() {
-                                            prompt_val = Some(n);
-                                        }
-                                    } else if let Some(v) = p.strip_prefix("total:") {
-                                        if let Ok(n) = v.parse::<u32>() {
-                                            total_val = Some(n);
-                                        }
-                                    } else if p.starts_with("total:") {
-                                        if let Some(v) = p.strip_prefix("total:")
-                                            && let Ok(n) = v.parse::<u32>()
-                                        {
-                                            total_val = Some(n);
-                                        }
-                                    } else if let Ok(n) = p.parse::<u32>() {
-                                        // legacy single number after prompt:
-                                        prompt_val = Some(n);
-                                    }
-                                }
-                                if let Some(pv) = prompt_val {
-                                    self.tokens_prompt_used = pv;
-                                }
-                                if let Some(tv) = total_val {
-                                    self.tokens_total_used = Some(tv);
-                                }
-                                self.dirty = true;
 
-                                // Also update remaining context tokens when prompt tokens change
-                                // Use the current context window size if available
-                                let context_size =
-                                    self.cfg.as_ref().and_then(|c| c.get_context_window_size());
-                                self.update_remaining_context_tokens(context_size);
-                                self.dirty = true; // Mark UI as dirty to trigger redraw
-
-                                // Check auto-compact threshold and trigger if necessary
-                                if self.tokens_prompt_used
-                                    >= self.auto_compact_prompt_token_threshold
-                                    && !self.auto_compact_pending
-                                {
-                                    self.auto_compact_pending = true;
-                                    // Inform user and dispatch compact command
-                                    self.push_log(format!(
-                                        "[AUTO] prompt tokens {} >= {}; triggering /compact",
-                                        self.tokens_prompt_used,
-                                        self.auto_compact_prompt_token_threshold
-                                    ));
-                                    self.dispatch("/compact");
-                                }
-
-                                continue;
-                            }
-
-                            // Legacy format: ::tokens:{n} => treat as prompt tokens
-                            if let Ok(tokens) = tokens_str.parse::<u32>() {
-                                self.tokens_prompt_used = tokens;
-                                self.dirty = true;
-
-                                // Also update remaining context tokens when prompt tokens change
-                                // Use the current context window size if available
-                                let context_size =
-                                    self.cfg.as_ref().and_then(|c| c.get_context_window_size());
-                                self.update_remaining_context_tokens(context_size);
-                                self.dirty = true; // Mark UI as dirty to trigger redraw
-
-                                // Check auto-compact threshold and trigger if necessary (legacy format)
-                                if self.tokens_prompt_used
-                                    >= self.auto_compact_prompt_token_threshold
-                                    && !self.auto_compact_pending
-                                {
-                                    self.auto_compact_pending = true;
-                                    self.push_log(format!(
-                                        "[AUTO] prompt tokens {} >= {}; triggering /compact",
-                                        self.tokens_prompt_used,
-                                        self.auto_compact_prompt_token_threshold
-                                    ));
-                                    self.dispatch("/compact");
-                                }
-                            }
-                        }
-                        _ if msg.starts_with("::update_remaining_tokens") => {
-                            // Update remaining context tokens
-                            if msg.len() > 22 {
-                                // "::update_remaining_tokens:".len() == 22
-                                if let Ok(context_size) = msg[22..].parse::<u32>() {
-                                    self.update_remaining_context_tokens(Some(context_size));
-                                }
-                            } else {
-                                // No context size provided, just update with None
-                                self.update_remaining_context_tokens(None);
-                            }
-                            self.dirty = true; // Mark UI as dirty to trigger redraw
-                        }
-                        _ if msg.starts_with("::status:error:") => {
-                            let content = &msg["::status:error:".len()..];
+                        if let Some(content) = rest.strip_prefix("error:") {
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Error;
                             self.dirty = true;
-                            // Reset processing_start_time to stop the timer
                             self.processing_start_time = None;
-                        }
-                        _ if msg.starts_with("::plan_list:") => {
-                            let plan_list_json = &msg["::plan_list:".len()..];
-                            // New format: { "items": [...], "approved": bool }
-                            #[derive(serde::Deserialize)]
-                            struct PlanListPayload {
-                                items: Vec<crate::tui::state::PlanItem>,
-                                approved: bool,
-                            }
-                            if let Ok(payload) =
-                                serde_json::from_str::<PlanListPayload>(plan_list_json)
-                            {
-                                self.apply_plan_list_update(payload.items, payload.approved);
-                            } else if let Ok(plan_list) =
-                                serde_json::from_str::<Vec<crate::tui::state::PlanItem>>(
-                                    plan_list_json,
-                                )
-                            {
-                                // Legacy format: just array of items
-                                self.apply_plan_list_update(plan_list, false);
-                            }
                             continue;
                         }
-                        _ => {
-                            if msg.starts_with("::status:") {
-                                debug!("Filtered out status message from log display");
-                                continue;
-                            }
 
-                            // Handle token updates
-                            if let Some(tokens_str) = msg.strip_prefix("::tokens:") {
-                                if let Ok(tokens) = tokens_str.parse::<u32>() {
-                                    self.tokens_used = tokens;
-                                    self.dirty = true;
+                        if let Some(msg_body) = rest.strip_prefix("waiting:") {
+                            self.status = Status::Waiting;
+                            self.push_log(format!("[WAIT] {}", msg_body));
+                            self.dirty = true;
+                            self.spinner_state = 0;
+                            continue;
+                        }
+
+                        if let Some(msg_body) = rest.strip_prefix("compacting:") {
+                            self.status = Status::Processing;
+                            self.push_log(format!("[AUTO] {}", msg_body));
+                            self.dirty = true;
+                            self.spinner_state = 0;
+                            continue;
+                        }
+
+                        if let Some(msg_body) = rest.strip_prefix("warning:") {
+                            // Do not change status, just log warning
+                            self.push_log(format!("[WARN] {}", msg_body));
+                            self.dirty = true;
+                            continue;
+                        }
+
+                        // Exact matches for status updates without payload
+                        match rest {
+                            "done" => {
+                                if is_streaming {
+                                    self.finalize_and_append_llm_response("");
+                                    is_streaming = false;
+                                }
+                                self.status = Status::Done;
+                                self.dirty = true;
+                                if let Some(start_time) = self.processing_start_time.take() {
+                                    let elapsed = start_time.elapsed();
+                                    let elapsed_secs = elapsed.as_secs();
+                                    let hours = elapsed_secs / 3600;
+                                    let minutes = (elapsed_secs % 3600) / 60;
+                                    let seconds = elapsed_secs % 60;
+                                    self.last_elapsed_time =
+                                        Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
                                 }
                                 continue;
                             }
-
-                            if self
-                                .last_llm_response_content
-                                .as_ref()
-                                .is_some_and(|last_content| msg == *last_content)
-                            {
-                                debug!("Skipping duplicate LLM response message: {}", msg);
-                                self.last_llm_response_content = None;
-                            } else {
-                                self.push_log(msg);
+                            "cancelled" => {
+                                if is_streaming {
+                                    self.finalize_and_append_llm_response("");
+                                    is_streaming = false;
+                                }
+                                self.status = Status::Cancelled;
+                                self.dirty = true;
+                                self.processing_start_time = None;
+                                continue;
                             }
-                            self.dirty = true;
+                            "preparing" => {
+                                self.status = Status::Preparing;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "sending" => {
+                                self.status = Status::Sending;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "waiting" => {
+                                self.status = Status::Waiting;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "streaming" => {
+                                if !is_streaming {
+                                    self.llm_parsing_buffer.clear();
+                                    is_streaming = true;
+                                }
+                                self.status = Status::Streaming;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "processing" => {
+                                self.status = Status::Processing;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "idle" => {
+                                self.status = Status::Idle;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "shell_running" => {
+                                self.status = Status::ShellCommandRunning;
+                                self.dirty = true;
+                                self.spinner_state = 0;
+                                continue;
+                            }
+                            "error" => {
+                                if is_streaming {
+                                    self.finalize_and_append_llm_response("");
+                                    is_streaming = false;
+                                }
+                                self.status = Status::Error;
+                                self.dirty = true;
+                                self.processing_start_time = None;
+                                continue;
+                            }
+                            "repomap_building" => {
+                                self.repomap_status = crate::tui::state::RepomapStatus::Building;
+                                self.dirty = true;
+                                continue;
+                            }
+                            "repomap_ready" => {
+                                self.repomap_status = crate::tui::state::RepomapStatus::Ready;
+                                self.dirty = true;
+                                continue;
+                            }
+                            "repomap_error" => {
+                                self.repomap_status = crate::tui::state::RepomapStatus::Error;
+                                self.dirty = true;
+                                continue;
+                            }
+                            _ => {
+                                debug!("Filtered out unknown status message: {}", msg);
+                                continue;
+                            }
                         }
                     }
+
+                    // Handle token updates (New format with prompt/total parsing is already handled above in the loop,
+                    // but this block handles the simple ::tokens:{n} legacy case if it slips through or for other variants)
+                    // Actually, the new format handler at the top of the loop uses continue, so we only get here if it didn't match.
+                    // Let's keep the existing handling for other message types.
+
+                    if let Some(payload) = msg.strip_prefix("::append:") {
+                        self.append_stream_token_structured(payload);
+                        self.dirty = true;
+                        continue;
+                    }
+
+                    // Handle structured error messages
+                    if let Some(rest) = msg.strip_prefix("::error:") {
+                        // Format: ::error:{category}:{msg} or ::error:{msg}
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            self.push_log(format!("[ERROR][{}] {}", parts[0], parts[1]));
+                        } else {
+                            self.push_log(format!("[ERROR] {}", rest));
+                        }
+                        // We don't necessarily change status to Error here as it might be a non-fatal error reported by a tool
+                        // But if it's critical, the sender usually sends ::status:error afterward.
+                        self.dirty = true;
+                        continue;
+                    }
+
+                    if let Some(plan_list_json) = msg.strip_prefix("::plan_list:") {
+                        // New format: { "items": [...], "approved": bool }
+                        #[derive(serde::Deserialize)]
+                        struct PlanListPayload {
+                            items: Vec<crate::tui::state::PlanItem>,
+                            approved: bool,
+                        }
+                        if let Ok(payload) = serde_json::from_str::<PlanListPayload>(plan_list_json)
+                        {
+                            self.apply_plan_list_update(payload.items, payload.approved);
+                        } else if let Ok(plan_list) =
+                            serde_json::from_str::<Vec<crate::tui::state::PlanItem>>(plan_list_json)
+                        {
+                            // Legacy format: just array of items
+                            self.apply_plan_list_update(plan_list, false);
+                        }
+                        continue;
+                    }
+
+                    if msg == "::trigger_compact" {
+                        self.push_log(
+                            "[AUTO] Triggering /compact due to context length exceeded."
+                                .to_string(),
+                        );
+                        self.dispatch("/compact");
+                        self.dirty = true;
+                        continue;
+                    }
+
+                    if msg == "[SUCCESS] Conversation history has been compacted." {
+                        // Only clear pending flag on the specific compact success message
+                        self.auto_compact_pending = false;
+                        self.push_log(msg);
+                        self.dirty = true;
+
+                        // Retry the last user input after compacting
+                        if let Some(last_input) = self.last_user_input.clone() {
+                            self.push_log(
+                                "[AUTO] Retrying last user input after compacting.".to_string(),
+                            );
+                            self.dispatch(&last_input);
+                        }
+                        continue;
+                    }
+
+                    // Fallback for generic logging
+                    // Handle token updates legacy fallback if needed
+                    if let Some(tokens_str) = msg.strip_prefix("::tokens:") {
+                        if let Ok(tokens) = tokens_str.parse::<u32>() {
+                            self.tokens_used = tokens;
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
+
+                    if msg.starts_with("::update_remaining_tokens") {
+                        // Update remaining context tokens
+                        if msg.len() > 22 {
+                            // "::update_remaining_tokens:".len() == 22
+                            if let Ok(context_size) = msg[22..].parse::<u32>() {
+                                self.update_remaining_context_tokens(Some(context_size));
+                            }
+                        } else {
+                            // No context size provided, just update with None
+                            self.update_remaining_context_tokens(None);
+                        }
+                        continue;
+                    }
+
+                    // Check for duplicate LLM responses
+                    if self
+                        .last_llm_response_content
+                        .as_ref()
+                        .is_some_and(|last_content| msg == *last_content)
+                    {
+                        debug!("Skipping duplicate LLM response message: {}", msg);
+                        self.last_llm_response_content = None;
+                    } else {
+                        self.push_log(msg);
+                    }
+                    self.dirty = true;
                 }
             }
 
