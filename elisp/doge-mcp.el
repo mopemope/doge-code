@@ -4,10 +4,9 @@
 ;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1") (request "0.3.0") (json "1.0") (deferred "0.5.1"))
 
-;;; Commentary:
 ;; MCP client integration for Doge-Code MCP server.
 ;; Connects to MCP HTTP server for tool calls (e.g., search_repomap).
-;; Usage: M-x doge-mcp-call-tool to invoke tools like search_repomap.
+;; This is an extension for `doge-code.el`.
 
 ;;; Code:
 
@@ -124,11 +123,7 @@ Optional ERROR-CALLBACK is called on failure. If nil, default error message is s
                                  (display-buffer (current-buffer)))
                              (message "Failed to read file"))))))
 
-;; Bind in doge-code-mode
-(with-eval-after-load 'doge-code
-  (define-key doge-code-mode-map (kbd "C-c d m s") 'doge-mcp-search-repomap)
-  (define-key doge-code-mode-map (kbd "C-c d m f") 'doge-mcp-fs-read)
-  (define-key doge-code-mode-map (kbd "C-c d m l") 'doge-mcp-list-tools))
+;; Keybindings are now handled in `doge-code-setup` in `doge-code.el`
 
 (provide 'doge-mcp)
 

@@ -7,15 +7,26 @@
 ;;; Commentary:
 ;; Emacs package for integrating with Doge-Code CLI agent.
 ;; Supports region/buffer analysis, refactoring, explanations.
-;; Uses JSON output for structured responses; displays in popup or buffer.
-;; Keybindings: Customize via doge-code-mode-map.
+;; This file serves as the main entry point for all Doge-Code extensions.
+;; Use `M-x doge-code-setup` to initialize all features.
 
 ;;; Code:
 
 (require 'json)
 (require 'async)
-(require 'popup)  ; For popup displays
 (require 'subr-x)
+
+;; Optional dependencies for extensions
+(defvar doge-code--missing-packages nil
+  "List of missing optional packages.")
+
+(defun doge-code--check-package (package feature)
+  "Check if PACKAGE is available. If not, add FEATURE to missing list."
+  (if (or (featurep package)
+          (ignore-errors (require package nil t)))
+      t
+    (add-to-list 'doge-code--missing-packages package t)
+    nil))
 
 (defgroup doge-code nil
   "Doge-Code integration."
@@ -54,6 +65,30 @@
   "Resume the latest session context (passed as --resume)."
   :type 'boolean)
 
+(defcustom doge-code-enable-auto-mode t
+  "Automatically enable `doge-code-mode` in programming modes."
+  :type 'boolean)
+
+(defcustom doge-code-enable-mcp t
+  "Enable MCP integration if `doge-mcp.el` and dependencies are available."
+  :type 'boolean)
+
+(defcustom doge-code-enable-hud nil
+  "Enable Semantic HUD if `doge-hud.el` is available."
+  :type 'boolean)
+
+(defcustom doge-code-enable-flymake t
+  "Enable Flymake integration if `doge-flymake.el` is available."
+  :type 'boolean)
+
+(defcustom doge-code-enable-compile t
+  "Enable Compilation auto-fix if `doge-compile.el` is available."
+  :type 'boolean)
+
+(defcustom doge-code-enable-refactor t
+  "Enable Refactoring tools if `doge-refactor.el` is available."
+  :type 'boolean)
+
 (defvar doge-code-mode-map (make-sparse-keymap)
   "Keymap for doge-code-mode.")
 
@@ -83,13 +118,89 @@
   (when doge-code-show-progress
     (message "Doge-Code: %s" message)))
 
-(defun doge-code-cancel ()
-  "Cancel the current Doge-Code process."
+(defun doge-code--handle-response (success response tokens)
+  "Handle response from Doge-Code."
+  (if success
+      (progn
+        (doge-code--show-progress "Completed")
+        (if (and doge-code-use-popup (featurep 'popup))
+            (unless (active-minibuffer-window)
+              (message "Doge-Code: %s (Tokens: %d)" response tokens))
+          (with-current-buffer (get-buffer-create "*doge-output*")
+            (erase-buffer)
+            (insert response)
+            (display-buffer (current-buffer)))))
+    (progn
+      (doge-code--show-progress "Error occurred")
+      (message "Doge-Code Error: %s" response))))
+
+(defun doge-code--get-project-root ()
+  "Get the project root directory."
+  (or (and (fboundp 'project-current)
+           (project-root (project-current)))
+      default-directory))
+
+;;;###autoload
+(defun doge-code-setup ()
+  "Initialize Doge-Code and its extensions."
   (interactive)
-  (when (process-live-p doge-code--current-process)
-    (kill-process doge-code--current-process)
-    (setq doge-code--current-process nil)
-    (doge-code--show-progress "Cancelled")))
+  (setq doge-code--missing-packages nil)
+  
+  ;; Initialize keybindings
+  (doge-code-mode-setup)
+
+  ;; Setup auto mode
+  (when doge-code-enable-auto-mode
+    (dolist (mode '(prog-mode c-mode c++-mode python-mode rust-mode js-mode typescript-mode))
+      (add-hook (intern (format "%s-hook" mode)) 'doge-code-mode)))
+
+  ;; Load extensions
+  (let ((load-path (cons (file-name-directory (or load-file-name (buffer-file-name))) load-path)))
+    
+    ;; Try loading popup for better UI
+    (doge-code--check-package 'popup 'doge-code)
+
+    ;; MCP
+    (when (and doge-code-enable-mcp
+               (doge-code--check-package 'request 'doge-mcp)
+               (doge-code--check-package 'deferred 'doge-mcp))
+      (when (require 'doge-mcp nil t)
+        (message "Doge-Code: MCP integration enabled.")))
+
+    ;; HUD (requires MCP)
+    (when (and doge-code-enable-hud (featurep 'doge-mcp))
+      (when (require 'doge-hud nil t)
+        (doge-hud-mode 1)
+        (message "Doge-Code: Semantic HUD enabled.")))
+
+    ;; Flymake
+    (when doge-code-enable-flymake
+      (when (require 'doge-flymake nil t)
+        (define-key doge-code-mode-map (kbd "C-c d f") 'doge-flymake-fix-at-point)
+        (message "Doge-Code: Flymake integration enabled.")))
+
+    ;; Compile
+    (when doge-code-enable-compile
+      (when (require 'doge-compile nil t)
+        (doge-compile-mode 1)
+        (message "Doge-Code: Compilation auto-fix enabled.")))
+
+    ;; Refactor
+    (when doge-code-enable-refactor
+      (when (require 'doge-refactor nil t)
+        (define-key doge-code-mode-map (kbd "C-c d R") 'doge-refactor)
+        (message "Doge-Code: Refactoring tools enabled.")))
+
+    ;; Org-babel
+    (when (require 'ob-doge nil t)
+      (with-eval-after-load 'org
+        (org-babel-do-load-languages
+         'org-babel-load-languages
+         (append org-babel-load-languages '((doge . t))))))
+
+    (when doge-code--missing-packages
+      (message "Doge-Code Notice: Some features disabled due to missing packages: %s"
+               (mapconcat #'symbol-name doge-code--missing-packages ", ")))))
 
 (defun doge-code--async-run (args callback)
   "Execute Doge-Code binary with ARGS asynchronously and invoke CALLBACK with output.
@@ -152,7 +263,7 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
                      (let ((response (or (assoc-default 'response result) ""))
                            (tokens (or (assoc-default 'tokens_used result) 0)))
                        (funcall handler t response tokens)
-                       (when (and doge-code-use-popup (not (string-empty-p response)))
+                       (when (and doge-code-use-popup (featurep 'popup) (not (string-empty-p response)))
                          (popup-tip response :margin t)))
                    (funcall handler nil (or (assoc-default 'error result) "Failed to execute") 0)))
              (funcall handler t output 0))
@@ -322,9 +433,7 @@ Runs the command via 'dgc fix' and displays output in a buffer."
                        (insert "\n[Done]"))
                      (message "Doge-Code: Fix attempt finished.")))))))
 
-;; Enable mode in programming modes
-(dolist (mode '(prog-mode c-mode c++-mode python-mode rust-mode js-mode typescript-mode))
-  (add-hook (intern (format "%s-hook" mode)) 'doge-code-mode))
+;; Remove manual initialization as it's handled by doge-code-setup
 
 (provide 'doge-code)
 

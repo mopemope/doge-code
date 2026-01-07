@@ -72,8 +72,6 @@
                                                ;; Otherwise use Kind + Name.
                                                (setq summary (format "%s (%s)" symbol kind))
                                                (throw 'found t))))))))
-                                               (setq summary (format "%s (%s)" symbol kind))
-                                               (throw 'found t))))))))
                                  (setq doge-hud--error-count 0) ;; Reset error count on success
                                  (when summary
                                    (doge-hud--show-overlay summary)))

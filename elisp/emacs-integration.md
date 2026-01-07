@@ -22,96 +22,78 @@ After installation you can enable the minor mode wherever you want (e.g. by addi
 ## Installation and Setup
 
 ### 1. Build and Setup Doge-Code
-1. Clone the repository:
-   ```
-   git clone https://github.com/mopemope/doge-code.git
-   cd doge-code
-   ```
-2. Install the Rust toolchain (via rustup):
-   ```
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source ~/.cargo/env
-   ```
-3. Install dependencies and build:
-   ```
-   cargo build --release
-   ```
-   - Binary generated at: `target/release/dgc` (recommended to add to PATH, e.g., `export PATH="$PATH:$HOME/.cargo/bin:./target/release"`).
-   - For persistence: Add to `~/.bashrc` or `~/.zshrc`.
-   - Note: If you launch Emacs from GUI/Launcher, ensure the environment variable is visible to Emacs (e.g., using `exec-path-from-shell` package).
+1. Build the release binary: `cargo build --release`.
+2. Ensure the binary (default: `dgc`) is in your `PATH`.
 
-### 2. Install Emacs Packages
+### 2. Emacs Configuration (Quick Start)
+Add the following to your `init.el`. This single setup function automatically detects and enables available extensions (MCP, Flymake, HUD, etc.).
 
-#### Option 1: Manual Installation (Recommended)
-1. Copy the following files to your `load-path` (e.g. `~/.emacs.d/lisp/`):
-   - `doge-code.el` (CLI integration).
-   - `doge-mcp.el` (MCP client).
-2. Install required dependencies via package manager (M-x package-install):
-   - `json` (built-in)
-   - `async`
-   - `popup`
-   - `request`
-   - `deferred`
-3. Add to `init.el` (or equivalent):
-   ```elisp
-   ;; Load Doge-Code integration
-   (add-to-list 'load-path "~/.emacs.d/lisp/")
-   (require 'doge-code)
-   (require 'doge-mcp)
-
-   ;; Automatically enable mode in programming modes
-   (add-hook 'prog-mode-hook 'doge-code-mode)
-
-   ;; Customize binary path (if needed)
-   (setq doge-code-executable "/path/to/doge-code/target/release/dgc")
-   (setq doge-mcp-server-url "http://127.0.0.1:8000")  ; MCP server URL
-
-   ;; Enable popup display (optional)
-   (setq doge-code-use-popup t)
-   ```
-3. Restart Emacs or evaluate `init.el` with `M-x eval-buffer`.
-4. Test: Open a new buffer and run `M-x doge-code-mode` → "Doge" should appear in the mode line.
-
-#### Option 2: Via MELPA (When Available)
-- For package publication: Add MELPA recipe.
-- Currently recommended to use manual installation.
-
-#### Option 3: Using straight.el (Emacs 27+)
-In `init.el`:
 ```elisp
-(use-package straight
-  :ensure t)
-
-(straight-use-package
- '(doge-code
-   :type git
-   :host github
-   :repo "mopemope/doge-code"
-   :files ("doge-code.el" "doge-mcp.el")))
-
+;; Add doge-code elisp directory to load-path
+(add-to-list 'load-path "/path/to/doge-code/elisp")
 (require 'doge-code)
-(add-hook 'prog-mode-hook 'doge-code-mode)
-(setq doge-code-executable "/path/to/dgc")
-(setq doge-mcp-server-url "http://127.0.0.1:8000")
+
+;; Optional: Customize behavior before setup
+(setq doge-code-executable "dgc") 
+(setq doge-code-enable-hud t) ; HUD is disabled by default
+
+;; Initialize all components
+(doge-code-setup)
 ```
 
-### 3. MCP Server Setup
-1. Start the Doge-Code MCP server in terminal:
-   ```
-   dgc --mcp-server  # Default: http://127.0.0.1:8000
-   ```
-   - Background: `dgc --mcp-server &`.
-   - Custom port: `dgc --mcp-server 127.0.0.1:9000`.
-2. Set URL in Emacs (init.el):
-   ```elisp
-   (setq doge-mcp-server-url "http://127.0.0.1:9000")
-   ```
-3. Test: In Emacs, run `M-x doge-mcp-list-tools` → Tool list should be displayed.
+### 3. Using with use-package
+```elisp
+(use-package doge-code
+  :load-path "/path/to/doge-code/elisp"
+  :config
+  (setq doge-code-executable "dgc")
+  (doge-code-setup))
+```
 
-### 4. Basic Setup Verification
-- **Environment Variable Check**: In Emacs, `M-x shell-command` → `echo $OPENAI_API_KEY` (should output the key).
-- **Binary Check**: `M-x shell-command` → `which dgc` (should display path).
-- **Mode Check**: In a rust-mode buffer, `C-h m` → Check for "Doge" keybindings.
+## Features and Keybindings
+
+When `doge-code-setup` is called, it automatically enables `doge-code-mode` in programming modes and sets up the following keybindings:
+
+### Core CLI Features
+- `C-c d a`: **Analyze Region** - Get improvement suggestions.
+- `C-c d r`: **Rewrite/Refactor Snippet** - Replace region with AI-generated code.
+- `C-c d e`: **Explain Region** - Get plain text explanation.
+- `C-c d b`: **Analyze Buffer** - Analyze the entire file.
+- `C-c d c`: **Cancel** - Stop the current Doge-Code process.
+
+### MCP Extensions (Requires `request`, `deferred`)
+If dependencies are met, these become available:
+- `C-c d m s`: **MCP Search** - Search repository map symbols.
+- `C-c d m f`: **MCP Read** - Read file content via MCP server.
+
+### Auto-Fix and Refactoring
+- `C-c d f`: **Fix Flymake** - Attempt to fix Flymake diagnostic at point.
+- `C-c d R`: **Global Refactor** - Perform large-scale codebase refactoring.
+- **Compilation Fix**: Automatically prompts to fix failed compilations.
+
+### Semantic HUD (Optional)
+Set `(setq doge-code-enable-hud t)` before setup to enable ghost-text overlays showing symbol info.
+
+## Customization
+
+You can control which features are enabled by setting these variables **before** calling `doge-code-setup`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `doge-code-enable-auto-mode` | `t` | Auto-enable `doge-code-mode` in `prog-mode`. |
+| `doge-code-enable-mcp` | `t` | Enable MCP tools integration. |
+| `doge-code-enable-hud` | `nil` | Enable Semantic HUD overlays. |
+| `doge-code-enable-flymake` | `t` | Enable Flymake auto-fix command. |
+| `doge-code-enable-compile` | `t` | Enable compilation finish hook for fixing. |
+| `doge-code-enable-refactor` | `t` | Enable git-aware refactoring tools. |
+
+## Dependencies
+
+Doge-Code intelligently handles missing packages. If an optional dependency is missing, that specific feature will be disabled with a message in the echo area, but the rest of Doge-Code will continue to work.
+
+- **Core**: `json`, `async` (required)
+- **MCP/HUD**: `request`, `deferred`
+- **Better UI**: `popup`
 
 ## Detailed Features
 

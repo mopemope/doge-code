@@ -146,12 +146,25 @@ dgc rewrite --prompt "Optimize this function for performance" \
 3. Access project tools directly from Claude Desktop chat interface
 
 ### Emacs Integration
-Doge-Code includes Elisp-based Emacs integration:
+Doge-Code provides a powerful Emacs integration. Setup is simple:
+
+1. Add the `elisp` directory to your `load-path`.
+2. Run `(doge-code-setup)` in your `init.el`.
+
 ```elisp
-;; Load doge-code.el and doge-mcp.el
-;; M-x doge-mcp-connect to connect to MCP server
-;; M-x doge-chat to open chat interface
+(add-to-list 'load-path "/path/to/doge-code/elisp")
+(require 'doge-code)
+(setq doge-code-executable "dgc") ; Ensure dgc is in PATH or specify full path
+(doge-code-setup)
 ```
+
+This enables:
+- **Analyze/Refactor**: `C-c d a` (Analyze), `C-c d r` (Rewrite snippet)
+- **MCP Tools**: `C-c d m s` (Symbol Search), `C-c d m f` (Read File)
+- **Auto-Fix**: `C-c d f` (Fix Flymake error), Compilation auto-fix
+- **HUD**: Semantic info overlays (optional, set `doge-code-enable-hud` to t)
+
+See [elisp/emacs-integration.md](elisp/emacs-integration.md) for detailed configuration options.
 
 ## 📝 TUI Slash Commands
 
