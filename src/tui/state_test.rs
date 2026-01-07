@@ -70,7 +70,7 @@ fn test_plan_list_completed_hides_on_next_dispatch() {
         status: "completed".to_string(),
     }];
 
-    app.apply_plan_list_update(plan.clone(), false);
+    app.apply_plan_list_update(plan.clone());
     assert_eq!(app.plan_list, plan);
     assert!(app.hide_plan_on_next_instruction);
 
@@ -89,7 +89,7 @@ fn test_plan_list_in_progress_does_not_hide() {
         status: "in_progress".to_string(),
     }];
 
-    app.apply_plan_list_update(plan.clone(), false);
+    app.apply_plan_list_update(plan.clone());
     assert_eq!(app.plan_list, plan);
     assert!(!app.hide_plan_on_next_instruction);
 }

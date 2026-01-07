@@ -16,7 +16,6 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::read_many::tool_def(),
         tools::plan::plan_write_tool_def(),
         tools::plan::plan_read_tool_def(),
-        tools::plan::plan_approve_tool_def(),
         tools::undo::undo_tool_def(),
         tools::memory::read_memory_tool_def(),
         tools::memory::write_memory_tool_def(),

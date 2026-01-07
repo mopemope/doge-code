@@ -153,12 +153,8 @@ pub fn build_render_plan(
             }
         };
 
-        // Header with approval indicator
-        let header_text = if params.plan_approved {
-            "--- Plan List (✓ 承認済み) ---".to_string()
-        } else {
-            "--- Plan List (⚠ 未承認) ---".to_string()
-        };
+        // Header
+        let header_text = "--- Plan List ---".to_string();
         if let Some(line) = render_plain(header_text, current_row) {
             log_lines.push(line);
         }

@@ -3,35 +3,10 @@ use crate::session::{SessionManager, SessionStore};
 use crate::tools::FsTools;
 use crate::tools::execute;
 use crate::tools::plan;
-use crate::tools::plan::{PlanItem, PlanWriteMode};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-
-async fn setup_approved_plan(fs_tools: &FsTools, session_id: &str) -> Result<()> {
-    let items = vec![PlanItem {
-        id: "test-step".to_string(),
-        content: "Test step".to_string(),
-        status: "pending".to_string(),
-    }];
-    fs_tools.plan_write(items, PlanWriteMode::Replace)?;
-
-    // Manual approval logic mirroring the approve tool/command
-    let config = &fs_tools.config;
-    let mut list = crate::tools::plan::plan_read(session_id, config)?;
-    list.approved = true;
-
-    let base = &config.project_root;
-    let plan_file_path = base
-        .join(".doge")
-        .join("plans")
-        .join(format!("{}.json", session_id));
-    let json_content = serde_json::to_string_pretty(&list)?;
-    std::fs::write(&plan_file_path, &json_content)?;
-
-    Ok(())
-}
 
 #[tokio::test]
 async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
@@ -52,8 +27,6 @@ async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
     }));
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
         .with_session_manager(session_manager);
-
-    setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
     // This should succeed because "echo" is in the allowed list
     let result = fs_tools.execute_bash("echo 'hello world'").await;
@@ -81,8 +54,6 @@ async fn test_execute_bash_with_permissions_not_allowed() -> Result<()> {
     }));
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
         .with_session_manager(session_manager);
-
-    setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
     // This should return a JSON string with success = false because "rm" is not in the allowed list
     let result_str = fs_tools.execute_bash("rm -rf /").await.unwrap();
@@ -112,8 +83,6 @@ async fn test_execute_bash_with_permissions_no_config() -> Result<()> {
     }));
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
         .with_session_manager(session_manager);
-
-    setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
     // This should be allowed because the allowed_commands list is empty
     let result = fs_tools.execute_bash("echo 'hello world'").await;
@@ -275,8 +244,6 @@ async fn test_execute_bash_complex_allowed_command() -> Result<()> {
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
         .with_session_manager(session_manager);
 
-    setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
-
     // This should succeed because the exact command is allowed
     let result = fs_tools.execute_bash("echo 'hello world'").await;
     assert!(result.is_ok());
@@ -303,8 +270,6 @@ async fn test_execute_bash_with_empty_allowed_commands() -> Result<()> {
     }));
     let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
         .with_session_manager(session_manager);
-
-    setup_approved_plan(&fs_tools, &fs_tools.ensure_current_session_id()?).await?;
 
     // All commands should be allowed when allowed_commands list is empty
     let result = fs_tools.execute_bash("echo 'test'").await;

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
@@ -37,8 +37,6 @@ pub struct PlanItem {
 pub struct PlanList {
     pub session_id: Option<String>,
     pub items: Vec<PlanItem>,
-    #[serde(default)]
-    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -115,22 +113,6 @@ pub fn plan_read_tool_def() -> ToolDef {
     }
 }
 
-pub fn plan_approve_tool_def() -> ToolDef {
-    ToolDef {
-        kind: "function".to_string(),
-        function: ToolFunctionDef {
-            name: "plan_approve".to_string(),
-            description: "Call this tool AFTER the user has explicitly approved the current plan. This marks the plan as approved and allows implementation to proceed.".to_string(),
-            strict: Some(true),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false,
-            }),
-        },
-    }
-}
-
 pub fn plan_write(
     items: Vec<PlanItem>,
     mode: PlanWriteMode,
@@ -142,36 +124,6 @@ pub fn plan_write(
 
 pub fn plan_read(session_id: &str, config: &AppConfig) -> Result<PlanList> {
     plan_read_from_base_path(session_id, &config.project_root, config)
-}
-
-pub fn plan_approve(session_id: &str, config: &AppConfig) -> Result<PlanList> {
-    let mut list = plan_read(session_id, config)?;
-    list.approved = true;
-
-    // Save back
-    let base = &config.project_root;
-    let plan_file_path = plan_file_path(base, session_id);
-    let json_content = serde_json::to_string_pretty(&list)
-        .with_context(|| "Failed to serialize plan list to JSON")?;
-    fs::write(&plan_file_path, &json_content)
-        .with_context(|| format!("Failed to write plan file: {}", plan_file_path.display()))?;
-
-    Ok(list)
-}
-
-pub fn ensure_plan_is_approved(session_id: &str, config: &AppConfig) -> Result<()> {
-    let list = plan_read(session_id, config)?;
-    if list.items.is_empty() {
-        bail!(
-            "現在のセッションには計画(Plan)が存在しません。`plan_write` ツールを使用して計画を作成し、`/plan approve` で承認を得てから実装に進んでください。"
-        );
-    }
-    if !list.approved {
-        bail!(
-            "現在の計画(Plan)はまだ承認されていません。ユーザーに計画を提示し、`/plan approve` コマンドで承認を得てから実装に進んでください。"
-        );
-    }
-    Ok(())
 }
 
 pub fn plan_write_from_base_path(
@@ -203,7 +155,6 @@ pub fn plan_write_from_base_path(
     let plan_list = PlanList {
         session_id: Some(session_id.to_string()),
         items: new_items,
-        approved: false, // Reset approval on any write
     };
 
     validate_plan_items(&plan_list.items)?;
@@ -235,7 +186,6 @@ pub fn plan_read_from_base_path(
     Ok(PlanList {
         session_id: Some(session_id.to_string()),
         items: vec![],
-        approved: false,
     })
 }
 
@@ -429,56 +379,5 @@ mod tests {
             &AppConfig::default(),
         );
         assert!(result.is_err());
-    }
-    #[test]
-    fn plan_write_resets_approval() {
-        let (_dir, base) = plan_dir();
-        let config = AppConfig::default();
-        let session_id = "approval_test";
-
-        // 1. Write initial plan
-        let items = vec![PlanItem {
-            id: "step-1".into(),
-            content: "Task".into(),
-            status: "pending".into(),
-        }];
-        plan_write_from_base_path(
-            items.clone(),
-            PlanWriteMode::Replace,
-            session_id,
-            &base,
-            &config,
-        )
-        .unwrap();
-
-        // 2. Approve it - verify manual approval works (simulating plan_approve)
-        let mut list = plan_read_from_base_path(session_id, &base, &config).unwrap();
-        list.approved = true;
-        let path = plan_file_path(&base, session_id);
-        fs::write(&path, serde_json::to_string(&list).unwrap()).unwrap();
-
-        // Verify it is approved
-        let loaded = plan_read_from_base_path(session_id, &base, &config).unwrap();
-        assert!(loaded.approved);
-
-        // 3. Update plan via plan_write
-        let new_items = vec![PlanItem {
-            id: "step-1".into(),
-            content: "Task Updated".into(),
-            status: "pending".into(),
-        }];
-        let updated = plan_write_from_base_path(
-            new_items,
-            PlanWriteMode::Replace,
-            session_id,
-            &base,
-            &config,
-        )
-        .unwrap();
-
-        // 4. Verify approval is reset
-        assert!(!updated.approved);
-        let reloaded = plan_read_from_base_path(session_id, &base, &config).unwrap();
-        assert!(!reloaded.approved);
     }
 }

@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::tools::plan::{plan_approve, plan_read};
+use crate::tools::plan::plan_read;
 use crate::tui::view::TuiApp;
 use anyhow::Result;
 
@@ -9,10 +9,10 @@ pub fn handle_plan(
     ui: &mut TuiApp,
     config: &AppConfig,
 ) -> Result<()> {
-    // /plan approve
+    // /plan show
     let args: Vec<&str> = input.split_whitespace().collect();
     if args.is_empty() {
-        ui.push_log("Usage: /plan <show|approve>");
+        ui.push_log("Usage: /plan show");
         return Ok(());
     }
 
@@ -26,13 +26,7 @@ pub fn handle_plan(
                 return Ok(());
             }
 
-            let status_indicator = if plan.approved {
-                "✓ 承認済み"
-            } else {
-                "⚠ 未承認"
-            };
-
-            ui.push_log(format!("--- 現在の計画 ({}) ---", status_indicator));
+            ui.push_log("--- 現在の計画 ---");
             for item in &plan.items {
                 let status_symbol = match item.status.as_str() {
                     "pending" => "◌",
@@ -42,50 +36,11 @@ pub fn handle_plan(
                 };
                 ui.push_log(format!("{} [{}] {}", status_symbol, item.id, item.content));
             }
-            ui.push_log("----------------------------");
-
-            if !plan.approved {
-                ui.push_log("[plan] /plan approve で計画を承認できます。");
-            }
-        }
-        "approve" => {
-            // Check if plan exists
-            let plan = plan_read(session_id, config)?;
-
-            if plan.items.is_empty() {
-                ui.push_log("[plan] 承認する計画がありません。まずは計画を作成してください。");
-                return Ok(());
-            }
-
-            if plan.approved {
-                ui.push_log("[plan] この計画は既に承認されています。");
-                return Ok(());
-            }
-
-            match plan_approve(session_id, config) {
-                Ok(approved_plan) => {
-                    // Update UI immediately
-                    let ui_items: Vec<crate::tui::state::PlanItem> = approved_plan
-                        .items
-                        .into_iter()
-                        .map(|item| crate::tui::state::PlanItem {
-                            id: item.id,
-                            content: item.content,
-                            status: item.status,
-                        })
-                        .collect();
-                    ui.apply_plan_list_update(ui_items, true);
-
-                    ui.push_log("[plan] 計画を承認しました。実装フェーズに進めます。");
-                }
-                Err(e) => {
-                    ui.push_log(format!("[Error] 計画の承認に失敗しました: {}", e));
-                }
-            }
+            ui.push_log("-------------------");
         }
         _ => {
             ui.push_log(format!("Unknown subcommand: {}", args[0]));
-            ui.push_log("Usage: /plan <show|approve>");
+            ui.push_log("Usage: /plan show");
         }
     }
 

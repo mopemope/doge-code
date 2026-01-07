@@ -24,9 +24,6 @@ pub async fn edit(
         tracing::error!(?e, "Failed to update session with tool call count");
     }
 
-    // Ensure plan is approved before editing
-    runtime.fs.ensure_plan_is_approved()?;
-
     let file_path = params.file_path.clone();
 
     // Backup existing file before editing
@@ -96,9 +93,6 @@ pub async fn apply_patch(
     if let Err(e) = runtime.fs.update_session_with_tool_call_count() {
         tracing::error!(?e, "Failed to update session with tool call count");
     }
-
-    // Ensure plan is approved before applying patch
-    runtime.fs.ensure_plan_is_approved()?;
 
     match crate::tools::apply_patch::apply_patch_with_recovery(params, &runtime.fs.config).await {
         Ok(res) => {

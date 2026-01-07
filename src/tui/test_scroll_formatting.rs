@@ -36,7 +36,6 @@ fn test_build_render_plan_with_scroll() {
         spinner_state: 0,
         scroll_state: &scroll_state,
         plan_list: &plan_items,
-        plan_approved: false,
         theme: &theme,
         log_heights: &log_heights,
         // textarea: &textarea, // 削除

@@ -365,15 +365,12 @@ pub async fn run_agent_loop(
                             let mut stack = fs.undo_stack.write().await;
                             if let Some(entry) = stack.pop() {
                                 // Write back the original content
-                                if let Ok(_) = crate::tools::write::fs_write(
+                                crate::tools::write::fs_write(
                                     entry.path.to_str().unwrap(),
                                     &entry.content,
                                     cfg,
-                                ) {
-                                    true
-                                } else {
-                                    false
-                                }
+                                )
+                                .is_ok()
                             } else {
                                 false
                             }

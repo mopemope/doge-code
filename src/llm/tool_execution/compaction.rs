@@ -65,7 +65,7 @@ pub async fn handle_compaction(
 
 /// Checks if compaction should be performed based on current token usage and configuration.
 #[allow(dead_code)]
-pub fn should_compact(current_tokens: u32, cfg: &AppConfig, messages: &Vec<ChatMessage>) -> bool {
+pub fn should_compact(current_tokens: u32, cfg: &AppConfig, messages: &[ChatMessage]) -> bool {
     let threshold = cfg.auto_compact_prompt_token_threshold_for_current_model();
     let context_limit = cfg.get_context_window_size().unwrap_or(128_000);
     let safety_limit = (context_limit as f64 * 0.9) as u32;
@@ -98,10 +98,11 @@ mod tests {
 
     #[test]
     fn test_should_compact() {
-        let mut cfg = AppConfig::default();
-        // Set a low threshold for testing
-        cfg.auto_compact_prompt_token_threshold = 1000;
-        cfg.model = "gpt-4".to_string(); // Has default context window
+        let cfg = AppConfig {
+            auto_compact_prompt_token_threshold: 1000,
+            model: "gpt-4".to_string(),
+            ..Default::default()
+        };
 
         let messages = create_dummy_messages(3); // > 2 messages
 
@@ -114,8 +115,10 @@ mod tests {
 
     #[test]
     fn test_should_not_compact_not_enough_messages() {
-        let mut cfg = AppConfig::default();
-        cfg.auto_compact_prompt_token_threshold = 1000;
+        let cfg = AppConfig {
+            auto_compact_prompt_token_threshold: 1000,
+            ..Default::default()
+        };
 
         let messages = create_dummy_messages(2); // <= 2 messages
 
@@ -125,11 +128,11 @@ mod tests {
 
     #[test]
     fn test_should_compact_safety_limit() {
-        let mut cfg = AppConfig::default();
-        // Set threshold very high
-        cfg.auto_compact_prompt_token_threshold = 100_000;
-        // Model with small context (gpt-4 -> 8192)
-        cfg.model = "gpt-4".to_string();
+        let cfg = AppConfig {
+            auto_compact_prompt_token_threshold: 100_000,
+            model: "gpt-4".to_string(),
+            ..Default::default()
+        };
         // 8192 * 0.9 = 7372.8 -> 7372 safety limit
 
         let messages = create_dummy_messages(10);

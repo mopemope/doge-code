@@ -76,18 +76,17 @@ impl TuiExecutor {
     /// Publish the persisted plan (if any) for the current session to the UI.
     pub fn publish_plan_list(&self) {
         if let Ok(plan_list) = self.tools.plan_read() {
-            self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
+            self.send_plan_items_to_ui(&plan_list.items);
         } else {
-            self.send_plan_items_to_ui(&[], false);
+            self.send_plan_items_to_ui(&[]);
         }
     }
 
-    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem], approved: bool) {
+    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem]) {
         if let Some(tx) = &self.ui_tx {
-            // Send as JSON object with items and approved status
+            // Send as JSON object with items
             let payload = serde_json::json!({
-                "items": items,
-                "approved": approved
+                "items": items
             });
             if let Ok(json) = serde_json::to_string(&payload) {
                 let _ = tx.send(format!("::plan_list:{}", json));
@@ -117,7 +116,7 @@ impl TuiExecutor {
             tool_calls: vec![],
             tool_call_id: None,
         });
-        self.send_plan_items_to_ui(&[], false);
+        self.send_plan_items_to_ui(&[]);
     }
 
     pub fn enforce_plan_context(
@@ -129,23 +128,12 @@ impl TuiExecutor {
         match self.tools.plan_read() {
             Ok(plan_list) if !plan_list.items.is_empty() => {
                 if let Some(summary) = plan::format_plan_summary(&plan_list.items) {
-                    let mut plan_msg = format!(
-                        "現在の実行計画（`plan_write mode=\"merge\"` でステータスを同期させ、必要に応じて `plan_read` を参照してください）：\n{}",
+                    let plan_msg = format!(
+                        "現在の実行計画（`plan_write mode=\"merge\"` でステータスを同期させ、必要に応じて `plan_read` を参照してください）：\n{}\n\n計画作成済みです。実装に進むことが許可されています。",
                         summary
                     );
-
-                    if !plan_list.approved {
-                        plan_msg.push_str("\n\n待って！現在の計画はまだユーザーによって承認されていません。\n1. ユーザーに計画を提示し、レビューを求めてください。\n2. ユーザーの確認を待ってください。\n3. ユーザーが承認（例：「OK」「承認します」）したら、`plan_approve` を呼び出してください。\n計画が承認されるまでは、実装（コードの書き込み）に進まないでください。");
-                        if let Some(ui) = ui {
-                            ui.push_log(
-                                "[plan] 計画は作成されましたが、まだ承認されていません。ユーザーに確認を求めてください。",
-                            );
-                        }
-                    } else {
-                        plan_msg.push_str("\n\n計画は `plan_approve` によって承認されました。実装に進むことが許可されています。");
-                        if let Some(ui) = ui {
-                            ui.push_log("[plan] 計画は承認済みです。実装を進めてください。");
-                        }
+                    if let Some(ui) = ui {
+                        ui.push_log("[plan] 計画は作成済みです。実装を進めてください。");
                     }
                     msgs.push(ChatMessage {
                         role: "system".into(),
@@ -154,11 +142,11 @@ impl TuiExecutor {
                         tool_call_id: None,
                     });
                 }
-                self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
+                self.send_plan_items_to_ui(&plan_list.items);
             }
             Ok(plan_list) => {
                 // Plan file exists but has no steps
-                self.send_plan_items_to_ui(&plan_list.items, plan_list.approved);
+                self.send_plan_items_to_ui(&plan_list.items);
                 self.push_plan_creation_directive(
                     msgs,
                     instruction,
