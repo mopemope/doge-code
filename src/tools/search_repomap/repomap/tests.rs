@@ -1,5 +1,5 @@
 use super::*;
-use crate::analysis::SymbolKind;
+use crate::analysis::{RepoMap, SymbolKind};
 use crate::tools::search_repomap::repomap::repomap_filter::filter_and_group_symbols;
 use std::path::PathBuf;
 
@@ -49,14 +49,18 @@ fn create_test_symbol_with_keywords(
 }
 
 fn run_response(
-    symbols: &[crate::analysis::SymbolInfo],
+    symbols: Vec<crate::analysis::SymbolInfo>, // Change to Vec for easier RepoMap construction
     args: SearchRepomapArgs,
 ) -> SearchRepomapResponse {
-    filter_and_group_symbols(symbols, args)
+    let map = RepoMap {
+        symbols,
+        relations: vec![],
+    };
+    filter_and_group_symbols(&map, args)
 }
 
 fn collect_results(
-    symbols: &[crate::analysis::SymbolInfo],
+    symbols: Vec<crate::analysis::SymbolInfo>,
     args: SearchRepomapArgs,
 ) -> Vec<RepomapSearchResult> {
     run_response(symbols, args).results
@@ -74,7 +78,7 @@ fn test_filter_by_file_lines() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("large.rs"));
     assert_eq!(results[0].file_total_lines, 600);
@@ -98,7 +102,7 @@ fn test_filter_by_function_lines() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "large_func");
@@ -116,7 +120,7 @@ fn test_filter_by_symbol_kind() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].kind, "fn");
@@ -136,7 +140,7 @@ fn test_sort_by_file_lines() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].file_total_lines, 500); // largest first
     assert_eq!(results[1].file_total_lines, 300);
@@ -169,7 +173,7 @@ fn test_keyword_search() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "test_function");
@@ -209,7 +213,7 @@ fn test_keyword_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both test_function and math_function
     let mut found_test = false;
@@ -261,7 +265,7 @@ fn test_name_search() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "calculate_total");
@@ -301,7 +305,7 @@ fn test_name_search_multiple_terms() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 2);
     // Results should include both calculate_total and parse_json
     let mut found_calculate = false;
@@ -342,7 +346,7 @@ fn test_code_doc_field_matching() {
         keyword_search: Some(vec!["special_doc_term".to_string()]),
         ..Default::default()
     };
-    let results_doc = collect_results(&symbols, args_doc);
+    let results_doc = collect_results(symbols.clone(), args_doc);
     assert_eq!(results_doc.len(), 1);
     assert_eq!(results_doc[0].symbols.len(), 1);
     let sym_doc = &results_doc[0].symbols[0];
@@ -356,7 +360,7 @@ fn test_code_doc_field_matching() {
         keyword_search: Some(vec!["special_code_term".to_string()]),
         ..Default::default()
     };
-    let results_code = collect_results(&symbols, args_code);
+    let results_code = collect_results(symbols, args_code);
     assert_eq!(results_code.len(), 1);
     let sym_code = &results_code[0].symbols[0];
     assert!(sym_code.match_score.is_some());
@@ -389,7 +393,7 @@ fn test_exclude_patterns_skip_files() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("src/keep.rs"));
 }
@@ -413,7 +417,7 @@ fn test_language_filters_by_extension() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file, PathBuf::from("lib.rs"));
 }
@@ -446,7 +450,7 @@ fn test_match_score_threshold_filters_symbols() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 1);
     assert_eq!(results[0].symbols[0].name, "match_symbol");
@@ -469,7 +473,7 @@ fn test_max_symbols_per_file_caps_results() {
         ..Default::default()
     };
 
-    let results = collect_results(&symbols, args);
+    let results = collect_results(symbols, args);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].symbols.len(), 2);
     assert_eq!(results[0].symbol_count, 2);
@@ -500,7 +504,7 @@ fn test_compact_density_limits_snippets_and_symbols() {
     }
 
     let full_response = run_response(
-        &symbols,
+        symbols.clone(),
         SearchRepomapArgs {
             result_density: Some(ResultDensity::Full),
             include_snippets: Some(true),
@@ -510,7 +514,7 @@ fn test_compact_density_limits_snippets_and_symbols() {
     assert!(!full_response.results[0].symbols[0].code_snippet.is_empty());
 
     let compact_response = run_response(
-        &symbols,
+        symbols,
         SearchRepomapArgs {
             result_density: Some(ResultDensity::Compact),
             include_snippets: Some(true),
@@ -543,7 +547,7 @@ fn test_response_budget_limits_and_sets_cursor() {
     }
 
     let response = run_response(
-        &symbols,
+        symbols,
         SearchRepomapArgs {
             result_density: Some(ResultDensity::Full),
             include_snippets: Some(false),
@@ -577,7 +581,7 @@ fn test_cursor_pagination_returns_expected_slice() {
     }
 
     let response = run_response(
-        &symbols,
+        symbols,
         SearchRepomapArgs {
             result_density: Some(ResultDensity::Full),
             include_snippets: Some(false),
@@ -593,4 +597,123 @@ fn test_cursor_pagination_returns_expected_slice() {
     assert_eq!(response.results.len(), 3);
     assert_eq!(response.next_cursor, Some(6));
     assert_eq!(response.results[0].file, PathBuf::from("file_3.rs"));
+}
+
+#[test]
+fn test_include_relations_returns_callers_and_callees() {
+    let mut caller = create_test_symbol(
+        "caller_func",
+        SymbolKind::Function,
+        "caller.rs",
+        100,
+        Some(10),
+    );
+    let callee = create_test_symbol(
+        "callee_func",
+        SymbolKind::Function,
+        "callee.rs",
+        100,
+        Some(10),
+    );
+
+    let symbols = vec![caller.clone(), callee.clone()];
+
+    // Create relations
+    let relation = crate::analysis::symbol::SymbolRelation {
+        source_symbol_name: "caller_func".to_string(),
+        source_symbol_parent: None,
+        source_file_path: PathBuf::from("caller.rs"),
+        target_symbol_name: "callee_func".to_string(),
+        relation_type: crate::analysis::symbol::RelationType::Call,
+        line: 5,
+    };
+
+    let map = RepoMap {
+        symbols,
+        relations: vec![relation],
+    };
+
+    // Test Outgoing (searching for caller, expect callee as relation)
+    let args_outgoing = SearchRepomapArgs {
+        name: Some(vec!["caller_func".to_string()]),
+        include_relations: Some(true),
+        ..Default::default()
+    };
+    let response_outgoing = filter_and_group_symbols(&map, args_outgoing);
+    assert_eq!(response_outgoing.results.len(), 1);
+    let caller_result = &response_outgoing.results[0].symbols[0];
+    assert!(caller_result.related_symbols.is_some());
+    let relations = caller_result.related_symbols.as_ref().unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].name, "callee_func");
+    assert_eq!(relations[0].relation_type, "call_outgoing");
+
+    // Test Incoming (searching for callee, expect caller as relation)
+    let args_incoming = SearchRepomapArgs {
+        name: Some(vec!["callee_func".to_string()]),
+        include_relations: Some(true),
+        ..Default::default()
+    };
+    let response_incoming = filter_and_group_symbols(&map, args_incoming);
+    assert_eq!(response_incoming.results.len(), 1);
+    let callee_result = &response_incoming.results[0].symbols[0];
+    assert!(callee_result.related_symbols.is_some());
+    let relations = callee_result.related_symbols.as_ref().unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].name, "caller_func");
+    assert_eq!(relations[0].relation_type, "call_incoming");
+}
+
+#[test]
+fn test_include_relations_returns_type_usage() {
+    let mut struct_sym = create_test_symbol("MyStruct", SymbolKind::Struct, "usage.rs", 100, None);
+    let mut field_type_sym =
+        create_test_symbol("FieldType", SymbolKind::Struct, "types.rs", 100, None);
+
+    let symbols = vec![struct_sym.clone(), field_type_sym.clone()];
+
+    // Relation: MyStruct uses FieldType
+    let relation = crate::analysis::symbol::SymbolRelation {
+        source_symbol_name: "MyStruct".to_string(),
+        source_symbol_parent: None,
+        source_file_path: PathBuf::from("usage.rs"),
+        target_symbol_name: "FieldType".to_string(),
+        relation_type: crate::analysis::symbol::RelationType::Use,
+        line: 5,
+    };
+
+    let map = RepoMap {
+        symbols,
+        relations: vec![relation],
+    };
+
+    // Test Outgoing (searching for MyStruct, expect FieldType as Use relation)
+    let args_outgoing = SearchRepomapArgs {
+        name: Some(vec!["MyStruct".to_string()]),
+        include_relations: Some(true),
+        ..Default::default()
+    };
+    let response_outgoing = filter_and_group_symbols(&map, args_outgoing);
+    assert_eq!(response_outgoing.results.len(), 1);
+    let struct_result = &response_outgoing.results[0].symbols[0];
+    assert!(struct_result.related_symbols.is_some());
+    let relations = struct_result.related_symbols.as_ref().unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].name, "FieldType");
+    assert_eq!(relations[0].relation_type, "use_outgoing");
+
+    // Test Incoming (searching for FieldType, expect MyStruct as User relation)
+    let args_incoming = SearchRepomapArgs {
+        name: Some(vec!["FieldType".to_string()]),
+        include_relations: Some(true),
+        ..Default::default()
+    };
+    let response_incoming = filter_and_group_symbols(&map, args_incoming);
+    assert_eq!(response_incoming.results.len(), 1);
+    let type_result = &response_incoming.results[0].symbols[0];
+    assert!(type_result.related_symbols.is_some());
+    let relations = type_result.related_symbols.as_ref().unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].name, "MyStruct");
+    assert_eq!(relations[0].relation_type, "use_incoming");
 }

@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    AppliedBudgetSummary, MatchSpan, RepomapSearchResult, ResultDensity, SearchRepomapArgs,
-    SearchRepomapResponse, SymbolSearchResult,
+    AppliedBudgetSummary, MatchSpan, RelatedSymbolResult, RepomapSearchResult, ResultDensity,
+    SearchRepomapArgs, SearchRepomapResponse, SymbolSearchResult,
 };
-use crate::analysis::SymbolInfo;
+use crate::analysis::{RepoMap, SymbolInfo};
 
 fn normalize_filter_value(raw: &str) -> String {
     let mut value = raw.trim().to_lowercase();
@@ -85,9 +85,10 @@ const MIN_SNIPPET_CHARS_FOR_BUDGET: usize = 80;
 const BASE_SYMBOL_METADATA_CHARS: usize = 180;
 
 pub(super) fn filter_and_group_symbols(
-    symbols: &[SymbolInfo],
+    map: &RepoMap,
     mut args: SearchRepomapArgs,
 ) -> SearchRepomapResponse {
+    let symbols = &map.symbols;
     let mut warnings: Vec<String> = Vec::new();
     let mut applied_budget: Option<AppliedBudgetSummary> = None;
 
@@ -523,6 +524,49 @@ pub(super) fn filter_and_group_symbols(
             if let Some(match_score) = computed_match_score {
                 sres.match_score = Some(match_score);
                 sres.matches = match_spans;
+            }
+
+            if args.include_relations.unwrap_or(false) {
+                let mut related = Vec::new();
+
+                // Outgoing relations: source is this symbol
+                // We need to match based on file path, symbol name, and parent scope
+                // Since RepoMap doesn't have an optimize lookup for this yet, we linearly scan relations (optimize later if needed)
+                // Or we can rely on ID if we had it, but currently we use name/path matching as per design.
+                for rel in &map.relations {
+                    // Check outgoing
+                    if rel.source_symbol_name == symbol.name
+                        && rel.source_file_path == symbol.file
+                        && rel.source_symbol_parent == symbol.parent
+                    {
+                        // Find target file path if possible? Converting target_symbol_name to file path is hard without lookup.
+                        // But we just return what we have.
+                        related.push(RelatedSymbolResult {
+                            name: rel.target_symbol_name.clone(),
+                            parent: None, // We don't have target parent info in relation yet (only source)
+                            file: PathBuf::new(), // Target file unknown in simplified relation
+                            relation_type: format!("{}_outgoing", rel.relation_type.as_str()),
+                            line: rel.line,
+                        });
+                    }
+
+                    // Check incoming: target matches this symbol name
+                    // Note: Target matching is weak because we only have name.
+                    // Ideally we should know if this symbol is indeed the target.
+                    if rel.target_symbol_name == symbol.name {
+                        // Check if it's a plausible match (e.g. valid scope) - for now just match name
+                        related.push(RelatedSymbolResult {
+                            name: rel.source_symbol_name.clone(),
+                            parent: rel.source_symbol_parent.clone(),
+                            file: rel.source_file_path.clone(),
+                            relation_type: format!("{}_incoming", rel.relation_type.as_str()),
+                            line: rel.line,
+                        });
+                    }
+                }
+                if !related.is_empty() {
+                    sres.related_symbols = Some(related);
+                }
             }
 
             filtered_symbol_results.push(sres);

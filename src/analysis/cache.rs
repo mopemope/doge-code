@@ -311,7 +311,10 @@ mod tests {
             function_lines: Some(3),
             keywords: vec![],
         }];
-        let repomap = RepoMap { symbols };
+        let repomap = RepoMap {
+            symbols,
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
         let cache = RepomapCache::new(project_root.clone(), repomap, hashes);
@@ -342,7 +345,10 @@ mod tests {
             .await
             .expect("Failed to create RepomapStore");
 
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
         let cache = RepomapCache::new(project_root.clone(), repomap, hashes);
@@ -366,7 +372,10 @@ mod tests {
             .await
             .expect("Failed to create RepomapStore");
 
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
         let cache = RepomapCache::new(project_root.clone(), repomap, hashes.clone());
@@ -401,7 +410,10 @@ mod tests {
             .await
             .expect("Failed to create RepomapStore");
 
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(project_root.join("src/main.rs"), "hash1".to_string());
         hashes.insert(project_root.join("src/lib.rs"), "hash2".to_string());

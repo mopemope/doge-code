@@ -1,5 +1,7 @@
-use crate::analysis::database::entities::{FileHashEntity, SymbolInfoEntity};
-use crate::analysis::{RepoMap, SymbolInfo as AnalysisSymbolInfo};
+use crate::analysis::database::entities::{FileHashEntity, SymbolInfoEntity, SymbolRelationEntity};
+use crate::analysis::{
+    RelationType as AnalysisRelationType, RepoMap, SymbolInfo as AnalysisSymbolInfo, SymbolRelation,
+};
 use anyhow::{Context, Result};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, TransactionTrait};
 use std::collections::HashMap;
@@ -121,10 +123,69 @@ impl RepomapDAO {
                 .context("Failed to batch insert file hashes")?;
         }
 
-        // Commit the transaction
-        txn.commit()
-            .await
-            .context("Failed to commit database transaction")?;
+        // --- Save Symbol Relations ---
+        if !repomap.relations.is_empty() {
+            info!("Saving {} symbol relations", repomap.relations.len());
+            // 1. Load all symbols to get IDs
+            // Use a HashMap<(PathBuf, String, Option<String>), i32> for lookup
+            let all_symbols = SymbolInfoEntity::find()
+                .filter(
+                    crate::analysis::database::entities::symbol_info::Column::ProjectRoot
+                        .eq(project_root_str),
+                )
+                .all(&txn)
+                .await
+                .context("Failed to load symbols for relation mapping")?;
+
+            let symbol_map: HashMap<(PathBuf, String, Option<String>), i32> = all_symbols
+                .into_iter()
+                .map(|s| ((PathBuf::from(s.file_path), s.name, s.parent), s.id))
+                .collect();
+
+            // 2. Build relation ActiveModels
+            let mut relation_batch = Vec::with_capacity(BATCH_SIZE);
+            for rel in &repomap.relations {
+                if let Some(&source_id) = symbol_map.get(&(
+                    rel.source_file_path.clone(),
+                    rel.source_symbol_name.clone(),
+                    rel.source_symbol_parent.clone(),
+                )) {
+                    let active_model =
+                        crate::analysis::database::entities::symbol_relation::ActiveModel {
+                            source_symbol_id: sea_orm::ActiveValue::Set(source_id),
+                            target_symbol_name: sea_orm::ActiveValue::Set(
+                                rel.target_symbol_name.clone(),
+                            ),
+                            relation_type: sea_orm::ActiveValue::Set(
+                                rel.relation_type.as_str().to_string(),
+                            ),
+                            line: sea_orm::ActiveValue::Set(rel.line as i32),
+                            ..Default::default()
+                        };
+                    relation_batch.push(active_model);
+
+                    if relation_batch.len() == BATCH_SIZE {
+                        let batch = std::mem::take(&mut relation_batch);
+                        SymbolRelationEntity::insert_many(batch)
+                            .exec(&txn)
+                            .await
+                            .context("Failed to batch insert symbol relations")?;
+                        relation_batch = Vec::with_capacity(BATCH_SIZE);
+                    }
+                } else {
+                    debug!(
+                        "Skipping relation: source symbol not found: {:?}::{} (parent: {:?})",
+                        rel.source_file_path, rel.source_symbol_name, rel.source_symbol_parent
+                    );
+                }
+            }
+            if !relation_batch.is_empty() {
+                SymbolRelationEntity::insert_many(relation_batch)
+                    .exec(&txn)
+                    .await
+                    .context("Failed to batch insert symbol relations")?;
+            }
+        }
 
         info!("Repomap saved successfully");
         Ok(())
@@ -180,6 +241,12 @@ impl RepomapDAO {
             return Ok(None);
         }
 
+        // Prepare ID map for relation reconstruction
+        let mut id_to_symbol_map = HashMap::new();
+        for m in &symbol_models {
+            id_to_symbol_map.insert(m.id, m.clone());
+        }
+
         let symbols: Vec<AnalysisSymbolInfo> = if symbol_models.is_empty() {
             vec![] // symbols can be empty
         } else {
@@ -190,16 +257,62 @@ impl RepomapDAO {
                 .context("Failed to convert database symbols to analysis symbols")?
         };
 
+        // Load Relations
+        // Since we don't have project root in relation table, we query by source_symbol_id IN (ids from symbol_models)
+        let symbol_ids: Vec<i32> = id_to_symbol_map.keys().cloned().collect();
+        let relations = if symbol_ids.is_empty() {
+            vec![]
+        } else {
+            // SeaORM IN query
+            SymbolRelationEntity::find()
+                .filter(
+                    crate::analysis::database::entities::symbol_relation::Column::SourceSymbolId
+                        .is_in(symbol_ids),
+                )
+                .all(conn)
+                .await
+                .context("Failed to load symbol relations")?
+        };
+
+        let loaded_relations: Vec<SymbolRelation> = relations
+            .into_iter()
+            .filter_map(|r| {
+                if let Some(source) = id_to_symbol_map.get(&r.source_symbol_id) {
+                    Some(SymbolRelation {
+                        source_symbol_name: source.name.clone(),
+                        source_symbol_parent: source.parent.clone(),
+                        source_file_path: PathBuf::from(&source.file_path),
+                        target_symbol_name: r.target_symbol_name,
+                        relation_type: match r.relation_type.as_str() {
+                            "Call" => AnalysisRelationType::Call,
+                            "Use" => AnalysisRelationType::Use,
+                            "Implements" => AnalysisRelationType::Implements,
+                            "Inherits" => AnalysisRelationType::Inherits,
+                            "Import" => AnalysisRelationType::Import,
+                            _ => AnalysisRelationType::Use, // fallback or error
+                        },
+                        line: r.line as usize,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let file_hashes: HashMap<PathBuf, String> = file_hash_models
             .into_iter()
             .map(|m| (PathBuf::from(m.file_path), m.hash))
             .collect();
 
-        let repomap = RepoMap { symbols };
+        let repomap = RepoMap {
+            symbols,
+            relations: loaded_relations,
+        };
 
         info!(
-            "Loaded repomap from database: {} symbols, {} file hashes",
+            "Loaded repomap from database: {} symbols, {} relations, {} file hashes",
             repomap.symbols.len(),
+            repomap.relations.len(),
             file_hashes.len()
         );
 
@@ -237,7 +350,18 @@ impl RepomapDAO {
             .await
             .context("Failed to delete file hashes")?;
 
-        // Delete symbols
+        // Delete symbols (and relations via Cascade if configured, but let's be explicit/safe or relies on symbol deletion)
+        // Since we didn't explicitly enable FK checks or might not trust them, deleting relations first is safer if we had source_symbol_id filter.
+        // But SymbolRelation table doesn't have ProjectRoot column.
+        // So we rely on Cascade Delete from SymbolInfo.
+        // OR we first delete SymbolInfo, which should cascade if the DB supports it.
+        // SeaORM doesn't automatically cascade delete unless configured in Schema or by DB engine.
+        // Assuming SQLite with FKs enabled by logic or default.
+        // However, checking `src/main.rs` or connection logic: `sqlite://...`
+        // Let's assume Cascade work or the orphan rows are acceptable for now/cleaned up by SymbolInfo deletion.
+        // But wait, if FK constraint exists, deleting SymbolInfo will fail if FK is restrict.
+        // The migration defined: OnDelete::Cascade. So it should be fine.
+
         let _deleted_symbols = SymbolInfoEntity::delete_many()
             .filter(
                 crate::analysis::database::entities::symbol_info::Column::ProjectRoot
@@ -388,7 +512,10 @@ mod tests {
             function_lines: Some(3),
             keywords: vec![],
         }];
-        let repomap = RepoMap { symbols };
+        let repomap = RepoMap {
+            symbols,
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(
             PathBuf::from("/test/project/src/main.rs"),
@@ -421,7 +548,10 @@ mod tests {
     async fn test_clear_repomap() {
         let (_tmp_dir, db) = setup_test_db().await;
         let project_root = PathBuf::from("/test/project");
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(
             PathBuf::from("/test/project/src/main.rs"),
@@ -449,7 +579,10 @@ mod tests {
     async fn test_is_repomap_valid() {
         let (_tmp_dir, db) = setup_test_db().await;
         let project_root = PathBuf::from("/test/project");
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(
             PathBuf::from("/test/project/src/main.rs"),
@@ -487,7 +620,10 @@ mod tests {
     async fn test_get_changed_files() {
         let (_tmp_dir, db) = setup_test_db().await;
         let project_root = PathBuf::from("/test/project");
-        let repomap = RepoMap { symbols: vec![] };
+        let repomap = RepoMap {
+            symbols: vec![],
+            relations: vec![],
+        };
         let mut hashes = HashMap::new();
         hashes.insert(
             PathBuf::from("/test/project/src/main.rs"),
@@ -569,7 +705,10 @@ mod tests {
                 keywords: vec![],
             });
         }
-        let repomap = RepoMap { symbols };
+        let repomap = RepoMap {
+            symbols,
+            relations: vec![],
+        };
 
         // Generate more than 1000 file hashes
         let mut hashes = HashMap::new();

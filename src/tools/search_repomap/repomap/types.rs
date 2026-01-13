@@ -82,6 +82,8 @@ pub struct SearchRepomapArgs {
     pub cursor: Option<usize>,
     /// Page size for paginated responses (defaults to limit when unset)
     pub page_size: Option<usize>,
+    /// Whether to include related symbols (callers/callees) in the result
+    pub include_relations: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +112,15 @@ pub struct MatchSpan {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RelatedSymbolResult {
+    pub name: String,
+    pub parent: Option<String>,
+    pub file: PathBuf,
+    pub relation_type: String, // "call_outgoing", "call_incoming", etc.
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SymbolSearchResult {
     pub name: String,
     pub kind: String,
@@ -127,6 +138,8 @@ pub struct SymbolSearchResult {
     pub matches: Vec<MatchSpan>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub code_snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_symbols: Option<Vec<RelatedSymbolResult>>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -164,6 +177,7 @@ impl From<SymbolInfo> for SymbolSearchResult {
             match_score: None,
             matches: Vec::new(),
             code_snippet: String::new(),
+            related_symbols: None,
         }
     }
 }
@@ -181,6 +195,7 @@ impl From<&SymbolInfo> for SymbolSearchResult {
             match_score: None,
             matches: Vec::new(),
             code_snippet: String::new(),
+            related_symbols: None,
         }
     }
 }

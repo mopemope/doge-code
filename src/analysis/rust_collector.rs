@@ -1,4 +1,4 @@
-use crate::analysis::{RepoMap, SymbolInfo, SymbolKind};
+use crate::analysis::{RelationType, RepoMap, SymbolInfo, SymbolKind, SymbolRelation};
 use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
@@ -26,7 +26,16 @@ impl LanguageSpecificExtractor for RustExtractor {
         collect_comments(root, src, &mut comments);
 
         // Second pass: extract symbols and associate keywords
-        visit_rust_node(map, root, src, file, None, file_total_lines, &comments);
+        visit_rust_node(
+            map,
+            root,
+            src,
+            file,
+            None,
+            None,
+            file_total_lines,
+            &comments,
+        );
         Ok(())
     }
 }
@@ -71,40 +80,104 @@ fn visit_rust_node(
     src: &str,
     file: &Path,
     ctx_impl: Option<String>,
+    current_symbol_name: Option<String>,
     file_total_lines: usize,
     comments: &[(usize, String)],
 ) {
+    let mut new_current_symbol = current_symbol_name.clone();
+
     match node.kind() {
-        "function_item" => handle_function_item(map, node, src, file, file_total_lines, comments),
-        "struct_item" => handle_struct_item(map, node, src, file, file_total_lines, comments),
-        "enum_item" => handle_enum_item(map, node, src, file, file_total_lines, comments),
-        "trait_item" => handle_trait_item(map, node, src, file, file_total_lines, comments),
-        "mod_item" => handle_mod_item(map, node, src, file, file_total_lines, comments),
+        "function_item" => {
+            if let Some(name) =
+                handle_function_item(map, node, src, file, file_total_lines, comments)
+            {
+                new_current_symbol = Some(name);
+            }
+        }
+        "struct_item" => {
+            if let Some(name) = handle_struct_item(map, node, src, file, file_total_lines, comments)
+            {
+                new_current_symbol = Some(name);
+            }
+        }
+        "enum_item" => {
+            if let Some(name) = handle_enum_item(map, node, src, file, file_total_lines, comments) {
+                new_current_symbol = Some(name);
+            }
+        }
+        "trait_item" => {
+            if let Some(name) = handle_trait_item(map, node, src, file, file_total_lines, comments)
+            {
+                new_current_symbol = Some(name);
+            }
+        }
+        "mod_item" => {
+            // Mod item usually doesn't have type usage inside body in the same way (it has items),
+            // but we propagate context.
+            if let Some(name) = handle_mod_item(map, node, src, file, file_total_lines, comments) {
+                new_current_symbol = Some(name);
+            }
+        }
         "let_declaration" => {
             handle_let_declaration(map, node, src, file, file_total_lines, comments)
         }
         "impl_item" => handle_impl_item(map, node, src, file, file_total_lines, comments),
+        "call_expression" => {
+            if let Some(caller) = &current_symbol_name {
+                handle_call_expression(map, node, src, file, caller, &ctx_impl);
+            }
+        }
+        "type_identifier" | "primitive_type" => {
+            if let Some(caller) = &current_symbol_name {
+                handle_type_usage(map, node, src, file, caller, &ctx_impl);
+            }
+        }
         "line_comment" | "block_comment" => handle_comment(map, node, src, file, file_total_lines),
         _ => {}
     }
 
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            visit_rust_node(
-                map,
-                cursor.node(),
-                src,
-                file,
-                ctx_impl.clone(),
-                file_total_lines,
-                comments,
-            );
-            if !cursor.goto_next_sibling() {
-                break;
+    if node.kind() != "impl_item" {
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                visit_rust_node(
+                    map,
+                    cursor.node(),
+                    src,
+                    file,
+                    ctx_impl.clone(),
+                    new_current_symbol.clone(),
+                    file_total_lines,
+                    comments,
+                );
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
+            cursor.goto_parent();
         }
-        cursor.goto_parent();
+    }
+}
+
+fn handle_call_expression(
+    map: &mut RepoMap,
+    node: Node,
+    src: &str,
+    file: &Path,
+    source_symbol_name: &str,
+    source_symbol_parent: &Option<String>,
+) {
+    if let Some(function_node) = node.child_by_field_name("function") {
+        let target_name = node_text(function_node, src).to_string();
+        let relation = SymbolRelation {
+            source_symbol_name: source_symbol_name.to_string(),
+            source_symbol_parent: source_symbol_parent.clone(),
+            source_file_path: file.to_path_buf(),
+            target_symbol_name: target_name,
+            relation_type: RelationType::Call,
+            line: node.start_position().row + 1,
+        };
+        map.relations.push(relation);
     }
 }
 
@@ -115,12 +188,12 @@ fn handle_function_item(
     file: &Path,
     file_total_lines: usize,
     comments: &[(usize, String)],
-) {
+) -> Option<String> {
     if let Some(name) = name_from(node, "name", src) {
         let function_lines = node.end_position().row - node.start_position().row + 1;
         let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
-            name,
+            name: name.clone(),
             kind: SymbolKind::Function,
             file: file.to_path_buf(),
             start_line: node.start_position().row + 1,
@@ -133,7 +206,70 @@ fn handle_function_item(
             keywords,
         };
         map.symbols.push(symbol_info);
+        Some(name)
+    } else {
+        None
     }
+}
+
+fn handle_type_usage(
+    map: &mut RepoMap,
+    node: Node,
+    src: &str,
+    file: &Path,
+    source_symbol_name: &str,
+    source_symbol_parent: &Option<String>,
+) {
+    // Filter out definitions.
+    // Generally, if the parent is a definition item and the field is "name", it's a definition, not a usage.
+    if let Some(parent) = node.parent() {
+        let kind = parent.kind();
+        if matches!(
+            kind,
+            "struct_item" | "enum_item" | "trait_item" | "function_item" | "mod_item" | "impl_item"
+        ) {
+            if let Some(name_node) = parent.child_by_field_name("name") {
+                if name_node.id() == node.id() {
+                    return; // It's the name of the definition
+                }
+            }
+        }
+    }
+
+    let target_name = node_text(node, src).to_string();
+
+    // Avoid self-reference or common primitives if desired (keeping primitives for now for completeness, or filter them?)
+    // Filtering primitives like "i32", "bool", "str" might reduce noise.
+    if matches!(
+        target_name.as_str(),
+        "i32"
+            | "i64"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "isize"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "str"
+            | "String"
+            | "Vec"
+            | "Option"
+            | "Result"
+    ) {
+        return;
+    }
+
+    let relation = SymbolRelation {
+        source_symbol_name: source_symbol_name.to_string(),
+        source_symbol_parent: source_symbol_parent.clone(),
+        source_file_path: file.to_path_buf(),
+        target_symbol_name: target_name,
+        relation_type: RelationType::Use,
+        line: node.start_position().row + 1,
+    };
+    map.relations.push(relation);
 }
 
 fn handle_struct_item(
@@ -143,11 +279,11 @@ fn handle_struct_item(
     file: &Path,
     file_total_lines: usize,
     comments: &[(usize, String)],
-) {
+) -> Option<String> {
     if let Some(name) = name_from(node, "name", src) {
         let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
-            name,
+            name: name.clone(),
             kind: SymbolKind::Struct,
             file: file.to_path_buf(),
             start_line: node.start_position().row + 1,
@@ -160,6 +296,9 @@ fn handle_struct_item(
             keywords,
         };
         map.symbols.push(symbol_info);
+        Some(name)
+    } else {
+        None
     }
 }
 
@@ -170,11 +309,11 @@ fn handle_enum_item(
     file: &Path,
     file_total_lines: usize,
     comments: &[(usize, String)],
-) {
+) -> Option<String> {
     if let Some(name) = name_from(node, "name", src) {
         let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
-            name,
+            name: name.clone(),
             kind: SymbolKind::Enum,
             file: file.to_path_buf(),
             start_line: node.start_position().row + 1,
@@ -187,6 +326,9 @@ fn handle_enum_item(
             keywords,
         };
         map.symbols.push(symbol_info);
+        Some(name)
+    } else {
+        None
     }
 }
 
@@ -197,11 +339,11 @@ fn handle_trait_item(
     file: &Path,
     file_total_lines: usize,
     comments: &[(usize, String)],
-) {
+) -> Option<String> {
     if let Some(name) = name_from(node, "name", src) {
         let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
-            name,
+            name: name.clone(),
             kind: SymbolKind::Trait,
             file: file.to_path_buf(),
             start_line: node.start_position().row + 1,
@@ -214,6 +356,9 @@ fn handle_trait_item(
             keywords,
         };
         map.symbols.push(symbol_info);
+        Some(name)
+    } else {
+        None
     }
 }
 
@@ -224,11 +369,11 @@ fn handle_mod_item(
     file: &Path,
     file_total_lines: usize,
     comments: &[(usize, String)],
-) {
+) -> Option<String> {
     if let Some(name) = name_from(node, "name", src) {
         let keywords = find_associated_comments(node, comments);
         let symbol_info = SymbolInfo {
-            name,
+            name: name.clone(),
             kind: SymbolKind::Mod,
             file: file.to_path_buf(),
             start_line: node.start_position().row + 1,
@@ -241,6 +386,9 @@ fn handle_mod_item(
             keywords,
         };
         map.symbols.push(symbol_info);
+        Some(name)
+    } else {
+        None
     }
 }
 
@@ -424,9 +572,11 @@ fn walk_impl_items(
                 }
                 if let Some(name) = name_from(child, "name", src) {
                     let keywords = find_associated_comments(child, comments);
+
+                    let symbol_info_obj;
                     if has_receiver {
-                        let symbol_info = SymbolInfo {
-                            name,
+                        symbol_info_obj = SymbolInfo {
+                            name: name.clone(),
                             kind: SymbolKind::Method,
                             file: file.to_path_buf(),
                             start_line: child.start_position().row + 1,
@@ -440,10 +590,9 @@ fn walk_impl_items(
                             ),
                             keywords,
                         };
-                        map.symbols.push(symbol_info);
                     } else {
-                        let symbol_info = SymbolInfo {
-                            name,
+                        symbol_info_obj = SymbolInfo {
+                            name: name.clone(),
                             kind: SymbolKind::AssocFn,
                             file: file.to_path_buf(),
                             start_line: child.start_position().row + 1,
@@ -457,7 +606,21 @@ fn walk_impl_items(
                             ),
                             keywords,
                         };
-                        map.symbols.push(symbol_info);
+                    }
+                    map.symbols.push(symbol_info_obj);
+
+                    // Recurse into body to find calls
+                    if let Some(body) = child.child_by_field_name("body") {
+                        visit_rust_node(
+                            map,
+                            body,
+                            src,
+                            file,
+                            parent_name.clone(), // This is the impl name (Context ID)
+                            Some(name),          // Current function name
+                            file_total_lines,
+                            comments,
+                        );
                     }
                 }
             } else {

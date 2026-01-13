@@ -350,6 +350,7 @@ impl DogeMcpService {
             match_score_threshold: params.match_score_threshold,
             cursor: params.cursor.map(|v| v as usize),
             page_size: params.page_size.map(|v| v as usize),
+            include_relations: None,
         };
 
         match self

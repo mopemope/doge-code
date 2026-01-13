@@ -30,7 +30,7 @@ pub use hash::{HashDiff, calculate_file_hashes};
 pub use md_collector::MarkdownExtractor;
 pub use python_collector::PythonExtractor;
 pub use rust_collector::RustExtractor;
-pub use symbol::{RepoMap, SymbolInfo, SymbolKind};
+pub use symbol::{RelationType, RepoMap, SymbolInfo, SymbolKind, SymbolRelation};
 pub use symbol_utils::{SymbolSpan, find_enclosing_symbol, list_symbols};
 pub use ts_js_collector::{JavaScriptExtractor, TypeScriptExtractor};
 

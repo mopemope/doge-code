@@ -64,6 +64,7 @@ When you are done, produce a concise Markdown report including:
 
 *   **`search_repomap`**:
     *   **PRIMARY SEARCH TOOL**. Use this FIRST to find relevant files and symbols. It is symbol-aware and efficient.
+    *   **Advanced Usage (Graph RAG)**: Use `include_relations: true` to discover symbol dependencies. This returns `outgoing` (calls/uses) and `incoming` (callers) relations, enabling impact analysis. Use this when asking "who calls this function?" or "what does this struct use?".
 *   **`search_text`**:
     *   Use for finding specific strings or regex patterns within file contents.
     *   Complementary to `search_repomap` (which finds symbols/files).

@@ -177,6 +177,10 @@ pub fn tool_def() -> ToolDef {
             "page_size": {
                 "type": ["integer", "null"],
                 "description": "Number of results to return from the cursor position (defaults to limit when unset)"
+            },
+            "include_relations": {
+                "type": ["boolean", "null"],
+                "description": "Whether to include related symbols (callers/callees) in the result (default: false)"
             }
                 },
                 "additionalProperties": false

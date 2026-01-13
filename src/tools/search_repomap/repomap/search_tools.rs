@@ -23,7 +23,7 @@ impl RepomapSearchTools {
         let warnings = Vec::new();
 
         // Avoid cloning the entire symbols vector; pass a reference-aware API
-        let mut response = filter_and_group_symbols(&map.symbols, args);
+        let mut response = filter_and_group_symbols(map, args);
         response.warnings.extend(warnings);
         Ok(response)
     }
