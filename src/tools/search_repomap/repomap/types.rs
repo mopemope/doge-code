@@ -64,8 +64,7 @@ pub struct SearchRepomapArgs {
     pub match_score_threshold: Option<f64>,
     /// Search for symbols containing specific keywords
     pub keyword_search: Option<Vec<String>>,
-    /// Semantic search query (natural language)
-    pub semantic_query: Option<String>,
+
     /// Search for symbols containing symbol name
     pub name: Option<Vec<String>>,
     /// Fields to search in. If None, all supported fields are searched.

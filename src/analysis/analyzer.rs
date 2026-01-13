@@ -3,7 +3,7 @@ use crate::analysis::cache::{RepomapCache, RepomapStore};
 use crate::analysis::file_finder::find_target_files;
 use crate::analysis::hash::{calculate_file_hashes, calculate_hash_diff};
 use crate::analysis::parser::{parse_single_file, process_single_file};
-use crate::analysis::semantic::SemanticService;
+
 use anyhow::{Context, Result};
 use num_cpus;
 use std::{collections::HashMap, path::PathBuf};
@@ -16,7 +16,6 @@ pub struct Analyzer {
     parser: Parser,
     current_lang: Language,
     cache_store: RepomapStore,
-    semantic_service: Option<SemanticService>,
 }
 
 impl Analyzer {
@@ -26,18 +25,12 @@ impl Analyzer {
             .await
             .context("Failed to create RepomapStore")?;
 
-        let semantic_service = Some(SemanticService::new(
-            cache_store.get_db_connection().clone(),
-            crate::config::RagConfig::default(),
-        ));
-
-        Self::new_with_store(root, cache_store, semantic_service).await
+        Self::new_with_store(root, cache_store).await
     }
 
     pub async fn new_with_store(
         root: impl Into<PathBuf>,
         cache_store: RepomapStore,
-        semantic_service: Option<SemanticService>,
     ) -> Result<Self> {
         let root = root.into();
         let mut parser = Parser::new();
@@ -49,7 +42,6 @@ impl Analyzer {
             parser,
             current_lang: lang,
             cache_store,
-            semantic_service,
         })
     }
 
@@ -259,21 +251,6 @@ impl Analyzer {
 
         if let Err(e) = self.cache_store.save(&cache).await {
             warn!("Failed to save repomap cache: {}", e);
-        } else {
-            // Trigger semantic embedding update in background
-            if let Some(service) = &self.semantic_service {
-                if service.auto_update_enabled() {
-                    let service = service.clone();
-                    let root = self.root.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = service.update_embeddings(&root).await {
-                            warn!("Failed to update semantic embeddings: {}", e);
-                        }
-                    });
-                } else {
-                    debug!("Semantic embeddings auto-update disabled; skipping background update.");
-                }
-            }
         }
 
         let duration = start_time.elapsed();

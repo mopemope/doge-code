@@ -3,7 +3,7 @@ use crate::analysis::RepoMap;
 use crate::analysis::database::connection::{connect_database, get_default_db_path};
 use crate::analysis::database::dao::RepomapDAO;
 use crate::analysis::database::migration::run_migrations;
-use crate::analysis::semantic::SemanticService;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
@@ -243,16 +243,13 @@ impl RepomapStore {
 pub async fn ensure_repomap_ready(
     repomap: &Arc<RwLock<Option<RepoMap>>>,
     project_root: &Path,
-    semantic_service: Option<SemanticService>,
 ) -> Result<RepoMap> {
     if let Some(existing) = repomap.read().await.clone() {
         return Ok(existing);
     }
 
     let store = RepomapStore::new(project_root.to_path_buf()).await?;
-    let mut analyzer =
-        Analyzer::new_with_store(project_root.to_path_buf(), store, semantic_service.clone())
-            .await?;
+    let mut analyzer = Analyzer::new_with_store(project_root.to_path_buf(), store).await?;
 
     let map = analyzer.build().await?;
 

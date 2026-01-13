@@ -21,6 +21,5 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::memory::write_memory_tool_def(),
         tools::memory::list_memories_tool_def(),
         tools::doc::tool_def(),
-        tools::history::tool_def(),
     ]
 }

@@ -35,7 +35,6 @@ pub struct FsTools {
     pub context_manager: Arc<RwLock<ContextManager>>,
     pub undo_stack: Arc<RwLock<crate::tools::undo::UndoStack>>,
     pub shell_session: SharedShellSession,
-    pub semantic_service: Option<crate::analysis::semantic::SemanticService>,
 }
 
 impl Default for FsTools {
@@ -47,7 +46,7 @@ impl Default for FsTools {
 impl FsTools {
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
-            search_repomap_tools: search_repomap::RepomapSearchTools::new(None),
+            search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             memory_tools: MemoryTools::new(config.clone()),
             context_manager: Arc::new(RwLock::new(ContextManager::new(repomap.clone()))),
             repomap,
@@ -60,57 +59,12 @@ impl FsTools {
                 config.project_root.clone(),
                 config.command_timeout_ms,
             ),
-            semantic_service: None,
         }
     }
 
     pub fn with_session_manager(mut self, session_manager: Arc<Mutex<SessionManager>>) -> Self {
         self.session_manager_wrapper = SessionManagerWrapper::new(Some(session_manager));
         self
-    }
-
-    pub fn with_semantic_service(
-        mut self,
-        service: Option<crate::analysis::semantic::SemanticService>,
-    ) -> Self {
-        self.semantic_service = service.clone();
-        self.search_repomap_tools = search_repomap::RepomapSearchTools::new(service);
-        self
-    }
-
-    pub async fn search_history(&self, query: &str, limit: usize) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match crate::tools::history::search_history(&self.semantic_service, query, limit).await {
-            Ok(result) => {
-                self.record_tool_call_success("search_history")?;
-                Ok(result)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("search_history")?;
-                Err(e)
-            }
-        }
-    }
-
-    pub async fn log_action(
-        &self,
-        action_type: &str,
-        content: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<()> {
-        if let Some(semantic) = &self.semantic_service
-            && let Some(session) = self.session_manager_wrapper.get_current_session()
-        {
-            semantic
-                .log_action(
-                    &session.meta.id,
-                    action_type,
-                    content,
-                    metadata.unwrap_or(serde_json::json!({})),
-                )
-                .await?;
-        }
-        Ok(())
     }
 
     /// Update the current session with tool call count
@@ -316,16 +270,7 @@ impl FsTools {
             Ok(result) => {
                 self.record_tool_call_success("fs_write")?;
                 self.update_context(PathBuf::from(path));
-                let _ = self
-                    .log_action(
-                        "fs_write",
-                        &format!("Modified file: {}", path),
-                        Some(serde_json::json!({
-                            "path": path,
-                            "content_snippet": content.chars().take(200).collect::<String>(),
-                        })),
-                    )
-                    .await;
+
                 Ok(result)
             }
             Err(e) => {
@@ -356,16 +301,7 @@ impl FsTools {
         match execute::execute_bash(command, &self.config).await {
             Ok(result) => {
                 self.record_tool_call_success("execute_bash")?;
-                let _ = self
-                    .log_action(
-                        "execute_bash",
-                        command,
-                        Some(serde_json::json!({
-                            "command": command,
-                            "result_snippet": result.chars().take(200).collect::<String>(),
-                        })),
-                    )
-                    .await;
+
                 Ok(result)
             }
             Err(e) => {

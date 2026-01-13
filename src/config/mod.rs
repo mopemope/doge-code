@@ -36,24 +36,6 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
     pub verification: VerificationConfig,
-    pub rag: RagConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RagConfig {
-    pub batch_size: usize,
-    pub enabled: bool,
-    pub auto_update: bool,
-}
-
-impl Default for RagConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 8,
-            enabled: true,
-            auto_update: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,7 +144,6 @@ impl Default for AppConfig {
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
             verification: VerificationConfig::default(),
-            rag: RagConfig::default(),
         }
     }
 }
@@ -281,14 +262,6 @@ pub struct FileConfig {
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub verification: Option<PartialVerificationConfig>,
-    pub rag: Option<PartialRagConfig>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct PartialRagConfig {
-    pub batch_size: Option<usize>,
-    pub enabled: Option<bool>,
-    pub auto_update: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -649,36 +622,6 @@ impl AppConfig {
             watch_cfg
         };
 
-        let rag = {
-            let default_rag = RagConfig::default();
-            let mut rag_cfg = default_rag.clone();
-
-            if let Some(file_rag) = &file_cfg.rag {
-                if let Some(batch_size) = file_rag.batch_size {
-                    rag_cfg.batch_size = batch_size;
-                }
-                if let Some(enabled) = file_rag.enabled {
-                    rag_cfg.enabled = enabled;
-                }
-                if let Some(auto_update) = file_rag.auto_update {
-                    rag_cfg.auto_update = auto_update;
-                }
-            }
-
-            if let Some(project_rag) = &project_cfg.rag {
-                if let Some(batch_size) = project_rag.batch_size {
-                    rag_cfg.batch_size = batch_size;
-                }
-                if let Some(enabled) = project_rag.enabled {
-                    rag_cfg.enabled = enabled;
-                }
-                if let Some(auto_update) = project_rag.auto_update {
-                    rag_cfg.auto_update = auto_update;
-                }
-            }
-            rag_cfg
-        };
-
         let verification = {
             let default_verification = VerificationConfig::default();
             let mut verification_cfg = default_verification.clone();
@@ -790,7 +733,6 @@ impl AppConfig {
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
             verification,
-            rag,
         })
     }
 }

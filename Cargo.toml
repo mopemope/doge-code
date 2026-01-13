@@ -72,7 +72,7 @@ arboard = "3.4"
 rmcp = { version = "0.8", features = ["transport-streamable-http-server", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process", "client"] }
 axum = "0.7"
 schemars = "1.0"
-fastembed = "5.5.0"
+
 url = "2.5.7"
 percent-encoding = "2.3.2"
 

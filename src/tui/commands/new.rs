@@ -11,14 +11,10 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 impl TuiExecutor {
-    pub fn new(
-        cfg: crate::config::AppConfig,
-        semantic_service: Option<crate::analysis::semantic::SemanticService>,
-    ) -> Result<Self> {
+    pub fn new(cfg: crate::config::AppConfig) -> Result<Self> {
         info!("Initializing TuiExecutor");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
-        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
-            .with_semantic_service(semantic_service);
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
 
         // Only initialize repomap if not disabled
         if !cfg.no_repomap {
@@ -113,11 +109,9 @@ impl TuiExecutor {
     pub fn new_with_repomap(
         cfg: crate::config::AppConfig,
         repomap: Arc<RwLock<Option<RepoMap>>>,
-        semantic_service: Option<crate::analysis::semantic::SemanticService>,
     ) -> Result<Self> {
         info!("Initializing TuiExecutor with existing repomap");
-        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
-            .with_semantic_service(semantic_service);
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
 
         // Only initialize repomap if not disabled and it's not already initialized
         // In the new_with_repomap flow, we rely on the repomap being initialized elsewhere

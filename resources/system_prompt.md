@@ -63,7 +63,7 @@ When you are done, produce a concise Markdown report including:
 # Tool Usage Guidelines
 
 *   **`search_repomap`**:
-    *   **PRIMARY SEARCH TOOL**. Use this FIRST to find relevant files and symbols. It is semantically aware and efficient.
+    *   **PRIMARY SEARCH TOOL**. Use this FIRST to find relevant files and symbols. It is symbol-aware and efficient.
 *   **`search_text`**:
     *   Use for finding specific strings or regex patterns within file contents.
     *   Complementary to `search_repomap` (which finds symbols/files).

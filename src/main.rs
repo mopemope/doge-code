@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
     // info!(?cfg, "app config");
 
     // Initialize repomap
-    let (repomap, status_rx, semantic_service) = if !cfg.no_repomap {
+    let (repomap, status_rx) = if !cfg.no_repomap {
         let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
         let repomap_clone = repomap.clone();
         let project_root = cfg.project_root.clone();
@@ -143,36 +143,23 @@ async fn main() -> Result<()> {
         // Initialize persistent store and semantic service
         let store_result = crate::analysis::cache::RepomapStore::new(project_root.clone()).await;
 
-        let (store, semantic_service) = match store_result {
-            Ok(s) => {
-                let service = if cfg.rag.enabled {
-                    Some(crate::analysis::semantic::SemanticService::new(
-                        s.get_db_connection().clone(),
-                        cfg.rag.clone(),
-                    ))
-                } else {
-                    None
-                };
-                (Some(s), service)
-            }
+        let store = match store_result {
+            Ok(s) => Some(s),
             Err(e) => {
                 tracing::error!("Failed to initialize RepomapStore: {:?}", e);
                 if let Err(send_err) = status_tx.send("::status:repomap_error".to_string()) {
                     tracing::error!("Failed to send repomap error message: {:?}", send_err);
                 }
-                (None, None)
+                None
             }
         };
 
         if let Some(store) = store {
-            let semantic_clone = semantic_service.clone();
             let root_clone = project_root.clone();
 
             // Spawn an asynchronous task to build the repomap
             tokio::spawn(async move {
-                match crate::analysis::Analyzer::new_with_store(root_clone, store, semantic_clone)
-                    .await
-                {
+                match crate::analysis::Analyzer::new_with_store(root_clone, store).await {
                     Ok(mut analyzer) => match analyzer.build().await {
                         Ok(map) => {
                             let start_time = std::time::Instant::now();
@@ -212,18 +199,14 @@ async fn main() -> Result<()> {
                 }
             });
         }
-        (repomap, Some(status_rx), semantic_service)
+        (repomap, Some(status_rx))
     } else {
-        (
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            None,
-            None,
-        )
+        (std::sync::Arc::new(tokio::sync::RwLock::new(None)), None)
     };
 
     // Start the MCP server if enabled
     let _mcp_server_handle = if let Some(mcp_server) = cfg.mcp_servers.first() {
-        mcp::server::start_mcp_server(mcp_server, repomap.clone(), semantic_service.clone())
+        mcp::server::start_mcp_server(mcp_server, repomap.clone())
     } else {
         None
     };
@@ -242,7 +225,7 @@ async fn main() -> Result<()> {
             retry,
             json,
         }) => run_fix(cfg, command, *retry, *json).await,
-        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx, semantic_service).await,
+        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
                 .clone()
@@ -253,7 +236,7 @@ async fn main() -> Result<()> {
                 address: addr,
                 transport: "http".to_string(),
             };
-            mcp::server::start_mcp_server(&config, repomap.clone(), semantic_service.clone());
+            mcp::server::start_mcp_server(&config, repomap.clone());
             Ok(())
         }
     }
@@ -263,7 +246,6 @@ async fn run_tui(
     cfg: AppConfig,
     repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
     status_rx: Option<std::sync::mpsc::Receiver<String>>,
-    semantic_service: Option<crate::analysis::semantic::SemanticService>,
 ) -> Result<()> {
     let mut app = TuiApp::new(
         "🦮 doge-code 🐕‍🦺 /help",
@@ -285,7 +267,7 @@ async fn run_tui(
     // app.push_log("Welcome to doge-code TUI");
     // app.push_log("Initializing repomap...");
 
-    let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap, semantic_service) {
+    let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
         Ok(exec) => {
             // If resume flag is set, load the latest session
             if cfg.resume {

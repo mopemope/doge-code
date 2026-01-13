@@ -21,7 +21,7 @@ mod tests {
         };
 
         let repomap = Arc::new(RwLock::new(None));
-        let handle = server::start_mcp_server(&_config, repomap, None);
+        let handle = server::start_mcp_server(&_config, repomap);
 
         // The server should start successfully
         assert!(handle.is_some());
@@ -152,7 +152,7 @@ mod tests {
             sort_desc: None,
             limit: None,
             keyword_search: Some(vec!["test".to_string()]),
-            semantic_query: None,
+
             name: None,
             fields: None,
             include_snippets: None,

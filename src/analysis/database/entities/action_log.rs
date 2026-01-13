@@ -13,9 +13,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub content: String, // Prompt, Code, or Tool Output
     #[sea_orm(column_type = "Json")]
-    pub metadata: Json, // {"thought": "...", "success": true, "error": "..."}
-    #[sea_orm(column_type = "Blob")]
-    pub embedding: Vec<u8>, // Vector embedding
+    pub error: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

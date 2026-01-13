@@ -76,7 +76,7 @@ mod tests {
         let mut app = create_test_app();
         // TuiExecutor::new(cfg, semantic_service)
         let mut executor =
-            TuiExecutor::new(AppConfig::default(), None).expect("Failed to create executor");
+            TuiExecutor::new(AppConfig::default()).expect("Failed to create executor");
 
         handle_stack(&mut executor, &mut app, "add Task1");
         assert_eq!(app.task_queue.len(), 1);
@@ -91,7 +91,7 @@ mod tests {
     async fn test_handle_stack_next() {
         let mut app = create_test_app();
         let mut executor =
-            TuiExecutor::new(AppConfig::default(), None).expect("Failed to create executor");
+            TuiExecutor::new(AppConfig::default()).expect("Failed to create executor");
 
         app.task_queue.push_back("Task1".to_string());
         app.task_queue.push_back("Task2".to_string());

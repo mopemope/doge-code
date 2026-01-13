@@ -109,7 +109,6 @@ instructions_file = "PROJECT.md"
 
 ### Advanced Tools
 - `undo`: Revert the last file modification (edit or write)
-- `search_history`: Semantic search of agent action history (RAG-based)
 - `shell`: Persistent shell session for command execution
 
 ## 🎯 Usage Examples
@@ -254,10 +253,6 @@ After file edits (`fs_write`, `edit`, `apply_patch`), automatic verification can
 
 Verification failures are returned to LLM for automatic correction.
 
-### Semantic Search (RAG)
-- **Embedding-based search**: Search code symbols semantically using FastEmbed
-- **Action history**: Track and search past agent actions
-- **Auto-update**: Embeddings update automatically on file changes
 
 ### Remote MCP Tools
 - Connect to remote MCP servers for additional tool capabilities
@@ -316,9 +311,6 @@ exclude_patterns = ["target/", "node_modules/", "*.log"]
 [mcp]
 address = "127.0.0.1:8000"
 
-[rag]
-enabled = true
-auto_update = true
 
 [verification]
 enabled = true

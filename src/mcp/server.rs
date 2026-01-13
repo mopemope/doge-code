@@ -1,5 +1,5 @@
 use crate::analysis::RepoMap;
-use crate::analysis::semantic::SemanticService;
+
 use crate::config::McpServerConfig;
 use crate::mcp::service::DogeMcpService;
 use anyhow::Result;
@@ -14,22 +14,19 @@ use tracing::info;
 pub fn start_mcp_server(
     config: &McpServerConfig,
     repomap: Arc<RwLock<Option<RepoMap>>>,
-    semantic_service: Option<SemanticService>,
 ) -> Option<JoinHandle<Result<()>>> {
     if !config.enabled {
         return None;
     }
 
     let config = config.clone();
-    let semantic_service = semantic_service.clone();
+
     let handle = tokio::spawn(async move {
         info!("Starting MCP server at {}", &config.address);
 
         let service = StreamableHttpService::new(
             move || {
-                let service = DogeMcpService::default()
-                    .with_repomap(repomap.clone())
-                    .with_semantic_service(semantic_service.clone());
+                let service = DogeMcpService::default().with_repomap(repomap.clone());
                 Ok(service)
             },
             LocalSessionManager::default().into(),

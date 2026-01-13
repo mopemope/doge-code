@@ -151,7 +151,7 @@ Do not include the code itself in the output—only the doc comment text.",
     }
 
     async fn ensure_repomap(&self) -> Result<RepoMap> {
-        ensure_repomap_ready(&self.repomap, &self.project_root, None).await
+        ensure_repomap_ready(&self.repomap, &self.project_root).await
     }
 
     async fn call_llm(&self, prompt: String) -> Result<String> {

@@ -4,7 +4,7 @@ pub mod doc;
 pub mod edit;
 pub mod execute;
 pub mod find_file;
-pub mod history;
+
 pub mod list;
 pub mod memory;
 pub mod plan;

@@ -20,8 +20,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::analysis::semantic::SemanticService;
-
 // Tool parameter structures
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SearchRepomapParams {
@@ -36,7 +34,7 @@ pub struct SearchRepomapParams {
     pub sort_desc: Option<bool>,
     pub limit: Option<u32>,
     pub keyword_search: Option<Vec<String>>,
-    pub semantic_query: Option<String>,
+
     pub name: Option<Vec<String>>,
     pub fields: Option<Vec<String>>,
     pub include_snippets: Option<bool>,
@@ -102,7 +100,7 @@ pub struct DogeMcpService {
     repomap: Arc<RwLock<Option<RepoMap>>>,
     search_repomap_tools: RepomapSearchTools,
     config: Arc<AppConfig>,
-    semantic_service: Option<SemanticService>,
+
     repomap_build_lock: Arc<Mutex<()>>,
 }
 
@@ -117,9 +115,9 @@ impl DogeMcpService {
         Self {
             tool_router: Self::tool_router(),
             repomap: Arc::new(RwLock::new(None)),
-            search_repomap_tools: RepomapSearchTools::new(None),
+            search_repomap_tools: RepomapSearchTools::new(),
             config: Arc::new(config),
-            semantic_service: None,
+
             repomap_build_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -130,18 +128,7 @@ impl DogeMcpService {
             repomap,
             search_repomap_tools: self.search_repomap_tools,
             config: self.config,
-            semantic_service: self.semantic_service,
-            repomap_build_lock: self.repomap_build_lock,
-        }
-    }
 
-    pub fn with_semantic_service(self, service: Option<SemanticService>) -> Self {
-        Self {
-            tool_router: self.tool_router,
-            repomap: self.repomap,
-            search_repomap_tools: RepomapSearchTools::new(service.clone()),
-            config: self.config,
-            semantic_service: service,
             repomap_build_lock: self.repomap_build_lock,
         }
     }
@@ -156,13 +143,9 @@ impl DogeMcpService {
             return Ok(map);
         }
 
-        ensure_repomap_ready(
-            &self.repomap,
-            &self.config.project_root,
-            self.semantic_service.clone(),
-        )
-        .await
-        .map_err(|e| self.format_error("Repomap build failed", Some(json!(e.to_string()))))
+        ensure_repomap_ready(&self.repomap, &self.config.project_root)
+            .await
+            .map_err(|e| self.format_error("Repomap build failed", Some(json!(e.to_string()))))
     }
 
     pub async fn list_resources_impl(&self) -> Result<ListResourcesResult, McpError> {
@@ -357,7 +340,7 @@ impl DogeMcpService {
             limit: params.limit.map(|v| v as usize),
             response_budget_chars: params.response_budget_chars.map(|v| v as usize),
             keyword_search: params.keyword_search,
-            semantic_query: params.semantic_query,
+
             name: params.name,
             fields: params.fields,
             include_snippets: params.include_snippets,
