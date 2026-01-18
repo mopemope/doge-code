@@ -187,6 +187,10 @@ impl RepomapDAO {
             }
         }
 
+        txn.commit()
+            .await
+            .context("Failed to commit database transaction")?;
+
         info!("Repomap saved successfully");
         Ok(())
     }

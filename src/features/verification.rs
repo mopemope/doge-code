@@ -110,6 +110,10 @@ impl AutoVerifier {
             Ok(output) => output,
             Err(message) => {
                 return Some(VerificationResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: message.clone(),
+                    exit_code: None,
                     message: format!(
                         "<verification_error>\n{} Check Failed:\n{}\n</verification_error>",
                         label, message
@@ -120,14 +124,18 @@ impl AutoVerifier {
         };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let msg = format!(
                 "<verification_error>\n{} Check Failed:\n{}{}\n</verification_error>",
                 label, stdout, stderr
             );
             warn!("Verification failed: {}", msg);
             return Some(VerificationResult {
+                success: false,
+                stdout,
+                stderr,
+                exit_code: output.status.code(),
                 message: msg,
                 should_revert: self.config.enforce,
             });
@@ -174,6 +182,10 @@ impl AutoVerifier {
 }
 
 pub struct VerificationResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
     pub message: String,
     pub should_revert: bool,
 }

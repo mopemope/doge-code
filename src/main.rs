@@ -120,6 +120,12 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Run a predefined workflow
+    #[command()]
+    Run {
+        /// The name of the workflow to run (without extension)
+        workflow: String,
+    },
 }
 
 #[tokio::main]
@@ -239,6 +245,7 @@ async fn main() -> Result<()> {
             mcp::server::start_mcp_server(&config, repomap.clone());
             Ok(())
         }
+        Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
     }
 }
 

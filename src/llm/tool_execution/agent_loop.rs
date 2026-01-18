@@ -378,13 +378,56 @@ pub async fn run_agent_loop(
 
                         let warning = if reverted {
                             format!(
-                                "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected CRITICAL issues. \n\n⚠️ CHANGES HAVE BEEN AUTOMATICALLY REVERTED to protect the project state. \n\nAnalyze the error above and try again with a fix.</SYSTEM_NOTE>",
-                                result.message
+                                r#"
+
+<AUTOMATED_VERIFICATION_FAILURE>
+The tool execution succeeded, but an automated check FAILED with strict mode enabled.
+Exit Code: {:?}
+
+STDOUT:
+{}
+
+STDERR:
+{}
+</AUTOMATED_VERIFICATION_FAILURE>
+
+<DIRECTIVE>
+⚠️ CRITICAL: Verification failed and your changes have been AUTOMATICALLY REVERTED.
+The file has been restored to its previous state.
+
+1. Analyze the STDERR output above to understand why your code failed.
+2. You MUST apply a DIFFERENT solution. Do not try the same broken code again.
+3. Fix the logical error or syntax error that caused the failure.
+</DIRECTIVE>"#,
+                                result.exit_code,
+                                truncate_string_with_graphemes(&result.stdout, 1000),
+                                truncate_string_with_graphemes(&result.stderr, 2000)
                             )
                         } else {
                             format!(
-                                "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. Automatic revert FAILED. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
-                                result.message
+                                r#"
+
+<AUTOMATED_VERIFICATION_FAILURE>
+The tool execution succeeded, but an automated check FAILED.
+Exit Code: {:?}
+
+STDOUT:
+{}
+
+STDERR:
+{}
+</AUTOMATED_VERIFICATION_FAILURE>
+
+<DIRECTIVE>
+⚠️ CRITICAL: Verification failed and automatic revert FAILED.
+The codebase is potentially in a broken state. You MUST fix this immediately.
+
+1. Analyze the STDERR output above.
+2. Fix the error in the current file state.
+</DIRECTIVE>"#,
+                                result.exit_code,
+                                truncate_string_with_graphemes(&result.stdout, 1000),
+                                truncate_string_with_graphemes(&result.stderr, 2000)
                             )
                         };
 

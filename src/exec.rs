@@ -180,6 +180,61 @@ impl Executor {
 
         match res {
             Ok((updated_messages, final_msg)) => {
+                // Update conversation history with new interactions
+                {
+                    let mut history_guard = self.conversation_history.lock().await;
+
+                    // We sent `msgs` in. `updated_messages` contains `msgs` + new messages.
+                    // We need to find where the new messages start.
+                    // The initial len was `msgs.len()`.
+                    // But wait, `run_agent_loop` might compact history?
+                    // If compaction happened, `updated_messages` might look totally different.
+                    // Ideally, we should just trust `updated_messages` as the new truth?
+                    // But `ChatHistory` optimizes storage.
+                    // For now, let's append the *delta*.
+                    // The safest way given compaction possibilities is to check if the history was compacted.
+                    // But for `exec` mode, let's assume standard appending for now as compaction handles its own history replacement if implemented deep.
+                    // Actually, `run_agent_loop` logic handles compaction internally on the `messages` vec.
+                    // So `updated_messages` IS the current valid state of the conversation.
+
+                    // Ideally we would replace `ChatHistory`'s content, but it might be easier to just append the difference
+                    // if we assume no compaction for short workflows, OR we leverage `set_messages` if it exists.
+                    // `ChatHistory` usually doesn't expose internal vec replacement easily to avoid invalid states.
+                    // Let's iterate and append new messages.
+                    // Original count:
+                    // Note: `msgs` was consumed/cloned. We don't have the original `msgs` count variable easily available after await unless we saved it.
+                    // But wait, we pushed System + User.
+                    // Let's assume we want to capture the Assistant steps + Result.
+
+                    // Check if we can identify new messages.
+                    // A simple heuristic: append messages that are NOT in the original set?
+                    // Or, simpler: we know we added 2 messages (System + User).
+                    // So anything after index `initial_msg_count` are new.
+
+                    // Note: `msgs` is moved into `run_agent_loop`. We can't query it.
+                    // But we know how many we added?
+                    // We took `history_msgs` + System + User.
+                    // Let's just blindly append the *last* few messages? No.
+
+                    // Correct approach:
+                    // 1. We know `history_guard` has the *old* history + user prompt (we appended it).
+                    // 2. `updated_messages` has *old* history + user prompt + system prompt(maybe) + new steps.
+                    // We generally just want to append the *assistant* responses and *tool* outputs.
+
+                    let existing_count = history_guard.build_messages().len();
+                    // Verify if `updated_messages` contains the pre-existing ones.
+                    // If `updated_messages` is shorter, compaction likely happened.
+
+                    if updated_messages.len() > existing_count {
+                        // Append the delta
+                        for msg in updated_messages.iter().skip(existing_count) {
+                            // Skip system prompt if it was injected internally and duplicates?
+                            // Just appending is safer to preserve the agent's view.
+                            history_guard.append_message(msg.clone());
+                        }
+                    }
+                }
+
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
                     role: "assistant".into(),

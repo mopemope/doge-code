@@ -227,12 +227,10 @@ fn handle_type_usage(
         if matches!(
             kind,
             "struct_item" | "enum_item" | "trait_item" | "function_item" | "mod_item" | "impl_item"
-        ) {
-            if let Some(name_node) = parent.child_by_field_name("name") {
-                if name_node.id() == node.id() {
-                    return; // It's the name of the definition
-                }
-            }
+        ) && let Some(name_node) = parent.child_by_field_name("name")
+            && name_node.id() == node.id()
+        {
+            return; // It's the name of the definition
         }
     }
 
@@ -623,6 +621,8 @@ fn walk_impl_items(
                         );
                     }
                 }
+            } else if child.kind() == "line_comment" || child.kind() == "block_comment" {
+                handle_comment(map, child, src, file, file_total_lines);
             } else {
                 walk_impl_items(
                     map,

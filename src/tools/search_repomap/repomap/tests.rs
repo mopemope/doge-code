@@ -601,7 +601,7 @@ fn test_cursor_pagination_returns_expected_slice() {
 
 #[test]
 fn test_include_relations_returns_callers_and_callees() {
-    let mut caller = create_test_symbol(
+    let caller = create_test_symbol(
         "caller_func",
         SymbolKind::Function,
         "caller.rs",
@@ -666,9 +666,8 @@ fn test_include_relations_returns_callers_and_callees() {
 
 #[test]
 fn test_include_relations_returns_type_usage() {
-    let mut struct_sym = create_test_symbol("MyStruct", SymbolKind::Struct, "usage.rs", 100, None);
-    let mut field_type_sym =
-        create_test_symbol("FieldType", SymbolKind::Struct, "types.rs", 100, None);
+    let struct_sym = create_test_symbol("MyStruct", SymbolKind::Struct, "usage.rs", 100, None);
+    let field_type_sym = create_test_symbol("FieldType", SymbolKind::Struct, "types.rs", 100, None);
 
     let symbols = vec![struct_sym.clone(), field_type_sym.clone()];
 
