@@ -36,6 +36,7 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
     pub verification: VerificationConfig,
+    pub test_fix: TestFixConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +103,23 @@ impl Default for VerificationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct TestFixConfig {
+    pub enabled: bool,
+    pub max_iterations: usize,
+    pub test_timeout_ms: u64,
+}
+
+impl Default for TestFixConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_iterations: 3,
+            test_timeout_ms: 120_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
     pub enabled: bool,
@@ -144,6 +162,7 @@ impl Default for AppConfig {
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
             verification: VerificationConfig::default(),
+            test_fix: TestFixConfig::default(),
         }
     }
 }
@@ -733,6 +752,7 @@ impl AppConfig {
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
             verification,
+            test_fix: TestFixConfig::default(),
         })
     }
 }

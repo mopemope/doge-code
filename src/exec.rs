@@ -560,6 +560,15 @@ impl Executor {
     pub fn hook_manager(&mut self) -> &mut crate::hooks::HookManager {
         &mut self.hook_manager
     }
+
+    /// Seeds the executor with existing conversation history.
+    pub async fn with_history(self, messages: Vec<llm::types::ChatMessage>) -> Self {
+        {
+            let mut history = self.conversation_history.lock().await;
+            history.overwrite_messages(messages);
+        }
+        self
+    }
 }
 
 fn collect_tools_called(messages: &[crate::llm::types::ChatMessage]) -> Vec<String> {
@@ -687,6 +696,7 @@ mod tests {
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
             verification: crate::config::VerificationConfig::default(),
+            test_fix: crate::config::TestFixConfig::default(),
         };
 
         let executor = Executor::new(cfg);
@@ -724,6 +734,7 @@ mod tests {
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
             verification: crate::config::VerificationConfig::default(),
+            test_fix: crate::config::TestFixConfig::default(),
         };
 
         let mut executor = Executor::new(cfg).unwrap();

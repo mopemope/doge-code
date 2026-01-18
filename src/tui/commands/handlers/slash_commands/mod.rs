@@ -14,6 +14,7 @@ pub mod rebuild_repomap;
 pub mod reset;
 pub mod stack;
 pub mod test;
+pub mod test_fix;
 pub mod theme;
 pub mod tokens;
 pub mod tools;

@@ -91,6 +91,18 @@ impl ChatHistory {
         self.system_added = false;
     }
 
+    /// Overwrites the current history with the provided messages.
+    /// This is useful for transferring context between executors.
+    pub fn overwrite_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
+        // Check if system prompt is present in the beginning
+        if let Some(first) = self.messages.first()
+            && first.role == "system" {
+                self.system_added = true;
+            }
+        self.smart_trim();
+    }
+
     /// Estimates tokens for a message including content and tool calls.
     /// Uses a heuristic of 4 chars per token.
     fn estimate_tokens(msg: &ChatMessage) -> usize {

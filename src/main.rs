@@ -126,6 +126,17 @@ pub enum Commands {
         /// The name of the workflow to run (without extension)
         workflow: String,
     },
+
+    /// Run tests and auto-fix failures in a loop
+    #[command()]
+    FixTests {
+        /// Maximum number of fix iterations
+        #[arg(long)]
+        max_iterations: Option<usize>,
+        /// Output structured JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -246,6 +257,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
+        Some(Commands::FixTests {
+            max_iterations,
+            json,
+        }) => run_fix_tests(cfg, *max_iterations, *json).await,
     }
 }
 
@@ -367,5 +382,29 @@ async fn run_fix(
 ) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg)?;
     crate::exec::fix::run_fix_loop(&mut executor, command, retry, json).await?;
+    Ok(())
+}
+
+async fn run_fix_tests(
+    mut cfg: crate::config::AppConfig,
+    max_iterations: Option<usize>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Override max_iterations if provided via CLI
+    if let Some(max_iter) = max_iterations {
+        cfg.test_fix.max_iterations = max_iter;
+    }
+
+    let mut executor = crate::exec::Executor::new(cfg.clone())?;
+    let result = features::test_fix::run_test_fix_loop(&cfg, &mut executor).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.success {
+        println!("✓ {}", result.message);
+    } else {
+        eprintln!("✗ {}", result.message);
+        std::process::exit(1);
+    }
     Ok(())
 }
