@@ -536,34 +536,6 @@ pub fn render_markdown_entry(
     lines
 }
 
-pub fn convert_ansi_text(text: ratatui_core::text::Text) -> ratatui::text::Text {
-    let lines: Vec<ratatui::text::Line> = text.lines.into_iter().map(convert_ansi_line).collect();
-    ratatui::text::Text::from(lines).style(convert_ansi_style(text.style))
-}
-
-pub fn convert_ansi_line(line: ratatui_core::text::Line) -> ratatui::text::Line {
-    let spans: Vec<ratatui::text::Span> = line.spans.into_iter().map(convert_ansi_span).collect();
-    let mut l = ratatui::text::Line::from(spans);
-    if let Some(alignment) = convert_ansi_alignment(line.alignment) {
-        l = l.alignment(alignment);
-    }
-    l
-}
-
-pub fn convert_ansi_span(span: ratatui_core::text::Span) -> ratatui::text::Span {
-    ratatui::text::Span::styled(span.content, convert_ansi_style(span.style))
-}
-
-pub fn convert_ansi_alignment(
-    alignment: Option<ratatui_core::layout::Alignment>,
-) -> Option<ratatui::layout::Alignment> {
-    alignment.map(|a| match a {
-        ratatui_core::layout::Alignment::Left => ratatui::layout::Alignment::Left,
-        ratatui_core::layout::Alignment::Center => ratatui::layout::Alignment::Center,
-        ratatui_core::layout::Alignment::Right => ratatui::layout::Alignment::Right,
-    })
-}
-
 pub fn convert_ansi_style(style: ratatui_core::style::Style) -> ratatui::style::Style {
     let mut s = ratatui::style::Style::default();
     if let Some(fg) = convert_ansi_color(style.fg) {

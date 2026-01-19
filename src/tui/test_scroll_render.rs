@@ -34,7 +34,7 @@ mod tests {
             // let textarea = TextArea::default(); // 不要
             let params = crate::tui::state::BuildRenderPlanParams {
                 title: "Test",
-                status: crate::tui::state::Status::Idle,
+                status: crate::tui::state::Status::Ready,
                 log: &app.log,
                 // textarea: &textarea, // 削除
                 // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -90,7 +90,7 @@ mod tests {
         // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
-            status: crate::tui::state::Status::Idle,
+            status: crate::tui::state::Status::Ready,
             log: &app.log,
             // textarea: &textarea, // 削除
             // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -129,7 +129,7 @@ mod tests {
         // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
-            status: crate::tui::state::Status::Idle,
+            status: crate::tui::state::Status::Ready,
             log: &app.log,
             // textarea: &textarea, // 削除
             // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -202,7 +202,7 @@ mod tests {
         // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
-            status: crate::tui::state::Status::Idle,
+            status: crate::tui::state::Status::Ready,
             log: &app.log,
             // textarea: &textarea, // 削除
             // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -262,7 +262,7 @@ mod tests {
             // let textarea = TextArea::default(); // 不要
             let params = crate::tui::state::BuildRenderPlanParams {
                 title: "Test",
-                status: crate::tui::state::Status::Idle,
+                status: crate::tui::state::Status::Ready,
                 log: &app.log,
                 // textarea: &textarea, // 削除
                 // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -320,7 +320,7 @@ mod tests {
         // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
-            status: crate::tui::state::Status::Idle,
+            status: crate::tui::state::Status::Ready,
             log: &app.log,
             // textarea: &textarea, // 削除
             // input_mode: crate::tui::state::InputMode::Normal, // 削除
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_build_render_plan_with_scroll() {
         let title = "Test";
-        let status = Status::Idle;
+        let status = Status::Ready;
         let log: Vec<LogEntry> = vec!["line1", "line2", "line3", "line4", "line5"]
             .into_iter()
             .map(|line| LogEntry::Plain(line.to_string()))

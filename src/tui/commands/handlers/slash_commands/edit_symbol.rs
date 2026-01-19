@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result, anyhow};
@@ -8,14 +7,12 @@ use tokio::fs;
 
 use crate::analysis::{SymbolSpan, find_enclosing_symbol};
 use crate::config::AppConfig;
-use crate::diff_review::DiffReviewPayload;
 use crate::llm::{
     EditTarget, SymbolEditRequest, SymbolEditResponse, build_symbol_edit_chat_request,
     parse_symbol_edit_response, read_target_source,
 };
 use crate::tools::apply_patch::{ApplyPatchParams, apply_patch as apply_patch_tool};
 use crate::tui::commands::core::TuiExecutor;
-use crate::tui::diff_review::{DiffFileState, DiffLineKind};
 use crate::tui::view::TuiApp;
 
 /// シンボル限定編集コマンドを処理する。
@@ -114,7 +111,7 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 }
 
 fn current_file_and_line(ui: &TuiApp) -> Option<(String, u32)> {
-    diff_review_cursor(ui).or_else(|| inline_path_reference(ui))
+    inline_path_reference(ui)
 }
 
 pub fn enqueue_symbol_edit_request(
@@ -205,20 +202,6 @@ pub fn enqueue_symbol_edit_request(
                 let relative_for_session = make_relative_path(&changed_path, &cfg.project_root)
                     .unwrap_or(changed_path.clone());
                 let _ = fs_tools.update_session_with_changed_file(relative_for_session);
-
-                if cfg.show_diff
-                    && let Err(e) = emit_diff_review(
-                        &ui_tx,
-                        vec![changed_path.clone()],
-                        cfg.project_root.clone(),
-                    )
-                    .await
-                {
-                    send_ui(
-                        &ui_tx,
-                        format!("[edit-symbol][warn] Failed to build diff preview: {e}"),
-                    );
-                }
 
                 let _ = ui_tx.send("::status:done".to_string());
             }
@@ -420,78 +403,6 @@ fn make_relative_display(path: &Path, root: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-async fn emit_diff_review(
-    tx: &Sender<String>,
-    files: Vec<PathBuf>,
-    project_root: PathBuf,
-) -> Result<()> {
-    let payload = tokio::task::spawn_blocking(move || collect_diff_for_files(files, project_root))
-        .await
-        .map_err(|e| anyhow!("failed to build diff payload: {e}"))??;
-
-    if let Some(payload) = payload {
-        let json = serde_json::to_string(&payload)?;
-        let _ = tx.send(format!("::diff_review:{json}"));
-    }
-    Ok(())
-}
-
-fn collect_diff_for_files(
-    files: Vec<PathBuf>,
-    project_root: PathBuf,
-) -> Result<Option<DiffReviewPayload>> {
-    let mut combined = String::new();
-    let mut listed = Vec::new();
-
-    for file in files {
-        let Some(rel_path) = make_relative_path(&file, &project_root) else {
-            continue;
-        };
-
-        let output = Command::new("git")
-            .arg("diff")
-            .arg("--color=never")
-            .arg("--")
-            .arg(&rel_path)
-            .current_dir(&project_root)
-            .output()
-            .with_context(|| {
-                format!("failed to run git diff for {}", rel_path.to_string_lossy())
-            })?;
-
-        if output.stdout.is_empty() {
-            continue;
-        }
-
-        let diff =
-            String::from_utf8(output.stdout).context("git diff output was not valid UTF-8")?;
-        combined.push_str(&diff);
-        listed.push(rel_path.to_string_lossy().to_string());
-    }
-
-    if combined.trim().is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(DiffReviewPayload {
-        diff: combined,
-        files: listed,
-    }))
-}
-
-fn diff_review_cursor(ui: &TuiApp) -> Option<(String, u32)> {
-    let review = ui.diff_review.as_ref()?;
-    let file = review.current_file()?;
-
-    if file.lines.is_empty() {
-        return Some((file.path.clone(), 1));
-    }
-
-    let idx = file.scroll.min(file.lines.len().saturating_sub(1));
-    let line = line_number_from_diff(file, idx).unwrap_or(1);
-    Some((file.path.clone(), line))
-}
-
 fn inline_path_reference(ui: &TuiApp) -> Option<(String, u32)> {
     let last_input = ui.last_user_input.as_deref()?;
     parse_inline_file_reference(last_input)
@@ -554,84 +465,6 @@ fn parse_line_marker(marker: &str) -> Option<u32> {
     }
 }
 
-fn line_number_from_diff(file: &DiffFileState, target_index: usize) -> Option<u32> {
-    let mut current_line: Option<u32> = None;
-    let mut last_mapped: Option<u32> = None;
-
-    for (idx, line) in file.lines.iter().enumerate() {
-        match line.kind {
-            DiffLineKind::HunkHeader => {
-                current_line = parse_new_file_line(&line.content);
-                last_mapped = None;
-                if idx == target_index {
-                    return current_line;
-                }
-            }
-            DiffLineKind::Addition | DiffLineKind::Context => {
-                if let Some(line_no) = current_line {
-                    if idx == target_index {
-                        return Some(line_no);
-                    }
-                    last_mapped = Some(line_no);
-                    current_line = Some(line_no.saturating_add(1));
-                }
-            }
-            DiffLineKind::Removal => {
-                if idx == target_index {
-                    if let Some(prev) = last_mapped {
-                        return Some(prev);
-                    }
-                    if let Some(line_no) = current_line {
-                        let candidate = line_no.saturating_sub(1);
-                        return Some(if candidate == 0 { 1 } else { candidate });
-                    }
-                }
-            }
-            _ => {
-                if idx == target_index
-                    && let Some(prev) = last_mapped
-                {
-                    return Some(prev);
-                }
-            }
-        }
-    }
-
-    last_mapped.or(current_line)
-}
-
-fn parse_new_file_line(header: &str) -> Option<u32> {
-    if !header.starts_with("@@") {
-        return None;
-    }
-
-    let plus_pos = header.find('+')?;
-    let mut rest = &header[plus_pos + 1..];
-
-    if let Some(end) = rest.find('@') {
-        rest = &rest[..end];
-    }
-
-    let mut digits = String::new();
-    for ch in rest.chars().skip_while(|c| matches!(c, ' ' | '+')) {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else if ch == ',' || ch.is_whitespace() {
-            break;
-        } else if digits.is_empty() && ch == 'L' {
-            continue;
-        } else {
-            break;
-        }
-    }
-
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse().ok()
-    }
-}
-
 fn format_symbol_kind(symbol: &SymbolSpan) -> &'static str {
     use crate::analysis::SymbolKind;
     match symbol.kind {
@@ -652,9 +485,6 @@ fn format_symbol_kind(symbol: &SymbolSpan) -> &'static str {
 mod tests {
     use super::*;
     use crate::analysis::SymbolKind;
-    use crate::tui::diff_review::{DiffLine, DiffLineKind};
-    use std::path::{Path, PathBuf};
-
     #[test]
     fn parses_inline_reference_with_colon() {
         let text = "Apply change to @src/lib.rs:42 based on review.";
@@ -671,37 +501,6 @@ mod tests {
             parse_inline_file_reference(text),
             Some(("src/main.rs".into(), 120))
         );
-    }
-
-    #[test]
-    fn maps_diff_scroll_to_line_numbers() {
-        let file = DiffFileState {
-            path: "src/lib.rs".into(),
-            lines: vec![
-                DiffLine {
-                    content: "@@ -1,2 +10,4 @@ fn example()".into(),
-                    kind: DiffLineKind::HunkHeader,
-                },
-                DiffLine {
-                    content: " context".into(),
-                    kind: DiffLineKind::Context,
-                },
-                DiffLine {
-                    content: "+added".into(),
-                    kind: DiffLineKind::Addition,
-                },
-                DiffLine {
-                    content: "-removed".into(),
-                    kind: DiffLineKind::Removal,
-                },
-            ],
-            scroll: 0,
-        };
-
-        assert_eq!(line_number_from_diff(&file, 1), Some(10));
-        assert_eq!(line_number_from_diff(&file, 2), Some(11));
-        // Removal lines fall back to the last mapped line number
-        assert_eq!(line_number_from_diff(&file, 3), Some(11));
     }
 
     #[test]

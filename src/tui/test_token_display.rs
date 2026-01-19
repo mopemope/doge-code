@@ -8,7 +8,7 @@ mod tests {
     fn test_no_token_display_when_zero() {
         // Test that token usage is not displayed when tokens_used = 0
         let title = "Test Title";
-        let status = Status::Idle;
+        let status = Status::Ready;
         let log: Vec<LogEntry> = Vec::new();
         // let input_mode = InputMode::Normal; // 不要
         let w = 80;

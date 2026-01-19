@@ -38,42 +38,17 @@ pub fn build_render_plan(
     let plan_list = params.plan_list;
     let w_usize = w as usize;
     let status_str = match status {
-        crate::tui::state::Status::Idle => "Ready".to_string(),
-        crate::tui::state::Status::Preparing => {
+        crate::tui::state::Status::Ready => "Ready".to_string(),
+        crate::tui::state::Status::Thinking => {
             let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Preparing request... {}", spinner_char)
+            format!("Thinking... {}", spinner_char)
         }
-        crate::tui::state::Status::Sending => {
+        crate::tui::state::Status::Running => {
             let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Sending request... {}", spinner_char)
+            format!("Running... {}", spinner_char)
         }
-        crate::tui::state::Status::Waiting => {
-            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!(
-                "Waiting for response... {} (Press Esc to cancel)",
-                spinner_char
-            )
-        }
-        crate::tui::state::Status::Streaming => {
-            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Receiving response... {}", spinner_char)
-        }
-        crate::tui::state::Status::Processing => {
-            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Processing tools... {}", spinner_char)
-        }
-        crate::tui::state::Status::ShellCommandRunning => {
-            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let spinner_char = spinner_chars[spinner_state % spinner_chars.len()];
-            format!("Executing command... {}", spinner_char)
-        }
-        crate::tui::state::Status::Cancelled => "Cancelled".to_string(),
-        crate::tui::state::Status::Done => "Done".to_string(),
         crate::tui::state::Status::Error => "Error".to_string(),
     };
 

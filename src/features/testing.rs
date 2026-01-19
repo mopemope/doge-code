@@ -566,42 +566,37 @@ pub fn enhance_failed_tests_with_stack_trace(
 ) {
     let combined = format!("{}\n{}", stdout, stderr);
 
-    match language {
-        "rust" => {
-            let frames = parse_rust_stack_trace(&combined);
-            if !frames.is_empty() {
-                // Distribute stack frames to relevant tests
-                for test in tests.iter_mut() {
-                    // Find frames that match this test's file location
-                    let relevant_frames: Vec<StackFrame> = frames
-                        .iter()
-                        .filter(|f| {
-                            if let (Some(test_file), Some(frame_file)) =
-                                (&test.file_path, &f.file_path)
-                            {
-                                frame_file.contains(test_file) || test_file.contains(frame_file)
-                            } else {
-                                true // Include if we can't determine relevance
-                            }
-                        })
-                        .cloned()
-                        .collect();
+    if language == "rust" {
+        let frames = parse_rust_stack_trace(&combined);
+        if !frames.is_empty() {
+            // Distribute stack frames to relevant tests
+            for test in tests.iter_mut() {
+                // Find frames that match this test's file location
+                let relevant_frames: Vec<StackFrame> = frames
+                    .iter()
+                    .filter(|f| {
+                        if let (Some(test_file), Some(frame_file)) = (&test.file_path, &f.file_path)
+                        {
+                            frame_file.contains(test_file) || test_file.contains(frame_file)
+                        } else {
+                            true // Include if we can't determine relevance
+                        }
+                    })
+                    .cloned()
+                    .collect();
 
-                    if !relevant_frames.is_empty() {
-                        test.stack_trace = Some(relevant_frames.clone());
-                        // Add related files
-                        for frame in relevant_frames {
-                            if let Some(file_path) = frame.file_path {
-                                if !test.related_files.contains(&file_path) {
-                                    test.related_files.push(file_path);
-                                }
-                            }
+                if !relevant_frames.is_empty() {
+                    test.stack_trace = Some(relevant_frames.clone());
+                    // Add related files
+                    for frame in relevant_frames {
+                        if let Some(file_path) = frame.file_path
+                            && !test.related_files.contains(&file_path)
+                        {
+                            test.related_files.push(file_path);
                         }
                     }
                 }
             }
         }
-        // TODO: Add stack trace parsing for other languages
-        _ => {}
     }
 }

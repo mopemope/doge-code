@@ -28,7 +28,7 @@ fn test_build_render_plan_with_scroll() {
 
     let params = crate::tui::state::BuildRenderPlanParams {
         title: "Test Title",
-        status: crate::tui::state::Status::Idle,
+        status: crate::tui::state::Status::Ready,
         log: &log_lines,
         width: 80,
         main_content_height, // height -> main_content_height

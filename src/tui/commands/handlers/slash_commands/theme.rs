@@ -15,13 +15,9 @@ pub fn handle_theme(line: &str, ui: &mut TuiApp) {
             ui.theme = Theme::light();
             ui.push_log("[Theme switched to light]");
         }
-        "cyberpunk" => {
-            ui.theme = Theme::cyberpunk();
-            ui.push_log("[Theme switched to cyberpunk]");
-        }
         _ => {
             ui.push_log(format!(
-                "[Unknown theme: {}. Available themes: dark, light, cyberpunk]",
+                "[Unknown theme: {}. Available themes: dark, light]",
                 theme_name
             ));
         }
@@ -33,15 +29,6 @@ pub fn handle_theme(line: &str, ui: &mut TuiApp) {
 mod tests {
     use super::*;
     use crate::tui::state::TuiApp;
-
-    #[test]
-    fn test_handle_theme_switch_to_cyberpunk() {
-        let mut app = TuiApp::new("Test App", None, "dark").unwrap();
-        assert_eq!(app.theme.name, "dark");
-        handle_theme("/theme cyberpunk", &mut app);
-        assert_eq!(app.theme.name, "cyberpunk");
-        assert!(app.dirty);
-    }
 
     #[test]
     fn test_handle_theme_switch_to_light() {

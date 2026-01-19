@@ -101,28 +101,28 @@ The following test(s) have failed. Please analyze the failures and provide fixes
             }
 
             // Add stack trace information if available
-            if let Some(ref stack_trace) = test.stack_trace {
-                if !stack_trace.is_empty() {
-                    prompt.push_str("   Stack Trace:\n");
-                    for (j, frame) in stack_trace.iter().take(5).enumerate() {
-                        if let Some(ref file) = frame.file_path {
-                            let line_info = frame
-                                .line_number
-                                .map(|l| format!(":{}", l))
-                                .unwrap_or_default();
-                            let func_info = frame
-                                .function_name
-                                .as_ref()
-                                .map(|f| format!(" in {}", f))
-                                .unwrap_or_default();
-                            prompt.push_str(&format!(
-                                "     {}. {}{}{}\n",
-                                j + 1,
-                                file,
-                                line_info,
-                                func_info
-                            ));
-                        }
+            if let Some(ref stack_trace) = test.stack_trace
+                && !stack_trace.is_empty()
+            {
+                prompt.push_str("   Stack Trace:\n");
+                for (j, frame) in stack_trace.iter().take(5).enumerate() {
+                    if let Some(ref file) = frame.file_path {
+                        let line_info = frame
+                            .line_number
+                            .map(|l| format!(":{}", l))
+                            .unwrap_or_default();
+                        let func_info = frame
+                            .function_name
+                            .as_ref()
+                            .map(|f| format!(" in {}", f))
+                            .unwrap_or_default();
+                        prompt.push_str(&format!(
+                            "     {}. {}{}{}\n",
+                            j + 1,
+                            file,
+                            line_info,
+                            func_info
+                        ));
                     }
                 }
             }
@@ -260,10 +260,10 @@ pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Resu
             info!("Tests passed after {} iteration(s)!", iteration);
 
             // Generate regression test if enabled
-            if cfg.test_fix.auto_gen_regression_test {
-                if let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await {
-                    warn!("Failed to generate regression test: {}", e);
-                }
+            if cfg.test_fix.auto_gen_regression_test
+                && let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await
+            {
+                warn!("Failed to generate regression test: {}", e);
             }
 
             return Ok(TestFixResult {

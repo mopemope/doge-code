@@ -10,6 +10,13 @@ use super::collector::{
 // ---------------- Rust Extractor -----------------
 pub struct RustExtractor;
 
+struct RustVisitorContext<'a> {
+    src: &'a str,
+    file: &'a Path,
+    file_total_lines: usize,
+    comments: &'a [(usize, String)],
+}
+
 impl LanguageSpecificExtractor for RustExtractor {
     fn extract_symbols(
         &self,
@@ -26,16 +33,14 @@ impl LanguageSpecificExtractor for RustExtractor {
         collect_comments(root, src, &mut comments);
 
         // Second pass: extract symbols and associate keywords
-        visit_rust_node(
-            map,
-            root,
+        let ctx = RustVisitorContext {
             src,
             file,
-            None,
-            None,
             file_total_lines,
-            &comments,
-        );
+            comments: &comments,
+        };
+
+        visit_rust_node(map, root, &ctx, None, None);
         Ok(())
     }
 }
@@ -77,62 +82,53 @@ fn find_associated_comments(node: Node, comments: &[(usize, String)]) -> Vec<Str
 fn visit_rust_node(
     map: &mut RepoMap,
     node: Node,
-    src: &str,
-    file: &Path,
+    ctx: &RustVisitorContext,
     ctx_impl: Option<String>,
     current_symbol_name: Option<String>,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
 ) {
     let mut new_current_symbol = current_symbol_name.clone();
 
     match node.kind() {
         "function_item" => {
-            if let Some(name) =
-                handle_function_item(map, node, src, file, file_total_lines, comments)
-            {
+            if let Some(name) = handle_function_item(map, node, ctx) {
                 new_current_symbol = Some(name);
             }
         }
         "struct_item" => {
-            if let Some(name) = handle_struct_item(map, node, src, file, file_total_lines, comments)
-            {
+            if let Some(name) = handle_struct_item(map, node, ctx) {
                 new_current_symbol = Some(name);
             }
         }
         "enum_item" => {
-            if let Some(name) = handle_enum_item(map, node, src, file, file_total_lines, comments) {
+            if let Some(name) = handle_enum_item(map, node, ctx) {
                 new_current_symbol = Some(name);
             }
         }
         "trait_item" => {
-            if let Some(name) = handle_trait_item(map, node, src, file, file_total_lines, comments)
-            {
+            if let Some(name) = handle_trait_item(map, node, ctx) {
                 new_current_symbol = Some(name);
             }
         }
         "mod_item" => {
             // Mod item usually doesn't have type usage inside body in the same way (it has items),
             // but we propagate context.
-            if let Some(name) = handle_mod_item(map, node, src, file, file_total_lines, comments) {
+            if let Some(name) = handle_mod_item(map, node, ctx) {
                 new_current_symbol = Some(name);
             }
         }
-        "let_declaration" => {
-            handle_let_declaration(map, node, src, file, file_total_lines, comments)
-        }
-        "impl_item" => handle_impl_item(map, node, src, file, file_total_lines, comments),
+        "let_declaration" => handle_let_declaration(map, node, ctx),
+        "impl_item" => handle_impl_item(map, node, ctx),
         "call_expression" => {
             if let Some(caller) = &current_symbol_name {
-                handle_call_expression(map, node, src, file, caller, &ctx_impl);
+                handle_call_expression(map, node, ctx, caller, &ctx_impl);
             }
         }
         "type_identifier" | "primitive_type" => {
             if let Some(caller) = &current_symbol_name {
-                handle_type_usage(map, node, src, file, caller, &ctx_impl);
+                handle_type_usage(map, node, ctx, caller, &ctx_impl);
             }
         }
-        "line_comment" | "block_comment" => handle_comment(map, node, src, file, file_total_lines),
+        "line_comment" | "block_comment" => handle_comment(map, node, ctx),
         _ => {}
     }
 
@@ -143,12 +139,9 @@ fn visit_rust_node(
                 visit_rust_node(
                     map,
                     cursor.node(),
-                    src,
-                    file,
+                    ctx,
                     ctx_impl.clone(),
                     new_current_symbol.clone(),
-                    file_total_lines,
-                    comments,
                 );
                 if !cursor.goto_next_sibling() {
                     break;
@@ -162,17 +155,16 @@ fn visit_rust_node(
 fn handle_call_expression(
     map: &mut RepoMap,
     node: Node,
-    src: &str,
-    file: &Path,
+    ctx: &RustVisitorContext,
     source_symbol_name: &str,
     source_symbol_parent: &Option<String>,
 ) {
     if let Some(function_node) = node.child_by_field_name("function") {
-        let target_name = node_text(function_node, src).to_string();
+        let target_name = node_text(function_node, ctx.src).to_string();
         let relation = SymbolRelation {
             source_symbol_name: source_symbol_name.to_string(),
             source_symbol_parent: source_symbol_parent.clone(),
-            source_file_path: file.to_path_buf(),
+            source_file_path: ctx.file.to_path_buf(),
             target_symbol_name: target_name,
             relation_type: RelationType::Call,
             line: node.start_position().row + 1,
@@ -181,27 +173,20 @@ fn handle_call_expression(
     }
 }
 
-fn handle_function_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) -> Option<String> {
-    if let Some(name) = name_from(node, "name", src) {
+fn handle_function_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) -> Option<String> {
+    if let Some(name) = name_from(node, "name", ctx.src) {
         let function_lines = node.end_position().row - node.start_position().row + 1;
-        let keywords = find_associated_comments(node, comments);
+        let keywords = find_associated_comments(node, ctx.comments);
         let symbol_info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Function,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: node.start_position().row + 1,
             start_col: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_col: node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: Some(function_lines),
             keywords,
         };
@@ -215,8 +200,7 @@ fn handle_function_item(
 fn handle_type_usage(
     map: &mut RepoMap,
     node: Node,
-    src: &str,
-    file: &Path,
+    ctx: &RustVisitorContext,
     source_symbol_name: &str,
     source_symbol_parent: &Option<String>,
 ) {
@@ -234,7 +218,7 @@ fn handle_type_usage(
         }
     }
 
-    let target_name = node_text(node, src).to_string();
+    let target_name = node_text(node, ctx.src).to_string();
 
     // Avoid self-reference or common primitives if desired (keeping primitives for now for completeness, or filter them?)
     // Filtering primitives like "i32", "bool", "str" might reduce noise.
@@ -262,7 +246,7 @@ fn handle_type_usage(
     let relation = SymbolRelation {
         source_symbol_name: source_symbol_name.to_string(),
         source_symbol_parent: source_symbol_parent.clone(),
-        source_file_path: file.to_path_buf(),
+        source_file_path: ctx.file.to_path_buf(),
         target_symbol_name: target_name,
         relation_type: RelationType::Use,
         line: node.start_position().row + 1,
@@ -270,26 +254,19 @@ fn handle_type_usage(
     map.relations.push(relation);
 }
 
-fn handle_struct_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) -> Option<String> {
-    if let Some(name) = name_from(node, "name", src) {
-        let keywords = find_associated_comments(node, comments);
+fn handle_struct_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) -> Option<String> {
+    if let Some(name) = name_from(node, "name", ctx.src) {
+        let keywords = find_associated_comments(node, ctx.comments);
         let symbol_info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Struct,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: node.start_position().row + 1,
             start_col: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_col: node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: None,
             keywords,
         };
@@ -300,26 +277,19 @@ fn handle_struct_item(
     }
 }
 
-fn handle_enum_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) -> Option<String> {
-    if let Some(name) = name_from(node, "name", src) {
-        let keywords = find_associated_comments(node, comments);
+fn handle_enum_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) -> Option<String> {
+    if let Some(name) = name_from(node, "name", ctx.src) {
+        let keywords = find_associated_comments(node, ctx.comments);
         let symbol_info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Enum,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: node.start_position().row + 1,
             start_col: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_col: node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: None,
             keywords,
         };
@@ -330,26 +300,19 @@ fn handle_enum_item(
     }
 }
 
-fn handle_trait_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) -> Option<String> {
-    if let Some(name) = name_from(node, "name", src) {
-        let keywords = find_associated_comments(node, comments);
+fn handle_trait_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) -> Option<String> {
+    if let Some(name) = name_from(node, "name", ctx.src) {
+        let keywords = find_associated_comments(node, ctx.comments);
         let symbol_info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Trait,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: node.start_position().row + 1,
             start_col: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_col: node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: None,
             keywords,
         };
@@ -360,26 +323,19 @@ fn handle_trait_item(
     }
 }
 
-fn handle_mod_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) -> Option<String> {
-    if let Some(name) = name_from(node, "name", src) {
-        let keywords = find_associated_comments(node, comments);
+fn handle_mod_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) -> Option<String> {
+    if let Some(name) = name_from(node, "name", ctx.src) {
+        let keywords = find_associated_comments(node, ctx.comments);
         let symbol_info = SymbolInfo {
             name: name.clone(),
             kind: SymbolKind::Mod,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: node.start_position().row + 1,
             start_col: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_col: node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: None,
             keywords,
         };
@@ -390,34 +346,27 @@ fn handle_mod_item(
     }
 }
 
-fn handle_let_declaration(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) {
+fn handle_let_declaration(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) {
     if let Some(pattern) = node.child_by_field_name("pattern") {
         if pattern.kind() == "identifier" {
-            let name = node_text(pattern, src).to_string();
-            let keywords = find_associated_comments(node, comments);
+            let name = node_text(pattern, ctx.src).to_string();
+            let keywords = find_associated_comments(node, ctx.comments);
             let symbol_info = SymbolInfo {
                 name,
                 kind: SymbolKind::Variable,
-                file: file.to_path_buf(),
+                file: ctx.file.to_path_buf(),
                 start_line: pattern.start_position().row + 1,
                 start_col: pattern.start_position().column + 1,
                 end_line: pattern.end_position().row + 1,
                 end_col: pattern.end_position().column + 1,
                 parent: None,
-                file_total_lines,
+                file_total_lines: ctx.file_total_lines,
                 function_lines: None,
                 keywords,
             };
             map.symbols.push(symbol_info);
         } else if pattern.kind() == "tuple_pattern" || pattern.kind() == "struct_pattern" {
-            extract_identifiers_from_pattern(map, pattern, src, file, file_total_lines, comments);
+            extract_identifiers_from_pattern(map, pattern, ctx);
         }
     }
 }
@@ -425,24 +374,21 @@ fn handle_let_declaration(
 fn extract_identifiers_from_pattern(
     map: &mut RepoMap,
     pattern_node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
+    ctx: &RustVisitorContext,
 ) {
     if pattern_node.kind() == "identifier" {
-        let name = node_text(pattern_node, src).to_string();
-        let keywords = find_associated_comments(pattern_node, comments);
+        let name = node_text(pattern_node, ctx.src).to_string();
+        let keywords = find_associated_comments(pattern_node, ctx.comments);
         let symbol_info = SymbolInfo {
             name,
             kind: SymbolKind::Variable,
-            file: file.to_path_buf(),
+            file: ctx.file.to_path_buf(),
             start_line: pattern_node.start_position().row + 1,
             start_col: pattern_node.start_position().column + 1,
             end_line: pattern_node.end_position().row + 1,
             end_col: pattern_node.end_position().column + 1,
             parent: None,
-            file_total_lines,
+            file_total_lines: ctx.file_total_lines,
             function_lines: None,
             keywords,
         };
@@ -451,14 +397,7 @@ fn extract_identifiers_from_pattern(
         let mut c = pattern_node.walk();
         if c.goto_first_child() {
             loop {
-                extract_identifiers_from_pattern(
-                    map,
-                    c.node(),
-                    src,
-                    file,
-                    file_total_lines,
-                    comments,
-                );
+                extract_identifiers_from_pattern(map, c.node(), ctx);
                 if !c.goto_next_sibling() {
                     break;
                 }
@@ -468,79 +407,59 @@ fn extract_identifiers_from_pattern(
     }
 }
 
-fn handle_impl_item(
-    map: &mut RepoMap,
-    node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
-) {
+fn handle_impl_item(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) {
     let mut parent_name = None;
     if let Some(ty) = node.child_by_field_name("type") {
-        parent_name = Some(node_text(ty, src).to_string());
+        parent_name = Some(node_text(ty, ctx.src).to_string());
     }
     if let Some(tr) = node.child_by_field_name("trait") {
-        parent_name = Some(node_text(tr, src).to_string());
+        parent_name = Some(node_text(tr, ctx.src).to_string());
     }
     let impl_name = parent_name.clone().unwrap_or_else(|| "impl".to_string());
-    let keywords = find_associated_comments(node, comments);
+    let keywords = find_associated_comments(node, ctx.comments);
     let symbol_info = SymbolInfo {
         name: impl_name.clone(),
         kind: SymbolKind::Impl,
-        file: file.to_path_buf(),
+        file: ctx.file.to_path_buf(),
         start_line: node.start_position().row + 1,
         start_col: node.start_position().column + 1,
         end_line: node.end_position().row + 1,
         end_col: node.end_position().column + 1,
         parent: None,
-        file_total_lines,
+        file_total_lines: ctx.file_total_lines,
         function_lines: None,
         keywords,
     };
     map.symbols.push(symbol_info);
-    walk_impl_items(
-        map,
-        &parent_name,
-        &impl_name,
-        node,
-        src,
-        file,
-        file_total_lines,
-        comments,
-    );
+    walk_impl_items(map, &parent_name, &impl_name, node, ctx);
 }
 
-fn handle_comment(map: &mut RepoMap, node: Node, src: &str, file: &Path, file_total_lines: usize) {
-    let name = node_text(node, src).to_string();
+fn handle_comment(map: &mut RepoMap, node: Node, ctx: &RustVisitorContext) {
+    let name = node_text(node, ctx.src).to_string();
     // For comments, we extract keywords directly from the comment text
     let keywords = extract_keywords_from_comment(&name);
     let symbol_info = SymbolInfo {
         name,
         kind: SymbolKind::Comment,
-        file: file.to_path_buf(),
+        file: ctx.file.to_path_buf(),
         start_line: node.start_position().row + 1,
         start_col: node.start_position().column + 1,
         end_line: node.end_position().row + 1,
         end_col: node.end_position().column + 1,
         parent: None,
-        file_total_lines,
+        file_total_lines: ctx.file_total_lines,
         function_lines: None,
         keywords,
     };
     map.symbols.push(symbol_info);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_impl_items(
     map: &mut RepoMap,
     parent_name: &Option<String>,
     _impl_name: &str,
     node: Node,
-    src: &str,
-    file: &Path,
-    file_total_lines: usize,
-    comments: &[(usize, String)],
+    ctx: &RustVisitorContext,
 ) {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -568,43 +487,42 @@ fn walk_impl_items(
                         pc.goto_parent();
                     }
                 }
-                if let Some(name) = name_from(child, "name", src) {
-                    let keywords = find_associated_comments(child, comments);
+                if let Some(name) = name_from(child, "name", ctx.src) {
+                    let keywords = find_associated_comments(child, ctx.comments);
 
-                    let symbol_info_obj;
-                    if has_receiver {
-                        symbol_info_obj = SymbolInfo {
+                    let symbol_info_obj = if has_receiver {
+                        SymbolInfo {
                             name: name.clone(),
                             kind: SymbolKind::Method,
-                            file: file.to_path_buf(),
+                            file: ctx.file.to_path_buf(),
                             start_line: child.start_position().row + 1,
                             start_col: child.start_position().column + 1,
                             end_line: child.end_position().row + 1,
                             end_col: child.end_position().column + 1,
                             parent: parent_name.clone(),
-                            file_total_lines,
+                            file_total_lines: ctx.file_total_lines,
                             function_lines: Some(
                                 child.end_position().row - child.start_position().row + 1,
                             ),
                             keywords,
-                        };
+                        }
                     } else {
-                        symbol_info_obj = SymbolInfo {
+                        SymbolInfo {
                             name: name.clone(),
                             kind: SymbolKind::AssocFn,
-                            file: file.to_path_buf(),
+                            file: ctx.file.to_path_buf(),
                             start_line: child.start_position().row + 1,
                             start_col: child.start_position().column + 1,
                             end_line: child.end_position().row + 1,
                             end_col: child.end_position().column + 1,
                             parent: parent_name.clone(),
-                            file_total_lines,
+                            file_total_lines: ctx.file_total_lines,
                             function_lines: Some(
                                 child.end_position().row - child.start_position().row + 1,
                             ),
                             keywords,
-                        };
-                    }
+                        }
+                    };
                     map.symbols.push(symbol_info_obj);
 
                     // Recurse into body to find calls
@@ -612,28 +530,16 @@ fn walk_impl_items(
                         visit_rust_node(
                             map,
                             body,
-                            src,
-                            file,
+                            ctx,
                             parent_name.clone(), // This is the impl name (Context ID)
                             Some(name),          // Current function name
-                            file_total_lines,
-                            comments,
                         );
                     }
                 }
             } else if child.kind() == "line_comment" || child.kind() == "block_comment" {
-                handle_comment(map, child, src, file, file_total_lines);
+                handle_comment(map, child, ctx);
             } else {
-                walk_impl_items(
-                    map,
-                    parent_name,
-                    _impl_name,
-                    child,
-                    src,
-                    file,
-                    file_total_lines,
-                    comments,
-                );
+                walk_impl_items(map, parent_name, _impl_name, child, ctx);
             }
             if !cursor.goto_next_sibling() {
                 break;

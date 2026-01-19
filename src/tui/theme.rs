@@ -58,36 +58,4 @@ impl Theme {
             border_type: ratatui::widgets::BorderType::Plain,
         }
     }
-
-    pub fn cyberpunk() -> Self {
-        // Dark blue/purple base with neon accents
-        let bg_color = Color::Rgb(10, 10, 30); // Deep space blue
-        let neon_cyan = Color::Rgb(0, 255, 255); // Electric cyan
-        let neon_pink = Color::Rgb(255, 0, 128); // Hot pink
-        let neon_green = Color::Rgb(57, 255, 20); // Neon green
-        let neon_yellow = Color::Rgb(255, 255, 0); // Electric yellow
-        let neon_purple = Color::Rgb(191, 0, 255); // Vivid purple
-
-        Self {
-            name: "cyberpunk".to_string(),
-            background_style: Style::default().bg(bg_color),
-            title_style: Style::default()
-                .fg(neon_cyan)
-                .bg(bg_color)
-                .add_modifier(Modifier::BOLD),
-            footer_style: Style::default().fg(neon_cyan).bg(bg_color),
-            log_style: Style::default().fg(Color::Rgb(200, 200, 220)).bg(bg_color),
-            input_style: Style::default().fg(neon_green).bg(bg_color),
-            shell_input_style: Style::default().fg(neon_pink).bg(bg_color),
-            llm_response_style: Style::default().fg(neon_cyan).bg(bg_color),
-            code_block_style: Style::default().fg(neon_yellow).bg(Color::Rgb(20, 20, 40)),
-            completion_style: Style::default().fg(neon_purple).bg(bg_color),
-            completion_selected_style: Style::default()
-                .bg(neon_pink)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-            border_style: Style::default().fg(neon_pink),
-            border_type: ratatui::widgets::BorderType::Thick,
-        }
-    }
 }

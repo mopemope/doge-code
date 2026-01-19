@@ -4,7 +4,7 @@ pub mod service;
 
 #[cfg(test)]
 mod tests {
-    use crate::config::McpServerConfig;
+    use crate::config::{AppConfig, McpServerConfig};
     use crate::mcp::{server, service};
     use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
     use std::sync::Arc;
@@ -194,7 +194,7 @@ mod tests {
         let result = service.list_resources_impl().await;
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.resources.len(), 2);
+        assert_eq!(result.resources.len(), 3);
         assert!(
             result
                 .resources
@@ -211,11 +211,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_resource_impl_summary_empty() {
-        let service = service::DogeMcpService::default();
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let mut config = AppConfig::default();
+        config.project_root = temp_dir.path().to_path_buf();
+        let service = service::DogeMcpService::new(config);
+
         let result = service
             .read_resource_impl("doge://repomap/summary".to_string())
             .await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -230,7 +234,7 @@ mod tests {
 
 #[cfg(test)]
 mod client_tests {
-    use crate::config::McpServerConfig;
+    use crate::config::{AppConfig, McpServerConfig};
 
     #[tokio::test]
     async fn test_mcp_client_creation_with_invalid_transport() {

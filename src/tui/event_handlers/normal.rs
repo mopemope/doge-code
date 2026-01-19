@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders};
 use tracing::debug;
 use tui_textarea::{CursorMove, Input, TextArea};
 
-use crate::tui::state::{CompletionType, InputMode, TuiApp, save_input_history};
+use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 
@@ -106,20 +106,6 @@ pub fn handle_normal_mode_key(
                 app.dirty = true;
                 app.spinner_state = 0;
             }
-        }
-
-        // Shell mode switch
-        KeyEvent {
-            code: KeyCode::Char('!'),
-            ..
-        } if app.textarea.is_empty() => {
-            app.input_mode = InputMode::Shell;
-            app.textarea.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Input (Shell Mode - Press ESC to exit)"),
-            );
-            app.dirty = true;
         }
 
         KeyEvent {

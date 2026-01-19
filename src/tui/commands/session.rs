@@ -16,8 +16,13 @@ impl TuiExecutor {
                     if sessions.is_empty() {
                         ui.push_log("No sessions found.");
                     } else {
-                        // Enter session list mode with the sessions
-                        ui.enter_session_list_mode(sessions);
+                        // Print sessions to log
+                        let mut output = String::from("Sessions:\n");
+                        for session in sessions {
+                            output
+                                .push_str(&format!("- {} ({})\n", session.id, session.created_at));
+                        }
+                        ui.push_log(output);
                     }
                 }
                 Err(e) => ui.push_log(format!("Failed to list sessions: {}", e)),
@@ -97,39 +102,8 @@ impl TuiExecutor {
                 match self.session_manager.lock().unwrap().delete_session(id) {
                     Ok(()) => {
                         ui.push_log(format!("Deleted session: {}", id));
-                        // If we're in session list mode, refresh the list
-                        if ui.input_mode == crate::tui::state::InputMode::SessionList {
-                            match self.session_manager.lock().unwrap().list_sessions() {
-                                Ok(sessions) => {
-                                    if sessions.is_empty() {
-                                        // Exit session list mode if no sessions left
-                                        ui.input_mode = crate::tui::state::InputMode::Normal;
-                                        ui.session_list_state = None;
-                                        ui.push_log("No more sessions available.");
-                                    } else {
-                                        // Update the session list
-                                        if let Some(ref mut session_list_state) =
-                                            ui.session_list_state
-                                        {
-                                            session_list_state.sessions = sessions;
-                                            // Make sure selected index is within bounds
-                                            if session_list_state.selected_index
-                                                >= session_list_state.sessions.len()
-                                            {
-                                                session_list_state.selected_index =
-                                                    session_list_state
-                                                        .sessions
-                                                        .len()
-                                                        .saturating_sub(1);
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    ui.push_log(format!("Failed to refresh session list: {}", e))
-                                }
-                            }
-                        }
+                        // If we're in session list mode... (SessionList mode removed)
+                        // Refresh logic removed as list command prints to log now.
                         self.publish_plan_list();
                     }
                     Err(e) => ui.push_log(format!("Failed to delete session: {}", e)),

@@ -1,7 +1,4 @@
-use crate::{
-    config::IGNORE_FILE, tui::diff_review::DiffReviewState, tui::shell::ShellSession,
-    tui::theme::Theme,
-};
+use crate::{config::IGNORE_FILE, tui::shell::ShellSession, tui::theme::Theme};
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -57,23 +54,16 @@ pub enum CompletionType {
 pub enum InputMode {
     #[default]
     Normal,
-    Shell,
-    SessionList,   // Session list selection mode
-    HistorySearch, // History search mode (Ctrl+R)
-    FileSearch,    // File search mode (Ctrl+P)
+    HistorySearch, // Ctrl+R
+    FileSearch,    // Ctrl+P
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
-    Idle,
-    Preparing,           // Request preparation
-    Sending,             // Request sending
-    Waiting,             // Response waiting
-    Streaming,           // Streaming reception
-    Processing,          // Tool execution
-    ShellCommandRunning, // Shell command execution
-    Cancelled,
-    Done,
+    #[default]
+    Ready,
+    Thinking,
+    Running,
     Error,
 }
 
@@ -227,7 +217,6 @@ pub struct TuiApp {
     // remaining context tokens (calculated)
     pub remaining_context_tokens: Option<u32>,
     pub pending_instructions: VecDeque<String>,
-    pub diff_review: Option<DiffReviewState>,
     // plan list
     pub plan_list: Vec<PlanItem>,
     /// If true, the plan list received from `plan_write` that contained only
@@ -403,7 +392,6 @@ impl TuiApp {
 
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
-            "cyberpunk" => Theme::cyberpunk(),
             _ => Theme::dark(),
         };
 
@@ -422,7 +410,7 @@ impl TuiApp {
             inbox_rx: Some(rx),
             inbox_tx: Some(tx),
             max_log_lines: 10000,
-            status: Status::Idle,
+            status: Status::Ready,
             model,
             input_history,
             history_index,
@@ -453,7 +441,6 @@ impl TuiApp {
             // remaining context tokens starts as None (calculated later)
             remaining_context_tokens: None,
             pending_instructions: VecDeque::new(),
-            diff_review: None,
             // plan list
             plan_list: Vec::new(),
             hide_plan_on_next_instruction: false,
@@ -690,16 +677,6 @@ impl TuiApp {
         self.log_heights.clear();
         self.last_llm_response_content = None;
         self.scroll_state = ScrollState::default();
-    }
-
-    /// Enter session list mode with the provided sessions
-    pub fn enter_session_list_mode(&mut self, sessions: Vec<crate::session::SessionMeta>) {
-        self.session_list_state = Some(SessionListState {
-            sessions,
-            selected_index: 0,
-        });
-        self.input_mode = InputMode::SessionList;
-        self.dirty = true;
     }
 
     /// Enter history search mode

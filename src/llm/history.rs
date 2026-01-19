@@ -97,9 +97,10 @@ impl ChatHistory {
         self.messages = messages;
         // Check if system prompt is present in the beginning
         if let Some(first) = self.messages.first()
-            && first.role == "system" {
-                self.system_added = true;
-            }
+            && first.role == "system"
+        {
+            self.system_added = true;
+        }
         self.smart_trim();
     }
 

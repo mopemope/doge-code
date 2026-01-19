@@ -7,7 +7,7 @@ use tracing::info;
 use crate::tui::commands::core::TuiExecutor;
 
 impl TuiExecutor {
-    pub fn handle_dispatch_rest(&mut self, line: &str, ui: &mut TuiApp) {
+    pub fn handle_dispatch_rest(&mut self, line: &str, ui: &mut TuiApp, skip_plan: bool) {
         if let Some(rest) = line.strip_prefix("/session ") {
             match self.handle_session_command(rest.trim(), ui) {
                 Ok(_) => {} // No-op on success
@@ -104,7 +104,9 @@ impl TuiExecutor {
                         });
                     }
 
-                    self.enforce_plan_context(&mut msgs, &content, Some(ui));
+                    if !skip_plan {
+                        self.enforce_plan_context(&mut msgs, &content, Some(ui));
+                    }
 
                     msgs.push(crate::llm::ChatMessage {
                         role: "user".into(),

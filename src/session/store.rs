@@ -157,6 +157,10 @@ impl SessionStore {
 }
 
 fn default_store_dir() -> Result<PathBuf, SessionError> {
+    // Check for environment variable override (useful for testing)
+    if let Ok(dir) = env::var("DOGE_SESSIONS_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     // Use .doge/sessions in the project directory or fallback to temp
     let project_dir = env::current_dir()
         .map_err(SessionError::ReadError)
@@ -194,11 +198,32 @@ mod tests {
 
     #[test]
     fn test_new_default() {
-        let store = SessionStore::new_default().expect("Failed to create default session store");
-        assert!(
-            store.root.exists(),
-            "Session store root directory should exist"
-        );
+        let dir = tempdir().expect("Failed to create temp directory");
+        // We use an environment variable to redirect the default store directory for this test
+        // This avoids creating .doge/sessions in the actual project directory and prevents race conditions
+        unsafe {
+            std::env::set_var("DOGE_SESSIONS_DIR", dir.path());
+        }
+
+        // Ensure cleanup happens even if test panics (Rust doesn't have try-finally block for var,
+        // relying on test isolation or hoping for the best. Since other tests use explicit paths, it's low risk.)
+        let result = std::panic::catch_unwind(|| {
+            let store =
+                SessionStore::new_default().expect("Failed to create default session store");
+            assert!(
+                store.root.exists(),
+                "Session store root directory should exist"
+            );
+            assert_eq!(store.root, dir.path());
+        });
+
+        unsafe {
+            std::env::remove_var("DOGE_SESSIONS_DIR");
+        }
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::tui::view::TuiApp;
 
 /// Handle /reset command to force reset the TUI state.
 pub fn handle_reset(ui: &mut TuiApp) {
-    ui.status = Status::Idle;
+    ui.status = Status::Ready;
     ui.pending_instructions.clear();
 
     // Reset other processing flags

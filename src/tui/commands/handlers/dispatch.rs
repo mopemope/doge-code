@@ -37,6 +37,34 @@ impl CommandHandler for TuiExecutor {
             return;
         }
 
+        // Integrated Shell Command Handling:
+        // Execute shell commands directly if prefixed with '!'
+        if let Some(cmd) = line.strip_prefix('!') {
+            if let Some(session) = ui.shell_session.as_mut() {
+                let cmd = cmd.trim();
+                if let Err(e) = session.write(&format!("{}\n", cmd)) {
+                    ui.push_log(format!("Failed to write to shell: {}", e));
+                }
+                // Set status to Running to indicate shell activity
+                ui.status = crate::tui::state::Status::Running;
+            } else {
+                ui.push_log("[ERROR] Shell session is not available.");
+            }
+            return;
+        }
+
+        // Quick Execute Command:
+        // Skip implementation plan enforcement for immediate execution
+        if let Some(rest) = line.strip_prefix("/quick") {
+            let args = rest.trim();
+            if args.is_empty() {
+                ui.push_log("Usage: /quick <instruction>");
+                return;
+            }
+            self.handle_dispatch_rest(args, ui, true);
+            return;
+        }
+
         match line {
             "/help" => handle_help(self, ui),
             "/tools" => handle_tools(self, ui),
@@ -86,7 +114,8 @@ impl CommandHandler for TuiExecutor {
             }
             _ => {
                 // Rest of content moved to exec.rs
-                self.handle_dispatch_rest(line, ui);
+                // Default behavior enforces plan context (skip_plan = false)
+                self.handle_dispatch_rest(line, ui, false);
             }
         }
     }

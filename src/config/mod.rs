@@ -151,7 +151,7 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             watch_config: WatchConfig::default(), // Added default watch config
             enable_stream_tools: false,
-            theme: "cyberpunk".to_string(),
+            theme: "dark".to_string(),
             project_instructions_file: None,
             no_repomap: false,
             resume: false,
@@ -561,7 +561,7 @@ impl AppConfig {
         let theme = project_cfg
             .theme
             .or(file_cfg.theme)
-            .unwrap_or_else(|| "cyberpunk".to_string());
+            .unwrap_or_else(|| "dark".to_string());
 
         // Add project_instructions_file setting (CLI args take precedence)
         let project_instructions_file = cli
