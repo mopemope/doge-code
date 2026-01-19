@@ -551,6 +551,65 @@ impl Executor {
         Ok(())
     }
 
+    /// Sends an instruction to the LLM and returns the response content.
+    /// Does NOT print to stdout.
+    pub async fn ask(&mut self, instruction: &str) -> Result<String> {
+        if self.client.is_none() {
+            return Err(anyhow::anyhow!("OPENAI_API_KEY not set"));
+        }
+
+        let mut msgs = Vec::new();
+        let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
+
+        {
+            let history_guard = self.conversation_history.lock().await;
+            msgs.extend(history_guard.build_messages());
+        }
+
+        msgs.push(llm::types::ChatMessage {
+            role: "system".into(),
+            content: Some(sys_prompt),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+
+        msgs.push(llm::types::ChatMessage {
+            role: "user".into(),
+            content: Some(instruction.to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+
+        {
+            let mut history_guard = self.conversation_history.lock().await;
+            history_guard.append_user(instruction);
+        }
+
+        let (updated_messages, final_msg) = llm::run_agent_loop(
+            self.client.as_ref().unwrap(),
+            &self.cfg.model,
+            &self.tools,
+            msgs,
+            None,
+            None,
+            &self.cfg,
+            None,
+        )
+        .await?;
+
+        {
+            let mut history_guard = self.conversation_history.lock().await;
+            let existing_count = history_guard.build_messages().len();
+            if updated_messages.len() > existing_count {
+                for msg in updated_messages.iter().skip(existing_count) {
+                    history_guard.append_message(msg.clone());
+                }
+            }
+        }
+
+        Ok(final_msg.content)
+    }
+
     /// Add a hook to be executed after each instruction
     pub fn add_hook(&mut self, hook: Box<dyn crate::hooks::InstructionHook>) {
         self.hook_manager.add_hook(hook);

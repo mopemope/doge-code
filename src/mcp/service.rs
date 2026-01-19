@@ -1,6 +1,7 @@
 use crate::analysis::RepoMap;
 use crate::analysis::cache::ensure_repomap_ready;
 use crate::config::AppConfig;
+use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::tools::list::{FsListMode, FsListOptions};
 use crate::tools::read::{FsReadMode, FsReadOptions};
 use crate::tools::read_many::FsReadManyOptions;
@@ -14,6 +15,7 @@ use rmcp::{
     service::RequestContext,
     tool, tool_handler, tool_router,
 };
+use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::str::FromStr;
@@ -92,6 +94,12 @@ pub struct FsListParams {
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FindFileParams {
     pub filename: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct HandshakeParams {
+    pub agent_id: String,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -183,6 +191,21 @@ impl DogeMcpService {
                     },
                     None,
                 ),
+                Resource::new(
+                    RawResource {
+                        uri: "agent://card".to_string(),
+                        name: "Agent Card".to_string(),
+                        description: Some(
+                            "The Agent Card describing identity and capabilities (A2A Protocol)"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                        icons: None,
+                        size: None,
+                        title: None,
+                    },
+                    None,
+                ),
             ],
             next_cursor: None,
         })
@@ -225,6 +248,17 @@ impl DogeMcpService {
                 "status": if ready { "ready" } else { "warming" }
             });
             let content = serde_json::to_string_pretty(&summary).unwrap();
+            return Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(content, uri)],
+            });
+        }
+
+        if uri == "agent://card" {
+            let tools = self.get_tool_defs();
+            let card = crate::a2a::generate_agent_card(&self.config, tools);
+            let content = serde_json::to_string_pretty(&card).map_err(|e| {
+                McpError::internal_error(format!("Serialization error: {}", e), None)
+            })?;
             return Ok(ReadResourceResult {
                 contents: vec![ResourceContents::text(content, uri)],
             });
@@ -474,6 +508,95 @@ impl DogeMcpService {
             Err(e) => Err(self.format_error("Failed to find files ", Some(json!(e.to_string())))),
         }
     }
+
+    #[tool(description = "Exchange agent information for collaboration (A2A Protocol) ")]
+    pub fn handshake(
+        &self,
+        Parameters(params): Parameters<HandshakeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tracing::info!("A2A Handshake received from agent: {}", params.agent_id);
+
+        let tools = self.get_tool_defs();
+        let card = crate::a2a::generate_agent_card(&self.config, tools);
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&card).unwrap_or_default(),
+        )]))
+    }
+
+    fn get_tool_defs(&self) -> Vec<ToolDef> {
+        vec![
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "search_repomap".to_string(),
+                    description: "Search the repository map for symbols and code structures"
+                        .to_string(),
+                    parameters: serde_json::to_value(schema_for!(SearchRepomapParams))
+                        .unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "fs_read".to_string(),
+                    description: "Read the content of a text file".to_string(),
+                    parameters: serde_json::to_value(schema_for!(FsReadParams)).unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "fs_read_many_files".to_string(),
+                    description: "Read the content of multiple files".to_string(),
+                    parameters: serde_json::to_value(schema_for!(FsReadManyFilesParams))
+                        .unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "search_text".to_string(),
+                    description: "Search for text within files using ripgrep".to_string(),
+                    parameters: serde_json::to_value(schema_for!(SearchTextParams))
+                        .unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "fs_list".to_string(),
+                    description: "List files and directories within a path".to_string(),
+                    parameters: serde_json::to_value(schema_for!(FsListParams)).unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "find_file".to_string(),
+                    description: "Find files by name or pattern".to_string(),
+                    parameters: serde_json::to_value(schema_for!(FindFileParams))
+                        .unwrap_or_default(),
+                    strict: None,
+                },
+            },
+            ToolDef {
+                kind: "function".to_string(),
+                function: ToolFunctionDef {
+                    name: "handshake".to_string(),
+                    description: "Exchange agent information for collaboration".to_string(),
+                    parameters: serde_json::to_value(schema_for!(HandshakeParams))
+                        .unwrap_or_default(),
+                    strict: None,
+                },
+            },
+        ]
+    }
 }
 
 #[tool_handler]
@@ -491,7 +614,8 @@ impl ServerHandler for DogeMcpService {
                  Resources available: \
                  - doge://repomap/summary: Overview of the codebase. \
                  - doge://files/{path}: Read file content. \
-                 - doge://symbols/{path}: Get symbols for a file."
+                 - doge://symbols/{path}: Get symbols for a file. \
+                 - agent://card: Agent identity and capabilities (A2A Protocol)."
                     .to_string(),
             ),
         }

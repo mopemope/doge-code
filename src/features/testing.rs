@@ -6,6 +6,15 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::debug;
 
+/// Represents a single frame in a stack trace
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackFrame {
+    pub function_name: Option<String>,
+    pub file_path: Option<String>,
+    pub line_number: Option<u32>,
+    pub column: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedTest {
     pub name: String,
@@ -14,6 +23,10 @@ pub struct FailedTest {
     pub message: String,
     pub expected: Option<String>,
     pub actual: Option<String>,
+    /// Stack trace frames for this failure
+    pub stack_trace: Option<Vec<StackFrame>>,
+    /// Related source files that may be relevant to this failure
+    pub related_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +318,8 @@ fn parse_rust_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                     message: current_message.clone(),
                     expected: None,
                     actual: None,
+                    stack_trace: None,
+                    related_files: Vec::new(),
                 });
                 current_message.clear();
             }
@@ -332,6 +347,8 @@ fn parse_rust_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
             message: current_message,
             expected: None,
             actual: None,
+            stack_trace: None,
+            related_files: Vec::new(),
         });
     }
 
@@ -363,6 +380,8 @@ fn parse_go_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                     message: current_message.clone(),
                     expected: None,
                     actual: None,
+                    stack_trace: None,
+                    related_files: Vec::new(),
                 });
                 current_message.clear();
             }
@@ -385,6 +404,8 @@ fn parse_go_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
             message: current_message,
             expected: None,
             actual: None,
+            stack_trace: None,
+            related_files: Vec::new(),
         });
     }
 
@@ -420,6 +441,8 @@ fn parse_javascript_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                 message: String::new(),
                 expected: None,
                 actual: None,
+                stack_trace: None,
+                related_files: Vec::new(),
             });
         }
     }
@@ -450,9 +473,135 @@ fn parse_pytest_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                 message,
                 expected: None,
                 actual: None,
+                stack_trace: None,
+                related_files: Vec::new(),
             });
         }
     }
 
     failed_tests
+}
+
+/// Parse Rust stack trace from panic output
+pub fn parse_rust_stack_trace(output: &str) -> Vec<StackFrame> {
+    let mut frames = Vec::new();
+
+    // Pattern: at path/to/file.rs:line:col
+    let re_frame = Regex::new(r"at\s+(.+\.rs):(\d+):(\d+)").unwrap();
+    // Pattern for function names in backtrace
+    let re_func = Regex::new(r"^\s*\d+:\s+(?:0x[a-fA-F0-9]+\s+-\s+)?(.+)$").unwrap();
+
+    let mut current_func: Option<String> = None;
+
+    for line in output.lines() {
+        // Check for function name
+        if let Some(captures) = re_func.captures(line) {
+            let func_name = captures.get(1).unwrap().as_str().to_string();
+            // Filter out std library frames
+            if !func_name.contains("std::")
+                && !func_name.contains("core::")
+                && !func_name.contains("panic")
+                && !func_name.contains("test::")
+            {
+                current_func = Some(func_name);
+            }
+        }
+
+        // Check for file location
+        if let Some(captures) = re_frame.captures(line) {
+            let file_path = captures.get(1).unwrap().as_str().to_string();
+            // Skip standard library and test harness files
+            if !file_path.contains("/rustc/")
+                && !file_path.contains(".cargo/registry")
+                && !file_path.starts_with("/usr/")
+            {
+                frames.push(StackFrame {
+                    function_name: current_func.take(),
+                    file_path: Some(file_path),
+                    line_number: captures.get(2).unwrap().as_str().parse().ok(),
+                    column: captures.get(3).unwrap().as_str().parse().ok(),
+                });
+            }
+        }
+    }
+
+    frames
+}
+
+/// Extract related source files from failed tests
+/// This collects unique file paths that should be included in the LLM context
+pub fn extract_related_files(failed_tests: &[FailedTest]) -> Vec<String> {
+    let mut files = std::collections::HashSet::new();
+
+    for test in failed_tests {
+        // Add the test file itself
+        if let Some(ref file_path) = test.file_path {
+            files.insert(file_path.clone());
+        }
+
+        // Add files from stack trace
+        if let Some(ref stack_trace) = test.stack_trace {
+            for frame in stack_trace {
+                if let Some(ref file_path) = frame.file_path {
+                    files.insert(file_path.clone());
+                }
+            }
+        }
+
+        // Add explicitly marked related files
+        for file in &test.related_files {
+            files.insert(file.clone());
+        }
+    }
+
+    files.into_iter().collect()
+}
+
+/// Enhance failed tests with stack trace information
+pub fn enhance_failed_tests_with_stack_trace(
+    tests: &mut [FailedTest],
+    stdout: &str,
+    stderr: &str,
+    language: &str,
+) {
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    match language {
+        "rust" => {
+            let frames = parse_rust_stack_trace(&combined);
+            if !frames.is_empty() {
+                // Distribute stack frames to relevant tests
+                for test in tests.iter_mut() {
+                    // Find frames that match this test's file location
+                    let relevant_frames: Vec<StackFrame> = frames
+                        .iter()
+                        .filter(|f| {
+                            if let (Some(test_file), Some(frame_file)) =
+                                (&test.file_path, &f.file_path)
+                            {
+                                frame_file.contains(test_file) || test_file.contains(frame_file)
+                            } else {
+                                true // Include if we can't determine relevance
+                            }
+                        })
+                        .cloned()
+                        .collect();
+
+                    if !relevant_frames.is_empty() {
+                        test.stack_trace = Some(relevant_frames.clone());
+                        // Add related files
+                        for frame in relevant_frames {
+                            if let Some(file_path) = frame.file_path {
+                                if !test.related_files.contains(&file_path) {
+                                    test.related_files.push(file_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // TODO: Add stack trace parsing for other languages
+        _ => {}
+    }
 }

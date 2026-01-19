@@ -8,6 +8,7 @@
 
 use crate::config::AppConfig;
 use crate::exec::Executor;
+use crate::features::test_gen;
 use crate::features::testing::{self, TestResult};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -98,6 +99,51 @@ The following test(s) have failed. Please analyze the failures and provide fixes
             if let Some(actual) = &test.actual {
                 prompt.push_str(&format!("   Actual: {}\n", actual));
             }
+
+            // Add stack trace information if available
+            if let Some(ref stack_trace) = test.stack_trace {
+                if !stack_trace.is_empty() {
+                    prompt.push_str("   Stack Trace:\n");
+                    for (j, frame) in stack_trace.iter().take(5).enumerate() {
+                        if let Some(ref file) = frame.file_path {
+                            let line_info = frame
+                                .line_number
+                                .map(|l| format!(":{}", l))
+                                .unwrap_or_default();
+                            let func_info = frame
+                                .function_name
+                                .as_ref()
+                                .map(|f| format!(" in {}", f))
+                                .unwrap_or_default();
+                            prompt.push_str(&format!(
+                                "     {}. {}{}{}\n",
+                                j + 1,
+                                file,
+                                line_info,
+                                func_info
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Add related files
+            if !test.related_files.is_empty() {
+                prompt.push_str("   Related Files:\n");
+                for file in &test.related_files {
+                    prompt.push_str(&format!("     - {}\n", file));
+                }
+            }
+        }
+
+        // Collect all related files for explicit mention
+        let related_files = testing::extract_related_files(&test_result.failed_tests);
+        if !related_files.is_empty() {
+            prompt.push_str("\n## Files to Review\n");
+            prompt.push_str("The following files are likely relevant to the failures. Read them using `fs_read` for context:\n");
+            for file in &related_files {
+                prompt.push_str(&format!("- `{}`\n", file));
+            }
         }
     }
 
@@ -106,8 +152,8 @@ The following test(s) have failed. Please analyze the failures and provide fixes
 ## Instructions
 
 1. Analyze the test failures above carefully
-2. Identify the root cause of each failure
-3. Read the relevant source files if needed using `fs_read`
+2. **Read the relevant source files listed above** using `fs_read` to understand the context
+3. Identify the root cause of each failure
 4. Apply fixes using `edit` or `apply_patch` tools
 5. Focus on fixing the actual code bugs, NOT the tests (unless tests are incorrect)
 
@@ -161,6 +207,13 @@ pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Resu
         testing::run_test_command(project_root, &test_cmd.command, &test_cmd.args, timeout_ms)
             .await;
     last_result.failed_tests = testing::parse_test_output(&last_result, &language);
+    // Enhance failed tests with stack trace information
+    testing::enhance_failed_tests_with_stack_trace(
+        &mut last_result.failed_tests,
+        &last_result.stdout,
+        &last_result.stderr,
+        &language,
+    );
 
     // Initial test run
     if last_result.success {
@@ -195,9 +248,24 @@ pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Resu
             testing::run_test_command(project_root, &test_cmd.command, &test_cmd.args, timeout_ms)
                 .await;
         last_result.failed_tests = testing::parse_test_output(&last_result, &language);
+        // Enhance failed tests with stack trace information
+        testing::enhance_failed_tests_with_stack_trace(
+            &mut last_result.failed_tests,
+            &last_result.stdout,
+            &last_result.stderr,
+            &language,
+        );
 
         if last_result.success {
             info!("Tests passed after {} iteration(s)!", iteration);
+
+            // Generate regression test if enabled
+            if cfg.test_fix.auto_gen_regression_test {
+                if let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await {
+                    warn!("Failed to generate regression test: {}", e);
+                }
+            }
+
             return Ok(TestFixResult {
                 success: true,
                 iterations: iteration,

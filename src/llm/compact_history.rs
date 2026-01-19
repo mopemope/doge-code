@@ -21,14 +21,35 @@ Structure:
 Single sentence objective.
 
 # Key Info
-Critical facts, commands, or constraints (e.g., "Tests: `npm test`").
+Critical facts, commands, or constraints (e.g., "Tests: `npm test`", "Rust Edition: 2024").
 
 # Files
 List accessed files with status (READ/MODIFIED/CREATED) and key insights.
 CWD: <cwd>
 
+Format:
+- `path/to/file.rs` [MODIFIED] - Brief description of changes or key contents
+- `path/to/config.toml` [READ] - Relevant config values
+
+# Learnings
+Important discoveries during this session that should persist:
+- Code patterns or conventions found in the codebase
+- Dependencies or tool versions that matter
+- Domain-specific knowledge discovered
+
+# Failure Patterns
+Issues encountered and how they were resolved (to avoid repeating mistakes):
+- "Error X was caused by Y, fixed by Z"
+- "Approach A didn't work because B"
+
+# Tools Used
+Key tools and commands that were effective:
+- Commands: e.g., `cargo test`, `npm run lint`
+- LLM tools: e.g., `fs_read`, `apply_patch`
+
 # History
 Concise summary of actions and outcomes. Focus on what was done and what failed.
+Use bullet points for clarity.
 "#;
 
 /// Parameters for compacting conversation history

@@ -107,6 +107,7 @@ pub struct TestFixConfig {
     pub enabled: bool,
     pub max_iterations: usize,
     pub test_timeout_ms: u64,
+    pub auto_gen_regression_test: bool,
 }
 
 impl Default for TestFixConfig {
@@ -115,6 +116,7 @@ impl Default for TestFixConfig {
             enabled: true,
             max_iterations: 3,
             test_timeout_ms: 120_000,
+            auto_gen_regression_test: true,
         }
     }
 }
@@ -281,6 +283,15 @@ pub struct FileConfig {
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub verification: Option<PartialVerificationConfig>,
+    pub test_fix: Option<PartialTestFixConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PartialTestFixConfig {
+    pub enabled: Option<bool>,
+    pub max_iterations: Option<usize>,
+    pub test_timeout_ms: Option<u64>,
+    pub auto_gen_regression_test: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -711,6 +722,43 @@ impl AppConfig {
             .or(file_cfg.command_timeout_ms)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS);
 
+        let test_fix = {
+            let default_test_fix = TestFixConfig::default();
+            let mut test_fix_cfg = default_test_fix.clone();
+
+            if let Some(file_test_fix) = &file_cfg.test_fix {
+                if let Some(enabled) = file_test_fix.enabled {
+                    test_fix_cfg.enabled = enabled;
+                }
+                if let Some(max_iterations) = file_test_fix.max_iterations {
+                    test_fix_cfg.max_iterations = max_iterations;
+                }
+                if let Some(test_timeout_ms) = file_test_fix.test_timeout_ms {
+                    test_fix_cfg.test_timeout_ms = test_timeout_ms;
+                }
+                if let Some(auto_gen) = file_test_fix.auto_gen_regression_test {
+                    test_fix_cfg.auto_gen_regression_test = auto_gen;
+                }
+            }
+
+            if let Some(project_test_fix) = &project_cfg.test_fix {
+                if let Some(enabled) = project_test_fix.enabled {
+                    test_fix_cfg.enabled = enabled;
+                }
+                if let Some(max_iterations) = project_test_fix.max_iterations {
+                    test_fix_cfg.max_iterations = max_iterations;
+                }
+                if let Some(test_timeout_ms) = project_test_fix.test_timeout_ms {
+                    test_fix_cfg.test_timeout_ms = test_timeout_ms;
+                }
+                if let Some(auto_gen) = project_test_fix.auto_gen_regression_test {
+                    test_fix_cfg.auto_gen_regression_test = auto_gen;
+                }
+            }
+
+            test_fix_cfg
+        };
+
         Ok(Self {
             base_url,
             model,
@@ -752,7 +800,7 @@ impl AppConfig {
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
             verification,
-            test_fix: TestFixConfig::default(),
+            test_fix,
         })
     }
 }
