@@ -151,6 +151,25 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 debug!("llm chat_once response");
 
                 let body: Result<ChatResponse, _> = serde_json::from_str(&response_text);
+                let body = match body {
+                    Ok(b) => Ok(b),
+                    Err(e) => {
+                        // Try to extract JSON from text if direct parsing failed
+                        if let Some(extracted) = extract_json_from_text(&response_text) {
+                            debug!("Extracted JSON from response text");
+                            serde_json::from_str::<ChatResponse>(extracted).map_err(|e2| {
+                                anyhow::anyhow!(
+                                    "Failed to parse extracted JSON: {} (original error: {})",
+                                    e2,
+                                    e
+                                )
+                            })
+                        } else {
+                            Err(anyhow::Error::new(e))
+                        }
+                    }
+                };
+
                 match body {
                     Ok(body) => {
                         // Track token usage if available
@@ -184,10 +203,10 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                                 }
                                 _ = tokio::time::sleep(wait) => {}
                             }
-                            last_err = Some(anyhow::Error::new(e).context("parse chat response"));
+                            last_err = Some(e.context("parse chat response"));
                             continue;
                         } else {
-                            return Err(anyhow::Error::new(e).context("parse chat response"));
+                            return Err(e.context("parse chat response"));
                         }
                     }
                 }
@@ -242,4 +261,103 @@ pub(crate) fn backoff_delay(
     let half = jitter / 2;
     let rnd = fastrand::i64(-half..=half).max(0) as u64;
     Duration::from_millis(exp.saturating_add(rnd))
+}
+
+/// Attempts to extract a valid JSON object from a string that might contain other text.
+/// It prioritizes extracting from markdown code blocks (```json ... ```).
+/// If no code block is found, it falls back to finding the first `{` and the last `}`.
+fn extract_json_from_text(text: &str) -> Option<&str> {
+    // 1. Try to find a markdown code block with "json" language specifier
+    if let Some(start_tag) = text.find("```json") {
+        let rest = &text[start_tag + 7..];
+        if let Some(end_pos) = rest.find("```") {
+            return Some(rest[..end_pos].trim());
+        }
+    }
+
+    // 2. Fallback: Find the first `{` and last `}`.
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if start <= end {
+        Some(&text[start..=end])
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_json_from_text() {
+        let cases = vec![
+            (r#"{"key": "value"}"#, Some(r#"{"key": "value"}"#)),
+            (
+                r#"```json
+{"key": "value"}
+```"#,
+                Some(r#"{"key": "value"}"#),
+            ),
+            (
+                r#"Here is the JSON: {"key": "value"}"#,
+                Some(r#"{"key": "value"}"#),
+            ),
+            (
+                r#"{"key": "value"} and some trailing text"#,
+                Some(r#"{"key": "value"}"#),
+            ),
+            (r#"No JSON here"#, None),
+            (r#"Invalid { range }"#, Some(r#"{ range }"#)),
+            (
+                r#"Some code:
+```rust
+fn main() {
+    println!("hello");
+}
+```
+And the JSON:
+{"tool": "edit"}
+"#,
+                Some(
+                    r#"{
+    println!("hello");
+}
+```
+And the JSON:
+{"tool": "edit"}"#,
+                ), // optimizing for the naive behavior failure demonstration
+            ),
+            (
+                r#"Some code:
+fn main() {
+    println!("hello");
+}
+```
+And the JSON:
+```json
+{"tool": "edit"}
+```
+"#,
+                Some(r#"{"tool": "edit"}"#),
+            ),
+            // Still naive fallback behavior for non-marked blocks, but checking it doesn't crash
+            (
+                r#"Some code:
+fn main() { ... }
+And the JSON:
+{"tool": "edit"}
+"#,
+                Some(
+                    r#"{ ... }
+And the JSON:
+{"tool": "edit"}"#,
+                ),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(extract_json_from_text(input), expected, "Input: {}", input);
+        }
+    }
 }

@@ -41,6 +41,11 @@ impl TuiApp {
                 while let Ok(msg) = rx.try_recv() {
                     drained.push(msg);
                 }
+
+                if !drained.is_empty() {
+                    self.last_heartbeat = Some(Instant::now());
+                }
+
                 for msg in drained {
                     // Shell command outputs (bin)
                     if let Some(encoded) = msg.strip_prefix("::shell_output_bin:") {
@@ -374,6 +379,24 @@ impl TuiApp {
                     }
                     self.dirty = true;
                 }
+            }
+
+            // Timeout Check
+            if (matches!(self.status, Status::Thinking | Status::Running))
+                && let Some(last_heartbeat) = self.last_heartbeat
+                && last_heartbeat.elapsed() > Duration::from_secs(30)
+            {
+                // Only warn once every 30 seconds to avoid spamming
+                // We can reset last_heartbeat to now to silence it for another 30 seconds,
+                // essentially treating the warning itself as a heartbeat of sorts (or rather acknowledgement)
+                // But better to just log a warning and maybe set a flag?
+                // For simplicity, let's just log and update heartbeat so we don't spam.
+                self.push_log(
+                    "[WARN] No signal from agent for 30s. It might be stuck or network is slow."
+                        .to_string(),
+                );
+                self.last_heartbeat = Some(Instant::now());
+                self.dirty = true;
             }
 
             if event::poll(Duration::from_millis(10))? {

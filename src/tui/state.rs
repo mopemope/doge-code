@@ -246,6 +246,8 @@ pub struct TuiApp {
     pub shell_output_buffer: String,
     // Ephemeral task stack
     pub task_queue: VecDeque<String>,
+    // Last time we received a signal from the backend
+    pub last_heartbeat: Option<std::time::Instant>,
 }
 
 impl TuiApp {
@@ -458,6 +460,7 @@ impl TuiApp {
             shell_session,
             shell_output_buffer: String::new(),
             task_queue: VecDeque::new(),
+            last_heartbeat: None,
         };
 
         Ok(app)
