@@ -19,3 +19,17 @@ pub fn truncate_tool_output(content: String, tool_name: &str) -> String {
         content
     }
 }
+
+pub fn clean_json_text(text: &str) -> String {
+    let text = text.trim();
+    if text.starts_with("```json") {
+        if let Some(end) = text.rfind("```") {
+            return text[7..end].trim().to_string();
+        }
+    } else if text.starts_with("```")
+        && let Some(end) = text.rfind("```")
+    {
+        return text[3..end].trim().to_string();
+    }
+    text.to_string()
+}

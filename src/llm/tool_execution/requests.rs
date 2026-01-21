@@ -1,10 +1,12 @@
 use crate::llm::LlmErrorKind;
 use crate::llm::chat_with_tools::{ChatResponseWithTools, ChoiceMessageWithTools, Reasoning};
 use crate::llm::client_core::OpenAIClient;
+use crate::llm::message_utils::clean_json_text;
 use crate::llm::types::{ChatMessage, ToolDef};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use std::ops::Mul;
+use std::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, warn};
 
@@ -30,6 +32,7 @@ pub async fn chat_tools_once(
     messages: &[ChatMessage],
     tools: &[ToolDef],
     cancel: Option<tokio_util::sync::CancellationToken>,
+    ui_tx: Option<Sender<String>>,
 ) -> Result<ChoiceMessageWithTools> {
     const MAX_RETRIES: u64 = 100;
     const MAX_TIMEOUT_RETRIES: u64 = 20;
@@ -58,6 +61,12 @@ pub async fn chat_tools_once(
                 } else if attempt >= MAX_RETRIES {
                     error!("Error occurred: {:?}", &last_error);
                     break;
+                } else if matches!(
+                    last_error.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Deserialize)
+                ) {
+                    error!("Deserialization error, not retrying: {:?}", &last_error);
+                    break;
                 }
 
                 // Exponential backoff with jitter
@@ -67,8 +76,16 @@ pub async fn chat_tools_once(
                 warn!(
                     attempt = attempt,
                     delay_ms = delay_ms + jitter,
+                    delay_ms = delay_ms + jitter,
                     "Retrying chat_tools_once after error"
                 );
+                if let Some(ref tx) = ui_tx {
+                    let _ = tx.send(format!(
+                        "::status:waiting:Retrying request (Attempt {}/{})...",
+                        attempt + 1,
+                        MAX_RETRIES
+                    ));
+                }
                 sleep(total_delay).await;
             }
         }
@@ -198,7 +215,10 @@ async fn chat_tools_once_inner(
     };
 
     debug!(response_body=%response_text, "llm chat_tools_once response");
-    let body: ChatResponseWithTools = serde_json::from_str(&response_text)?;
+    // Clean JSON text (remove markdown code blocks if present)
+    let cleaned_text = clean_json_text(&response_text);
+    let body: ChatResponseWithTools = serde_json::from_str(&cleaned_text)
+        .map_err(|e| anyhow!(LlmErrorKind::Deserialize).context(e))?;
 
     // Track token usage if available
     if let Some(usage) = &body.usage {

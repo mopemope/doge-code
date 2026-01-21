@@ -156,6 +156,7 @@ pub async fn run_agent_loop(
                 messages.as_slice(),
                 &runtime.tools,
                 Some(cancel_token.clone()),
+                ui_tx.clone(),
             ) => {
                 match res {
                     Ok(msg) => msg,
@@ -206,6 +207,21 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
+                        if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
+                            warn!("JSON parse error from LLM: {}", e);
+                            let feedback = format!("Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.", e);
+                            messages.push(ChatMessage {
+                                role: "user".into(),
+                                content: Some(feedback),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            });
+                             if let Some(tx) = &ui_tx {
+                                let _ = tx.send("::status:warning:Invalid JSON received. Requesting correction...".to_string());
+                            }
+                            continue;
+                        }
+
                         let agent_error = AgentLoopError::Llm(e.to_string());
                         handle_agent_error(&agent_error, &ui_tx);
                         return Err(agent_error.into());
@@ -359,7 +375,10 @@ pub async fn run_agent_loop(
             if modifies_files && success {
                 // Run AutoVerifier
                 if let Some(result) = verifier.verify(&tc, true).await {
-                    if result.should_revert {
+                    // Auto-revert is disabled for stability ("Soft Revert" strategy)
+                    let should_revert = false; // result.should_revert && false;
+
+                    if should_revert {
                         // Attempt to revert the change using the undo stack
                         let reverted = {
                             let mut stack = fs.undo_stack.write().await;
@@ -441,10 +460,33 @@ The codebase is potentially in a broken state. You MUST fix this immediately.
                             let _ = tx.send(status_msg.to_string());
                         }
                     } else {
-                        // Warning only (enforce = false)
+                        // Warning only (revert suppressed)
                         let warning = format!(
-                            "\n\n<AUTOMATED_VERIFICATION_FAILURE>\n{}\n</AUTOMATED_VERIFICATION_FAILURE>\n\n<SYSTEM_NOTE>The tool execution succeeded, but an automated check detected issues. You MUST fix these issues immediately. STOP and fix them before proceeding.</SYSTEM_NOTE>",
-                            result.message
+                            r#"
+
+<AUTOMATED_VERIFICATION_FAILURE>
+The tool execution succeeded, but an automated check FAILED.
+(Auto-revert suppressed to allow fix)
+Exit Code: {:?}
+
+STDOUT:
+{}
+
+STDERR:
+{}
+</AUTOMATED_VERIFICATION_FAILURE>
+
+<DIRECTIVE>
+⚠️ CRITICAL: Verification failed.
+The codebase is potentially in a broken state. You MUST fix this immediately.
+Do not proceed with other tasks until this is resolved.
+
+1. Analyze the STDERR output above.
+2. Fix the error in the current file state.
+</DIRECTIVE>"#,
+                            result.exit_code,
+                            truncate_string_with_graphemes(&result.stdout, 1000),
+                            truncate_string_with_graphemes(&result.stderr, 2000)
                         );
                         tool_message_content.push_str(&warning);
                         if let Some(tx) = &ui_tx {
