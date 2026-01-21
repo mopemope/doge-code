@@ -60,14 +60,23 @@ pub async fn run_agent_streaming_once(
                             if buf.finalize_sync_call(idx).is_ok() {
                                 // Update session with tool call count if session manager is available
                                 if let Some(ref sm) = session_manager {
-                                    let mut session_mgr = sm.lock().unwrap();
-                                    if let Err(e) =
-                                        session_mgr.update_current_session_with_tool_call_count()
-                                    {
-                                        tracing::error!(
-                                            ?e,
-                                            "Failed to update session with tool call count"
-                                        );
+                                    match sm.lock() {
+                                        Ok(mut session_mgr) => {
+                                            if let Err(e) = session_mgr
+                                                .update_current_session_with_tool_call_count()
+                                            {
+                                                tracing::error!(
+                                                    ?e,
+                                                    "Failed to update session with tool call count"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Session manager mutex poisoned: {}",
+                                                e
+                                            );
+                                        }
                                     }
                                 }
 
