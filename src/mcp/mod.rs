@@ -234,7 +234,7 @@ mod tests {
 
 #[cfg(test)]
 mod client_tests {
-    use crate::config::{AppConfig, McpServerConfig};
+    use crate::config::McpServerConfig;
 
     #[tokio::test]
     async fn test_mcp_client_creation_with_invalid_transport() {
