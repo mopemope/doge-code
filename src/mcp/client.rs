@@ -1,7 +1,7 @@
 use reqwest::Url;
 use rmcp::{
     RmcpError,
-    model::{CallToolRequestParam, ListToolsResult},
+    model::{CallToolRequestParams, ListToolsResult},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -179,7 +179,7 @@ impl McpClient {
     /// Call a tool with parameters
     pub async fn call_tool(
         &self,
-        params: CallToolRequestParam,
+        params: CallToolRequestParams,
     ) -> Result<rmcp::model::CallToolResult, RmcpError> {
         info!(tool_name = %params.name, "Calling MCP tool");
         debug!(tool_params = ?params.arguments, "Tool parameters");

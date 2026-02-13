@@ -176,6 +176,7 @@ impl DogeMcpService {
                         icons: None,
                         size: None,
                         title: None,
+                        meta: None,
                     },
                     None,
                 ),
@@ -188,6 +189,7 @@ impl DogeMcpService {
                         icons: None,
                         size: None,
                         title: None,
+                        meta: None,
                     },
                     None,
                 ),
@@ -203,11 +205,13 @@ impl DogeMcpService {
                         icons: None,
                         size: None,
                         title: None,
+                        meta: None,
                     },
                     None,
                 ),
             ],
             next_cursor: None,
+            meta: None,
         })
     }
 
@@ -216,6 +220,7 @@ impl DogeMcpService {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         Ok(ListResourceTemplatesResult {
             next_cursor: None,
+            meta: None,
             resource_templates: vec![
                 ResourceTemplate::new(
                     RawResourceTemplate {
@@ -224,6 +229,7 @@ impl DogeMcpService {
                         description: Some("Read the content of a file in the project.".to_string()),
                         mime_type: Some("text/plain".to_string()),
                         title: None,
+                        icons: None,
                     },
                     None,
                 ),
@@ -234,6 +240,7 @@ impl DogeMcpService {
                         description: Some("Get the symbol map for a specific file.".to_string()),
                         mime_type: Some("application/json".to_string()),
                         title: None,
+                        icons: None,
                     },
                     None,
                 ),
@@ -623,7 +630,7 @@ impl ServerHandler for DogeMcpService {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         self.list_resources_impl().await
@@ -631,7 +638,7 @@ impl ServerHandler for DogeMcpService {
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         self.read_resource_impl(request.uri).await
@@ -639,7 +646,7 @@ impl ServerHandler for DogeMcpService {
 
     async fn list_resource_templates(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         self.list_resource_templates_impl().await
@@ -647,7 +654,7 @@ impl ServerHandler for DogeMcpService {
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         Ok(self.get_info())

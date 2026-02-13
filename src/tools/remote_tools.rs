@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use crate::mcp::client::McpClient;
 use anyhow::{Result, anyhow};
-use rmcp::model::CallToolRequestParam;
+use rmcp::model::CallToolRequestParams;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -195,9 +195,11 @@ impl RemoteToolManager {
             }
         };
 
-        let params = CallToolRequestParam {
+        let params = CallToolRequestParams {
             name: tool.remote_name.clone().into(),
             arguments,
+            meta: None,
+            task: None,
         };
 
         let result = {
