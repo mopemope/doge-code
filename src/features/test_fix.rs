@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 use crate::exec::Executor;
 use crate::features::test_gen;
 use crate::features::testing::{self, TestResult};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::path::Path;
 use tracing::{info, warn};
@@ -163,6 +163,8 @@ IMPORTANT: After making changes, the tests will be automatically re-run. Make su
     prompt
 }
 
+use crate::features::auto_fix::{AutoFixer, FixableResult};
+
 /// Run the test-fix loop
 ///
 /// This function:
@@ -172,13 +174,12 @@ IMPORTANT: After making changes, the tests will be automatically re-run. Make su
 /// 4. Re-runs tests
 /// 5. Repeats until success or max_iterations reached
 pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Result<TestFixResult> {
-    let max_iterations = cfg.test_fix.max_iterations;
     let timeout_ms = cfg.test_fix.test_timeout_ms;
     let project_root = &cfg.project_root;
 
     info!(
         "Starting test-fix loop (max {} iterations, timeout {}ms)",
-        max_iterations, timeout_ms
+        cfg.test_fix.max_iterations, timeout_ms
     );
 
     let language = detect_language(project_root);
@@ -200,101 +201,87 @@ pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Resu
     }
 
     // For now, we take the first command. In a truly multi-language proj, this might need more logic.
-    let test_cmd = &config.commands[0];
+    let test_cmd = config.commands[0].clone();
 
-    let mut iteration = 0;
-    let mut last_result =
-        testing::run_test_command(project_root, &test_cmd.command, &test_cmd.args, timeout_ms)
-            .await;
-    last_result.failed_tests = testing::parse_test_output(&last_result, &language);
-    // Enhance failed tests with stack trace information
-    testing::enhance_failed_tests_with_stack_trace(
-        &mut last_result.failed_tests,
-        &last_result.stdout,
-        &last_result.stderr,
-        &language,
+    let fixer = crate::features::auto_fix::DefaultFixerAgent::new(
+        executor.tools().clone(),
+        executor.client().cloned(),
+        cfg.clone(),
     );
 
-    // Initial test run
-    if last_result.success {
-        info!("All tests passed on initial run!");
-        return Ok(TestFixResult {
-            success: true,
-            iterations: 0,
-            final_stdout: last_result.stdout,
-            final_stderr: last_result.stderr,
-            message: "All tests passed on initial run.".to_string(),
-        });
-    }
+    let mut auto_fixer = AutoFixer::new(fixer, cfg.test_fix.max_iterations);
 
-    // Test-fix loop
-    while iteration < max_iterations {
-        iteration += 1;
-        info!("Test-fix iteration {}/{}", iteration, max_iterations);
+    let check_fn = || {
+        let cmd = test_cmd.clone();
+        let lang = language.clone();
+        let root = project_root.clone();
+        Box::pin(async move {
+            let mut result =
+                testing::run_test_command(&root, &cmd.command, &cmd.args, timeout_ms).await;
 
-        // Build prompt for LLM
-        let prompt = build_fix_prompt(&last_result, iteration);
+            result.failed_tests = testing::parse_test_output(&result, &lang);
+            // Enhance failed tests with stack trace information
+            testing::enhance_failed_tests_with_stack_trace(
+                &mut result.failed_tests,
+                &result.stdout,
+                &result.stderr,
+                &lang,
+            );
 
-        // Send to executor for LLM analysis and fix
-        info!("Sending test failures to LLM for analysis...");
-        executor
-            .run(&prompt, false)
-            .await
-            .context("Failed to run LLM analysis")?;
+            // Convert TestResult to FixableResult
+            let context_prompt = serde_json::to_string(&result).ok();
 
-        // Re-run tests
-        info!("Re-running tests after LLM fix...");
-        last_result =
-            testing::run_test_command(project_root, &test_cmd.command, &test_cmd.args, timeout_ms)
-                .await;
-        last_result.failed_tests = testing::parse_test_output(&last_result, &language);
-        // Enhance failed tests with stack trace information
-        testing::enhance_failed_tests_with_stack_trace(
-            &mut last_result.failed_tests,
-            &last_result.stdout,
-            &last_result.stderr,
-            &language,
-        );
-
-        if last_result.success {
-            info!("Tests passed after {} iteration(s)!", iteration);
-
-            // Generate regression test if enabled
-            if cfg.test_fix.auto_gen_regression_test
-                && let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await
-            {
-                warn!("Failed to generate regression test: {}", e);
+            // Convert TestResult to FixableResult
+            FixableResult {
+                success: result.success,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                context_prompt,
             }
+        })
+    };
 
-            return Ok(TestFixResult {
-                success: true,
-                iterations: iteration,
-                final_stdout: last_result.stdout,
-                final_stderr: last_result.stderr,
-                message: format!("Tests passed after {} iteration(s).", iteration),
+    let prompt_fn = |result: &FixableResult, iteration: usize| {
+        // Recover TestResult from context_prompt
+        let test_result: TestResult = result
+            .context_prompt
+            .as_ref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| TestResult {
+                command: "unknown".to_string(), // We don't have the original command string here easily without capture
+                stdout: result.stdout.clone(),
+                stderr: result.stderr.clone(),
+                success: result.success,
+                exit_code: result.exit_code,
+                failed_tests: vec![],
             });
-        }
 
-        warn!(
-            "Tests still failing after iteration {}. Exit code: {:?}",
-            iteration, last_result.exit_code
-        );
+        build_fix_prompt(&test_result, iteration)
+    };
+
+    let (final_result, iterations) = auto_fixer.run_fix_loop(check_fn, prompt_fn).await?;
+
+    // Generate regression test if enabled AND success
+    if final_result.success && cfg.test_fix.auto_gen_regression_test {
+        if let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await {
+            warn!("Failed to generate regression test: {}", e);
+        }
     }
 
-    // Max iterations reached
-    warn!(
-        "Test-fix loop reached max iterations ({}) without success",
-        max_iterations
-    );
     Ok(TestFixResult {
-        success: false,
-        iterations: max_iterations,
-        final_stdout: last_result.stdout,
-        final_stderr: last_result.stderr,
-        message: format!(
-            "Tests still failing after {} iterations. Manual intervention required.",
-            max_iterations
-        ),
+        success: final_result.success,
+        iterations,
+        final_stdout: final_result.stdout,
+        final_stderr: final_result.stderr,
+        message: if final_result.success {
+            format!("Tests passed after {} iteration(s).", iterations)
+        } else {
+            format!(
+                "Tests still failing after {} iterations. Manual intervention required.",
+                iterations
+            )
+        },
     })
 }
 

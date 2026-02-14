@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+#[derive(Clone)]
 pub struct AutoVerifier {
     config: VerificationConfig,
     project_root: PathBuf,
@@ -54,10 +55,10 @@ impl AutoVerifier {
         }?;
 
         let path = Path::new(path_str);
-        self.run_verification(path).await
+        self.verify_path(path).await
     }
 
-    async fn run_verification(&self, path: &Path) -> Option<VerificationResult> {
+    pub async fn verify_path(&self, path: &Path) -> Option<VerificationResult> {
         let extension = path.extension().and_then(|e| e.to_str())?;
 
         match extension {

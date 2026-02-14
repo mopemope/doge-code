@@ -628,6 +628,21 @@ impl Executor {
         }
         self
     }
+
+    /// Get a reference to the OpenAI client
+    pub fn client(&self) -> Option<&OpenAIClient> {
+        self.client.as_ref()
+    }
+
+    /// Get a reference to the FsTools
+    pub fn tools(&self) -> &FsTools {
+        &self.tools
+    }
+
+    /// Get a mutable reference to the FsTools
+    pub fn tools_mut(&mut self) -> &mut FsTools {
+        &mut self.tools
+    }
 }
 
 fn collect_tools_called(messages: &[crate::llm::types::ChatMessage]) -> Vec<String> {
