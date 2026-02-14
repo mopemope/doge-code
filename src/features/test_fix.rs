@@ -263,11 +263,10 @@ pub async fn run_test_fix_loop(cfg: &AppConfig, executor: &mut Executor) -> Resu
     let (final_result, iterations) = auto_fixer.run_fix_loop(check_fn, prompt_fn).await?;
 
     // Generate regression test if enabled AND success
-    if final_result.success && cfg.test_fix.auto_gen_regression_test {
-        if let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await {
+    if final_result.success && cfg.test_fix.auto_gen_regression_test
+        && let Err(e) = test_gen::generate_regression_test(cfg, executor, &language).await {
             warn!("Failed to generate regression test: {}", e);
         }
-    }
 
     Ok(TestFixResult {
         success: final_result.success,
