@@ -161,6 +161,7 @@ impl TuiApp {
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Ready; // Was Done
+                            self.detailed_status = None;
                             self.dirty = true;
 
                             if let Some(start_time) = self.processing_start_time.take() {
@@ -180,6 +181,7 @@ impl TuiApp {
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
                             self.status = Status::Error;
+                            self.detailed_status = None;
                             self.dirty = true;
                             self.processing_start_time = None;
                             continue;
@@ -188,6 +190,14 @@ impl TuiApp {
                         if let Some(msg_body) = rest.strip_prefix("waiting:") {
                             self.status = Status::Thinking; // Was Waiting
                             self.push_log(format!("[WAIT] {}", msg_body));
+                            self.dirty = true;
+                            self.spinner_state = 0;
+                            continue;
+                        }
+
+                        if let Some(msg_body) = rest.strip_prefix("working:") {
+                            self.status = Status::Running;
+                            self.detailed_status = Some(msg_body.to_string());
                             self.dirty = true;
                             self.spinner_state = 0;
                             continue;
@@ -214,6 +224,7 @@ impl TuiApp {
                                     is_streaming = false;
                                 }
                                 self.status = Status::Ready; // Was Done
+                                self.detailed_status = None;
                                 self.dirty = true;
                                 if let Some(start_time) = self.processing_start_time.take() {
                                     let elapsed = start_time.elapsed();
@@ -233,6 +244,7 @@ impl TuiApp {
                                     is_streaming = false;
                                 }
                                 self.status = Status::Ready; // Was Cancelled
+                                self.detailed_status = None;
                                 self.dirty = true;
                                 self.processing_start_time = None;
                                 continue;
@@ -255,6 +267,7 @@ impl TuiApp {
                             }
                             "idle" => {
                                 self.status = Status::Ready;
+                                self.detailed_status = None;
                                 self.dirty = true;
                                 self.spinner_state = 0;
                                 continue;
@@ -271,6 +284,7 @@ impl TuiApp {
                                     is_streaming = false;
                                 }
                                 self.status = Status::Error;
+                                self.detailed_status = None;
                                 self.dirty = true;
                                 self.processing_start_time = None;
                                 continue;

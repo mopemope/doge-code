@@ -29,6 +29,8 @@ Hard requirements (automatically enforced):
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub content: String,
     pub status: String,
 }
@@ -73,6 +75,7 @@ pub fn plan_write_tool_def() -> ToolDef {
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string"},
+                                "parent_id": {"type": "string", "nullable": true},
                                 "content": {"type": "string", "minLength": 1},
                                 "status": {
                                     "type": "string",
@@ -264,7 +267,46 @@ fn validate_plan_items(items: &[PlanItem]) -> Result<()> {
         if !seen_ids.insert(item.id.clone()) {
             anyhow::bail!("Duplicate plan item id detected: {}", item.id);
         }
+    }
 
+    // Build adjacency list
+    let mut adjacency: std::collections::HashMap<&String, &String> =
+        std::collections::HashMap::new();
+    for item in items {
+        if let Some(parent_id) = &item.parent_id {
+            if !seen_ids.contains(parent_id) {
+                anyhow::bail!(
+                    "Plan item '{}' refers to non-existent parent '{}'",
+                    item.id,
+                    parent_id
+                );
+            }
+            if parent_id == &item.id {
+                anyhow::bail!("Plan item '{}' cannot be its own parent", item.id);
+            }
+            adjacency.insert(&item.id, parent_id);
+        }
+    }
+
+    // Check for cycles
+    for item in items {
+        let mut visited = std::collections::HashSet::new();
+        let mut curr = &item.id;
+        while let Some(parent) = adjacency.get(curr) {
+            if !visited.insert(curr) {
+                // We shouldn't hit this if we only move up, unless there's a cycle
+            }
+            if *parent == &item.id {
+                anyhow::bail!("Cycle detected involving plan item '{}'", item.id);
+            }
+            if visited.contains(parent) {
+                anyhow::bail!("Cycle detected involving plan item '{}'", parent);
+            }
+            curr = parent;
+        }
+    }
+
+    for item in items {
         let trimmed = item.content.trim();
         if trimmed.is_empty() {
             anyhow::bail!(
@@ -307,16 +349,19 @@ mod tests {
         let items = vec![
             PlanItem {
                 id: "step-1".into(),
+                parent_id: None,
                 content: "Review requirements and clarify scope".into(),
                 status: "pending".into(),
             },
             PlanItem {
                 id: "step-2".into(),
+                parent_id: None,
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
             },
             PlanItem {
                 id: "step-3".into(),
+                parent_id: None,
                 content: "Run tests and verify results".into(),
                 status: "pending".into(),
             },
@@ -337,11 +382,13 @@ mod tests {
         let items = vec![
             PlanItem {
                 id: "step-1".into(),
+                parent_id: None,
                 content: "Do something".into(),
                 status: "pending".into(),
             },
             PlanItem {
                 id: "step-1".into(),
+                parent_id: None,
                 content: "Do another".into(),
                 status: "pending".into(),
             },
@@ -362,11 +409,13 @@ mod tests {
         let items = vec![
             PlanItem {
                 id: "step-1".into(),
+                parent_id: None,
                 content: "Work item".into(),
                 status: "in_progress".into(),
             },
             PlanItem {
                 id: "step-2".into(),
+                parent_id: None,
                 content: "Another".into(),
                 status: "in_progress".into(),
             },
@@ -379,5 +428,92 @@ mod tests {
             &AppConfig::default(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_write_validates_hierarchy() {
+        let (_dir, base) = plan_dir();
+
+        // 1. Valid hierarchy
+        let items = vec![
+            PlanItem {
+                id: "parent".into(),
+                parent_id: None,
+                content: "Parent task".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "child".into(),
+                parent_id: Some("parent".into()),
+                content: "Child task".into(),
+                status: "pending".into(),
+            },
+        ];
+        let result = plan_write_from_base_path(
+            items.clone(),
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+        );
+        assert!(result.is_ok());
+
+        // 2. Invalid parent
+        let items = vec![PlanItem {
+            id: "child".into(),
+            parent_id: Some("non-existent".into()),
+            content: "Child task".into(),
+            status: "pending".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+        );
+        assert!(result.is_err());
+
+        // 3. Self-referencing
+        let items = vec![PlanItem {
+            id: "self".into(),
+            parent_id: Some("self".into()),
+            content: "Infinite loop".into(),
+            status: "pending".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("own parent"));
+
+        // 4. Indirect cycle (A -> B -> A)
+        let items = vec![
+            PlanItem {
+                id: "A".into(),
+                parent_id: Some("B".into()),
+                content: "Task A".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "B".into(),
+                parent_id: Some("A".into()),
+                content: "Task B".into(),
+                status: "pending".into(),
+            },
+        ];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base,
+            &AppConfig::default(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cycle detected"));
     }
 }

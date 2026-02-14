@@ -48,6 +48,8 @@ pub async fn dispatch_tool_call(
             "read_memory" => tools::read_memory(runtime, &args_val).await,
             "write_memory" => tools::write_memory(runtime, &args_val).await,
             "list_memories" => tools::list_memories(runtime, &args_val).await,
+            "search_memory" => tools::search_memory(runtime, &args_val).await,
+            "run_workflow" => tools::run_workflow(runtime, &args_val).await,
             "doc_generate" => tools::doc_generate(runtime, &args_val).await,
             "search_history" => tools::search_history(runtime, &args_val).await,
 

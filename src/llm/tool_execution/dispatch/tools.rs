@@ -226,7 +226,12 @@ pub async fn write_memory(
 ) -> Result<serde_json::Value> {
     let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    match runtime.fs.write_memory(key, content).await {
+    let tags = args
+        .get("tags")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let metadata = args.get("metadata").cloned();
+
+    match runtime.fs.write_memory(key, content, tags, metadata).await {
         Ok(msg) => Ok(json!({ "message": msg })),
         Err(e) => Err(anyhow!("{e}")),
     }
@@ -238,6 +243,45 @@ pub async fn list_memories(
 ) -> Result<serde_json::Value> {
     match runtime.fs.list_memories().await {
         Ok(msg) => Ok(json!({ "result": msg })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+pub async fn search_memory(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let tags = args
+        .get("tags")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    match runtime.fs.search_memory(query, tags).await {
+        Ok(msg) => Ok(json!({ "result": msg })),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+pub async fn run_workflow(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let workflow_name = args
+        .get("workflow_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("workflow_name is required"))?;
+
+    match crate::tools::workflow::run_workflow(
+        workflow_name,
+        &runtime.fs.config.project_root,
+        runtime.fs,
+    )
+    .await
+    {
+        Ok(output) => Ok(json!({ "result": output })),
         Err(e) => Err(anyhow!("{e}")),
     }
 }

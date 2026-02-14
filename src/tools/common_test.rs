@@ -352,16 +352,19 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
     let items = vec![
         plan::PlanItem {
             id: "step-1".into(),
+            parent_id: None,
             content: "Write the plan".into(),
             status: "pending".into(),
         },
         plan::PlanItem {
             id: "step-2".into(),
+            parent_id: None,
             content: "Implement changes".into(),
             status: "pending".into(),
         },
         plan::PlanItem {
             id: "step-3".into(),
+            parent_id: None,
             content: "Run validators".into(),
             status: "pending".into(),
         },

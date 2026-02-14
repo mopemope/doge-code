@@ -136,9 +136,38 @@ pub fn build_render_plan(
         current_row += 1;
 
         // Items
+        // Build parent-child map
+        let mut children: std::collections::HashMap<
+            Option<&String>,
+            Vec<&crate::tui::state::PlanItem>,
+        > = std::collections::HashMap::new();
         for item in plan_list {
+            children
+                .entry(item.parent_id.as_ref())
+                .or_default()
+                .push(item);
+        }
+
+        // Use a stack for depth-first traversal (item, depth)
+        let mut stack: Vec<(&crate::tui::state::PlanItem, usize)> = Vec::new();
+
+        // Initialize stack with root items (reverse order to process first-to-last)
+        if let Some(roots) = children.get(&None) {
+            for root in roots.iter().rev() {
+                stack.push((root, 0));
+            }
+        }
+
+        // Track visited to handle cycles or orphans safely (though orphans won't be reached here)
+        let mut visited_ids = std::collections::HashSet::new();
+
+        while let Some((item, depth)) = stack.pop() {
             if current_row >= view_end_row {
                 break;
+            }
+
+            if !visited_ids.insert(&item.id) {
+                continue; // Prevent infinite loops in case of cycles
             }
 
             let status_symbol = match item.status.as_str() {
@@ -147,12 +176,26 @@ pub fn build_render_plan(
                 "completed" => "✓",
                 _ => "○",
             };
-            let line_text = format!("{} {}", status_symbol, item.content);
+
+            let indent = "  ".repeat(depth);
+
+            // Wait, double indent? "  " * depth is enough?
+            // The original indentation in my thought was just `indent`.
+            // "{} {}" -> indent symbol content.
+            // Let's use 2 spaces per level.
+            let line_text = format!("{}{} {}", indent, status_symbol, item.content);
 
             if let Some(line) = render_plain(line_text, current_row) {
                 log_lines.push(line);
             }
             current_row += 1;
+
+            // Push children (reverse order)
+            if let Some(kids) = children.get(&Some(&item.id)) {
+                for kid in kids.iter().rev() {
+                    stack.push((kid, depth + 1));
+                }
+            }
         }
 
         // Footer

@@ -491,15 +491,43 @@ impl FsTools {
         }
     }
 
-    pub async fn write_memory(&self, key: &str, content: &str) -> Result<String> {
+    pub async fn write_memory(
+        &self,
+        key: &str,
+        content: &str,
+        tags: Option<Vec<String>>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<String> {
         self.update_session_with_tool_call_count()?;
-        match self.memory_tools.write_memory(key, content).await {
+        match self
+            .memory_tools
+            .write_memory(key, content, tags, metadata)
+            .await
+        {
             Ok(msg) => {
                 self.record_tool_call_success("write_memory")?;
                 Ok(msg)
             }
             Err(e) => {
                 self.record_tool_call_failure("write_memory")?;
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn search_memory(
+        &self,
+        query: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> Result<String> {
+        self.update_session_with_tool_call_count()?;
+        match self.memory_tools.search_memory(query, tags).await {
+            Ok(msg) => {
+                self.record_tool_call_success("search_memory")?;
+                Ok(msg)
+            }
+            Err(e) => {
+                self.record_tool_call_failure("search_memory")?;
                 Err(e)
             }
         }

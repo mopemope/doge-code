@@ -66,6 +66,7 @@ fn test_plan_list_completed_hides_on_next_dispatch() {
 
     let plan = vec![super::PlanItem {
         id: "step-1".to_string(),
+        parent_id: None,
         content: "Done".to_string(),
         status: "completed".to_string(),
     }];
@@ -85,6 +86,7 @@ fn test_plan_list_in_progress_does_not_hide() {
 
     let plan = vec![super::PlanItem {
         id: "step-1".to_string(),
+        parent_id: None,
         content: "Working".to_string(),
         status: "in_progress".to_string(),
     }];

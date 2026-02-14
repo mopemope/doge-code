@@ -15,6 +15,8 @@ use tui_textarea::TextArea;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct PlanItem {
     pub id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub content: String,
     pub status: String, // pending, in_progress, completed
 }
@@ -170,6 +172,7 @@ pub struct TuiApp {
     pub(crate) inbox_tx: Option<Sender<String>>,
     pub max_log_lines: usize,
     pub status: Status,
+    pub detailed_status: Option<String>,
     pub model: Option<String>,
     // input history and navigation index; index==history.len() means current (editing) buffer
     pub input_history: Vec<String>,
@@ -413,6 +416,7 @@ impl TuiApp {
             inbox_tx: Some(tx),
             max_log_lines: 10000,
             status: Status::Ready,
+            detailed_status: None,
             model,
             input_history,
             history_index,

@@ -91,6 +91,12 @@ impl TuiApp {
         // For simplicity, just color the whole line or parts of it.
         // Let's make the status word colored.
 
+        let display_status_str = if let Some(detailed) = &self.detailed_status {
+            detailed.as_str()
+        } else {
+            status_str
+        };
+
         let spans = vec![
             Span::styled(
                 " DOGE-CODE ",
@@ -102,7 +108,7 @@ impl TuiApp {
             Span::styled(model_name, Style::default().fg(Color::Cyan)),
             Span::raw(" | "),
             Span::styled(
-                status_str,
+                display_status_str,
                 Style::default()
                     .fg(status_color)
                     .add_modifier(Modifier::BOLD),

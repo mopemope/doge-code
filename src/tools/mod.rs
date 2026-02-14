@@ -16,6 +16,7 @@ pub mod search_text;
 pub mod security;
 pub mod session_manager;
 pub mod undo;
+pub mod workflow;
 pub mod write;
 
 pub mod shell;
