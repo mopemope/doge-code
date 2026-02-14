@@ -8,7 +8,7 @@ mod stream;
 mod stream_tools;
 mod symbol_edit;
 mod tool_def;
-mod tool_execution;
+pub mod tool_execution;
 mod tool_runtime;
 pub mod types;
 

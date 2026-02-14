@@ -157,13 +157,14 @@ impl MemoryTools {
 
 fn parse_memory_file(content: &str) -> (MemoryFrontmatter, String) {
     if content.starts_with("---")
-        && let Some(end_idx) = content[3..].find("---") {
-            let yaml_str = &content[3..end_idx + 3];
-            let body = &content[end_idx + 6..]; // 3 for start --- + 3 for end --- + yaml len
-            if let Ok(fm) = serde_yaml::from_str::<MemoryFrontmatter>(yaml_str) {
-                return (fm, body.trim().to_string());
-            }
+        && let Some(end_idx) = content[3..].find("---")
+    {
+        let yaml_str = &content[3..end_idx + 3];
+        let body = &content[end_idx + 6..]; // 3 for start --- + 3 for end --- + yaml len
+        if let Ok(fm) = serde_yaml::from_str::<MemoryFrontmatter>(yaml_str) {
+            return (fm, body.trim().to_string());
         }
+    }
     // Fallback
     (
         MemoryFrontmatter {

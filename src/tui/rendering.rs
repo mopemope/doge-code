@@ -99,23 +99,17 @@ impl TuiApp {
 
         let spans = vec![
             Span::styled(
-                " DOGE-CODE ",
+                format!(" [{}] ", display_status_str),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .bg(status_color)
+                    .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("| model: "),
+            Span::raw(" "),
             Span::styled(model_name, Style::default().fg(Color::Cyan)),
             Span::raw(" | "),
-            Span::styled(
-                display_status_str,
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" | tokens: "),
-            Span::raw(self.tokens_prompt_used.to_string()),
-            Span::raw(" | "),
+            Span::raw(format!("{} tokens", self.tokens_prompt_used)),
+            Span::raw(" "),
             Span::styled(spinner, Style::default().fg(status_color)),
         ];
 
@@ -141,10 +135,97 @@ impl TuiApp {
                     self.render_file_search(f, area, file_search_state, theme);
                 }
             }
-            _ => {
-                self.render_log_panel(f, area, plan, theme);
-            }
+            _ => match self.view_mode {
+                crate::tui::state::ViewMode::Dashboard => {
+                    self.render_dashboard(f, area, theme);
+                }
+                crate::tui::state::ViewMode::Log => {
+                    self.render_log_panel(f, area, plan, theme);
+                }
+            },
         }
+    }
+
+    fn render_dashboard(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        // Dashboard Layout
+        // Split into Left (Tasks) and Right (Stats/Context)
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(60), // Tasks
+                Constraint::Percentage(40), // Stats
+            ])
+            .split(area);
+
+        self.render_tasks_panel(f, chunks[0], theme);
+        self.render_stats_panel(f, chunks[1], theme);
+    }
+
+    fn render_tasks_panel(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style)
+            .title("Tasks");
+
+        let items: Vec<ListItem> = self
+            .plan_list
+            .iter()
+            .map(|item| {
+                let (symbol, style) = match item.status.as_str() {
+                    "completed" => ("✓", Style::default().fg(Color::Green)),
+                    "in_progress" => ("➜", Style::default().fg(Color::Yellow)),
+                    "failed" => ("✗", Style::default().fg(Color::Red)),
+                    _ => ("•", Style::default().fg(Color::Gray)),
+                };
+
+                let content = format!("{} {}", symbol, item.content);
+                ListItem::new(content).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(block);
+        f.render_widget(list, area);
+    }
+
+    fn render_stats_panel(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style)
+            .title("Context & Stats");
+
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+
+        let stats_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(inner_area);
+
+        // tokens
+        let token_text = format!("Tokens Used: {}", self.tokens_prompt_used);
+        f.render_widget(
+            Paragraph::new(token_text).style(theme.log_style),
+            stats_chunks[0],
+        );
+
+        // Model
+        let model_text = format!("Model: {}", self.model.as_deref().unwrap_or("Unknown"));
+        f.render_widget(
+            Paragraph::new(model_text).style(theme.log_style),
+            stats_chunks[1],
+        );
+
+        // Repo Status
+        let status_text = format!("Repo Status: {:?}", self.repomap_status);
+        f.render_widget(
+            Paragraph::new(status_text).style(theme.log_style),
+            stats_chunks[2],
+        );
     }
 
     fn render_log_panel(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {

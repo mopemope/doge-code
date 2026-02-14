@@ -134,6 +134,19 @@ pub fn handle_normal_mode_key(
         }
 
         KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.view_mode == crate::tui::state::ViewMode::Log {
+                app.view_mode = crate::tui::state::ViewMode::Dashboard;
+            } else {
+                app.view_mode = crate::tui::state::ViewMode::Log;
+            }
+            app.dirty = true;
+        }
+
+        KeyEvent {
             code: KeyCode::PageUp,
             ..
         } => {

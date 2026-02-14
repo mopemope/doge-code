@@ -212,8 +212,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_resource_impl_summary_empty() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let mut config = AppConfig::default();
-        config.project_root = temp_dir.path().to_path_buf();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let service = service::DogeMcpService::new(config);
 
         let result = service

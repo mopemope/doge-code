@@ -84,18 +84,38 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
         // println!("Diff for {path}:\n{patch}");
     }
 
-    let result = fs::write(p, content).with_context(|| format!("write {}", p.display()));
+    // Atomic write: write to temp file, then rename
+    // usage of tempfile crate ensures the file is created in the same filesystem if possible,
+    // or we can explicitly use `tempfile::Builder::new().tempfile_in(parent)`
+    if let Some(parent) = p.parent() {
+        let mut temp_file = tempfile::Builder::new()
+            .prefix(".tmp_atomic_write_")
+            .tempfile_in(parent)
+            .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
+
+        use std::io::Write;
+        temp_file
+            .write_all(content.as_bytes())
+            .with_context(|| "failed to write to temp file")?;
+
+        // persist (rename)
+        temp_file
+            .persist(p)
+            .with_context(|| format!("failed to persist (rename) file to {}", p.display()))?;
+    } else {
+        // Fallback for root path (unlikely in this context but good for safety)
+        fs::write(p, content).with_context(|| format!("write {}", p.display()))?;
+    }
 
     // Update session with changed file
-    if result.is_ok()
-        && let Ok(current_dir) = std::env::current_dir()
+    if let Ok(current_dir) = std::env::current_dir()
         && let Ok(relative_path) = p.strip_prefix(current_dir)
     {
         let fs_tools = crate::tools::FsTools::default();
         let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
     }
 
-    result
+    Ok(())
 }
 
 #[cfg(test)]

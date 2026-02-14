@@ -100,8 +100,7 @@ The following test(s) have failed. Please analyze the failures and provide fixes
                 prompt.push_str(&format!("   Actual: {}\n", actual));
             }
 
-            // Add stack trace information if available
-            if let Some(ref stack_trace) = test.stack_trace
+            if let Some(stack_trace) = &test.stack_trace
                 && !stack_trace.is_empty()
             {
                 prompt.push_str("   Stack Trace:\n");

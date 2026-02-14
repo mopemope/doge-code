@@ -60,6 +60,13 @@ pub enum InputMode {
     FileSearch,    // Ctrl+P
 }
 
+#[derive(PartialEq, Default, Clone, Copy, Debug)]
+pub enum ViewMode {
+    #[default]
+    Log,
+    Dashboard,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
     #[default]
@@ -194,6 +201,8 @@ pub struct TuiApp {
     pub current_stream_start: Option<usize>,
     // Input mode
     pub input_mode: InputMode,
+    // View mode
+    pub view_mode: ViewMode,
     // session management
     // pub current_session: Option<SessionData>,
     // pub session_store: SessionStore,
@@ -429,6 +438,7 @@ impl TuiApp {
             last_llm_response_content: None,
             current_stream_start: None,
             input_mode: InputMode::default(),
+            view_mode: ViewMode::default(),
             tokens_used: 0,
             tokens_prompt_used: 0,
             tokens_total_used: None,

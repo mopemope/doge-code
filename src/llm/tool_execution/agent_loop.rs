@@ -70,7 +70,7 @@ pub async fn run_agent_loop(
     }
 
     let runtime = ToolRuntime::build(fs).await?;
-    let verifier = crate::features::verification::AutoVerifier::new(cfg);
+    // let verifier = crate::features::verification::AutoVerifier::new(cfg);
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;
@@ -391,262 +391,25 @@ pub async fn run_agent_loop(
                 if let Some(path_str) = path_str {
                     let path = PathBuf::from(path_str);
 
-                    // Initial verification
-                    if let Some(mut verification_result) = verifier.verify_path(&path).await {
-                        let mut fixed = false;
-                        let mut fixed_iters = 0;
+                    // Use ReliabilityLayer for verification and auto-fixing
+                    let reliability_layer = crate::features::reliability::ReliabilityLayer::new(
+                        cfg.clone(),
+                        Some(client.clone()),
+                        fs.clone(),
+                    );
 
-                        // Attempt Auto-Fix if configured
-                        if cfg.test_fix.max_iterations > 0 {
-                            info!(
-                                "Verification failed for {}. Attempting auto-fix...",
-                                path.display()
-                            );
-                            if let Some(tx) = &ui_tx {
-                                let _ = tx.send(format!("::status:working:Verification failed. Attempting auto-fix (max {} iters)...", cfg.test_fix.max_iterations));
-                            }
-
-                            let fixer = crate::features::auto_fix::DefaultFixerAgent::new(
-                                fs.clone(),
-                                Some(client.clone()),
-                                cfg.clone(),
-                            );
-                            let mut auto_fixer = crate::features::auto_fix::AutoFixer::new(
-                                fixer,
-                                cfg.test_fix.max_iterations,
-                            );
-
-                            let verifier_clone = verifier.clone();
-                            let path_clone = path.clone();
-
-                            // Define check function for the loop
-                            let check_fn = move || {
-                                let v = verifier_clone.clone();
-                                let p = path_clone.clone();
-                                Box::pin(async move {
-                                    match v.verify_path(&p).await {
-                                        Some(res) => crate::features::auto_fix::FixableResult {
-                                            success: false,
-                                            stdout: res.stdout,
-                                            stderr: res.stderr,
-                                            exit_code: res.exit_code,
-                                            context_prompt: None,
-                                        },
-                                        None => crate::features::auto_fix::FixableResult {
-                                            success: true,
-                                            stdout: String::new(),
-                                            stderr: String::new(),
-                                            exit_code: Some(0),
-                                            context_prompt: None,
-                                        },
-                                    }
-                                })
-                            };
-
-                            // Define prompt function
-                            let prompt_fn =
-                                |res: &crate::features::auto_fix::FixableResult, iter: usize| {
-                                    format!(
-                                        "<VERIFICATION_FAILURE iteration=\"{}\">\nThe verification command for {} failed.\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n\nPlease fix the code to resolve these errors.</VERIFICATION_FAILURE>",
-                                        iter,
-                                        path_str,
-                                        truncate_string_with_graphemes(&res.stdout, 2000),
-                                        truncate_string_with_graphemes(&res.stderr, 4000)
-                                    )
-                                };
-
-                            // Run the fix loop
-                            match auto_fixer.run_fix_loop(check_fn, prompt_fn).await {
-                                Ok((fixed_res, iters)) => {
-                                    if fixed_res.success {
-                                        fixed = true;
-                                        fixed_iters = iters;
-                                    } else {
-                                        // Update verification result with the final failure
-                                        verification_result.stdout = fixed_res.stdout;
-                                        verification_result.stderr = fixed_res.stderr;
-                                        verification_result.exit_code = fixed_res.exit_code;
-                                        verification_result.message = format!(
-                                            "<verification_error>\nVerification Failed after {} auto-fix attempts:\n{}{}\n</verification_error>",
-                                            iters,
-                                            verification_result.stdout,
-                                            verification_result.stderr
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Auto-fix execution error: {}", e);
-                                    if let Some(tx) = &ui_tx {
-                                        let _ = tx
-                                            .send(format!("::status:error:Auto-fix error: {}", e));
-                                    }
-                                }
-                            }
-                        }
-
-                        if fixed {
-                            info!("Auto-fix successful after {} iterations", fixed_iters);
+                    match reliability_layer
+                        .verify_and_fix(&path, ui_tx.as_ref())
+                        .await
+                    {
+                        Ok(content) => tool_message_content.push_str(&content),
+                        Err(e) => {
+                            error!("Error in reliability layer: {}", e);
                             tool_message_content.push_str(&format!(
-                                "\n\n<AUTO_FIX>\nVerification failed initially, but was automatically fixed after {} iterations.\n</AUTO_FIX>",
-                                fixed_iters
+                                "\n<SYSTEM_NOTE>Error during verification: {}</SYSTEM_NOTE>",
+                                e
                             ));
-                            if let Some(tx) = &ui_tx {
-                                let _ = tx.send(format!(
-                                    "::status:fixed:Auto-fixed after {} iterations.",
-                                    fixed_iters
-                                ));
-                            }
-                        } else {
-                            // Auto-fix failed or was disabled. Proceed with failure reporting/reverting.
-
-                            // Auto-revert logic (soft revert)
-                            let should_revert = false; // verification_result.should_revert && false;
-
-                            if should_revert {
-                                // Attempt to revert the change using the undo stack
-                                let reverted = {
-                                    let mut stack = fs.undo_stack.write().await;
-                                    if let Some(entry) = stack.pop() {
-                                        // Write back the original content
-                                        crate::tools::write::fs_write(
-                                            entry.path.to_str().unwrap(),
-                                            &entry.content,
-                                            cfg,
-                                        )
-                                        .is_ok()
-                                    } else {
-                                        false
-                                    }
-                                };
-
-                                let warning = if reverted {
-                                    format!(
-                                        r#"
-        
-        <AUTOMATED_VERIFICATION_FAILURE>
-        The tool execution succeeded, but an automated check FAILED with strict mode enabled.
-        Exit Code: {:?}
-        
-        STDOUT:
-        {}
-        
-        STDERR:
-        {}
-        </AUTOMATED_VERIFICATION_FAILURE>
-        
-        <DIRECTIVE>
-        ⚠️ CRITICAL: Verification failed and your changes have been AUTOMATICALLY REVERTED.
-        The file has been restored to its previous state.
-        
-        1. Analyze the STDERR output above to understand why your code failed.
-        2. You MUST apply a DIFFERENT solution. Do not try the same broken code again.
-        3. Fix the logical error or syntax error that caused the failure.
-        </DIRECTIVE>"#,
-                                        verification_result.exit_code,
-                                        truncate_string_with_graphemes(
-                                            &verification_result.stdout,
-                                            1000
-                                        ),
-                                        truncate_string_with_graphemes(
-                                            &verification_result.stderr,
-                                            2000
-                                        )
-                                    )
-                                } else {
-                                    format!(
-                                        r#"
-        
-        <AUTOMATED_VERIFICATION_FAILURE>
-        The tool execution succeeded, but an automated check FAILED.
-        Exit Code: {:?}
-        
-        STDOUT:
-        {}
-        
-        STDERR:
-        {}
-        </AUTOMATED_VERIFICATION_FAILURE>
-        
-        <DIRECTIVE>
-        ⚠️ CRITICAL: Verification failed and automatic revert FAILED.
-        The codebase is potentially in a broken state. You MUST fix this immediately.
-        
-        1. Analyze the STDERR output above.
-        2. Fix the error in the current file state.
-        </DIRECTIVE>"#,
-                                        verification_result.exit_code,
-                                        truncate_string_with_graphemes(
-                                            &verification_result.stdout,
-                                            1000
-                                        ),
-                                        truncate_string_with_graphemes(
-                                            &verification_result.stderr,
-                                            2000
-                                        )
-                                    )
-                                };
-
-                                tool_message_content.push_str(&warning);
-                                if let Some(tx) = &ui_tx {
-                                    let status_msg = if reverted {
-                                        "::status:error:Verification failed. Changes reverted."
-                                    } else {
-                                        "::status:error:Verification failed. Revert failed."
-                                    };
-                                    let _ = tx.send(status_msg.to_string());
-                                }
-                            } else {
-                                // Warning only (revert suppressed)
-                                let warning = format!(
-                                    r#"
-        
-        <AUTOMATED_VERIFICATION_FAILURE>
-        The tool execution succeeded, but an automated check FAILED.
-        (Auto-revert suppressed to allow fix)
-        Exit Code: {:?}
-        
-        STDOUT:
-        {}
-        
-        STDERR:
-        {}
-        </AUTOMATED_VERIFICATION_FAILURE>
-        
-        <DIRECTIVE>
-        ⚠️ CRITICAL: Verification failed.
-        The codebase is potentially in a broken state. You MUST fix this immediately.
-        Do not proceed with other tasks until this is resolved.
-        
-        1. Analyze the STDERR output above.
-        2. Fix the error in the current file state.
-        </DIRECTIVE>"#,
-                                    verification_result.exit_code,
-                                    truncate_string_with_graphemes(
-                                        &verification_result.stdout,
-                                        1000
-                                    ),
-                                    truncate_string_with_graphemes(
-                                        &verification_result.stderr,
-                                        2000
-                                    )
-                                );
-                                tool_message_content.push_str(&warning);
-                                if let Some(tx) = &ui_tx {
-                                    let _ = tx.send(
-                                        "::status:warning:Auto-verification failed. Correction required."
-                                            .to_string(),
-                                    );
-                                }
-                            }
                         }
-                    } else {
-                        // Verification passed initially
-                        let verification_note = r#"
-        
-        <SYSTEM_NOTE>
-        File modification detected. Verification passed.
-        </SYSTEM_NOTE>"#;
-                        tool_message_content.push_str(verification_note);
                     }
                 } else {
                     // Could not determine path, fallback to generic note
