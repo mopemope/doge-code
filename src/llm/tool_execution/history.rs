@@ -6,9 +6,6 @@ use tracing::{error, info, warn};
 pub struct HistoryManager {
     messages: Vec<ChatMessage>,
     client: OpenAIClient,
-    model: String,
-    auto_compact_threshold: u32,
-    context_window_size: u32,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     fs_tools: crate::tools::FsTools,
     config: crate::config::AppConfig,
@@ -17,10 +14,7 @@ pub struct HistoryManager {
 impl HistoryManager {
     pub fn new(
         client: OpenAIClient,
-        model: String,
         messages: Vec<ChatMessage>,
-        auto_compact_threshold: u32,
-        context_window_size: u32,
         ui_tx: Option<std::sync::mpsc::Sender<String>>,
         fs_tools: crate::tools::FsTools,
         config: crate::config::AppConfig,
@@ -28,9 +22,6 @@ impl HistoryManager {
         Self {
             messages,
             client,
-            model,
-            auto_compact_threshold,
-            context_window_size,
             ui_tx,
             fs_tools,
             config,
@@ -144,8 +135,12 @@ impl HistoryManager {
     /// Check if proactive compaction is needed and perform it if so
     pub async fn check_and_compact_proactive(&mut self) -> Result<bool> {
         let last_prompt_tokens = self.client.get_prompt_tokens_used();
-        let safety_limit = (self.context_window_size as f64 * 0.9) as u32;
-        let effective_limit = std::cmp::min(self.auto_compact_threshold, safety_limit);
+        let context_window_size = self.config.get_context_window_size().unwrap_or(8192);
+        let safety_limit = (context_window_size as f64 * 0.9) as u32;
+        let auto_compact_threshold = self
+            .config
+            .auto_compact_prompt_token_threshold_for_current_model();
+        let effective_limit = std::cmp::min(auto_compact_threshold, safety_limit);
 
         // Only compact if we are over the limit AND we have enough history to meaningful compact
         if last_prompt_tokens > effective_limit && self.messages.len() > 2 {
@@ -188,7 +183,7 @@ impl HistoryManager {
     async fn perform_compaction(&mut self) -> Result<bool> {
         let params = crate::llm::compact_history::CompactParams {
             client: self.client.clone(),
-            model: self.model.clone(),
+            model: self.config.model.clone(),
             fs_tools: self.fs_tools.clone(),
             history: self.messages.clone(),
             cfg: self.config.clone(),

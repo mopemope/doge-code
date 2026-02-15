@@ -30,10 +30,7 @@ pub async fn run_agent_loop(
     // Initialize HistoryManager
     let mut history = crate::llm::tool_execution::history::HistoryManager::new(
         client.clone(),
-        model.to_string(),
         messages,
-        cfg.auto_compact_prompt_token_threshold_for_current_model(),
-        cfg.get_context_window_size().unwrap_or(128_000),
         ui_tx.clone(),
         fs.clone(),
         cfg.clone(),

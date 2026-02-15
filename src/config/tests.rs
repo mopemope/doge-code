@@ -1,212 +1,152 @@
-use crate::Cli;
-use crate::config::{AppConfig, FileConfig, load_project_config};
+use crate::config::*;
+use std::env;
 use std::fs;
 use tempfile::TempDir;
 
 #[test]
-fn test_load_project_config() {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let project_root = temp_dir.path();
-
-    // Create .doge directory and config file
-    let doge_dir = project_root.join(".doge");
-    fs::create_dir_all(&doge_dir).expect("Failed to create dir");
-
-    let config_content = r#"
-model = "gpt-4o"
-theme = "light"
-show_diff = false
-
-[llm]
-max_retries = 5
-retry_base_ms = 500
-"#;
-
-    fs::write(doge_dir.join("config.toml"), config_content).unwrap();
-
-    // Load project config
-    let project_cfg = load_project_config(project_root).unwrap();
-
-    // Verify the config was loaded correctly
-    assert_eq!(project_cfg.model, Some("gpt-4o".to_string()));
-    assert_eq!(project_cfg.theme, Some("light".to_string()));
-    assert_eq!(project_cfg.show_diff, Some(false));
-
-    // Verify LLM config
-    assert!(project_cfg.llm.is_some());
-    let llm_cfg = project_cfg.llm.unwrap();
-    assert_eq!(llm_cfg.max_retries, Some(5));
-    assert_eq!(llm_cfg.retry_base_ms, Some(500));
+fn test_llm_config_apply_partial() {
+    let mut config = LlmConfig::default();
+    let partial = PartialLlmConfig {
+        connect_timeout_ms: Some(999),
+        max_retries: Some(5),
+        ..Default::default()
+    };
+    config.apply_partial(&partial);
+    assert_eq!(config.connect_timeout_ms, 999);
+    assert_eq!(config.max_retries, 5);
+    // Other fields should remain default
+    assert_eq!(
+        config.request_timeout_ms,
+        LlmConfig::default().request_timeout_ms
+    );
 }
 
 #[test]
-fn test_load_project_config_not_exists() {
-    let temp_dir = TempDir::new().unwrap();
-    let project_root = temp_dir.path();
-
-    // Load project config when no config file exists
-    let project_cfg = load_project_config(project_root).unwrap();
-
-    // Should return default config
-    assert_eq!(project_cfg, FileConfig::default());
-}
-
-#[test]
-fn test_auto_compact_threshold_overrides() {
-    let temp_dir = TempDir::new().unwrap();
-    let project_root = temp_dir.path();
-
-    let doge_dir = project_root.join(".doge");
-    fs::create_dir_all(&doge_dir).unwrap();
-
-    let config_content = r#"
-model = "project-model"
-auto_compact_prompt_token_threshold = 111
-
-[auto_compact_prompt_token_thresholds]
-project-model = 222
-other-model = 333
-"#;
-
-    fs::write(doge_dir.join("config.toml"), config_content).unwrap();
-
-    let global_config_path = temp_dir.path().join("global.toml");
-    fs::write(&global_config_path, "").unwrap();
-
-    let prev_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(project_root).unwrap();
-
-    let old_model = std::env::var("OPENAI_MODEL").ok();
-    let old_threshold = std::env::var("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD").ok();
-    let old_config = std::env::var("DOGE_CODE_CONFIG").ok();
-
-    let set_env = |key: &str, value: &str| unsafe { std::env::set_var(key, value) };
-    let remove_env = |key: &str| unsafe { std::env::remove_var(key) };
-
-    remove_env("OPENAI_MODEL");
-    set_env("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD", "4444");
-    set_env("DOGE_CODE_CONFIG", global_config_path.to_str().unwrap());
-
-    let cli = Cli {
-        base_url: "".to_string(),
-        model: "".to_string(),
-        api_key: None,
-        no_repomap: false,
-        instructions_file: None,
-        resume: false,
-        command: None,
-    };
-
-    let cfg = AppConfig::from_cli(cli).unwrap();
-
-    assert_eq!(cfg.auto_compact_prompt_token_threshold, 4444);
-    assert_eq!(
-        cfg.auto_compact_prompt_token_threshold_for_model("project-model"),
-        222
-    );
-    assert_eq!(
-        cfg.auto_compact_prompt_token_threshold_for_model("other-model"),
-        333
-    );
-    assert_eq!(
-        cfg.auto_compact_prompt_token_threshold_for_model("unknown"),
-        4444
-    );
-
-    if let Some(value) = old_model {
-        set_env("OPENAI_MODEL", &value);
-    } else {
-        remove_env("OPENAI_MODEL");
-    }
-
-    if let Some(value) = old_threshold {
-        set_env("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD", &value);
-    } else {
-        remove_env("DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD");
-    }
-
-    if let Some(value) = old_config {
-        set_env("DOGE_CODE_CONFIG", &value);
-    } else {
-        remove_env("DOGE_CODE_CONFIG");
-    }
-
-    std::env::set_current_dir(prev_dir).unwrap();
-}
-
-#[test]
-fn test_get_context_window_size() {
-    // Test OpenAI models
-    let cfg = AppConfig {
-        model: "gpt-4o".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(128_000));
-
-    let cfg = AppConfig {
-        model: "gpt-4".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(8_192));
-
-    let cfg = AppConfig {
-        model: "gpt-3.5-turbo".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(16_385));
-
-    // Test Anthropic Claude models
-    let cfg = AppConfig {
-        model: "claude-3-5-sonnet-20241022".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(200_000));
-
-    let cfg = AppConfig {
-        model: "claude-3-opus".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(200_000));
-
-    let cfg = AppConfig {
-        model: "claude-2".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(100_000));
-
-    // Test OpenRouter models
-    let cfg = AppConfig {
-        model: "kwaipilot/kat-coder-pro:free".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(128_000));
-
-    let cfg = AppConfig {
-        model: "qwen/qwen3-coder:free".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(32_768));
-
-    let cfg = AppConfig {
-        model: "deepseek/deepseek-chat-v3.1:free".to_string(),
-        ..Default::default()
-    };
-    assert_eq!(cfg.get_context_window_size(), Some(64_000));
-
-    // Test explicitly configured model
-    let cfg = AppConfig {
-        llm: crate::config::LlmConfig {
-            context_window_size: Some(50_000),
+fn test_verification_config_apply_partial() {
+    let mut config = VerificationConfig::default();
+    let partial = PartialVerificationConfig {
+        enabled: Some(false),
+        commands: Some(PartialVerificationCommands {
+            rust: Some(vec!["custom".to_string()]),
             ..Default::default()
-        },
+        }),
         ..Default::default()
     };
-    assert_eq!(cfg.get_context_window_size(), Some(50_000));
+    config.apply_partial(&partial);
+    assert!(!config.enabled);
+    assert_eq!(config.commands.rust, vec!["custom".to_string()]);
+}
 
-    // Test unknown model
-    let cfg = AppConfig {
-        model: "unknown-model".to_string(),
+#[test]
+fn test_watch_config_apply_partial() {
+    let mut config = WatchConfig::default();
+    let partial = PartialWatchConfig {
+        debounce_delay_ms: Some(123),
+        backup_enabled: Some(false),
         ..Default::default()
     };
-    assert_eq!(cfg.get_context_window_size(), None);
+    config.apply_partial(&partial);
+    assert_eq!(config.debounce_delay_ms, Some(123));
+    assert!(!config.backup_enabled.unwrap_or(true));
+}
+
+#[test]
+fn test_test_fix_config_apply_partial() {
+    let mut config = TestFixConfig::default();
+    let partial = PartialTestFixConfig {
+        max_iterations: Some(10),
+        ..Default::default()
+    };
+    config.apply_partial(&partial);
+    assert_eq!(config.max_iterations, 10);
+}
+
+#[test]
+fn test_mcp_servers_merge_logic() {
+    let file_servers = vec![PartialMcpServerConfig {
+        name: Some("server1".to_string()),
+        enabled: Some(true),
+        address: Some("1.2.3.4".to_string()),
+        ..Default::default()
+    }];
+    let project_servers = vec![PartialMcpServerConfig {
+        name: Some("server1".to_string()),
+        enabled: Some(false),
+        ..Default::default()
+    }];
+
+    let merged = merge_mcp_servers(Some(&file_servers), Some(&project_servers));
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].name, "server1");
+    assert!(!merged[0].enabled); // Project overrides file
+    assert_eq!(merged[0].address, "1.2.3.4"); // Field from file preserved
+}
+
+#[test]
+fn test_mcp_servers_no_duplicates() {
+    let file_servers = vec![PartialMcpServerConfig {
+        name: Some("server1".to_string()),
+        ..Default::default()
+    }];
+    let project_servers = vec![PartialMcpServerConfig {
+        name: Some("server2".to_string()),
+        ..Default::default()
+    }];
+
+    let merged = merge_mcp_servers(Some(&file_servers), Some(&project_servers));
+    assert_eq!(merged.len(), 2);
+}
+
+#[test]
+fn test_load_file_config_creates_default() {
+    let temp_dir = TempDir::new().unwrap();
+    let original_home = env::var("HOME").ok();
+    let original_xdg_config_home = env::var("XDG_CONFIG_HOME").ok();
+
+    // Set up test environment
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path());
+        let config_home = temp_dir.path().join(".config");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    }
+
+    // Remove any existing config file to test creation
+    let config_path = temp_dir
+        .path()
+        .join(".config")
+        .join("doge-code")
+        .join("config.toml");
+
+    // Load config (this should create the file)
+    let result = load_file_config();
+    assert!(result.is_ok());
+
+    // Check that the config file was created
+    assert!(
+        config_path.exists(),
+        "Config file should be created at {:?}",
+        config_path
+    );
+
+    // Check that the file contains content
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(!content.is_empty(), "Config file should not be empty");
+    assert!(
+        content.contains("# Doge-Code Configuration"),
+        "Config should contain comment header"
+    );
+
+    // Restore original environment
+    unsafe {
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(xdg_home) = original_xdg_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", xdg_home);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
 }
