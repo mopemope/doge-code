@@ -19,7 +19,7 @@ pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
     model: &str,
     fs: &FsTools,
-    mut messages: Vec<ChatMessage>,
+    messages: Vec<ChatMessage>,
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
     cfg: &crate::config::AppConfig,
@@ -27,12 +27,22 @@ pub async fn run_agent_loop(
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
 
-    debug!("run_agent_loop called");
+    // Initialize HistoryManager
+    let mut history = crate::llm::tool_execution::history::HistoryManager::new(
+        client.clone(),
+        model.to_string(),
+        messages,
+        cfg.auto_compact_prompt_token_threshold_for_current_model(),
+        cfg.get_context_window_size().unwrap_or(128_000),
+        ui_tx.clone(),
+        fs.clone(),
+        cfg.clone(),
+    );
 
     // Inject System Prompt if not already present
     {
         // Check if there's already a system message in the history
-        let has_system_prompt = messages.iter().any(|m| m.role == "system");
+        let has_system_prompt = history.iter().any(|m| m.role == "system");
 
         if !has_system_prompt {
             debug!("Injecting default system prompt");
@@ -42,35 +52,18 @@ pub async fn run_agent_loop(
                 tool_calls: vec![],
                 tool_call_id: None,
             };
-            messages.insert(0, system_msg);
+            history.insert(0, system_msg);
         } else {
             debug!("System prompt already present, skipping injection");
         }
     }
 
-    // Inject Proactive Context
-    {
-        let cm = fs.context_manager.read().await;
-        let context_prompt = cm.get_context_prompt().await;
-        if !context_prompt.is_empty() {
-            let context_msg = ChatMessage {
-                role: "system".into(),
-                content: Some(context_prompt),
-                tool_calls: vec![],
-                tool_call_id: None,
-            };
-            // Insert before the last message if it's a User message to provide immediate context
-            if !messages.is_empty() && messages.last().map(|m| m.role == "user").unwrap_or(false) {
-                let idx = messages.len() - 1;
-                messages.insert(idx, context_msg);
-            } else {
-                messages.push(context_msg);
-            }
-        }
+    // Inject Proactive Context (Files + Smart Memory)
+    if let Err(e) = history.inject_context().await {
+        warn!("Failed to inject context: {}", e);
     }
 
     let runtime = ToolRuntime::build(fs).await?;
-    // let verifier = crate::features::verification::AutoVerifier::new(cfg);
     let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
     let mut file_was_written = false;
@@ -79,69 +72,20 @@ pub async fn run_agent_loop(
 
     loop {
         iters += 1;
-        debug!(iteration = iters, messages = ?messages, "agent loop iteration");
+        debug!(
+            iteration = iters,
+            messages_len = history.len(),
+            "agent loop iteration"
+        );
         if iters > runtime.max_iters {
             warn!(iters, "max tool iterations reached");
             return Err(AgentLoopError::MaxIterations(iters).into());
         }
 
         // --- Proactive Compaction Check ---
-        let threshold = cfg.auto_compact_prompt_token_threshold_for_current_model();
-        let context_limit = cfg.get_context_window_size().unwrap_or(128_000); // Default to a safe large value if unknown
-        let safety_limit = (context_limit as f64 * 0.9) as u32;
-        let effective_limit = std::cmp::min(threshold, safety_limit);
-        let last_prompt_tokens = client.get_prompt_tokens_used();
-
-        // Only compact if we are over the limit AND we have enough history to meaningful compact (avoid loops)
-        // We typically want at least System + User + Assistant + Tool (4 messages) or similar complexity before compacting becomes the only option.
-        // But strictly > 2 (System + User + something) matches our plan.
-        if last_prompt_tokens > effective_limit && messages.len() > 2 {
-            warn!(
-                current_tokens = last_prompt_tokens,
-                limit = effective_limit,
-                "Proactive compaction triggered"
-            );
-
-            if let Some(tx) = &ui_tx {
-                let _ = tx.send(
-                    "::status:compacting:Context limits approaching, summarizing history..."
-                        .to_string(),
-                );
-            }
-
-            match crate::llm::compact_conversation_history_ref(client, model, messages.as_slice())
-                .await
-            {
-                Ok(compact_result) => {
-                    if compact_result.metadata.success {
-                        info!("Proactive history compaction successful.");
-
-                        // Preserve System Prompt if present
-                        let system_prompt = messages.iter().find(|m| m.role == "system").cloned();
-                        messages.clear();
-                        if let Some(sys) = system_prompt {
-                            messages.push(sys);
-                        }
-                        messages.push(compact_result.compacted_message);
-
-                        if let Some(tx) = &ui_tx {
-                            let _ = tx.send(
-                                "::status:waiting:History compacted. Continuing...".to_string(),
-                            );
-                        }
-                        // Continue loop with new compacted history
-                        continue;
-                    } else {
-                        error!(
-                            "Proactive compaction failed: {:?}",
-                            compact_result.metadata.error_message
-                        );
-                    }
-                }
-                Err(e) => {
-                    error!("Proactive compaction error: {}", e);
-                }
-            }
+        if let Err(e) = history.check_and_compact_proactive().await {
+            error!("Proactive compaction error: {}", e);
+            // Continue even if compaction failed, hoping context length isn't fatal yet
         }
         // ----------------------------------
 
@@ -154,7 +98,7 @@ pub async fn run_agent_loop(
             res = crate::llm::tool_execution::requests::chat_tools_once(
                 client,
                 model,
-                messages.as_slice(),
+                history.as_slice(),
                 &runtime.tools,
                 Some(cancel_token.clone()),
                 ui_tx.clone(),
@@ -164,54 +108,24 @@ pub async fn run_agent_loop(
                     Err(e) => {
                         // Check if the error is due to context length exceeded
                         if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>() {
-                            warn!("Context length exceeded in agent loop. Attempting to compact history.");
-
-                            // Send a message to the UI to indicate that we are compacting
-                            if let Some(tx) = &ui_tx {
-                                let _ = tx.send("::status:compacting:Context limits reached, summarizing history...".to_string());
-                            }
-
-                            match crate::llm::compact_conversation_history_ref(
-                                client,
-                                model,
-                                messages.as_slice(),
-                            )
-                            .await
-                            {
-                                Ok(compact_result) => {
-                                    if compact_result.metadata.success {
-                                        info!("History compaction successful. Resuming with compacted history.");
-
-                                        // Preserve System Prompt if present
-                                        let system_prompt = messages.iter().find(|m| m.role == "system").cloned();
-                                        messages.clear();
-                                        if let Some(sys) = system_prompt {
-                                            messages.push(sys);
-                                        }
-                                        messages.push(compact_result.compacted_message);
-
-                                        // Inform UI
-                                        if let Some(tx) = &ui_tx {
-                                            let _ = tx.send("::status:waiting:History compacted. Retrying...".to_string());
-                                        }
-
-                                        // Retry the loop iteration with the new history
-                                        continue;
-                                    } else {
-                                        error!("History compaction failed: {:?}", compact_result.metadata.error_message);
-                                        // Fall through to return the original error if compaction failed
-                                    }
+                            match history.compact_reactive().await {
+                                Ok(true) => {
+                                    info!("History compaction successful (reactive). Resuming.");
+                                    continue;
+                                }
+                                Ok(false) => {
+                                     // Should not happen if compact_reactive returns true only on success
                                 }
                                 Err(compact_err) => {
-                                    error!("Error during history compaction: {}", compact_err);
-                                    // Fall through to return the original error
+                                     error!("Error during reactive history compaction: {}", compact_err);
                                 }
                             }
                         }
+
                         if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
                             warn!("JSON parse error from LLM: {}", e);
                             let feedback = format!("Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.", e);
-                            messages.push(ChatMessage {
+                            history.push(ChatMessage {
                                 role: "user".into(),
                                 content: Some(feedback),
                                 tool_calls: vec![],
@@ -229,7 +143,6 @@ pub async fn run_agent_loop(
                     }
                 }
             },
-
         };
 
         // If assistant returned final content without tool calls, we are done.
@@ -243,7 +156,7 @@ pub async fn run_agent_loop(
                 let _ = tx.send(format!("::status:done:{}", content));
             }
 
-            messages.push(ChatMessage {
+            history.push(ChatMessage {
                 role: "assistant".into(),
                 content: msg.content.clone(),
                 tool_calls: msg.tool_calls.clone(),
@@ -290,7 +203,7 @@ pub async fn run_agent_loop(
             }
 
             return Ok((
-                messages,
+                history.into_messages(),
                 ChoiceMessage {
                     role: "assistant".into(),
                     content: msg.content.clone().unwrap_or_default(),
@@ -307,7 +220,7 @@ pub async fn run_agent_loop(
             let _ = tx.send(content.clone());
         }
 
-        messages.push(ChatMessage {
+        history.push(ChatMessage {
             role: "assistant".into(),
             content: msg.content.clone(),
             tool_calls: msg.tool_calls.clone(),
@@ -558,7 +471,7 @@ File modification detected. You MUST now verify your changes:
             }
 
             // tool message to feed back to the LLM
-            messages.push(ChatMessage {
+            history.push(ChatMessage {
                 role: "tool".into(),
                 content: Some(tool_message_content),
                 tool_calls: vec![],
@@ -575,7 +488,7 @@ File modification detected. You MUST now verify your changes:
                     let _ = tx.send("::status:warning:Loop detected. Intervening...".to_string());
                 }
 
-                messages.push(ChatMessage {
+                history.push(ChatMessage {
                     role: "user".into(),
                     content: Some(warning_msg),
                     tool_calls: vec![],
@@ -591,7 +504,7 @@ File modification detected. You MUST now verify your changes:
                     let _ =
                         tx.send("::status:warning:Progress stalled. Intervening...".to_string());
                 }
-                messages.push(ChatMessage {
+                history.push(ChatMessage {
                     role: "user".into(),
                     content: Some(stall_warning),
                     tool_calls: vec![],
@@ -603,7 +516,7 @@ File modification detected. You MUST now verify your changes:
             if let Err(e) = &res {
                 let err_str = e.to_string();
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
-                    messages.push(ChatMessage {
+                    history.push(ChatMessage {
                         role: "user".into(),
                         content: Some(hint.to_string()),
                         tool_calls: vec![],

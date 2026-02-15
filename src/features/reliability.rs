@@ -171,7 +171,7 @@ impl ReliabilityLayer {
         ui_tx: Option<&std::sync::mpsc::Sender<String>>,
     ) {
         // Auto-revert logic (soft revert)
-        let should_revert = false; // verification_result.should_revert && false;
+        let should_revert = self.config.verification.auto_revert;
 
         if should_revert {
             // Attempt to revert the change using the undo stack

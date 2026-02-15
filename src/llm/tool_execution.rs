@@ -3,6 +3,7 @@ pub mod compaction;
 mod diff_collection;
 mod dispatch;
 mod error;
+pub mod history;
 mod requests;
 mod streaming;
 pub mod ui_rendering;

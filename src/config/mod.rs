@@ -44,6 +44,7 @@ pub struct VerificationConfig {
     pub enabled: bool,
     pub enforce: bool,
     pub timeout_ms: u64,
+    pub auto_revert: bool,
     pub commands: VerificationCommands,
 }
 
@@ -97,6 +98,7 @@ impl Default for VerificationConfig {
             enabled: true,
             enforce: true,
             timeout_ms: 120_000,
+            auto_revert: false,
             commands: VerificationCommands::default(),
         }
     }
@@ -299,6 +301,7 @@ pub struct PartialVerificationConfig {
     pub enabled: Option<bool>,
     pub enforce: Option<bool>,
     pub timeout_ms: Option<u64>,
+    pub auto_revert: Option<bool>,
     pub commands: Option<PartialVerificationCommands>,
 }
 
@@ -666,6 +669,9 @@ impl AppConfig {
                 if let Some(timeout_ms) = file_verification.timeout_ms {
                     verification_cfg.timeout_ms = timeout_ms;
                 }
+                if let Some(auto_revert) = file_verification.auto_revert {
+                    verification_cfg.auto_revert = auto_revert;
+                }
                 if let Some(commands) = &file_verification.commands {
                     if let Some(rust) = &commands.rust {
                         verification_cfg.commands.rust = rust.clone();
@@ -694,6 +700,9 @@ impl AppConfig {
                 }
                 if let Some(timeout_ms) = project_verification.timeout_ms {
                     verification_cfg.timeout_ms = timeout_ms;
+                }
+                if let Some(auto_revert) = project_verification.auto_revert {
+                    verification_cfg.auto_revert = auto_revert;
                 }
                 if let Some(commands) = &project_verification.commands {
                     if let Some(rust) = &commands.rust {
