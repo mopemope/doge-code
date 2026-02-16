@@ -5,6 +5,7 @@
 //! error handling helpers.
 
 use anyhow::{Context, Result};
+use fastrand;
 use std::path::{Path, PathBuf};
 
 /// Checks if the specified path is a Git repository.
@@ -224,13 +225,14 @@ mod tests {
             .arg(&repo_path)
             .output();
 
-        // Run test if git command is available
-        if output.is_ok() && output.unwrap().status.success() {
-            assert!(is_git_repository(&repo_path));
-
-            // Cleanup
-            let _ = fs::remove_dir_all(&repo_path);
+        if let Ok(output) = output {
+            if output.status.success() {
+                assert!(is_git_repository(&repo_path));
+            }
         }
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&repo_path);
     }
 
     #[test]
@@ -242,13 +244,18 @@ mod tests {
             .status()
             .expect("git init failed");
         assert!(status.success());
-        let sub_dir = temp.path().join("src");
-        std::fs::create_dir(&sub_dir).expect("Failed to create sub dir");
+
+        let sub_dir = temp.path().join("subdir");
+        fs::create_dir(&sub_dir).expect("Failed to create subdir");
+
         assert!(is_git_repository(&sub_dir));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(temp.path());
     }
 
     #[test]
-    fn test_get_git_repository_root() {
+    fn test_get_git_repository_root_with_git() {
         let temp = tempfile::tempdir().expect("Failed to create temp dir");
         let status = std::process::Command::new("git")
             .arg("init")
@@ -257,17 +264,27 @@ mod tests {
             .expect("git init failed");
         assert!(status.success());
 
-        // From repo root
-        let root1 = get_git_repository_root(temp.path());
-        assert!(root1.is_some());
-        assert_eq!(root1.unwrap(), temp.path());
+        let root = get_git_repository_root(temp.path());
+        assert!(root.is_some());
+        assert_eq!(root.unwrap(), temp.path());
+    }
 
-        // From sub dir
-        let sub_dir = temp.path().join("src");
-        std::fs::create_dir(&sub_dir).expect("Failed to create sub dir");
-        let root2 = get_git_repository_root(&sub_dir);
-        assert!(root2.is_some());
-        assert_eq!(root2.unwrap(), temp.path());
+    #[test]
+    fn test_get_git_repository_root_in_subdirectory() {
+        let temp = tempfile::tempdir().expect("Failed to create temp dir");
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
+
+        let sub_dir = temp.path().join("subdir");
+        fs::create_dir(&sub_dir).expect("Failed to create subdir");
+
+        let root = get_git_repository_root(&sub_dir);
+        assert!(root.is_some());
+        assert_eq!(root.unwrap(), temp.path());
     }
 
     #[test]

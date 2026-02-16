@@ -593,7 +593,7 @@ impl Executor {
         }
 
         let (updated_messages, final_msg) = llm::run_agent_loop(
-            self.client.as_ref().unwrap(),
+            self.client.as_ref().expect("LLM client is not initialized"),
             &self.cfg.model,
             &self.tools,
             msgs,

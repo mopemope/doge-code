@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn test_detect_language_rust() {
         let temp_dir = TempDir::new().unwrap();
-        std::fs::write(temp_dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(temp_dir.path().join("Cargo.toml"), "").expect("Failed to write Cargo.toml");
         assert_eq!(detect_language(temp_dir.path()), "rust");
     }
 
