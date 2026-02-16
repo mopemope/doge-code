@@ -49,14 +49,14 @@ impl LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            connect_timeout_ms: 10000,
-            request_timeout_ms: 30000,
-            read_idle_timeout_ms: 30000,
+            connect_timeout_ms: 120000,
+            request_timeout_ms: 120000,
+            read_idle_timeout_ms: 120000,
             max_retries: 3,
             retry_base_ms: 1000,
             retry_jitter_ms: 500,
             respect_retry_after: true,
-            timeout_ms: 30000,
+            timeout_ms: 120000,
             context_window_size: None,
         }
     }

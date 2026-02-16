@@ -49,15 +49,22 @@ pub async fn handle_compaction(
 
                 Ok(true)
             } else {
-                error!(
-                    "History compaction failed: {:?}",
-                    compact_result.metadata.error_message
-                );
+                let err_msg = compact_result
+                    .metadata
+                    .error_message
+                    .unwrap_or_else(|| "Unknown compaction error".to_string());
+                error!("History compaction failed: {}", err_msg);
+                if let Some(tx) = ui_tx {
+                    let _ = tx.send(format!("::status:error:Compaction failed: {}", err_msg));
+                }
                 Ok(false)
             }
         }
         Err(compact_err) => {
             error!("Error during history compaction: {}", compact_err);
+            if let Some(tx) = ui_tx {
+                let _ = tx.send(format!("::status:error:Compaction error: {}", compact_err));
+            }
             Ok(false)
         }
     }
