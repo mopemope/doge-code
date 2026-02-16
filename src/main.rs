@@ -8,6 +8,7 @@ pub mod a2a;
 pub mod analysis;
 pub mod assets;
 pub mod config;
+pub mod error;
 
 pub mod diff_review;
 pub mod error_recovery;
