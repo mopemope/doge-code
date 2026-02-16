@@ -134,7 +134,9 @@ async fn chat_tools_once_inner(
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(
         AUTHORIZATION,
-        format!("Bearer {}", client.api_key).parse().unwrap(),
+        format!("Bearer {}", client.api_key)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid API key: {}", e))?,
     );
 
     // if let Ok(payload) = serde_json::to_string_pretty(&req) {

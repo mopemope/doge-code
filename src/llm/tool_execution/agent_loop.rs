@@ -361,7 +361,8 @@ File modification detected. You MUST now verify your changes:
 
                 let start_time = std::time::SystemTime::now();
                 let utc_datetime: DateTime<Utc> = start_time.into();
-                let jst_offset = FixedOffset::east_opt(9 * 3600).unwrap(); // JST is UTC+9
+                let jst_offset =
+                    FixedOffset::east_opt(9 * 3600).unwrap_or(FixedOffset::east_opt(0).unwrap()); // JST is UTC+9, fallback to UTC
                 let jst_datetime = utc_datetime.with_timezone(&jst_offset);
                 let timestamp_short = jst_datetime.format("%H:%M:%S").to_string(); // HH:MM:SS format in JST
 

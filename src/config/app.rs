@@ -114,6 +114,13 @@ impl AppConfig {
         self.auto_compact_prompt_token_threshold_for_model(&self.model)
     }
 
+    pub fn get_effective_compaction_limit(&self) -> u32 {
+        let context_window_size = self.get_context_window_size().unwrap_or(128_000);
+        let safety_limit = (context_window_size as f64 * 0.8) as u32;
+        let auto_compact_threshold = self.auto_compact_prompt_token_threshold_for_current_model();
+        std::cmp::min(auto_compact_threshold, safety_limit)
+    }
+
     pub fn from_cli(cli: crate::Cli) -> Result<Self> {
         let project_root = std::env::current_dir().context("resolve current dir")?;
         let git_root = get_git_repository_root(&project_root);

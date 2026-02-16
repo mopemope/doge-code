@@ -42,7 +42,9 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(
         AUTHORIZATION,
-        format!("Bearer {}", client.api_key).parse().unwrap(),
+        format!("Bearer {}", client.api_key)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid API key: {}", e))?,
     );
 
     if tracing::enabled!(tracing::Level::DEBUG)

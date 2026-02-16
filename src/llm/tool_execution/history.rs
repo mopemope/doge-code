@@ -135,12 +135,7 @@ impl HistoryManager {
     /// Check if proactive compaction is needed and perform it if so
     pub async fn check_and_compact_proactive(&mut self) -> Result<bool> {
         let last_prompt_tokens = self.client.get_prompt_tokens_used();
-        let context_window_size = self.config.get_context_window_size().unwrap_or(8192);
-        let safety_limit = (context_window_size as f64 * 0.9) as u32;
-        let auto_compact_threshold = self
-            .config
-            .auto_compact_prompt_token_threshold_for_current_model();
-        let effective_limit = std::cmp::min(auto_compact_threshold, safety_limit);
+        let effective_limit = self.config.get_effective_compaction_limit();
 
         // Only compact if we are over the limit AND we have enough history to meaningful compact
         if last_prompt_tokens > effective_limit && self.messages.len() > 2 {

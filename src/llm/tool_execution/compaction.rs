@@ -73,10 +73,7 @@ pub async fn handle_compaction(
 /// Checks if compaction should be performed based on current token usage and configuration.
 #[allow(dead_code)]
 pub fn should_compact(current_tokens: u32, cfg: &AppConfig, messages: &[ChatMessage]) -> bool {
-    let threshold = cfg.auto_compact_prompt_token_threshold_for_current_model();
-    let context_limit = cfg.get_context_window_size().unwrap_or(128_000);
-    let safety_limit = (context_limit as f64 * 0.9) as u32;
-    let effective_limit = std::cmp::min(threshold, safety_limit);
+    let effective_limit = cfg.get_effective_compaction_limit();
 
     // Only compact if we are over the limit AND we have enough history
     current_tokens > effective_limit && messages.len() > 2
@@ -140,14 +137,14 @@ mod tests {
             model: "gpt-4".to_string(),
             ..Default::default()
         };
-        // 8192 * 0.9 = 7372.8 -> 7372 safety limit
+        // 8192 * 0.8 = 6553.6 -> 6553 safety limit
 
         let messages = create_dummy_messages(10);
 
         // Usage below safety limit
-        assert!(!should_compact(7000, &cfg, &messages));
+        assert!(!should_compact(6500, &cfg, &messages));
 
-        // Usage above safety limit (7372) matches effective limit logic
-        assert!(should_compact(7400, &cfg, &messages));
+        // Usage above safety limit (6553) matches effective limit logic
+        assert!(should_compact(6600, &cfg, &messages));
     }
 }
