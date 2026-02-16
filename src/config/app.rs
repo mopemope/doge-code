@@ -15,6 +15,14 @@ use super::loading::{load_file_config, load_project_config};
 pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 250_000;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 300_000;
 
+#[derive(thiserror::Error, Debug)]
+pub enum AppConfigError {
+    #[error("Failed to load config: {0}")]
+    Load(#[from] anyhow::Error),
+    #[error("Missing configuration: {0}")]
+    Missing(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub base_url: String,

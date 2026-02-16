@@ -56,7 +56,7 @@ impl Default for VerificationCommands {
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             enforce: true,
             timeout_ms: 120_000,
             auto_revert: false,

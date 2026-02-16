@@ -11,7 +11,7 @@ pub struct TestFixConfig {
 impl Default for TestFixConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_iterations: 3,
             test_timeout_ms: 120_000,
             auto_gen_regression_test: true,

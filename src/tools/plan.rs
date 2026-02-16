@@ -535,12 +535,12 @@ mod tests {
             },
         ];
         let summary = format_plan_summary(&items).unwrap();
-        
+
         assert!(summary.contains("step-1"));
         assert!(summary.contains("step-2"));
         assert!(summary.contains("Task 1"));
         assert!(summary.contains("Task 2"));
-        
+
         // Check format "1. [◌] Task 1 (id: step-1)"
         assert!(summary.contains("1. [◌] Task 1 (id: step-1)"));
         assert!(summary.contains("2. [◔] Task 2 (id: step-2)"));

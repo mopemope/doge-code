@@ -1,5 +1,13 @@
 pub mod apply_patch;
 mod common;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ToolError {
+    #[error("Tool execution failed: {0}")]
+    Execution(#[from] anyhow::Error),
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(String),
+}
 pub mod doc;
 pub mod edit;
 pub mod execute;

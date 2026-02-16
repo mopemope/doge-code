@@ -20,6 +20,14 @@ use tracing::info;
 
 pub mod fix;
 
+#[derive(thiserror::Error, Debug)]
+pub enum ExecError {
+    #[error("Execution failed: {0}")]
+    Failed(#[from] anyhow::Error),
+    #[error("Timeout")]
+    Timeout,
+}
+
 /// Executor for the `exec` subcommand.
 /// This struct holds the necessary components to interact with the LLM and tools.
 pub struct Executor {
@@ -41,12 +49,11 @@ impl Executor {
         // Initialize session manager for exec mode
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
-        // Create a default session if none exists
-        {
-            let mut session_mgr = session_manager.lock().unwrap();
-            if session_mgr.current_session.is_none() {
-                session_mgr.create_session(None)?;
-            }
+        let mut session_mgr = session_manager
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {:?}", e))?;
+        if session_mgr.current_session.is_none() {
+            session_mgr.create_session(None)?;
         }
         let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
             .with_session_manager(session_manager.clone());
@@ -615,7 +622,7 @@ impl Executor {
         self.hook_manager.add_hook(hook);
     }
 
-    /// Get access to the hook manager
+    /// Get access to the hook manager.
     pub fn hook_manager(&mut self) -> &mut crate::hooks::HookManager {
         &mut self.hook_manager
     }
