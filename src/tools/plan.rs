@@ -244,10 +244,11 @@ pub fn format_plan_summary(items: &[PlanItem]) -> Option<String> {
             other => other,
         };
         lines.push(format!(
-            "{}. [{}] {}",
+            "{}. [{}] {} (id: {})",
             idx + 1,
             status_symbol,
-            item.content.trim()
+            item.content.trim(),
+            item.id
         ));
     }
     Some(lines.join("\n"))
@@ -515,5 +516,33 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cycle detected"));
+    }
+
+    #[test]
+    fn test_format_plan_summary_includes_ids() {
+        let items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "Task 1".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "step-2".into(),
+                parent_id: None,
+                content: "Task 2".into(),
+                status: "in_progress".into(),
+            },
+        ];
+        let summary = format_plan_summary(&items).unwrap();
+        
+        assert!(summary.contains("step-1"));
+        assert!(summary.contains("step-2"));
+        assert!(summary.contains("Task 1"));
+        assert!(summary.contains("Task 2"));
+        
+        // Check format "1. [◌] Task 1 (id: step-1)"
+        assert!(summary.contains("1. [◌] Task 1 (id: step-1)"));
+        assert!(summary.contains("2. [◔] Task 2 (id: step-2)"));
     }
 }
