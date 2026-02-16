@@ -103,18 +103,16 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
     let lines_edited = count_lines_in_diff(&diff_text);
 
     // 6. Write the modified content back to the file
-    let result = fs::write(path, &modified_content)
+    fs::write(path, &modified_content)
         .await
-        .with_context(|| format!("Failed to write to file: {}", path.display()));
+        .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
-    if result.is_ok() {
-        // Update session with changed file
-        if let Ok(current_dir) = std::env::current_dir()
-            && let Ok(relative_path) = path.strip_prefix(current_dir)
-        {
-            let fs_tools = crate::tools::FsTools::default();
-            let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
-        }
+    // Update session with changed file
+    if let Ok(current_dir) = std::env::current_dir()
+        && let Ok(relative_path) = path.strip_prefix(current_dir)
+    {
+        let fs_tools = crate::tools::FsTools::default();
+        let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
     }
 
     Ok(EditResult {
@@ -221,5 +219,29 @@ mod tests {
         // Test case 4: Multiple changes
         let diff_text = "---\n+++\n@@ -1,3 +1,3 @@\n Line 1\n-Line 2\n+Line Two\n Line 3\n+Line 4";
         assert_eq!(count_lines_in_diff(diff_text), 3);
+    }
+
+    #[tokio::test]
+    async fn test_edit_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let original_content = "Read-only test.";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Make the file read-only
+        let f = std::fs::File::open(&file_path).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o400); // User read-only
+        std::fs::set_permissions(&file_path, perms).unwrap();
+
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "Read-only".to_string(),
+            new_block: "Writable".to_string(),
+        };
+
+        // Attempting to edit a read-only file should fail
+        let result = edit(params).await;
+
+        assert!(result.is_err(), "Edit should fail on read-only file");
     }
 }
