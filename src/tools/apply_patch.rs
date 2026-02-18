@@ -35,20 +35,19 @@ pub struct ApplyPatchResult {
 // ===== ツール定義 =====
 
 /// apply_patchツールの定義を返す
+const DESCRIPTION: &str = "Applies a unified diff patch. REQUIRED: Read the file closer to the edit time to ensure context lines match EXACTLY. Use absolute paths.";
+
+/// apply_patchツールの定義を返す
 pub fn tool_def() -> ToolDef {
     ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "apply_patch".to_string(),
-            description: create_tool_description(),
+            description: DESCRIPTION.to_string(),
             strict: None,
             parameters: create_tool_parameters(),
         },
     }
-}
-
-fn create_tool_description() -> String {
-    "Applies a unified diff patch to a file. \n\nREQUIRED PARAMETERS:\n- file_path: ABSOLUTE path to target file (e.g., '/home/user/project/src/main.rs')\n- patch_content: Unified diff content in proper format\n\nCRITICAL RULES:\n1. ALWAYS read current file content with fs_read first\n2. Context lines (starting with ' ') must EXACTLY match current file content  \n3. Use proper unified diff format with correct @@ line numbers\n4. NEVER use relative paths - always use absolute paths starting with project root\n\nWORKFLOW:\nfs_read → analyze current content → create precise diff → apply_patch\n\nEXAMPLE (CORRECT):\n```diff\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    println!(\"Hello\");\n+    println!(\"Hello, world!\");\n }\n```\n\nFAILURE MODES & SOLUTIONS:\n- 'Context lines do not match': File content changed - re-read file and create new patch\n- 'File path must be absolute': Use absolute path like '/project/src/main.rs', not 'src/main.rs'\n- 'Failed to parse patch content': Check unified diff format syntax\n- 'Failed to write to file': Check file permissions and ensure write access\n\nCOMMON MISTAKES TO AVOID:\n- ❌ Using relative paths: 'src/main.rs'\n- ❌ Creating patch before reading current file content\n- ❌ Insufficient context lines (need 3-5 lines before/after change)\n- ❌ Incorrect line numbers in @@ headers\n- ❌ Whitespace differences in context lines".to_string()
 }
 
 fn create_tool_parameters() -> Value {
@@ -1328,6 +1327,54 @@ second line modified
             let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
             perms.set_mode(0o644);
             std::fs::set_permissions(&file_path, perms).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn test_apply_patch_fuzzy_context_success() {
+        let original_content = "line1\nline2\nline3\n";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Mismatch in context line "line3" (patch expects "line3Modified")
+        // But "line1" matches, so fuzzy matching should handle it.
+        let patch_content =
+            "--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+lineNew\n line3Modified\n";
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content: patch_content.to_string(),
+        };
+
+        let result = apply_patch(params).await.unwrap();
+        assert!(result.success, "Fuzzy patch application should succeed");
+        assert!(
+            result.modified_content.unwrap().contains("lineNew"),
+            "Content should be modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_total_mismatch_failure() {
+        let original_content = "line1\nline2\nline3\n";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Total mismatch: NO context lines match, AND the line to be deleted doesn't match.
+        // This ensures even aggressive fuzzy matching can't find a place to apply it.
+        let patch_content = "--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1Modified\n-line2Modified\n+lineNew\n line3Modified\n";
+
+        let params = ApplyPatchParams {
+            file_path: file_path.clone(),
+            patch_content: patch_content.to_string(),
+        };
+
+        let result = apply_patch(params).await;
+
+        match result {
+            Ok(res) => {
+                assert!(!res.success, "Patch should fail when NO context matches");
+            }
+            Err(_) => {
+                // Also acceptable
+            }
         }
     }
 }

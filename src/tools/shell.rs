@@ -25,7 +25,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "execute_shell".to_string(),
-            description: "Executes a shell command in a persistent bash session. Unlike execute_bash, this maintains state (cwd, environment variables) between calls. Use this for sequences of commands that depend on each other (e.g., activating a venv then running a script, or cd into a directory then running make). Returns stdout, stderr, and exit code.".to_string(),
+            description: "Executes a command in a STATEFUL persistent shell session. Maintains cwd and env vars. Use for dependent commands or interactive-like workflows.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",

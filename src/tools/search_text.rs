@@ -39,7 +39,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_text".to_string(),
-            description: "Searches for a regular expression `search_pattern` within the content of files matching the `file_glob` pattern. It returns matching lines along with their file paths and line numbers. This tool is specifically for searching within file contents, not file names. For example, use it to locate all usages of a specific API, trace the origin of an error message, or find where a particular variable name is used. The `file_glob` argument is mandatory. Use `**/*` to search in all files, or specific patterns like `src/**/*.rs` to scope the search.".to_string(),
+            description: "Regex search within files matching `file_glob`. Wraps `rg`. `file_glob` is required (e.g., '**/*.rs'). Use for text/pattern finding.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",

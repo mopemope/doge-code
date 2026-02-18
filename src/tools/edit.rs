@@ -6,12 +6,14 @@ use serde_json::json;
 use std::path::Path;
 use tokio::fs;
 
+const DESCRIPTION: &str = "Replaces a single, unique text block in a file. `target_block` must match EXACTLY and be UNIQUE in the file context. Use this for surgical edits.";
+
 pub fn tool_def() -> ToolDef {
     ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "edit".to_string(),
-            description: "Edit a single, unique block of text within a file with a new block of text. Use this for simple, targeted modifications like fixing a bug in a specific line, changing a variable name within a single function, or adjusting a small code snippet. The `target_block` must be unique within the file; otherwise, the tool will return an error.".to_string(),
+            description: DESCRIPTION.to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
@@ -200,6 +202,40 @@ mod tests {
 
         let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
         assert_eq!(new_content, "No hash PROVIDED test.");
+    }
+
+    #[tokio::test]
+    async fn test_edit_target_not_found() {
+        let original_content = "Hello World";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "Goodbye".to_string(),
+            new_block: "Greetings".to_string(),
+        };
+
+        let result = edit(params).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.message.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_target_not_unique() {
+        let original_content = "Hello World\nHello World";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "Hello World".to_string(),
+            new_block: "Greetings".to_string(),
+        };
+
+        let result = edit(params).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.message.contains("not unique"));
     }
 
     #[tokio::test]

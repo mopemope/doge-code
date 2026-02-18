@@ -10,66 +10,7 @@ pub use search_tools::RepomapSearchTools;
 #[cfg(test)]
 mod tests;
 
-const DESCRIPTION: &str = r#"
-This is an advanced, structural code search tool that you MUST use as the first step for any code analysis or modification task.
-It is your primary tool for understanding the codebase. Unlike simple text search, it understands code structure (symbols, comments) and helps you locate relevant code with surgical precision.
-
-**Workflow:**
-1.  **ALWAYS start with this tool.**
-2.  **Determine the type of query:**
-    - If the request is **conceptual** or asks "how" something works (e.g., "how is authentication handled?", "find the logic for retry"), use `semantic_query`.
-    - If the request refers to **specific names** or identifiers (e.g., "UserFactory", "login_button", "auth_middleware"), use `keyword_search` or `name`.
-3.  Analyze the results to determine your next step.
-
-**Primary Use Cases:**
-- **Mandatory first step:** Finding the location of code related to any feature or bug.
-- **Code analysis:** Finding refactoring candidates (e.g., large files, complex functions) or analyzing the codebase structure.
-
-**Key Parameters:**
-
-- `semantic_query`:
-  - **Use this for natural language queries.**
-  - Best for finding code based on *meaning* rather than exact matches.
-  - Example: `semantic_query: "how are API requests authenticated?"`
-- `keyword_search`:
-  - **Use this for specific terms.**
-  - Extract keywords from the user's request and provide them as a list.
-  - Example: `keyword_search: ["login", "button", "auth"]`
-- `name`:
-  - Use this when you are looking for a specific, named symbol (function, class, etc.).
-- `symbol_kinds`:
-  - Use this to narrow your search to specific types of symbols.
-  - Example: `symbol_kinds: ["Function", "Struct"]`
-- `fields`:
-  - Optional list of fields to search in. Supported values: `name`, `keyword`, `code`, `doc`.
-  - If omitted, all fields are searched. Use `fields` to narrow scope and save tokens (e.g., `fields:["name","doc"]`).
-- `exclude_patterns` / `file_pattern`:
-  - `exclude_patterns` lets you drop paths matching substrings or simple glob-like tokens (e.g., `"tests/"`, `"generated"`).
-  - Pair with `file_pattern` when you need both allow- and deny-lists for file paths.
-- `language_filters`:
-  - Restrict results to specific languages or extensions (`"rust"`, `"py"`, `"ts"`, `.tsx`). Mixed forms are accepted.
-- `max_symbols_per_file`:
-  - Caps how many symbols are returned for a single file. The most relevant matches are kept.
-- `match_score_threshold`:
-  - Require a minimum per-symbol `match_score` (0.0–1.0) to filter out weaker matches.
-- `result_density`:
-  - Choose between `compact` (default) and `full`. Compact mode disables snippets, caps symbols per file, and trims limits to preserve tokens.
-- `response_budget_chars`:
-  - Provide an approximate upper bound (e.g. 5000). The tool will automatically tighten `limit`, `max_symbols_per_file`, and snippet sizes to stay within budget when possible.
-- `cursor` / `page_size`:
-  - Use these to paginate through sorted results without pulling everything at once. Combine with `response_budget_chars` for predictable payload sizes.
-- `max_file_lines` / `max_function_lines`:
-  - Use these to filter for code that might be too complex or require refactoring.
-- `ranking_strategy`:
-  - Use this to specify how the file-level match score (`file_match_score`) is calculated.
-  - Options: `max_score` (default), `avg_score`, `sum_score`, `hybrid`.
-- `sort_by`:
-  - Use this to sort the results. 
-  - In addition to existing options (`file_lines`, `function_lines`, `symbol_count`, `file_path`), you can now sort by `file_match_score`.
-
-**Return Value:**
-The tool returns a `SearchRepomapResponse` structure. The `results` field contains the familiar list of `RepomapSearchResult` objects (with names, kinds, locations, keywords, and optional **code_snippet** data). The response may also include a `next_cursor` for pagination, `warnings` when budgets force aggressive trimming, and an `applied_budget` summary so you know which constraints were tightened automatically.
-"#;
+const DESCRIPTION: &str = r#"Advanced structural code search. Use `semantic_query` for natural language questions (e.g. 'how does auth work?'), `name` for specific symbol names, or `keyword_search` for exact string matches. Features: symbol-aware, relationship graph support."#;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {

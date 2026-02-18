@@ -8,23 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-const DESCRIPTION: &str = r#"
-Use this tool to create or update the execution plan for the current session.
-Always draft concrete, ordered steps before modifying code, and rewrite the
-plan as scope evolves.
-
-Guidelines:
-- Aim for at least three actionable steps (pending by default)
-- IDs must remain stable and unique so progress can be tracked over time
-- Keep only one item in_progress at a time; mark completed immediately after finishing
-- Do not delete history mid-session; instead, append or update statuses via merge
-- Describe concrete actions and expected outcomes (e.g., tests to run, files to touch)
-
-Hard requirements (automatically enforced):
-- Provide at least one non-empty step
-- Use unique IDs per step
-- Use only pending/in_progress/completed statuses, with at most one in_progress
-"#;
+const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update statutes."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanItem {
@@ -105,7 +89,8 @@ pub fn plan_read_tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "plan_read".to_string(),
             description:
-                "Use this tool to fetch the current execution plan (if any) for the active session. Call it before making changes or when resuming work to stay aligned with the plan.".to_string(),
+                "Reads the current execution plan. Use this to resume work or check status."
+                    .to_string(),
             strict: Some(true),
             parameters: json!({
                 "type": "object",

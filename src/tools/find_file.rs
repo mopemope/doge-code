@@ -39,7 +39,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "find_file".to_string(),
-            description: "Finds files in the project based on a filename or pattern. It allows searching for files by name or using glob patterns. If the input does not contain glob wildcards (*, ?, etc.), it performs a recursive search for files with that exact name or partial name matching. The tool is designed to be used by the LLM agent to efficiently locate files without needing to know the exact path.".to_string(),
+            description: "Finds files by filename or glob pattern (e.g., '*.rs', 'src/**/*.ts'). Searches recursively from project root.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",

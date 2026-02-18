@@ -14,7 +14,7 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "fs_read".to_string(),
             strict: None,
-            description: "Reads the content of a text file from the absolute path. You can specify a starting line and a maximum number of lines to read. This is useful for inspecting file contents, reading specific sections of large files, or understanding the implementation details of a function or class. Do not use this for binary files or extremely large files.".to_string(),
+            description: "Reads a text file from an absolute path. Supports partial reading via `start_line`/`limit` or `mode='summary'` for large files. Always read files before editing.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
