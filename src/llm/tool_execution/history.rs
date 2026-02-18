@@ -189,13 +189,11 @@ impl HistoryManager {
                 if compact_result.metadata.success {
                     info!("History compaction successful.");
 
-                    // Preserve System Prompt if present
-                    let system_prompt = self.messages.iter().find(|m| m.role == "system").cloned();
-                    self.messages.clear();
-                    if let Some(sys) = system_prompt {
-                        self.messages.push(sys);
-                    }
-                    self.messages.push(compact_result.compacted_message);
+                    // Preserve System Prompt AND Loop Intervention messages
+                    self.messages = Self::merge_compacted_history(
+                        &self.messages,
+                        compact_result.compacted_message,
+                    );
 
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx
@@ -218,5 +216,71 @@ impl HistoryManager {
                 Err(e)
             }
         }
+    }
+
+    /// Helper to merge existing system messages with the compacted state
+    fn merge_compacted_history(
+        original: &[ChatMessage],
+        compacted: ChatMessage,
+    ) -> Vec<ChatMessage> {
+        let mut new_history: Vec<ChatMessage> = original
+            .iter()
+            .filter(|m| m.role == "system")
+            .cloned()
+            .collect();
+        new_history.push(compacted);
+        new_history
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_merge_compacted_history_preserves_system_messages() {
+        let original = vec![
+            make_msg("system", "System Prompt"),
+            make_msg("user", "User 1"),
+            make_msg("assistant", "Assistant 1"),
+            make_msg("system", "Loop Warning"),
+            make_msg("user", "User 2"),
+        ];
+
+        let compacted = make_msg("system", "Summary");
+
+        let result = HistoryManager::merge_compacted_history(&original, compacted);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[0].content.as_deref(), Some("System Prompt"));
+        assert_eq!(result[1].role, "system");
+        assert_eq!(result[1].content.as_deref(), Some("Loop Warning"));
+        assert_eq!(result[2].role, "system");
+        assert_eq!(result[2].content.as_deref(), Some("Summary"));
+    }
+
+    #[test]
+    fn test_merge_compacted_history_no_system_messages() {
+        let original = vec![
+            make_msg("user", "User 1"),
+            make_msg("assistant", "Assistant 1"),
+        ];
+
+        let compacted = make_msg("system", "Summary");
+
+        let result = HistoryManager::merge_compacted_history(&original, compacted);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.as_deref(), Some("Summary"));
     }
 }

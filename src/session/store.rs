@@ -138,8 +138,11 @@ impl SessionStore {
             return Err(SessionError::InvalidId(id.to_string()));
         }
         let dir = self.root.join(id);
-        if dir.exists() {
-            fs::remove_dir_all(dir).map_err(SessionError::DeleteError)?;
+        match fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(SessionError::DeleteError(e));
+            }
+            _ => {}
         }
         Ok(())
     }

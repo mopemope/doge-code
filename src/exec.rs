@@ -8,7 +8,6 @@ use crate::config::AppConfig;
 use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
 use crate::llm::ChatHistory;
 use crate::llm::{self, OpenAIClient};
-use crate::session::SessionManager;
 use crate::tools::FsTools;
 use anyhow::{Context, Result};
 use notify_rust::Notification;
@@ -44,8 +43,12 @@ impl Executor {
     pub async fn new(cfg: AppConfig) -> Result<Self> {
         info!("Initializing Executor for exec subcommand");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
-        // Initialize session manager for exec mode
-        let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
+        // Initialize session manager for exec mode using project root
+        let session_store =
+            crate::session::SessionStore::new(cfg.project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(Mutex::new(crate::session::SessionManager::with_store(
+            session_store,
+        )));
 
         {
             let mut session_mgr = session_manager.lock().unwrap();

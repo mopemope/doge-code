@@ -22,12 +22,14 @@ struct ToolCallEntry {
 #[derive(Debug, Clone, Default)]
 pub struct LoopDetector {
     history: VecDeque<ToolCallEntry>,
+    intervention_count: usize,
 }
 
 impl LoopDetector {
     pub fn new() -> Self {
         Self {
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            intervention_count: 0,
         }
     }
 
@@ -47,82 +49,94 @@ impl LoopDetector {
         self.history.push_back(entry);
     }
 
-    pub fn detect_loop(&self) -> Option<LoopType> {
+    pub fn detect_loop(&mut self) -> Option<LoopType> {
         if self.history.len() < REPEAT_THRESHOLD {
             return None;
         }
 
-        // 1. Check for immediate consecutive repetition
-        // Check if the last N entries are identical
-        let last = self.history.back()?;
-        let mut count = 0;
-        for entry in self.history.iter().rev() {
-            if entry.name == last.name && entry.args_hash == last.args_hash {
-                count += 1;
+        let loop_detected = {
+            // 1. Check for immediate consecutive repetition
+            let last = self.history.back()?;
+            let mut count = 0;
+            for entry in self.history.iter().rev() {
+                if entry.name == last.name && entry.args_hash == last.args_hash {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if count >= REPEAT_THRESHOLD {
+                Some(LoopType::ConsecutiveRepetition(last.name.clone()))
             } else {
-                break;
+                // 2. Check for simple cycles (A -> B -> A -> B ...)
+                if self.history.len() >= 4 {
+                    let n = self.history.len();
+                    let h = &self.history;
+
+                    let a1 = &h[n - 4];
+                    let b1 = &h[n - 3];
+                    let a2 = &h[n - 2];
+                    let b2 = &h[n - 1];
+
+                    if is_same(a1, a2) && is_same(b1, b2) && !is_same(a1, b1) {
+                        Some(LoopType::CycleRepetition)
+                    } else if self.history.len() >= 6 {
+                        // Check cycle length 3 (A, B, C, A, B, C)
+                        if is_same(&h[n - 6], &h[n - 3])
+                            && is_same(&h[n - 5], &h[n - 2])
+                            && is_same(&h[n - 4], &h[n - 1])
+                        {
+                            Some(LoopType::CycleRepetition)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
+        };
+
+        if loop_detected.is_some() {
+            self.intervention_count += 1;
+        } else {
+            self.intervention_count = 0;
         }
 
-        if count >= REPEAT_THRESHOLD {
-            return Some(LoopType::ConsecutiveRepetition(last.name.clone()));
-        }
-
-        // 2. Check for simple cycles (A -> B -> A -> B ...)
-        // Min cycle length 2, max cycle length hardcoded for simplicity (e.g. 2 or 3)
-        // Check cycle length 2 (A, B, A, B)
-        if self.history.len() >= 4 {
-            let n = self.history.len();
-            let h = &self.history;
-
-            // Look at last 4: [..., A, B, A, B]
-            // Indexes: n-4, n-3, n-2, n-1
-            let a1 = &h[n - 4];
-            let b1 = &h[n - 3];
-            let a2 = &h[n - 2];
-            let b2 = &h[n - 1];
-
-            if is_same(a1, a2) && is_same(b1, b2) && !is_same(a1, b1) {
-                return Some(LoopType::CycleRepetition);
-            }
-        }
-
-        // Check cycle length 3 (A, B, C, A, B, C)
-        if self.history.len() >= 6 {
-            let n = self.history.len();
-            let h = &self.history;
-            if is_same(&h[n - 6], &h[n - 3])
-                && is_same(&h[n - 5], &h[n - 2])
-                && is_same(&h[n - 4], &h[n - 1])
-            {
-                return Some(LoopType::CycleRepetition);
-            }
-        }
-
-        None
+        loop_detected
     }
 
     pub fn loop_warning(&self, loop_type: &LoopType) -> String {
-        match loop_type {
-            LoopType::ConsecutiveRepetition(name) => {
+        let (base_msg, recommendation) = match loop_type {
+            LoopType::ConsecutiveRepetition(name) => (
                 format!(
-                    "WARNING: You are repeatedly calling the tool '{}' with the same arguments. STOP. This strategy is NOT working.\n\
-                     <RECOMMENDED_ACTION>\n\
-                     1. Analyze WHY it is failing.\n\
-                     2. Read the error message carefully.\n\
-                     3. Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify the file content first).\n\
-                     </RECOMMENDED_ACTION>",
+                    "You are repeatedly calling the tool '{}' with the same arguments.",
                     name
-                )
-            }
-            LoopType::CycleRepetition => {
-                "WARNING: You are in a repetitive loop (A -> B -> A -> B). Your current mental model is likely incorrect. STOP.\n\
-                 <RECOMMENDED_ACTION>\n\
-                 1. Reset your plan.\n\
-                 2. Use `plan_write` to outline a NEW approach.\n\
-                 3. Double check file paths and contents.\n\
-                 </RECOMMENDED_ACTION>".to_string()
-            }
+                ),
+                "Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify content first).",
+            ),
+            LoopType::CycleRepetition => (
+                "You are in a repetitive loop (A -> B -> A -> B).".to_string(),
+                "Reset your plan and use `plan_write` to outline a NEW approach.",
+            ),
+        };
+
+        match self.intervention_count {
+            1 => format!(
+                "WARNING: {}\n<RECOMMENDED_ACTION>\n{}\n</RECOMMENDED_ACTION>",
+                base_msg, recommendation
+            ),
+            2 => format!(
+                "CRITICAL WARNING: {}. Action required! You MUST stop this cycle.\n<INSTRUCTION>\nAnalyze the previous errors carefully. Your current strategy is fundamentally flawed. Stop and THINK.\n</INSTRUCTION>",
+                base_msg
+            ),
+            _ => format!(
+                "HARD INTERVENTION: {}. LOOP DETECTED. DO NOT REPEAT.\n<MANDATORY_ACTION>\n1. STOP all current tool sequences.\n2. Summarize WHY you are stuck.\n3. PROPOSE a completely different path or ask the user for help.\n</MANDATORY_ACTION>",
+                base_msg
+            ),
         }
     }
 }
@@ -183,5 +197,38 @@ mod tests {
             Some(LoopType::CycleRepetition) => {}
             _ => panic!("Expected CycleRepetition"),
         }
+    }
+
+    #[test]
+    fn test_loop_escalation() {
+        let mut detector = LoopDetector::new();
+        let call = make_call("read", "{}");
+
+        // 1st detection (3 calls total)
+        for _ in 0..3 {
+            detector.record_tool_call(&call);
+        }
+        let loop_type = detector.detect_loop().unwrap();
+        let warning1 = detector.loop_warning(&loop_type);
+        assert!(warning1.contains("WARNING"));
+        assert!(!warning1.contains("CRITICAL"));
+
+        // 2nd detection (same call again)
+        detector.record_tool_call(&call);
+        let loop_type = detector.detect_loop().unwrap();
+        let warning2 = detector.loop_warning(&loop_type);
+        assert!(warning2.contains("CRITICAL WARNING"));
+
+        // 3rd detection
+        detector.record_tool_call(&call);
+        let loop_type = detector.detect_loop().unwrap();
+        let warning3 = detector.loop_warning(&loop_type);
+        assert!(warning3.contains("HARD INTERVENTION"));
+
+        // Reset
+        let call2 = make_call("write", "{}");
+        detector.record_tool_call(&call2);
+        assert!(detector.detect_loop().is_none());
+        assert_eq!(detector.intervention_count, 0);
     }
 }

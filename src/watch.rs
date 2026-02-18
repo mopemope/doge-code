@@ -230,7 +230,7 @@ async fn write_watch_backup(
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .unwrap_or(Duration::from_secs(0))
         .as_secs();
     let backup_file_name = format!("{}.bak.{}", file_name, timestamp);
     let backup_path = backup_dir.join(backup_file_name);

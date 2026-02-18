@@ -18,6 +18,14 @@ impl SessionManager {
         })
     }
 
+    /// Create a new SessionManager with a specific store
+    pub fn with_store(store: SessionStore) -> Self {
+        Self {
+            store,
+            current_session: None,
+        }
+    }
+
     /// List all sessions
     pub fn list_sessions(&self) -> Result<Vec<crate::session::SessionMeta>> {
         self.store.list().map_err(|e| anyhow::anyhow!(e))

@@ -224,7 +224,20 @@ pub async fn run_agent_loop(
             tool_call_id: None,
         });
 
+        let mut loop_detected = false;
         for tc in msg.tool_calls {
+            if loop_detected {
+                // Skip remaining tool calls in the batch
+                debug!(tool = %tc.function.name, "Skipping tool call due to loop detection in same batch");
+                history.push(ChatMessage {
+                    role: "tool".into(),
+                    content: Some("{\"error\":\"Loop detected in current tool batch. Execution skipped to allow for immediate reassessment.\"}".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: tc.id.clone(),
+                });
+                continue;
+            }
+
             // Always send processing status to UI if available
             if let Some(tx) = &ui_tx {
                 let _ = tx.send("::status:processing".into());
@@ -447,11 +460,12 @@ File modification detected. You MUST now verify your changes:
                 }
 
                 history.push(ChatMessage {
-                    role: "user".into(),
+                    role: "system".into(), // Escalated to system role
                     content: Some(warning_msg),
                     tool_calls: vec![],
                     tool_call_id: None,
                 });
+                loop_detected = true;
             }
 
             // Task Sentinel (Stalled Progress Check)
