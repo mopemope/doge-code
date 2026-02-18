@@ -97,6 +97,14 @@ impl FsTools {
             .update_session_with_changed_file(path)
     }
 
+    /// Update session with changed file if it is within the project root
+    pub fn update_session_if_changed(&self, path: &std::path::Path) -> Result<()> {
+        if let Ok(relative_path) = path.strip_prefix(&self.config.project_root) {
+            self.update_session_with_changed_file(relative_path.to_path_buf())?;
+        }
+        Ok(())
+    }
+
     /// Get current session data
     pub fn get_current_session(&self) -> Option<SessionData> {
         self.session_manager_wrapper.get_current_session()
@@ -227,7 +235,9 @@ impl FsTools {
 
         match write::fs_write(path, content, &self.config) {
             Ok(result) => {
-                self.update_context(PathBuf::from(path));
+                let p = PathBuf::from(path);
+                self.update_context(p.clone());
+                let _ = self.update_session_if_changed(&p);
                 Ok(result)
             }
             Err(e) => Err(e),
@@ -683,6 +693,67 @@ mod tests {
 
         let result = fs_tools.execute_bash("ls -la").await;
         assert!(result.is_ok());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_session_if_changed() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_root = temp_dir.path().join("project");
+        std::fs::create_dir(&project_root)?;
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+
+        // Ensure session directory exists
+        let session_dir = project_root.join(".doge/sessions");
+        std::fs::create_dir_all(&session_dir)?;
+
+        let store = crate::session::SessionStore::new(session_dir)?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+
+        // Initialize a session
+        {
+            let mut mgr = session_manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(session_manager.clone());
+
+        // Test file inside project root
+        let file_path = project_root.join("src/main.rs");
+        if let Err(e) = fs_tools.update_session_if_changed(&file_path) {
+            panic!("Failed inside project root update: {}", e);
+        }
+
+        // Verify session updated
+        {
+            let mgr = session_manager.lock().unwrap();
+            let session = mgr.current_session.as_ref().unwrap();
+            assert!(session.changed_files.contains(&"src/main.rs".to_string()));
+        }
+
+        // Test file outside project root
+        let outside_path = temp_dir.path().join("outside.rs");
+        // This should pass silently (Ok(())) but NOT update session
+        if let Err(e) = fs_tools.update_session_if_changed(&outside_path) {
+            panic!("Failed outside project root update: {}", e);
+        }
+
+        // Verify session NOT updated with outside path
+        {
+            let mgr = session_manager.lock().unwrap();
+            let session = mgr.current_session.as_ref().unwrap();
+            assert_eq!(session.changed_files.len(), 1);
+            assert!(session.changed_files.contains(&"src/main.rs".to_string()));
+        }
 
         Ok(())
     }

@@ -57,9 +57,10 @@ pub async fn edit(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result
                 {
                     tracing::error!(?e, "Failed to update session with lines edited count");
                 }
-                runtime
-                    .fs
-                    .update_context(std::path::PathBuf::from(&file_path));
+
+                let p = std::path::PathBuf::from(&file_path);
+                runtime.fs.update_context(p.clone());
+                let _ = runtime.fs.update_session_if_changed(&p);
             }
             // We do NOT record failure here anymore.
 
@@ -85,13 +86,18 @@ pub async fn apply_patch(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
 ) -> Result<ToolOutput> {
-    let params = serde_json::from_value(args.clone())?;
+    let params: crate::tools::apply_patch::ApplyPatchParams = serde_json::from_value(args.clone())?;
+    let file_path = params.file_path.clone();
 
     // Remove redundant session update
 
     match crate::tools::apply_patch::apply_patch_with_recovery(params, &runtime.fs.config).await {
         Ok(res) => {
             // Remove redundant recording
+            if res.success {
+                let p = std::path::PathBuf::from(&file_path);
+                let _ = runtime.fs.update_session_if_changed(&p);
+            }
 
             let value = serde_json::to_value(&res)?;
             Ok(ToolOutput {

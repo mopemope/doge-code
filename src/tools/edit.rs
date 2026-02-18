@@ -150,14 +150,6 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
-    // Update session with changed file
-    if let Ok(current_dir) = std::env::current_dir()
-        && let Ok(relative_path) = path.strip_prefix(current_dir)
-    {
-        let fs_tools = crate::tools::FsTools::default();
-        let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
-    }
-
     Ok(EditResult {
         success: true,
         message: "File updated successfully.".to_string(),

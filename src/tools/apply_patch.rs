@@ -247,9 +247,6 @@ async fn apply_patch_impl(
     // ===== 11. 書き込み検証 =====
     verify_file_content(path, &patched_content).await?;
 
-    // ===== 12. セッション更新 =====
-    update_session_with_changed_file(path).await;
-
     // ===== 13. 成功結果の返却 =====
     Ok(ApplyPatchResult {
         success: true,
@@ -679,16 +676,6 @@ async fn verify_file_content(path: &Path, expected_content: &str) -> Result<()> 
     }
 
     Ok(())
-}
-
-/// セッションの更新
-async fn update_session_with_changed_file(path: &Path) {
-    if let Ok(current_dir) = std::env::current_dir()
-        && let Ok(relative_path) = path.strip_prefix(current_dir)
-    {
-        let fs_tools = crate::tools::FsTools::default();
-        let _ = fs_tools.update_session_with_changed_file(relative_path.to_path_buf());
-    }
 }
 
 #[cfg(test)]
