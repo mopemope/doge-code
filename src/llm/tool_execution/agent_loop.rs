@@ -507,6 +507,12 @@ mod tests {
         assert_eq!(not_truncated.len(), 30000);
         assert!(!not_truncated.contains("truncated"));
 
+        // Exception for plan_write
+        let plan_content = "na".repeat(15000); // 30000 chars
+        let not_truncated_plan = truncate_tool_output(plan_content.clone(), "plan_write");
+        assert_eq!(not_truncated_plan.len(), 30000);
+        assert!(!not_truncated_plan.contains("truncated"));
+
         // fs_read too huge
         let huge_read = "na".repeat(21000); // 42000 chars
         let huge_truncated = truncate_tool_output(huge_read.clone(), "fs_read");

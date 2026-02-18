@@ -47,9 +47,11 @@ impl Executor {
         // Initialize session manager for exec mode
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
-        let mut session_mgr = session_manager.lock().unwrap();
-        if session_mgr.current_session.is_none() {
-            session_mgr.create_session(None)?;
+        {
+            let mut session_mgr = session_manager.lock().unwrap();
+            if session_mgr.current_session.is_none() {
+                session_mgr.create_session(None)?;
+            }
         }
         let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
             .with_session_manager(session_manager.clone());
@@ -74,15 +76,28 @@ impl Executor {
 
         // If resume is requested, load the latest session and populate history
         if cfg.resume {
-            let mut session_mgr = session_manager
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
-            if let Ok(()) = session_mgr.load_latest_session()
-                && let Some(session) = &session_mgr.current_session
-            {
-                info!("Resuming session: {}", session.meta.id);
+            let (conversation_to_resume, session_id) = {
+                let mut session_mgr = session_manager
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
+                if let Ok(()) = session_mgr.load_latest_session()
+                    && let Some(session) = &session_mgr.current_session
+                {
+                    (
+                        Some(session.conversation.clone()),
+                        Some(session.meta.id.clone()),
+                    )
+                } else {
+                    (None, None)
+                }
+            };
+
+            if let Some(conversation) = conversation_to_resume {
+                if let Some(id) = session_id {
+                    info!("Resuming session: {}", id);
+                }
                 let mut history = conversation_history.lock().await;
-                for entry in &session.conversation {
+                for entry in conversation {
                     if let Ok(value) = serde_json::to_value(entry)
                         && let Ok(msg) =
                             serde_json::from_value::<crate::llm::types::ChatMessage>(value)

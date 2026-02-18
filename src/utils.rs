@@ -225,10 +225,10 @@ mod tests {
             .arg(&repo_path)
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                assert!(is_git_repository(&repo_path));
-            }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            assert!(is_git_repository(&repo_path));
         }
 
         // Cleanup

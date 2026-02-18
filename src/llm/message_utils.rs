@@ -2,7 +2,11 @@ pub fn truncate_tool_output(content: String, tool_name: &str) -> String {
     const DEFAULT_MAX_LEN: usize = 8000;
     const READ_MAX_LEN: usize = 40000; // Allow more context for reading files
 
-    let max_len = if tool_name == "fs_read" || tool_name == "fs_read_many_files" {
+    let max_len = if tool_name == "fs_read"
+        || tool_name == "fs_read_many_files"
+        || tool_name == "plan_write"
+        || tool_name == "plan_read"
+    {
         READ_MAX_LEN
     } else {
         DEFAULT_MAX_LEN
