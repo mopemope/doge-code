@@ -51,7 +51,9 @@ impl Executor {
         )));
 
         {
-            let mut session_mgr = session_manager.lock().map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
+            let mut session_mgr = session_manager
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
             if session_mgr.current_session.is_none() {
                 session_mgr.create_session(None)?;
             }
@@ -379,7 +381,10 @@ impl Executor {
             return Ok(());
         }
 
-        let client = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Client not initialized"))?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Client not initialized"))?;
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
         let original_file_path = file_path.map(|path| path.to_string());

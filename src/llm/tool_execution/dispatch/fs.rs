@@ -6,10 +6,7 @@ use crate::tools::read_many::FsReadManyOptions;
 use anyhow::{Result, anyhow};
 use serde_json::json;
 
-pub async fn fs_list(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn fs_list(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let max_depth = args
         .get("max_depth")
@@ -49,10 +46,7 @@ pub async fn fs_list(
     }
 }
 
-pub async fn fs_read(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn fs_read(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let start_line = args
         .get("start_line")
@@ -129,10 +123,7 @@ pub async fn search_text(
     }
 }
 
-pub async fn fs_write(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn fs_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.fs_write(path, content).await {
@@ -148,10 +139,7 @@ pub async fn fs_write(
     }
 }
 
-pub async fn find_file(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn find_file(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let args = serde_json::from_value::<crate::tools::find_file::FindFileArgs>(args.clone())?;
     match runtime.fs.find_file(&args.filename).await {
         Ok(res) => {

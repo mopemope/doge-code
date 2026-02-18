@@ -15,10 +15,7 @@ pub struct ToolOutput {
     pub result_summary: String,
 }
 
-pub async fn dispatch_tool_call(
-    runtime: &ToolRuntime<'_>,
-    call: &ToolCall,
-) -> Result<ToolOutput> {
+pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> Result<ToolOutput> {
     debug!("dispatching tool call");
     if call.r#type != "function" {
         return Err(anyhow!("unsupported tool type: {}", call.r#type));
@@ -65,7 +62,10 @@ pub async fn dispatch_tool_call(
                     Ok(ToolOutput {
                         value: result.clone(),
                         is_success: true, // Remote tools don't yet have a standardized success flag, assume true if Ok
-                        result_summary: format!("Remote tool result: {}", serde_json::to_string(&result).unwrap_or_default()),
+                        result_summary: format!(
+                            "Remote tool result: {}",
+                            serde_json::to_string(&result).unwrap_or_default()
+                        ),
                     })
                 } else {
                     Err(anyhow!("unknown tool: {other}"))
@@ -90,8 +90,8 @@ mod tests {
     use crate::llm::types::ToolCallFunction;
     use crate::tools::FsTools;
     use serde_json::json;
-    use tempfile::tempdir;
     use std::sync::Arc;
+    use tempfile::tempdir;
     use tokio::sync::RwLock;
 
     #[tokio::test]
@@ -111,12 +111,16 @@ mod tests {
                 name: "execute_bash".to_string(),
                 arguments: json!({
                     "command": "exit 1"
-                }).to_string(),
+                })
+                .to_string(),
             },
         };
 
         let output = dispatch_tool_call(&runtime, &tool_call).await?;
-        assert!(!output.is_success, "execute_bash(exit 1) should be marked as failure");
+        assert!(
+            !output.is_success,
+            "execute_bash(exit 1) should be marked as failure"
+        );
         assert_eq!(output.value["exit_code"], 1);
         Ok(())
     }
@@ -138,12 +142,16 @@ mod tests {
                 name: "execute_bash".to_string(),
                 arguments: json!({
                     "command": "echo hello"
-                }).to_string(),
+                })
+                .to_string(),
             },
         };
 
         let output = dispatch_tool_call(&runtime, &tool_call).await?;
-        assert!(output.is_success, "execute_bash(echo hello) should be marked as success");
+        assert!(
+            output.is_success,
+            "execute_bash(echo hello) should be marked as success"
+        );
         assert_eq!(output.value["exit_code"], 0);
         Ok(())
     }

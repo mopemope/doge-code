@@ -323,18 +323,18 @@ fn parse_rust_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                 });
                 current_message.clear();
             }
-            current_test = Some(captures.get(1).unwrap().as_str().to_string());
+            current_test = captures.get(1).map(|m| m.as_str().to_string());
         } else if let Some(captures) = re_panic.captures(line) {
-            current_file = Some(captures.get(2).unwrap().as_str().to_string());
-            current_line = captures.get(3).unwrap().as_str().parse().ok();
+            current_file = captures.get(2).map(|m| m.as_str().to_string());
+            current_line = captures.get(3).and_then(|m| m.as_str().parse().ok());
         }
     }
 
     // Check for assertion details
     if let Some(captures) = re_assertion.captures(&combined) {
         for test in &mut failed_tests {
-            test.expected = Some(captures.get(2).unwrap().as_str().to_string());
-            test.actual = Some(captures.get(3).unwrap().as_str().to_string());
+            test.expected = captures.get(2).map(|m| m.as_str().to_string());
+            test.actual = captures.get(3).map(|m| m.as_str().to_string());
         }
     }
 
@@ -385,13 +385,16 @@ fn parse_go_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
                 });
                 current_message.clear();
             }
-            current_test = Some(captures.get(1).unwrap().as_str().to_string());
+            current_test = captures.get(1).map(|m| m.as_str().to_string());
         } else if current_test.is_some()
             && let Some(captures) = re_location.captures(line)
         {
-            current_file = Some(captures.get(1).unwrap().as_str().to_string());
-            current_line = captures.get(2).unwrap().as_str().parse().ok();
-            current_message = captures.get(3).unwrap().as_str().to_string();
+            current_file = captures.get(1).map(|m| m.as_str().to_string());
+            current_line = captures.get(2).and_then(|m| m.as_str().parse().ok());
+            current_message = captures
+                .get(3)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
         }
     }
 
@@ -423,19 +426,19 @@ fn parse_javascript_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
 
     for line in combined.lines() {
         if let Some(captures) = re_fail.captures(line) {
-            let name = captures.get(1).unwrap().as_str().to_string();
+            let name = captures.get(1).map(|m| m.as_str().to_string());
 
             // Try to find location in nearby lines
             let mut file_path = None;
             let mut line_number = None;
 
             if let Some(loc_captures) = re_location.captures(&combined) {
-                file_path = Some(loc_captures.get(1).unwrap().as_str().to_string());
-                line_number = loc_captures.get(2).unwrap().as_str().parse().ok();
+                file_path = loc_captures.get(1).map(|m| m.as_str().to_string());
+                line_number = loc_captures.get(2).and_then(|m| m.as_str().parse().ok());
             }
 
             failed_tests.push(FailedTest {
-                name,
+                name: name.unwrap_or_else(|| "Unknown Test".to_string()),
                 file_path,
                 line_number,
                 message: String::new(),
@@ -459,16 +462,16 @@ fn parse_pytest_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
 
     for line in combined.lines() {
         if let Some(captures) = re_fail.captures(line) {
-            let file_path = captures.get(1).unwrap().as_str().to_string();
-            let name = captures.get(2).unwrap().as_str().to_string();
+            let file_path = captures.get(1).map(|m| m.as_str().to_string());
+            let name = captures.get(2).map(|m| m.as_str().to_string());
             let message = captures
                 .get(3)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
 
             failed_tests.push(FailedTest {
-                name,
-                file_path: Some(file_path),
+                name: name.unwrap_or_else(|| "Unknown Test".to_string()),
+                file_path,
                 line_number: None,
                 message,
                 expected: None,

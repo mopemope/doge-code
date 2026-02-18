@@ -27,10 +27,7 @@ pub async fn execute_bash(
     }
 }
 
-pub async fn edit(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn edit(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let params: crate::tools::edit::EditParams = serde_json::from_value(args.clone())?;
 
     // Count the tool call attempt (to be removed once centralized)
@@ -114,10 +111,7 @@ pub async fn apply_patch(
     }
 }
 
-pub async fn plan_write(
-    runtime: &ToolRuntime<'_>,
-    args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn plan_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let params: crate::tools::plan::PlanWriteArgs = serde_json::from_value(args.clone())?;
 
     // Remove redundant session update
@@ -141,10 +135,7 @@ pub async fn plan_write(
     }
 }
 
-pub async fn plan_read(
-    runtime: &ToolRuntime<'_>,
-    _args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn plan_read(runtime: &ToolRuntime<'_>, _args: &serde_json::Value) -> Result<ToolOutput> {
     // Remove redundant session update
 
     match runtime.fs.plan_read() {
@@ -164,10 +155,7 @@ pub async fn plan_read(
     }
 }
 
-pub async fn undo(
-    runtime: &ToolRuntime<'_>,
-    _args: &serde_json::Value,
-) -> Result<ToolOutput> {
+pub async fn undo(runtime: &ToolRuntime<'_>, _args: &serde_json::Value) -> Result<ToolOutput> {
     // Remove redundant session update
 
     match crate::tools::undo::undo(runtime.fs).await {

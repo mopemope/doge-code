@@ -19,8 +19,11 @@ pub fn tool_def() -> ToolDef {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file."},
-                    "target_block": {"type": "string", "description": "The exact, unique text block to be replaced."},
+                    "target_block": {"type": "string", "description": "The exact text block to be replaced."},
                     "new_block": {"type": "string", "description": "The new text block to replace the target."},
+                    "start_line": {"type": "integer", "description": "Optional: 1-based start line to restrict the search scope."},
+                    "end_line": {"type": "integer", "description": "Optional: 1-based end line to restrict the search scope."},
+                    "allow_multiple": {"type": "boolean", "description": "Optional: If true, replace all occurrences in the scope. Default is false."}
                 },
                 "required": ["file_path", "target_block", "new_block"]
             }),
@@ -33,6 +36,9 @@ pub struct EditParams {
     pub file_path: String,
     pub target_block: String,
     pub new_block: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub allow_multiple: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +53,9 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
     let file_path = params.file_path;
     let target_block = params.target_block;
     let new_block = params.new_block;
+    let start_line = params.start_line.unwrap_or(1);
+    let end_line = params.end_line.unwrap_or(usize::MAX);
+    let allow_multiple = params.allow_multiple.unwrap_or(false);
 
     // Ensure the path is absolute
     let path = Path::new(&file_path);
@@ -75,36 +84,68 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         .await
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
-    // 2. Find the target block
-    let occurrences = original_content.matches(&target_block).count();
-    if occurrences == 0 {
-        return Ok(EditResult {
-            success: false,
-            message: "Target block not found in the file.".to_string(),
-            diff: None,
-            lines_edited: None,
-        });
+    // 2. Find matches
+    let mut matches = Vec::new();
+    for (start_byte, _) in original_content.match_indices(&target_block) {
+        let line_num = original_content[..start_byte].lines().count() + 1;
+        // Check if the match falls within the specified line range
+        if line_num >= start_line && line_num <= end_line {
+            matches.push((start_byte, line_num));
+        }
     }
-    if occurrences > 1 {
+
+    // 3. Validate matches
+    if matches.is_empty() {
         return Ok(EditResult {
             success: false,
-            message: "Target block is not unique. Found multiple occurrences.".to_string(),
+            message: "Target block not found in the file (within the specified range).".to_string(),
             diff: None,
             lines_edited: None,
         });
     }
 
-    // 3. Perform the replacement
-    let modified_content = original_content.replace(&target_block, &new_block);
+    if matches.len() > 1 && !allow_multiple {
+        let line_numbers: Vec<String> = matches.iter().map(|(_, line)| line.to_string()).collect();
+        return Ok(EditResult {
+            success: false,
+            message: format!(
+                "Target block is not unique. Found {} occurrences at lines: {}. Please use `start_line`/`end_line` to narrow the scope or set `allow_multiple` to true.",
+                matches.len(),
+                line_numbers.join(", ")
+            ),
+            diff: None,
+            lines_edited: None,
+        });
+    }
 
-    // 4. Generate diff for successful operation
+    // 4. Perform the replacement
+    // We construct the new content by string building to handle multiple matches correctly
+    // working backwards to keep indices valid would be one way, but since we have simple string replacement,
+    // we can use standard string replacement if replacing *all*, OR we construct it manually.
+    // To respect the "specific matches only" (filtered by range), we must construct manually.
+
+    let mut modified_content = String::with_capacity(original_content.len());
+    let mut last_end = 0;
+
+    for (start_byte, _) in matches {
+        // Append content from last match end to current match start
+        modified_content.push_str(&original_content[last_end..start_byte]);
+        // Append new block
+        modified_content.push_str(&new_block);
+        // Update last matches end
+        last_end = start_byte + target_block.len();
+    }
+    // Append remaining content
+    modified_content.push_str(&original_content[last_end..]);
+
+    // 5. Generate diff for successful operation
     let diff = diffy::create_patch(&original_content, &modified_content);
     let diff_text = diff.to_string();
 
-    // 5. Count actual lines edited by comparing the diff
+    // 6. Count actual lines edited by comparing the diff
     let lines_edited = count_lines_in_diff(&diff_text);
 
-    // 6. Write the modified content back to the file
+    // 7. Write the modified content back to the file
     fs::write(path, &modified_content)
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
@@ -174,6 +215,9 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "world".to_string(),
             new_block: "Rust".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
         };
 
         let result = edit(params).await.unwrap();
@@ -194,6 +238,9 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "provided".to_string(),
             new_block: "PROVIDED".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
         };
 
         let result = edit(params).await.unwrap();
@@ -213,6 +260,9 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "Goodbye".to_string(),
             new_block: "Greetings".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
         };
 
         let result = edit(params).await.unwrap();
@@ -230,12 +280,81 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "Hello World".to_string(),
             new_block: "Greetings".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
         };
 
         let result = edit(params).await.unwrap();
 
         assert!(!result.success);
-        assert!(result.message.contains("not unique"));
+        assert!(result.message.contains("Target block is not unique"));
+        assert!(result.message.contains("occurrences at lines: 1, 2"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_with_line_range() {
+        let original_content = "Hello World\nHello World\nHello World";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Target the second occurrence only (line 2)
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "Hello World".to_string(),
+            new_block: "Greetings".to_string(),
+            start_line: Some(2),
+            end_line: Some(2),
+            allow_multiple: None,
+        };
+
+        let result = edit(params).await.unwrap();
+        assert!(result.success);
+
+        let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(new_content, "Hello World\nGreetings\nHello World");
+    }
+
+    #[tokio::test]
+    async fn test_edit_allow_multiple() {
+        let original_content = "foo\nfoo\nbar";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "foo".to_string(),
+            new_block: "baz".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: Some(true),
+        };
+
+        let result = edit(params).await.unwrap();
+        assert!(result.success);
+
+        let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(new_content, "baz\nbaz\nbar");
+    }
+
+    #[tokio::test]
+    async fn test_edit_allow_multiple_with_range() {
+        let original_content = "foo\nfoo\nfoo";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        // Replace first two occurrences only
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "foo".to_string(),
+            new_block: "baz".to_string(),
+            start_line: Some(1),
+            end_line: Some(2),
+            allow_multiple: Some(true),
+        };
+
+        let result = edit(params).await.unwrap();
+        assert!(result.success);
+
+        let new_content = tokio::fs::read_to_string(file_path).await.unwrap();
+        assert_eq!(new_content, "baz\nbaz\nfoo");
     }
 
     #[tokio::test]
@@ -273,6 +392,9 @@ mod tests {
             file_path: file_path.clone(),
             target_block: "Read-only".to_string(),
             new_block: "Writable".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
         };
 
         // Attempting to edit a read-only file should fail

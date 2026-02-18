@@ -275,10 +275,8 @@ pub async fn run_agent_loop(
                 if let Err(e) = fs.record_tool_call_success(tool_name) {
                     error!("Failed to record tool success: {}", e);
                 }
-            } else {
-                if let Err(e) = fs.record_tool_call_failure(tool_name) {
-                    error!("Failed to record tool failure: {}", e);
-                }
+            } else if let Err(e) = fs.record_tool_call_failure(tool_name) {
+                error!("Failed to record tool failure: {}", e);
             }
 
             let modifies_files = matches!(tool_name, "fs_write" | "edit" | "apply_patch");
@@ -336,7 +334,6 @@ File modification detected. You MUST now verify your changes:
             }
 
             // Prepare a short result summary for UI log and truncate if necessary
-
 
             // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
@@ -439,7 +436,7 @@ File modification detected. You MUST now verify your changes:
 
                 // If failed, try to show the error message in the TUI log
                 if !success {
-                   let _ = tx.send(format!("    Error: {}", result_summary));
+                    let _ = tx.send(format!("    Error: {}", result_summary));
                 }
 
                 // Tool arguments and results are intentionally not displayed in the TUI to avoid leaking sensitive data.
@@ -461,7 +458,8 @@ File modification detected. You MUST now verify your changes:
             // Check if the tool call is plan_write/plan_read and update the plan list in the UI
             if matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
                 && let Some(tool_result_value) = output_value
-                && let Ok(plan_list) = serde_json::from_value::<PlanList>((*tool_result_value).clone())
+                && let Ok(plan_list) =
+                    serde_json::from_value::<PlanList>((*tool_result_value).clone())
             {
                 debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
                 // Send the plan list to the UI
@@ -519,13 +517,14 @@ File modification detected. You MUST now verify your changes:
 
             // Specific Error Recovery Hints
             if !success {
-                 // Try to look into the output value for an "error" field if it exists, or use result_summary
+                // Try to look into the output value for an "error" field if it exists, or use result_summary
                 let err_str = if let Some(val) = output_value
-                    && let Some(err_field) = val.get("error").and_then(|v| v.as_str()) {
-                        err_field.to_string()
-                    } else {
-                        result_summary.clone()
-                    };
+                    && let Some(err_field) = val.get("error").and_then(|v| v.as_str())
+                {
+                    err_field.to_string()
+                } else {
+                    result_summary.clone()
+                };
 
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
                     history.push(ChatMessage {
