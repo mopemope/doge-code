@@ -6,7 +6,7 @@ use crate::tools::FsTools;
 use crate::tools::plan::PlanList;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
-use std::path::PathBuf;
+
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -284,46 +284,7 @@ pub async fn run_agent_loop(
 
             // Inject verification note if file was written
             if modifies_files && success {
-                // Determine path from tool args
-                let args: Option<serde_json::Value> =
-                    serde_json::from_str(&tc.function.arguments).ok();
-                let path_str = if let Some(args) = &args {
-                    match tool_name {
-                        "fs_write" => args.get("path").and_then(|v| v.as_str()),
-                        "edit" => args.get("file_path").and_then(|v| v.as_str()),
-                        "apply_patch" => args.get("file_path").and_then(|v| v.as_str()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(path_str) = path_str {
-                    let path = PathBuf::from(path_str);
-
-                    // Use ReliabilityLayer for verification and auto-fixing
-                    let reliability_layer = crate::features::reliability::ReliabilityLayer::new(
-                        cfg.clone(),
-                        Some(client.clone()),
-                        fs.clone(),
-                    );
-
-                    match reliability_layer
-                        .verify_and_fix(&path, ui_tx.as_ref())
-                        .await
-                    {
-                        Ok(content) => tool_message_content.push_str(&content),
-                        Err(e) => {
-                            error!("Error in reliability layer: {}", e);
-                            tool_message_content.push_str(&format!(
-                                "\n<SYSTEM_NOTE>Error during verification: {}</SYSTEM_NOTE>",
-                                e
-                            ));
-                        }
-                    }
-                } else {
-                    // Could not determine path, fallback to generic note
-                    let verification_note = r#"
+                let verification_note = r#"
 
 <SYSTEM_NOTE>
 File modification detected. You MUST now verify your changes:
@@ -331,8 +292,7 @@ File modification detected. You MUST now verify your changes:
 1. Read the file to confirm the content is correct.
 2. Run tests to ensure no regressions.
 </SYSTEM_NOTE>"#;
-                    tool_message_content.push_str(verification_note);
-                }
+                tool_message_content.push_str(verification_note);
             }
 
             // Prepare a short result summary for UI log and truncate if necessary

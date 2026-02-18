@@ -22,22 +22,6 @@ fn test_llm_config_apply_partial() {
 }
 
 #[test]
-fn test_verification_config_apply_partial() {
-    let mut config = VerificationConfig::default();
-    let partial = PartialVerificationConfig {
-        enabled: Some(false),
-        commands: Some(PartialVerificationCommands {
-            rust: Some(vec!["custom".to_string()]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    config.apply_partial(&partial);
-    assert!(!config.enabled);
-    assert_eq!(config.commands.rust, vec!["custom".to_string()]);
-}
-
-#[test]
 fn test_watch_config_apply_partial() {
     let mut config = WatchConfig::default();
     let partial = PartialWatchConfig {
@@ -48,17 +32,6 @@ fn test_watch_config_apply_partial() {
     config.apply_partial(&partial);
     assert_eq!(config.debounce_delay_ms, Some(123));
     assert!(!config.backup_enabled.unwrap_or(true));
-}
-
-#[test]
-fn test_test_fix_config_apply_partial() {
-    let mut config = TestFixConfig::default();
-    let partial = PartialTestFixConfig {
-        max_iterations: Some(10),
-        ..Default::default()
-    };
-    config.apply_partial(&partial);
-    assert_eq!(config.max_iterations, 10);
 }
 
 #[test]
@@ -149,4 +122,27 @@ fn test_load_file_config_creates_default() {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
     }
+}
+
+#[test]
+fn test_file_config_ignores_unknown_fields() {
+    let toml_str = r#"
+        [llm]
+        connect_timeout_ms = 1000
+
+        # These fields are removed config
+        [verification]
+        enabled = true
+
+        [test_fix]
+        max_iterations = 5
+    "#;
+
+    let config: Result<FileConfig, _> = toml::from_str(toml_str);
+    assert!(
+        config.is_ok(),
+        "Should parse successfully confirming unknown fields are ignored"
+    );
+    let config = config.unwrap();
+    assert_eq!(config.llm.unwrap().connect_timeout_ms, Some(1000));
 }

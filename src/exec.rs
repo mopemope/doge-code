@@ -18,8 +18,6 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::info;
 
-pub mod fix;
-
 #[derive(thiserror::Error, Debug)]
 pub enum ExecError {
     #[error("Execution failed: {0}")]
@@ -776,8 +774,6 @@ mod tests {
             command_timeout_ms: crate::config::DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
-            verification: crate::config::VerificationConfig::default(),
-            test_fix: crate::config::TestFixConfig::default(),
         };
 
         let executor = Executor::new(cfg).await;
@@ -814,8 +810,6 @@ mod tests {
             command_timeout_ms: crate::config::DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             rewrite_timeout_sec: 30,
-            verification: crate::config::VerificationConfig::default(),
-            test_fix: crate::config::TestFixConfig::default(),
         };
 
         let mut executor = Executor::new(cfg).await.unwrap();

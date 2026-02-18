@@ -6,8 +6,7 @@ use tracing::{info, warn};
 
 use super::llm::PartialLlmConfig;
 use super::mcp::PartialMcpServerConfig;
-use super::test_fix::PartialTestFixConfig;
-use super::verification::PartialVerificationConfig;
+
 use super::watch::PartialWatchConfig;
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
@@ -31,8 +30,6 @@ pub struct FileConfig {
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
-    pub verification: Option<PartialVerificationConfig>,
-    pub test_fix: Option<PartialTestFixConfig>,
 }
 
 pub fn get_default_config_content() -> String {
@@ -62,18 +59,7 @@ batch_size = 8
 # enabled = true
 # auto_update = true
 
-# Verification settings
-[verification]
-enabled = true
-enforce = true
-timeout_ms = 120000
 
-[verification.commands]
-rust = ["cargo", "check", "--quiet", "--message-format=short"]
-python = ["python3", "-m", "py_compile", "{path}"]
-node = ["node", "--check", "{path}"]
-typescript = ["tsc", "--noEmit", "--allowSyntheticDefaultImports", "--target", "esnext", "--moduleResolution", "node", "{path}"]
-go = ["go", "vet", "{path}"]
 
 # Watch mode settings
 [watch]

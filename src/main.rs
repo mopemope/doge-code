@@ -94,51 +94,11 @@ pub enum Commands {
         address: Option<String>,
     },
 
-    /// Rewrite a snippet of code using the LLM based on a user prompt
-    #[command()]
-    Rewrite {
-        /// Prompt describing the desired transformation
-        #[arg(long)]
-        prompt: String,
-        /// Path to a temporary file containing the snippet to rewrite
-        #[arg(long, value_name = "FILE")]
-        code_file: std::path::PathBuf,
-        /// Optional original file path hint for additional context
-        #[arg(long)]
-        file_path: Option<String>,
-        /// Output structured JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-
-    /// Run a command and auto-fix if it fails
-    #[command()]
-    Fix {
-        /// The command to execute (e.g., "cargo test")
-        command: String,
-        /// Maximum number of fix attempts
-        #[arg(long, default_value_t = 3)]
-        retry: usize,
-        /// Output structured JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
     /// Run a predefined workflow
     #[command()]
     Run {
         /// The name of the workflow to run (without extension)
         workflow: String,
-    },
-
-    /// Run tests and auto-fix failures in a loop
-    #[command()]
-    FixTests {
-        /// Maximum number of fix iterations
-        #[arg(long)]
-        max_iterations: Option<usize>,
-        /// Output structured JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
     },
 }
 
@@ -234,17 +194,6 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
         Some(Commands::Exec { instruction, json }) => run_exec(cfg, instruction, *json).await,
-        Some(Commands::Rewrite {
-            prompt,
-            code_file,
-            file_path,
-            json,
-        }) => run_rewrite(cfg, prompt, code_file, file_path.as_deref(), *json).await,
-        Some(Commands::Fix {
-            command,
-            retry,
-            json,
-        }) => run_fix(cfg, command, *retry, *json).await,
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
@@ -260,10 +209,6 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
-        Some(Commands::FixTests {
-            max_iterations,
-            json,
-        }) => run_fix_tests(cfg, *max_iterations, *json).await,
     }
 }
 
@@ -365,49 +310,4 @@ async fn run_exec(
 ) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg).await?;
     executor.run(instruction, json).await
-}
-
-async fn run_rewrite(
-    cfg: crate::config::AppConfig,
-    prompt: &str,
-    code_file: &std::path::Path,
-    file_path: Option<&str>,
-    json: bool,
-) -> anyhow::Result<()> {
-    crate::exec::run_rewrite(cfg, prompt, code_file, file_path, json).await
-}
-
-async fn run_fix(
-    cfg: crate::config::AppConfig,
-    command: &str,
-    retry: usize,
-    json: bool,
-) -> anyhow::Result<()> {
-    let mut executor = crate::exec::Executor::new(cfg).await?;
-    crate::exec::fix::run_fix_loop(&mut executor, command, retry, json).await?;
-    Ok(())
-}
-
-async fn run_fix_tests(
-    mut cfg: crate::config::AppConfig,
-    max_iterations: Option<usize>,
-    json: bool,
-) -> anyhow::Result<()> {
-    // Override max_iterations if provided via CLI
-    if let Some(max_iter) = max_iterations {
-        cfg.test_fix.max_iterations = max_iter;
-    }
-
-    let mut executor = crate::exec::Executor::new(cfg.clone()).await?;
-    let result = features::test_fix::run_test_fix_loop(&cfg, &mut executor).await?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else if result.success {
-        println!("✓ {}", result.message);
-    } else {
-        eprintln!("✗ {}", result.message);
-        std::process::exit(1);
-    }
-    Ok(())
 }

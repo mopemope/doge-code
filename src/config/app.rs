@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use super::llm::LlmConfig;
 use super::mcp::McpServerConfig;
-use super::test_fix::TestFixConfig;
-use super::verification::VerificationConfig;
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
 // Re-import from mod or loading
@@ -45,8 +43,6 @@ pub struct AppConfig {
     pub command_timeout_ms: u64,
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
-    pub verification: VerificationConfig,
-    pub test_fix: TestFixConfig,
 }
 
 impl Default for AppConfig {
@@ -72,8 +68,6 @@ impl Default for AppConfig {
             command_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
-            verification: VerificationConfig::default(),
-            test_fix: TestFixConfig::default(),
         }
     }
 }
@@ -211,22 +205,6 @@ impl AppConfig {
             watch_config.apply_partial(p);
         }
 
-        let mut verification = VerificationConfig::default();
-        if let Some(f) = &file_cfg.verification {
-            verification.apply_partial(f);
-        }
-        if let Some(p) = &project_cfg.verification {
-            verification.apply_partial(p);
-        }
-
-        let mut test_fix = TestFixConfig::default();
-        if let Some(f) = &file_cfg.test_fix {
-            test_fix.apply_partial(f);
-        }
-        if let Some(p) = &project_cfg.test_fix {
-            test_fix.apply_partial(p);
-        }
-
         let command_timeout_ms = project_cfg
             .command_timeout_ms
             .or(file_cfg.command_timeout_ms)
@@ -272,8 +250,6 @@ impl AppConfig {
                 .rewrite_timeout_sec
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
-            verification,
-            test_fix,
         })
     }
 }

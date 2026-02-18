@@ -18,7 +18,7 @@ use crate::tui::commands::handlers::slash_commands::rebuild_repomap::handle_rebu
 use crate::tui::commands::handlers::slash_commands::reset::handle_reset;
 use crate::tui::commands::handlers::slash_commands::stack::handle_stack;
 use crate::tui::commands::handlers::slash_commands::test::handle_test;
-use crate::tui::commands::handlers::slash_commands::test_fix::handle_test_fix;
+
 use crate::tui::commands::handlers::slash_commands::theme::handle_theme;
 use crate::tui::commands::handlers::slash_commands::tokens::handle_tokens;
 use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
@@ -79,7 +79,7 @@ impl CommandHandler for TuiExecutor {
             "/edit-symbol" => handle_edit_symbol(self, ui),
             "/lint" => handle_lint(self, ui),
             "/test" => handle_test(self, ui),
-            "/test-fix" => handle_test_fix(self, ui),
+
             line if line.starts_with("/stack") => {
                 let args = line.strip_prefix("/stack").unwrap_or("").trim();
                 handle_stack(self, ui, args);
