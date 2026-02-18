@@ -34,7 +34,7 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
-pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<String> {
+pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<ExecuteBashResult> {
     // Change to the project root directory before executing the command
     let project_root = &config.project_root;
     let timeout_ms = config.command_timeout_ms;
@@ -49,13 +49,12 @@ pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<String> {
     let output = match run_command_with_timeout(cmd, timeout_ms).await {
         Ok(Some(output)) => output,
         Ok(None) => {
-            let result = ExecuteBashResult {
+            return Ok(ExecuteBashResult {
                 stdout: String::new(),
                 stderr: format!("Command timed out after {} ms", timeout_ms),
                 exit_code: None,
                 success: false,
-            };
-            return Ok(serde_json::to_string(&result)?);
+            });
         }
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -71,14 +70,12 @@ pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<String> {
     let exit_code = output.status.code();
     let success = output.status.success();
 
-    let result = ExecuteBashResult {
+    Ok(ExecuteBashResult {
         stdout,
         stderr,
         exit_code,
         success,
-    };
-
-    Ok(serde_json::to_string(&result)?)
+    })
 }
 
 async fn run_command_with_timeout(
@@ -100,6 +97,7 @@ async fn run_command_with_timeout(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::AppConfig;
@@ -112,8 +110,7 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let result_str = execute_bash("echo 'hello'", &config).await.unwrap();
-        let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+        let result = execute_bash("echo 'hello'", &config).await.unwrap();
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.stderr, "");
         assert_eq!(result.exit_code, Some(0));
@@ -127,9 +124,7 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let result = execute_bash("invalid_command", &config).await;
-        assert!(result.is_ok()); // The function should return Ok with a JSON string even for command failures
-        let result: ExecuteBashResult = serde_json::from_str(&result.unwrap()).unwrap();
+        let result = execute_bash("invalid_command", &config).await.unwrap();
         assert!(!result.success);
     }
 
@@ -140,10 +135,9 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let result_str = execute_bash("echo 'test error' >&2; exit 1", &config)
+        let result = execute_bash("echo 'test error' >&2; exit 1", &config)
             .await
             .unwrap();
-        let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
         assert_eq!(result.stdout, "");
         assert!(result.stderr.contains("test error"));
         assert_eq!(result.exit_code, Some(1));
@@ -157,8 +151,7 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let result_str = execute_bash("exit 0", &config).await.unwrap();
-        let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+        let result = execute_bash("exit 0", &config).await.unwrap();
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "");
         assert_eq!(result.exit_code, Some(0));
@@ -172,8 +165,7 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let result_str = execute_bash("exit 42", &config).await.unwrap();
-        let result: ExecuteBashResult = serde_json::from_str(&result_str).unwrap();
+        let result = execute_bash("exit 42", &config).await.unwrap();
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "");
         assert_eq!(result.exit_code, Some(42));

@@ -8,10 +8,17 @@ mod analysis;
 mod fs;
 mod tools;
 
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    pub value: serde_json::Value,
+    pub is_success: bool,
+    pub result_summary: String,
+}
+
 pub async fn dispatch_tool_call(
     runtime: &ToolRuntime<'_>,
     call: &ToolCall,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     debug!("dispatching tool call");
     if call.r#type != "function" {
         return Err(anyhow!("unsupported tool type: {}", call.r#type));
@@ -55,7 +62,11 @@ pub async fn dispatch_tool_call(
 
             other => {
                 if let Some(result) = runtime.fs.call_remote_tool(other, &args_val).await? {
-                    Ok(result)
+                    Ok(ToolOutput {
+                        value: result.clone(),
+                        is_success: true, // Remote tools don't yet have a standardized success flag, assume true if Ok
+                        result_summary: format!("Remote tool result: {}", serde_json::to_string(&result).unwrap_or_default()),
+                    })
                 } else {
                     Err(anyhow!("unknown tool: {other}"))
                 }
@@ -69,5 +80,71 @@ pub async fn dispatch_tool_call(
             "Tool execution timed out after {} seconds",
             timeout_duration.as_secs()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::llm::types::ToolCallFunction;
+    use crate::tools::FsTools;
+    use serde_json::json;
+    use tempfile::tempdir;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn test_execute_bash_failure_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_1".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_bash".to_string(),
+                arguments: json!({
+                    "command": "exit 1"
+                }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success, "execute_bash(exit 1) should be marked as failure");
+        assert_eq!(output.value["exit_code"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_success_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_2".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_bash".to_string(),
+                arguments: json!({
+                    "command": "echo hello"
+                }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(output.is_success, "execute_bash(echo hello) should be marked as success");
+        assert_eq!(output.value["exit_code"], 0);
+        Ok(())
     }
 }

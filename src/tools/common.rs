@@ -180,35 +180,16 @@ impl FsTools {
         pattern: Option<&str>,
         options: list::FsListOptions,
     ) -> Result<list::FsListResponse> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
-        match list::fs_list(path, max_depth, pattern, &self.config, options) {
-            Ok(result) => {
-                self.record_tool_call_success("fs_list")?;
-                Ok(result)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("fs_list")?;
-                Err(e)
-            }
-        }
+        list::fs_list(path, max_depth, pattern, &self.config, options)
     }
 
     pub fn fs_read(&self, path: &str, opts: read::FsReadOptions) -> Result<read::FsReadResult> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         match read::fs_read(path, opts, &self.config) {
             Ok(result) => {
-                self.record_tool_call_success("fs_read")?;
                 self.update_context(PathBuf::from(path));
                 Ok(result)
             }
-            Err(e) => {
-                self.record_tool_call_failure("fs_read")?;
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -219,21 +200,14 @@ impl FsTools {
         recursive: Option<bool>,
         options: read_many::FsReadManyOptions,
     ) -> Result<read_many::FsReadManyResponse> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         match read_many::fs_read_many_files(paths, exclude, recursive, &self.config, options) {
             Ok(result) => {
-                self.record_tool_call_success("fs_read_many_files")?;
                 for file in &result.files {
                     self.update_context(PathBuf::from(&file.path));
                 }
                 Ok(result)
             }
-            Err(e) => {
-                self.record_tool_call_failure("fs_read_many_files")?;
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -242,25 +216,10 @@ impl FsTools {
         search_pattern: &str,
         file_glob: Option<&str>,
     ) -> Result<Vec<(PathBuf, usize, String)>> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
-        match search_text::search_text(search_pattern, file_glob, &self.config) {
-            Ok(result) => {
-                self.record_tool_call_success("search_text")?;
-                Ok(result)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("search_text")?;
-                Err(e)
-            }
-        }
+        search_text::search_text(search_pattern, file_glob, &self.config)
     }
 
     pub async fn fs_write(&self, path: &str, content: &str) -> Result<()> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         // Backup existing file before overwriting
         if let Err(e) = self.backup_file(std::path::Path::new(path)).await {
             tracing::warn!("Failed to backup file {}: {}", path, e);
@@ -268,26 +227,17 @@ impl FsTools {
 
         match write::fs_write(path, content, &self.config) {
             Ok(result) => {
-                self.record_tool_call_success("fs_write")?;
                 self.update_context(PathBuf::from(path));
-
                 Ok(result)
             }
-            Err(e) => {
-                self.record_tool_call_failure("fs_write")?;
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         // Check if the command is allowed
         if !self.is_command_allowed(command) {
             tracing::warn!("Command '{}' is not allowed", command);
-            self.record_tool_call_failure("execute_bash")?;
             // Return a structured result indicating the command is not allowed
             let result = execute::ExecuteBashResult {
                 stdout: String::new(),
@@ -299,13 +249,8 @@ impl FsTools {
         }
 
         match execute::execute_bash(command, &self.config).await {
-            Ok(result) => {
-                self.record_tool_call_success("execute_bash")?;
-
-                Ok(result)
-            }
+            Ok(result) => Ok(serde_json::to_string(&result)?),
             Err(e) => {
-                self.record_tool_call_failure("execute_bash")?;
                 // Return a structured result with the error details
                 let result = execute::ExecuteBashResult {
                     stdout: String::new(),
@@ -319,13 +264,9 @@ impl FsTools {
     }
 
     pub async fn execute_shell(&self, command: &str) -> Result<String> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         // Check if the command is allowed
         if !self.is_command_allowed(command) {
             tracing::warn!("Command '{}' is not allowed", command);
-            self.record_tool_call_failure("execute_shell")?;
             let result = shell::ExecuteShellResult {
                 stdout: String::new(),
                 stderr: format!("Command '{}' is not allowed", command),
@@ -336,12 +277,8 @@ impl FsTools {
         }
 
         match self.shell_session.exec(command).await {
-            Ok(result) => {
-                self.record_tool_call_success("execute_shell")?;
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(e) => {
-                self.record_tool_call_failure("execute_shell")?;
                 let result = shell::ExecuteShellResult {
                     stdout: String::new(),
                     stderr: e.to_string(),
@@ -386,60 +323,27 @@ impl FsTools {
     /// let result = fs_tools.find_file("main").await?;
     /// ```
     pub async fn find_file(&self, filename: &str) -> Result<find_file::FindFileResult> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
-        match find_file::find_file(
+        find_file::find_file(
             find_file::FindFileArgs {
                 filename: filename.to_string(),
             },
             &self.config,
         )
         .await
-        {
-            Ok(result) => {
-                self.record_tool_call_success("find_file")?;
-                Ok(result)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("find_file")?;
-                Err(e)
-            }
-        }
     }
 
     pub async fn search_repomap(
         &self,
         args: search_repomap::SearchRepomapArgs,
     ) -> Result<search_repomap::SearchRepomapResponse> {
-        // Update session with tool call count
-        self.update_session_with_tool_call_count()?;
-
         // Use a more robust approach to handle potential RwLock poisoning
         let repomap_guard = self.repomap.read().await;
-        let result = match if let Some(map) = &*repomap_guard {
+        if let Some(map) = &*repomap_guard {
             self.search_repomap_tools
                 .search_repomap(map, args, &self.config.project_root)
                 .await
         } else {
             Err(anyhow::anyhow!("repomap is still generating"))
-        } {
-            Ok(search_result) => Ok(search_result),
-            Err(e) => {
-                self.record_tool_call_failure("search_repomap")?;
-                return Err(e);
-            }
-        };
-
-        match result {
-            Ok(search_result) => {
-                self.record_tool_call_success("search_repomap")?;
-                Ok(search_result)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("search_repomap")?;
-                Err(e)
-            }
         }
     }
 
@@ -462,33 +366,10 @@ impl FsTools {
         alias: &str,
         args: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>> {
-        // Update session with tool call count before making the call
-        self.update_session_with_tool_call_count()?;
-
-        match self.remote_tool_manager.call_remote_tool(alias, args).await {
-            Ok(Some(result)) => {
-                self.record_tool_call_success(alias)?;
-                Ok(Some(result))
-            }
-            Ok(None) => Ok(None), // No tool found with this alias
-            Err(e) => {
-                self.record_tool_call_failure(alias)?;
-                Err(e)
-            }
-        }
+        self.remote_tool_manager.call_remote_tool(alias, args).await
     }
     pub async fn read_memory(&self, key: &str) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match self.memory_tools.read_memory(key).await {
-            Ok(content) => {
-                self.record_tool_call_success("read_memory")?;
-                Ok(content)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("read_memory")?;
-                Err(e)
-            }
-        }
+        self.memory_tools.read_memory(key).await
     }
 
     pub async fn write_memory(
@@ -498,21 +379,9 @@ impl FsTools {
         tags: Option<Vec<String>>,
         metadata: Option<serde_json::Value>,
     ) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match self
-            .memory_tools
+        self.memory_tools
             .write_memory(key, content, tags, metadata)
             .await
-        {
-            Ok(msg) => {
-                self.record_tool_call_success("write_memory")?;
-                Ok(msg)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("write_memory")?;
-                Err(e)
-            }
-        }
     }
 
     pub async fn search_memory(
@@ -520,46 +389,14 @@ impl FsTools {
         query: Option<String>,
         tags: Option<Vec<String>>,
     ) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match self.memory_tools.search_memory(query, tags).await {
-            Ok(msg) => {
-                self.record_tool_call_success("search_memory")?;
-                Ok(msg)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("search_memory")?;
-                Err(e)
-            }
-        }
+        self.memory_tools.search_memory(query, tags).await
     }
 
     pub async fn list_memories(&self) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match self.memory_tools.list_memories().await {
-            Ok(msg) => {
-                self.record_tool_call_success("list_memories")?;
-                Ok(msg)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("list_memories")?;
-                Err(e)
-            }
-        }
+        self.memory_tools.list_memories().await
     }
     pub async fn doc_generate(&self, path: &str, symbol: Option<&str>) -> Result<String> {
-        self.update_session_with_tool_call_count()?;
-        match crate::tools::doc::doc_generate(path, symbol, &self.config, self.repomap.clone())
-            .await
-        {
-            Ok(msg) => {
-                self.record_tool_call_success("doc_generate")?;
-                Ok(msg)
-            }
-            Err(e) => {
-                self.record_tool_call_failure("doc_generate")?;
-                Err(e)
-            }
-        }
+        crate::tools::doc::doc_generate(path, symbol, &self.config, self.repomap.clone()).await
     }
 }
 

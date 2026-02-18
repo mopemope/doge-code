@@ -1,3 +1,4 @@
+use crate::llm::tool_execution::dispatch::ToolOutput;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::tools::list::{FsListMode, FsListOptions};
 use crate::tools::read::{FsReadMode, FsReadOptions};
@@ -8,7 +9,7 @@ use serde_json::json;
 pub async fn fs_list(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let max_depth = args
         .get("max_depth")
@@ -36,7 +37,14 @@ pub async fn fs_list(
     };
 
     match runtime.fs.fs_list(path, max_depth, pattern, options) {
-        Ok(files) => Ok(json!({ "ok": true, "result": files })),
+        Ok(files) => {
+            let value = json!({ "ok": true, "result": files });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: serde_json::to_string(&files).unwrap_or_default(),
+            })
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }
@@ -44,7 +52,7 @@ pub async fn fs_list(
 pub async fn fs_read(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let start_line = args
         .get("start_line")
@@ -76,7 +84,15 @@ pub async fn fs_read(
     };
 
     match runtime.fs.fs_read(path, options) {
-        Ok(result) => Ok(json!({ "ok": true, "result": result })),
+        Ok(result) => {
+            let value = json!({ "ok": true, "result": result });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                // Truncate content for summary if too long, or just use length
+                result_summary: format!("Read {} bytes from {}", result.content.len(), path),
+            })
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }
@@ -84,7 +100,7 @@ pub async fn fs_read(
 pub async fn search_text(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let search_pattern = args
         .get("search_pattern")
         .and_then(|v| v.as_str())
@@ -102,7 +118,12 @@ pub async fn search_text(
                     })
                 })
                 .collect();
-            Ok(json!({ "ok": true, "results": items }))
+            let value = json!({ "ok": true, "results": items });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Found {} matches for '{}'", items.len(), search_pattern),
+            })
         }
         Err(e) => Err(anyhow!("{e}")),
     }
@@ -111,14 +132,17 @@ pub async fn search_text(
 pub async fn fs_write(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.fs_write(path, content).await {
         Ok(()) => {
-            println!("SUCCESS");
-            println!("{}", path);
-            Ok(json!({ "ok": true, "path": path, "bytesWritten": content.len() }))
+            let value = json!({ "ok": true, "path": path, "bytesWritten": content.len() });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Wrote {} bytes to {}", content.len(), path),
+            })
         }
         Err(e) => Err(anyhow!("{e}")),
     }
@@ -127,10 +151,17 @@ pub async fn fs_write(
 pub async fn find_file(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let args = serde_json::from_value::<crate::tools::find_file::FindFileArgs>(args.clone())?;
     match runtime.fs.find_file(&args.filename).await {
-        Ok(res) => Ok(serde_json::to_value(res)?),
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Found {} files", res.files.len()),
+            })
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }
@@ -138,7 +169,7 @@ pub async fn find_file(
 pub async fn fs_read_many_files(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<ToolOutput> {
     let paths = args
         .get("paths")
         .and_then(|v| v.as_array())
@@ -182,7 +213,14 @@ pub async fn fs_read_many_files(
         .fs
         .fs_read_many_files(paths, exclude, recursive, options)
     {
-        Ok(result) => Ok(json!({ "ok": true, "result": result })),
+        Ok(result) => {
+            let value = json!({ "ok": true, "result": result });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Read {} files", result.files.len()),
+            })
+        }
         Err(e) => Err(anyhow!("{e}")),
     }
 }

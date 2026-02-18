@@ -253,7 +253,34 @@ pub async fn run_agent_loop(
                 res = crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, &tc) => res,
             };
 
-            let success = res.is_ok();
+            // Extract success status and result summary from the structured output
+            let (success, result_summary, output_value) = match &res {
+                Ok(output) => (
+                    output.is_success,
+                    output.result_summary.clone(),
+                    Some(&output.value),
+                ),
+                Err(e) => (
+                    false,
+                    truncate_string_with_graphemes(&e.to_string(), 200),
+                    None,
+                ),
+            };
+
+            // Centralized Session Recording
+            if let Err(e) = fs.update_session_with_tool_call_count() {
+                error!("Failed to update tool call count: {}", e);
+            }
+            if success {
+                if let Err(e) = fs.record_tool_call_success(tool_name) {
+                    error!("Failed to record tool success: {}", e);
+                }
+            } else {
+                if let Err(e) = fs.record_tool_call_failure(tool_name) {
+                    error!("Failed to record tool failure: {}", e);
+                }
+            }
+
             let modifies_files = matches!(tool_name, "fs_write" | "edit" | "apply_patch");
 
             let ui_args = if success
@@ -279,8 +306,8 @@ pub async fn run_agent_loop(
 
             // Build tool message content (full JSON) for feeding back to the LLM
             let mut tool_message_content = match &res {
-                Ok(value) => {
-                    let json_str = serde_json::to_string(value).unwrap_or_else(|_e| {
+                Ok(output) => {
+                    let json_str = serde_json::to_string(&output.value).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize tool result\"}".to_string()
                     });
                     truncate_tool_output(json_str, tool_name)
@@ -309,7 +336,7 @@ File modification detected. You MUST now verify your changes:
             }
 
             // Prepare a short result summary for UI log and truncate if necessary
-            let result_summary = truncate_string_with_graphemes(&tool_message_content, 200);
+
 
             // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
@@ -410,6 +437,11 @@ File modification detected. You MUST now verify your changes:
                     let _ = tx.send(format!("Command: {}", command));
                 }
 
+                // If failed, try to show the error message in the TUI log
+                if !success {
+                   let _ = tx.send(format!("    Error: {}", result_summary));
+                }
+
                 // Tool arguments and results are intentionally not displayed in the TUI to avoid leaking sensitive data.
 
                 let _ = tx.send("".to_string()); // Extra blank line for spacing
@@ -428,8 +460,8 @@ File modification detected. You MUST now verify your changes:
 
             // Check if the tool call is plan_write/plan_read and update the plan list in the UI
             if matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
-                && let Ok(tool_result) = &res
-                && let Ok(plan_list) = serde_json::from_value::<PlanList>(tool_result.clone())
+                && let Some(tool_result_value) = output_value
+                && let Ok(plan_list) = serde_json::from_value::<PlanList>((*tool_result_value).clone())
             {
                 debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
                 // Send the plan list to the UI
@@ -469,7 +501,8 @@ File modification detected. You MUST now verify your changes:
             }
 
             // Task Sentinel (Stalled Progress Check)
-            task_sentinel.record_tool_call(&tc.function.name, res.is_ok());
+            // Use the authoritative success flag
+            task_sentinel.record_tool_call(&tc.function.name, success);
             if let Some(stall_warning) = task_sentinel.check_stalled() {
                 warn!("Stalled progress detected: {}", stall_warning);
                 if let Some(tx) = &ui_tx {
@@ -485,8 +518,15 @@ File modification detected. You MUST now verify your changes:
             }
 
             // Specific Error Recovery Hints
-            if let Err(e) = &res {
-                let err_str = e.to_string();
+            if !success {
+                 // Try to look into the output value for an "error" field if it exists, or use result_summary
+                let err_str = if let Some(val) = output_value
+                    && let Some(err_field) = val.get("error").and_then(|v| v.as_str()) {
+                        err_field.to_string()
+                    } else {
+                        result_summary.clone()
+                    };
+
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
                     history.push(ChatMessage {
                         role: "user".into(),
