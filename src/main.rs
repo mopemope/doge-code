@@ -363,7 +363,7 @@ async fn run_exec(
     instruction: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let mut executor = crate::exec::Executor::new(cfg)?;
+    let mut executor = crate::exec::Executor::new(cfg).await?;
     executor.run(instruction, json).await
 }
 
@@ -383,7 +383,7 @@ async fn run_fix(
     retry: usize,
     json: bool,
 ) -> anyhow::Result<()> {
-    let mut executor = crate::exec::Executor::new(cfg)?;
+    let mut executor = crate::exec::Executor::new(cfg).await?;
     crate::exec::fix::run_fix_loop(&mut executor, command, retry, json).await?;
     Ok(())
 }
@@ -398,7 +398,7 @@ async fn run_fix_tests(
         cfg.test_fix.max_iterations = max_iter;
     }
 
-    let mut executor = crate::exec::Executor::new(cfg.clone())?;
+    let mut executor = crate::exec::Executor::new(cfg.clone()).await?;
     let result = features::test_fix::run_test_fix_loop(&cfg, &mut executor).await?;
 
     if json {

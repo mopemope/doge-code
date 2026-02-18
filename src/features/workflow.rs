@@ -114,7 +114,7 @@ impl WorkflowExecutor {
                 .unwrap_or("No description")
         );
 
-        let mut executor = Executor::new(self.cfg.clone())?;
+        let mut executor = Executor::new(self.cfg.clone()).await?;
 
         for (i, step) in workflow.steps.iter().enumerate() {
             let step_num = i + 1;

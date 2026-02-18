@@ -49,7 +49,7 @@ fn test_fix_thread(
     };
 
     let result = rt.block_on(async {
-        let mut executor = match crate::exec::Executor::new(cfg.clone()) {
+        let mut executor = match crate::exec::Executor::new(cfg.clone()).await {
             Ok(e) => e,
             Err(e) => {
                 return Err(anyhow::anyhow!("Failed to create executor: {}", e));
@@ -58,7 +58,11 @@ fn test_fix_thread(
 
         // Seed executor with history context
         if !history_msgs.is_empty() {
-            executor = executor.with_history(history_msgs).await;
+            let mut history_guard: tokio::sync::MutexGuard<'_, crate::llm::ChatHistory> =
+                executor.conversation_history.lock().await;
+            for msg in &history_msgs {
+                history_guard.append_message(msg.clone());
+            }
         }
 
         crate::features::test_fix::run_test_fix_loop(&cfg, &mut executor).await

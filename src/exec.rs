@@ -36,22 +36,20 @@ pub struct Executor {
     #[allow(dead_code)] // Used internally by FsTools
     repomap: Arc<RwLock<Option<RepoMap>>>,
     client: Option<OpenAIClient>,
-    conversation_history: Arc<tokio::sync::Mutex<ChatHistory>>,
+    pub conversation_history: Arc<tokio::sync::Mutex<ChatHistory>>,
     hook_manager: HookManager,
 }
 
 impl Executor {
     /// Creates a new `Executor`.
     /// Initializes the repomap, tools, LLM client, and other necessary components.
-    pub fn new(cfg: AppConfig) -> Result<Self> {
+    pub async fn new(cfg: AppConfig) -> Result<Self> {
         info!("Initializing Executor for exec subcommand");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
         // Initialize session manager for exec mode
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
 
-        let mut session_mgr = session_manager
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {:?}", e))?;
+        let mut session_mgr = session_manager.lock().unwrap();
         if session_mgr.current_session.is_none() {
             session_mgr.create_session(None)?;
         }
@@ -78,12 +76,14 @@ impl Executor {
 
         // If resume is requested, load the latest session and populate history
         if cfg.resume {
-            let mut session_mgr = session_manager.lock().unwrap();
+            let mut session_mgr = session_manager
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
             if let Ok(()) = session_mgr.load_latest_session()
                 && let Some(session) = &session_mgr.current_session
             {
                 info!("Resuming session: {}", session.meta.id);
-                let mut history = conversation_history.blocking_lock();
+                let mut history = conversation_history.lock().await;
                 for entry in &session.conversation {
                     if let Ok(value) = serde_json::to_value(entry)
                         && let Ok(msg) =
@@ -734,7 +734,7 @@ pub async fn run_rewrite(
     let snippet = fs::read_to_string(code_file)
         .await
         .with_context(|| format!("Failed to read snippet from {}", code_file.display()))?;
-    let mut executor = Executor::new(cfg)?;
+    let mut executor = Executor::new(cfg).await?;
     executor
         .run_rewrite(prompt, &snippet, file_path, json)
         .await
@@ -780,7 +780,7 @@ mod tests {
             test_fix: crate::config::TestFixConfig::default(),
         };
 
-        let executor = Executor::new(cfg);
+        let executor = Executor::new(cfg).await;
         assert!(executor.is_ok());
         let executor = executor.unwrap();
         assert!(executor.client.is_none()); // Client should not be initialized without API key
@@ -818,7 +818,7 @@ mod tests {
             test_fix: crate::config::TestFixConfig::default(),
         };
 
-        let mut executor = Executor::new(cfg).unwrap();
+        let mut executor = Executor::new(cfg).await.unwrap();
 
         // Capture stderr to check for the error message
         // Note: Directly capturing stderr in tests is complex and platform-dependent.
@@ -941,7 +941,7 @@ mod tests {
             api_key: None,
             ..Default::default()
         };
-        let executor = Executor::new(cfg).unwrap();
+        let executor = Executor::new(cfg).await.unwrap();
         assert!(executor.client.is_none());
     }
 
@@ -951,7 +951,7 @@ mod tests {
             api_key: Some("test_key".to_string()),
             ..Default::default()
         };
-        let executor = Executor::new(cfg).unwrap();
+        let executor = Executor::new(cfg).await.unwrap();
         assert!(executor.client.is_some());
     }
 
