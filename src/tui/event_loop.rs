@@ -398,7 +398,7 @@ impl TuiApp {
             // Timeout Check
             if (matches!(self.status, Status::Thinking | Status::Running))
                 && let Some(last_heartbeat) = self.last_heartbeat
-                && last_heartbeat.elapsed() > Duration::from_secs(30)
+                && last_heartbeat.elapsed() > Duration::from_secs(180)
             {
                 // Only warn once every 30 seconds to avoid spamming
                 // We can reset last_heartbeat to now to silence it for another 30 seconds,
@@ -406,7 +406,7 @@ impl TuiApp {
                 // But better to just log a warning and maybe set a flag?
                 // For simplicity, let's just log and update heartbeat so we don't spam.
                 self.push_log(
-                    "[WARN] No signal from agent for 30s. It might be stuck or network is slow."
+                    "[WARN] No signal from agent. It might be stuck or network is slow."
                         .to_string(),
                 );
                 self.last_heartbeat = Some(Instant::now());
