@@ -101,13 +101,25 @@ pub fn plan_read_tool_def() -> ToolDef {
     }
 }
 
+use regex::Regex;
+
+// ... imports ...
+
 pub fn plan_write(
     items: Vec<PlanItem>,
     mode: PlanWriteMode,
     session_id: &str,
     config: &AppConfig,
+    valid_files: Option<&[String]>,
 ) -> Result<PlanList> {
-    plan_write_from_base_path(items, mode, session_id, &config.project_root, config)
+    plan_write_from_base_path(
+        items,
+        mode,
+        session_id,
+        &config.project_root,
+        config,
+        valid_files,
+    )
 }
 
 pub fn plan_read(session_id: &str, config: &AppConfig) -> Result<PlanList> {
@@ -120,6 +132,7 @@ pub fn plan_write_from_base_path(
     session_id: &str,
     base_path: impl AsRef<Path>,
     _config: &AppConfig,
+    valid_files: Option<&[String]>,
 ) -> Result<PlanList> {
     let base = base_path.as_ref();
     let plan_dir = plans_dir(base);
@@ -146,6 +159,10 @@ pub fn plan_write_from_base_path(
     };
 
     validate_plan_items(&plan_list.items)?;
+
+    if let Some(files) = valid_files {
+        validate_completion_files(&plan_list.items, files)?;
+    }
 
     let json_content = serde_json::to_string_pretty(&plan_list)
         .with_context(|| "Failed to serialize plan list to JSON")?;
@@ -318,6 +335,58 @@ fn validate_plan_items(items: &[PlanItem]) -> Result<()> {
     Ok(())
 }
 
+fn validate_completion_files(items: &[PlanItem], valid_files: &[String]) -> Result<()> {
+    // Extensions: rs, toml, js, ts, jsx, tsx, md, json, yml, yaml, html, css, py, c, cpp, h, hpp, go, java, sql, sh, bat, ps1, txt, check
+    let file_pattern = Regex::new(r"(?x)
+        \b
+        (?P<path>
+            # Match paths (optional directory prefix) ending with specific extensions
+            # This avoids matching common text like 'and/or', 'n/a', 'w/o'
+            ([\w.-]+/)*[\w.-]+\.(rs|toml|js|ts|jsx|tsx|md|json|yml|yaml|html|css|py|c|cpp|h|hpp|go|java|sql|sh|bat|ps1|txt|check)
+        )
+        \b
+    ").unwrap();
+
+    for item in items {
+        if item.status == "completed" {
+            for cap in file_pattern.captures_iter(&item.content) {
+                let path = &cap["path"];
+                // Check if this path is in valid_files (which are changed files in this session)
+                // valid_files are relative or absolute. We check if the valid file *ends with* the detected path
+                // to handle relative match.
+                // e.g. detected "main.rs" matches valid "src/main.rs".
+
+                let found = valid_files.iter().any(|f| f.ends_with(path));
+                if !found {
+                    // Try to see if it's just a casing issue or similar, but strict is better.
+                    // We allow if the path is NOT in the list, then we error.
+                    // BUT: What if the user mentions a file they *read* but didn't modify?
+                    // The requirement is "If a plan item is marked as completed... those files must be in changed_files".
+                    // This implies if you say "Read main.rs", it shouldn't trigger.
+                    // But usually "completed" implies modification in this context?
+                    // The user said: "plan_writeで修正内容と一致しない項目まで更新されている... 修正もしていないのにplanのチェックつけてしまう"
+                    // so yes, if it's completed, it implies modification.
+
+                    // However, we must be careful about "I read main.rs and it looks good".
+                    // If the user *just* read it, they might mark it done.
+                    // But the prompt says "Modify plan_write to check... if match ONLY".
+                    // If the user *manually* marks it done, they might use a tool.
+                    // If the *Agent* marks it done, it should have modified it.
+
+                    anyhow::bail!(
+                        "Plan item '{}' is marked as completed but refers to file '{}' which has not been modified in this session. \
+                        Please only mark items as completed if you have actually modified the referenced files. \
+                        If you only read the file, do not mark the item as completed yet, or verify you modified the correct file.",
+                        item.id,
+                        path
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +427,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_ok());
     }
@@ -385,6 +455,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_err());
     }
@@ -412,6 +483,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_err());
     }
@@ -441,6 +513,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_ok());
 
@@ -450,6 +523,7 @@ mod tests {
             parent_id: Some("non-existent".into()),
             content: "Child task".into(),
             status: "pending".into(),
+            // ...
         }];
         let result = plan_write_from_base_path(
             items,
@@ -457,6 +531,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_err());
 
@@ -473,6 +548,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("own parent"));
@@ -498,6 +574,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cycle detected"));
@@ -529,5 +606,98 @@ mod tests {
         // Check format "1. [◌] Task 1 (id: step-1)"
         assert!(summary.contains("1. [◌] Task 1 (id: step-1)"));
         assert!(summary.contains("2. [◔] Task 2 (id: step-2)"));
+    }
+
+    #[test]
+    fn plan_write_validates_changed_files() {
+        let (_dir, base) = plan_dir();
+
+        let valid_files = vec!["src/main.rs".to_string(), "Cargo.toml".to_string()];
+
+        // 1. Success: Referred file is in changed_files
+        let items = vec![PlanItem {
+            id: "step-1".into(),
+            parent_id: None,
+            content: "Update src/main.rs".into(),
+            status: "completed".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            Some(&valid_files),
+        );
+        assert!(result.is_ok());
+
+        // 2. Failure: Referred file is NOT in changed_files
+        let items = vec![PlanItem {
+            id: "step-2".into(),
+            parent_id: None,
+            content: "Update utils.rs".into(),
+            status: "completed".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            Some(&valid_files),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("modified"));
+
+        // 3. Success: No files mentioned
+        let items = vec![PlanItem {
+            id: "step-3".into(),
+            parent_id: None,
+            content: "Think about life".into(),
+            status: "completed".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            Some(&valid_files),
+        );
+        assert!(result.is_ok());
+
+        // 4. Success: Pending item mentions file not in changed_files (should be ignored)
+        let items = vec![PlanItem {
+            id: "step-4".into(),
+            parent_id: None,
+            content: "Will update utils.rs".into(),
+            status: "pending".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            Some(&valid_files),
+        );
+        assert!(result.is_ok());
+
+        // 5. Success: Content contains "and/or" which shouldn't be matched as a file
+        let items = vec![PlanItem {
+            id: "step-5".into(),
+            parent_id: None,
+            content: "Review this and/or that".into(),
+            status: "completed".into(),
+        }];
+        let result = plan_write_from_base_path(
+            items,
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            Some(&valid_files),
+        );
+        assert!(result.is_ok());
     }
 }

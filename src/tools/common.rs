@@ -353,7 +353,11 @@ impl FsTools {
         mode: plan::PlanWriteMode,
     ) -> Result<plan::PlanList> {
         let session_id = self.ensure_current_session_id()?;
-        plan::plan_write(items, mode, &session_id, &self.config)
+        let changed_files = self
+            .get_current_session()
+            .map(|s| s.changed_files)
+            .unwrap_or_default();
+        plan::plan_write(items, mode, &session_id, &self.config, Some(&changed_files))
     }
 
     pub fn plan_read(&self) -> Result<plan::PlanList> {
