@@ -47,6 +47,8 @@ pub struct EditResult {
     pub message: String,
     pub diff: Option<String>,
     pub lines_edited: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_lines: Option<Vec<usize>>,
 }
 
 pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> {
@@ -101,6 +103,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
             message: "Target block not found in the file (within the specified range).".to_string(),
             diff: None,
             lines_edited: None,
+            candidate_lines: None,
         });
     }
 
@@ -115,6 +118,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
             ),
             diff: None,
             lines_edited: None,
+            candidate_lines: Some(matches.iter().map(|(_, line)| *line).collect()),
         });
     }
 
@@ -155,6 +159,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         message: "File updated successfully.".to_string(),
         diff: Some(diff_text),
         lines_edited: Some(lines_edited),
+        candidate_lines: None,
     })
 }
 
@@ -261,6 +266,7 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.message.contains("not found"));
+        assert!(result.candidate_lines.is_none());
     }
 
     #[tokio::test]
@@ -282,6 +288,7 @@ mod tests {
         assert!(!result.success);
         assert!(result.message.contains("Target block is not unique"));
         assert!(result.message.contains("occurrences at lines: 1, 2"));
+        assert_eq!(result.candidate_lines, Some(vec![1, 2]));
     }
 
     #[tokio::test]

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_tool_arguments() -> String {
+    "{}".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolFunctionDef {
     pub name: String,
@@ -19,6 +23,7 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallFunction {
     pub name: String,
+    #[serde(default = "default_tool_arguments")]
     pub arguments: String, // JSON string per OpenAI spec
 }
 
@@ -75,4 +80,16 @@ pub struct ChatResponse {
     pub id: Option<String>,
     pub choices: Vec<Choice>,
     pub usage: Option<Usage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_function_defaults_arguments_to_empty_object() {
+        let payload = r#"{"name":"plan_read"}"#;
+        let parsed: ToolCallFunction = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed.arguments, "{}");
+    }
 }

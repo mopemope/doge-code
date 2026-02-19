@@ -86,6 +86,10 @@ pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
         Some(
             "Hint: The file was not found. \n1. Use `fs_list` to verify the directory structure.\n2. Use `find_file` to search for the file if you are unsure of the path.",
         )
+    } else if err_lower.contains("target block is not unique") {
+        Some(
+            "Hint: The edit target matched multiple locations.\n1. Use the returned candidate line numbers.\n2. Retry `edit` with `start_line`/`end_line` narrowed to one match, or intentionally use `allow_multiple: true`.",
+        )
     } else if err_lower.contains("context bounds")
         || err_lower.contains("patch failed")
         || err_lower.contains("hunk")

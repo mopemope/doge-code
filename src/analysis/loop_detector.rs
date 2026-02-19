@@ -120,7 +120,7 @@ impl LoopDetector {
             ),
             LoopType::CycleRepetition => (
                 "You are in a repetitive loop (A -> B -> A -> B).".to_string(),
-                "Reset your plan and use `plan_write` to outline a NEW approach.",
+                "Stop repeating the same tool pattern. Either answer the user directly or choose a different next action based on the latest tool result.",
             ),
         };
 

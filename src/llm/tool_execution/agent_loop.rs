@@ -6,6 +6,7 @@ use crate::tools::FsTools;
 use crate::tools::plan::PlanList;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
+use std::hash::{Hash, Hasher};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -66,6 +67,8 @@ pub async fn run_agent_loop(
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
+    let mut last_plan_write_args_hash: Option<u64> = None;
+    let mut repeated_plan_write_count = 0usize;
 
     loop {
         iters += 1;
@@ -244,6 +247,67 @@ pub async fn run_agent_loop(
             }
 
             let tool_name = tc.function.name.as_str();
+            if tool_name == "plan_write" {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                tc.function.arguments.hash(&mut hasher);
+                let args_hash = hasher.finish();
+
+                if last_plan_write_args_hash == Some(args_hash) {
+                    repeated_plan_write_count += 1;
+                } else {
+                    repeated_plan_write_count = 1;
+                    last_plan_write_args_hash = Some(args_hash);
+                }
+
+                // Hard-stop repeated no-op plan writes to break infinite A->A loops.
+                if repeated_plan_write_count >= 3 {
+                    warn!(
+                        repeat_count = repeated_plan_write_count,
+                        "Blocking repeated identical plan_write call"
+                    );
+
+                    if let Err(e) = fs.update_session_with_tool_call_count() {
+                        error!("Failed to update tool call count: {}", e);
+                    }
+                    if let Err(e) = fs.record_tool_call_failure(tool_name) {
+                        error!("Failed to record tool failure: {}", e);
+                    }
+
+                    if let Some(tx) = &ui_tx {
+                        let _ = tx.send(
+                            "::status:warning:Blocked repeated identical plan_write call."
+                                .to_string(),
+                        );
+                    }
+
+                    let blocked = serde_json::json!({
+                        "success": false,
+                        "error": "Repeated identical plan_write detected and blocked. Do not call plan_write again unless plan items/status actually change.",
+                        "repeat_count": repeated_plan_write_count
+                    });
+                    let blocked_content = truncate_tool_output(blocked.to_string(), "plan_write");
+                    history.push(ChatMessage {
+                        role: "tool".into(),
+                        content: Some(blocked_content),
+                        tool_calls: vec![],
+                        tool_call_id: tc.id.clone(),
+                    });
+                    history.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some("Repeated identical `plan_write` was blocked. Continue by either answering the user directly or using a different tool with new arguments.".to_string()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+
+                    loop_detected = true;
+                    task_sentinel.record_tool_call(tool_name, false);
+                    continue;
+                }
+            } else {
+                repeated_plan_write_count = 0;
+                last_plan_write_args_hash = None;
+            }
+
             let res = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
@@ -446,7 +510,13 @@ File modification detected. You MUST now verify your changes:
 
             // Also emit structured debug/error logs (include truncated result summary for debugging)
             match &res {
-                Ok(_) => debug!("[tool] {} succeeded: {}", tc.function.name, result_summary),
+                Ok(_) if success => {
+                    debug!("[tool] {} succeeded: {}", tc.function.name, result_summary)
+                }
+                Ok(_) => warn!(
+                    "[tool] {} reported failure: {}",
+                    tc.function.name, result_summary
+                ),
                 Err(e) => error!("[tool] {} failed: {}", tc.function.name, e),
             }
 

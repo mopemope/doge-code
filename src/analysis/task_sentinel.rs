@@ -26,18 +26,13 @@ impl TaskSentinel {
     pub fn record_tool_call(&mut self, name: &str, success: bool) {
         self.current_step += 1;
 
-        // heuristic: modification tools or plan updates count as progress
+        // Heuristic: only concrete state-changing actions count as progress.
         let is_progress = success
-            && (
-                name == "fs_write"
-                    || name == "edit"
-                    || name == "apply_patch"
-                    || name == "plan_write"
-                    || name == "undo"
-                    || name == "execute_bash"
-                    || name == "search_repomap"
-                // undo is also an action
-            );
+            && (name == "fs_write"
+                || name == "edit"
+                || name == "apply_patch"
+                || name == "undo"
+                || name == "execute_bash");
 
         if is_progress {
             self.last_progress_step = self.current_step;
@@ -82,5 +77,16 @@ mod tests {
         // 1 step after write - no warning
         sentinel.record_tool_call("fs_read", true);
         assert!(sentinel.check_stalled().is_none());
+    }
+
+    #[test]
+    fn test_plan_write_is_not_progress() {
+        let mut sentinel = TaskSentinel::new();
+
+        for _ in 0..15 {
+            sentinel.record_tool_call("plan_write", true);
+        }
+
+        assert!(sentinel.check_stalled().is_some());
     }
 }

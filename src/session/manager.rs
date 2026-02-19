@@ -96,8 +96,9 @@ impl SessionManager {
         history: &[crate::llm::types::ChatMessage],
     ) -> Result<()> {
         debug!(
-            "Updating session with history: {:?} session: {:?}",
-            history, &self.current_session
+            history_len = history.len(),
+            has_current_session = self.current_session.is_some(),
+            "Updating session with history"
         );
         if let Some(ref mut session) = self.current_session {
             // Clear existing conversation
