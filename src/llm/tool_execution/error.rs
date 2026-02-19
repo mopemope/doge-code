@@ -82,7 +82,11 @@ pub fn handle_agent_error(error: &AgentLoopError, ui_tx: &Option<std::sync::mpsc
 pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
     let err_lower = err_str.to_lowercase();
 
-    if err_lower.contains("no such file") || err_lower.contains("not found") {
+    if err_lower.contains("target block not found") {
+        Some(
+            "Hint: The edit target no longer matches the current file.\n1. Use `fs_read` to fetch fresh content around the intended location.\n2. Retry `edit` with an exact, up-to-date `target_block`.\n3. If there are repeated similar blocks, include `start_line`/`end_line` to narrow scope.",
+        )
+    } else if err_lower.contains("no such file") || err_lower.contains("not found") {
         Some(
             "Hint: The file was not found. \n1. Use `fs_list` to verify the directory structure.\n2. Use `find_file` to search for the file if you are unsure of the path.",
         )
@@ -170,6 +174,11 @@ mod tests {
             get_error_hint("timeout")
                 .unwrap()
                 .contains("operation timed out")
+        );
+        assert!(
+            get_error_hint("Target block not found in the file")
+                .unwrap()
+                .contains("edit target no longer matches")
         );
     }
 }

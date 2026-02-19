@@ -1,4 +1,5 @@
 use crate::llm::types::ToolCall;
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
@@ -36,7 +37,7 @@ impl LoopDetector {
 
     pub fn record_tool_call(&mut self, call: &ToolCall) {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        call.function.arguments.hash(&mut hasher);
+        normalize_tool_arguments(&call.function.arguments).hash(&mut hasher);
         let args_hash = hasher.finish();
 
         self.push_entry(ToolCallEntry {
@@ -165,6 +166,13 @@ fn is_same(a: &ToolCallEntry, b: &ToolCallEntry) -> bool {
     a.name == b.name && a.args_hash == b.args_hash
 }
 
+fn normalize_tool_arguments(arguments: &str) -> String {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string()),
+        Err(_) => arguments.trim().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +282,24 @@ mod tests {
 
         let warning = detector.loop_warning(&loop_type);
         assert!(warning.contains("plan remains unchanged"));
+    }
+
+    #[test]
+    fn test_argument_normalization_detects_semantic_repetition() {
+        let mut detector = LoopDetector::new();
+        let call_a = make_call("edit", r#"{"b":2,"a":1}"#);
+        let call_b = make_call("edit", r#"{"a":1,"b":2}"#);
+
+        detector.record_tool_call(&call_a);
+        assert!(detector.detect_loop().is_none());
+
+        detector.record_tool_call(&call_b);
+        assert!(detector.detect_loop().is_none());
+
+        detector.record_tool_call(&call_a);
+        match detector.detect_loop() {
+            Some(LoopType::ConsecutiveRepetition(name)) => assert_eq!(name, "edit"),
+            _ => panic!("Expected ConsecutiveRepetition"),
+        }
     }
 }

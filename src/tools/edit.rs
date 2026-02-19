@@ -98,6 +98,35 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
 
     // 3. Validate matches
     if matches.is_empty() {
+        // Idempotency guard:
+        // if target is gone but the new block already exists in scope, treat as already applied.
+        if !new_block.is_empty() {
+            let already_applied_lines: Vec<usize> = original_content
+                .match_indices(&new_block)
+                .filter_map(|(start_byte, _)| {
+                    let line_num = original_content[..start_byte].lines().count() + 1;
+                    (line_num >= start_line && line_num <= end_line).then_some(line_num)
+                })
+                .collect();
+
+            if !already_applied_lines.is_empty() {
+                return Ok(EditResult {
+                    success: true,
+                    message: format!(
+                        "No change needed: target block not found, and new block already exists at lines: {}.",
+                        already_applied_lines
+                            .iter()
+                            .map(|line| line.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    diff: None,
+                    lines_edited: Some(0),
+                    candidate_lines: Some(already_applied_lines),
+                });
+            }
+        }
+
         return Ok(EditResult {
             success: false,
             message: "Target block not found in the file (within the specified range).".to_string(),
@@ -267,6 +296,27 @@ mod tests {
         assert!(!result.success);
         assert!(result.message.contains("not found"));
         assert!(result.candidate_lines.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_edit_idempotent_when_new_block_already_present() {
+        let original_content = "line1\nnew text\nline3";
+        let (_temp_file, file_path) = create_temp_file(original_content);
+
+        let params = EditParams {
+            file_path: file_path.clone(),
+            target_block: "old text".to_string(),
+            new_block: "new text".to_string(),
+            start_line: None,
+            end_line: None,
+            allow_multiple: None,
+        };
+
+        let result = edit(params).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.lines_edited, Some(0));
+        assert!(result.message.contains("No change needed"));
+        assert_eq!(result.candidate_lines, Some(vec![2]));
     }
 
     #[tokio::test]

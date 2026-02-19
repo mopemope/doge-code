@@ -19,9 +19,9 @@ pub fn tool_def() -> ToolDef {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "start_line": {"type": "integer"},
+                    "start_line": {"type": "integer", "description": "1-based line number to start reading from."},
                     "limit": {"type": "integer"},
-                    "cursor": {"type": "integer", "description": "Alias for start_line when paginating from previous response"},
+                    "cursor": {"type": "integer", "description": "1-based alias for start_line when paginating from previous response"},
                     "page_size": {"type": "integer", "description": "Number of lines to return (overrides limit)"},
                     "response_budget_chars": {"type": "integer", "description": "Approximate maximum characters for the snippet (default 6000)"},
                     "mode": {"type": "string", "enum": ["summary", "full"], "description": "Summary avoids long files unless full is requested"}
@@ -124,28 +124,31 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
     let lines: Vec<&str> = s.lines().collect();
     let total_lines = lines.len();
 
-    let start_line = opts
-        .cursor
-        .or(opts.start_line)
-        .unwrap_or(0)
-        .min(total_lines);
+    // Tool contract uses 1-based line numbers for consistency with `edit`.
+    let requested_start_line = opts.cursor.or(opts.start_line);
+    let start_line = if total_lines == 0 {
+        0
+    } else {
+        requested_start_line.unwrap_or(1).clamp(1, total_lines)
+    };
+    let start_index = start_line.saturating_sub(1);
 
     let mut line_limit = opts
         .page_size
         .or(opts.limit)
         .unwrap_or_else(|| match opts.mode {
             FsReadMode::Summary => DEFAULT_SUMMARY_LINES,
-            FsReadMode::Full => total_lines.saturating_sub(start_line),
+            FsReadMode::Full => total_lines.saturating_sub(start_index),
         });
 
     if opts.mode == FsReadMode::Full && opts.limit.is_none() && opts.page_size.is_none() {
-        line_limit = total_lines.saturating_sub(start_line);
+        line_limit = total_lines.saturating_sub(start_index);
     }
 
-    let end_line = min(start_line.saturating_add(line_limit), total_lines);
+    let end_index = min(start_index.saturating_add(line_limit), total_lines);
 
-    let mut content = lines[start_line..end_line].join("\n");
-    let mut truncated = end_line < total_lines;
+    let mut content = lines[start_index..end_index].join("\n");
+    let mut truncated = end_index < total_lines;
     let mut warnings = Vec::new();
 
     let budget = opts
@@ -168,7 +171,11 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         ));
     }
 
-    let next_cursor = if truncated { Some(end_line) } else { None };
+    let next_cursor = if truncated {
+        Some(end_index.saturating_add(1))
+    } else {
+        None
+    };
     if truncated && warnings.is_empty() {
         warnings.push("additional content available; increase limit or request next cursor".into());
     }
@@ -177,7 +184,7 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         path: path.to_string(),
         content,
         start_line,
-        end_line,
+        end_line: end_index,
         total_lines,
         truncated,
         next_cursor,
@@ -224,9 +231,9 @@ mod tests {
     #[test]
     fn test_fs_read_with_start_line_limit() {
         let (_temp_file, file_path) = create_temp_file("line1\nline2\nline3\nline4");
-        let result = crate::tools::test_utils::test_fs_read(&file_path, Some(1), Some(2)).unwrap();
+        let result = crate::tools::test_utils::test_fs_read(&file_path, Some(2), Some(2)).unwrap();
         assert_eq!(result.content, "line2\nline3");
-        assert_eq!(result.start_line, 1);
+        assert_eq!(result.start_line, 2);
         assert_eq!(result.end_line, 3);
     }
 

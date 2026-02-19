@@ -43,6 +43,8 @@ pub enum LlmErrorKind {
     Timeout,
     #[error("client error")]
     Client,
+    #[error("authentication error")]
+    Authentication,
     #[error("deserialization error")]
     Deserialize,
     #[error("request cancelled")]
@@ -59,6 +61,9 @@ pub fn classify_error(status: Option<StatusCode>, err: &anyhow::Error) -> LlmErr
         return e.clone();
     }
     if let Some(st) = status {
+        if st == StatusCode::UNAUTHORIZED || st == StatusCode::FORBIDDEN {
+            return LlmErrorKind::Authentication;
+        }
         if st == StatusCode::TOO_MANY_REQUESTS {
             return LlmErrorKind::RateLimited;
         }

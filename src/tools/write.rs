@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use diffy::create_patch;
 use serde_json::json;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -37,16 +37,19 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
     }
 
     // Check if the path is within the project root or in allowed paths
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root = &config.project_root;
     let temp_dir = std::env::temp_dir();
-    let canonical_path = p.canonicalize().unwrap_or_else(|_| {
-        // If canonicalization fails, try to get a relative path from the project root
-        if let Ok(relative_path) = p.strip_prefix(&project_root) {
-            project_root.join(relative_path)
-        } else {
-            p.to_path_buf()
-        }
-    });
+    let canonical_path = if p.exists() {
+        p.canonicalize()
+            .context("Failed to canonicalize existing path")?
+    } else {
+        let parent = p.parent().context("Path has no parent directory")?;
+        let canonical_parent = parent
+            .canonicalize()
+            .context("Failed to canonicalize parent directory")?;
+        let file_name = p.file_name().context("Path has no file name component")?;
+        canonical_parent.join(file_name)
+    };
 
     // Check if the path is in allowed paths
     let is_allowed_path = config
@@ -55,7 +58,7 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
         .any(|allowed_path| canonical_path.starts_with(allowed_path));
 
     // Allow paths that are within the project root OR within the temp directory OR in allowed paths
-    if !canonical_path.starts_with(&project_root)
+    if !canonical_path.starts_with(project_root)
         && !canonical_path.starts_with(&temp_dir)
         && !is_allowed_path
     {
@@ -128,21 +131,25 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_write_success() {
+    fn test_fs_write_success() -> Result<()> {
         let root = create_temp_dir();
         let file_path = root.join("test_file.txt");
-        let file_path_str = file_path.to_str().unwrap();
+        let file_path_str = file_path
+            .to_str()
+            .context("Failed to convert path to string")?
+            .to_string();
         let content = "Hello, Rust!";
 
-        fs::write(&file_path, "").unwrap(); // Create the file first
-        fs_write(file_path_str, content, &AppConfig::default()).unwrap();
+        fs::write(&file_path, "").context("Failed to create file")?;
+        fs_write(&file_path_str, content, &AppConfig::default())?;
 
-        let read_content = fs::read_to_string(&file_path).unwrap();
+        let read_content = fs::read_to_string(&file_path).context("Failed to read file")?;
         assert_eq!(read_content, content);
+        Ok(())
     }
 
     #[test]
-    fn test_fs_write_absolute_path_error() {
+    fn test_fs_write_absolute_path_error() -> Result<()> {
         let absolute_path = "/tmp/abs_path.txt";
         let result = fs_write(absolute_path, "test", &AppConfig::default());
         // Since we removed the absolute path check, this test needs to be adjusted.
@@ -150,10 +157,11 @@ mod tests {
         // In a test environment, /tmp might be writable, so this test might need further adjustment.
         // For now, let's just check it returns an error.
         assert!(result.is_err() || std::path::Path::new(absolute_path).exists());
+        Ok(())
     }
 
     #[test]
-    fn test_fs_write_path_escape_error() {
+    fn test_fs_write_path_escape_error() -> Result<()> {
         let root = create_temp_dir();
         // Create a subdirectory to test path escaping
         let subdir = root.join("subdir");
@@ -185,24 +193,32 @@ mod tests {
             // depending on the system's security policies
             assert!(result.is_err());
         }
+        Ok(())
     }
 
     #[test]
-    fn test_fs_write_binary_content_error() {
+    fn test_fs_write_binary_content_error() -> Result<()> {
         let root = create_temp_dir();
         let file_path = root.join("binary.txt");
-        let file_path_str = file_path.to_str().unwrap();
+        let file_path_str = file_path
+            .to_str()
+            .context("Failed to convert path to string")?
+            .to_string();
         let content_with_null = "hello\0world";
 
-        let result = fs_write(file_path_str, content_with_null, &AppConfig::default());
+        let result = fs_write(&file_path_str, content_with_null, &AppConfig::default());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_fs_write_diff_display() {
+    fn test_fs_write_diff_display() -> Result<()> {
         let root = create_temp_dir();
         let file_path = root.join("diff_test.txt");
-        let file_path_str = file_path.to_str().unwrap();
+        let file_path_str = file_path
+            .to_str()
+            .context("Failed to convert path to string")?
+            .to_string();
         let old_content = "Old content\n";
         let new_content = "New content\n";
 
@@ -211,6 +227,7 @@ mod tests {
         // Here we observe that diff is printed during test execution.
         // In real tests, verifying diff content is difficult, so this test
         // primarily ensures there are no compilation errors.
-        fs_write(file_path_str, new_content, &AppConfig::default()).unwrap();
+        fs_write(&file_path_str, new_content, &AppConfig::default()).unwrap();
+        Ok(())
     }
 }

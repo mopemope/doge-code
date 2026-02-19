@@ -67,6 +67,12 @@ pub async fn chat_tools_once(
                 ) {
                     error!("Deserialization error, not retrying: {:?}", &last_error);
                     break;
+                } else if matches!(
+                    last_error.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Authentication)
+                ) {
+                    error!("Authentication error, not retrying: {:?}", &last_error);
+                    break;
                 }
 
                 // Exponential backoff with jitter
@@ -177,6 +183,11 @@ async fn chat_tools_once_inner(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default().trim().to_owned();
         error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
+
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(anyhow!(LlmErrorKind::Authentication)
+                .context(format!("chat (tools) auth error: {} - {}", status, text)));
+        }
 
         // Check if the error is due to context length exceeded
         if status.as_u16() == 400
