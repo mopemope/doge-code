@@ -771,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_executor_new() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let project_root = temp_dir.path().to_path_buf();
 
         // Create a minimal config without API key
@@ -809,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_executor_run_no_api_key() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let project_root = temp_dir.path().to_path_buf();
 
         // Create a minimal config without API key
@@ -837,7 +837,7 @@ mod tests {
             rewrite_timeout_sec: 30,
         };
 
-        let mut executor = Executor::new(cfg).await.unwrap();
+        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
 
         // Capture stderr to check for the error message
         // Note: Directly capturing stderr in tests is complex and platform-dependent.
@@ -861,7 +861,8 @@ mod tests {
             super::REWRITE_MARKER_END
         );
         let original = format!("{}\n", snippet);
-        let rewritten = super::extract_rewritten_code(&response, &original).unwrap();
+        let rewritten = super::extract_rewritten_code(&response, &original)
+            .expect("Failed to extract rewritten code");
         assert!(rewritten.ends_with('\n'));
         assert!(rewritten.starts_with("fn main()"));
     }
@@ -876,7 +877,8 @@ mod tests {
             super::REWRITE_MARKER_END
         );
         let original = "fn add(a: i32, b: i32) -> i32 { a + b }";
-        let rewritten = super::extract_rewritten_code(&response, original).unwrap();
+        let rewritten = super::extract_rewritten_code(&response, original)
+            .expect("Failed to extract rewritten code");
         assert_eq!(rewritten, snippet);
     }
 
@@ -884,7 +886,12 @@ mod tests {
     fn test_format_location_hint_relative_path() {
         let root = PathBuf::from("/tmp/doge_project");
         let file_path = root.join("src").join("lib.rs");
-        let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
+        let hint = super::format_location_hint(
+            file_path
+                .to_str()
+                .expect("File path contains invalid UTF-8"),
+            &root,
+        );
         let expected = format!("src{}lib.rs", std::path::MAIN_SEPARATOR);
         assert_eq!(hint, expected);
     }
@@ -893,7 +900,12 @@ mod tests {
     fn test_format_location_hint_outside_project() {
         let root = PathBuf::from("/tmp/doge_project");
         let file_path = PathBuf::from("/var/tmp/other.rs");
-        let hint = super::format_location_hint(file_path.to_str().unwrap(), &root);
+        let hint = super::format_location_hint(
+            file_path
+                .to_str()
+                .expect("File path contains invalid UTF-8"),
+            &root,
+        );
         assert_eq!(hint, "other.rs");
     }
 
@@ -960,7 +972,7 @@ mod tests {
             api_key: None,
             ..Default::default()
         };
-        let executor = Executor::new(cfg).await.unwrap();
+        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
         assert!(executor.client.is_none());
     }
 
@@ -970,7 +982,7 @@ mod tests {
             api_key: Some("test_key".to_string()),
             ..Default::default()
         };
-        let executor = Executor::new(cfg).await.unwrap();
+        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
         assert!(executor.client.is_some());
     }
 
