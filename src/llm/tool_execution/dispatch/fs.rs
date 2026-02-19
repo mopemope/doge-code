@@ -100,9 +100,29 @@ pub async fn search_text(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let file_glob = args.get("file_glob").and_then(|v| v.as_str());
-    match runtime.fs.search_text(search_pattern, file_glob) {
-        Ok(rows) => {
-            let items: Vec<_> = rows
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let options = crate::tools::search_text::SearchTextOptions {
+        max_results,
+        offset,
+    };
+    match runtime
+        .fs
+        .search_text_with_options(search_pattern, file_glob, options)
+    {
+        Ok(result) => {
+            let truncated = result.truncated;
+            let next_offset = result.next_offset;
+            let effective_offset = result.offset;
+            let effective_max_results = result.max_results;
+            let items: Vec<_> = result
+                .rows
                 .into_iter()
                 .map(|(p, ln, text)| {
                     json!({
@@ -112,11 +132,30 @@ pub async fn search_text(
                     })
                 })
                 .collect();
-            let value = json!({ "ok": true, "results": items });
+            let value = json!({
+                "ok": true,
+                "results": items,
+                "meta": {
+                    "offset": effective_offset,
+                    "max_results": effective_max_results,
+                    "returned": items.len(),
+                    "truncated": truncated,
+                    "next_offset": next_offset
+                }
+            });
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: true,
-                result_summary: format!("Found {} matches for '{}'", items.len(), search_pattern),
+                result_summary: if truncated {
+                    format!(
+                        "Found matches for '{}': returned {} (truncated, next_offset={:?})",
+                        search_pattern,
+                        items.len(),
+                        next_offset
+                    )
+                } else {
+                    format!("Found {} matches for '{}'", items.len(), search_pattern)
+                },
             })
         }
         Err(e) => Err(anyhow!("{e}")),

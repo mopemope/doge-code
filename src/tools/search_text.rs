@@ -12,6 +12,34 @@ use std::path::PathBuf;
 
 use std::process::Command;
 
+const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MiB
+const DEFAULT_MAX_RESULTS: usize = 200;
+const HARD_MAX_RESULTS: usize = 2_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchTextOptions {
+    pub max_results: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+impl Default for SearchTextOptions {
+    fn default() -> Self {
+        Self {
+            max_results: Some(DEFAULT_MAX_RESULTS),
+            offset: Some(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchTextResult {
+    pub rows: Vec<(PathBuf, usize, String)>,
+    pub truncated: bool,
+    pub next_offset: Option<usize>,
+    pub offset: usize,
+    pub max_results: usize,
+}
+
 fn glob_search_root(pattern: &str) -> PathBuf {
     if let Some(meta_pos) = pattern.find(['*', '?', '[', '{']) {
         let before_meta = &pattern[..meta_pos];
@@ -51,6 +79,14 @@ pub fn tool_def() -> ToolDef {
                     "file_glob": {
                         "type": "string",
                         "description": "A glob pattern to filter which files are searched. This pattern must include a file extension or wildcard. Examples: 'src/**/*.rs', '**/*.toml', '**/*'."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Optional: Maximum number of matches to return. Default 200, hard cap 2000."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Optional: Number of matches to skip before collecting results. Use with `max_results` for pagination."
                     }
                 },
                 "required": ["search_pattern", "file_glob"]
@@ -91,6 +127,32 @@ pub fn search_text(
     file_glob: Option<&str>,
     config: &AppConfig,
 ) -> Result<Vec<(PathBuf, usize, String)>> {
+    let result = search_text_with_options(
+        search_pattern,
+        file_glob,
+        SearchTextOptions::default(),
+        config,
+    )?;
+    Ok(result.rows)
+}
+
+fn normalize_options(options: SearchTextOptions) -> (usize, usize) {
+    let max_results = options
+        .max_results
+        .unwrap_or(DEFAULT_MAX_RESULTS)
+        .clamp(1, HARD_MAX_RESULTS);
+    let offset = options.offset.unwrap_or(0);
+    (max_results, offset)
+}
+
+pub fn search_text_with_options(
+    search_pattern: &str,
+    file_glob: Option<&str>,
+    options: SearchTextOptions,
+    config: &AppConfig,
+) -> Result<SearchTextResult> {
+    let (max_results, offset) = normalize_options(options);
+
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
     let project_root = &config.project_root;
@@ -100,7 +162,15 @@ pub fn search_text(
             let abs = Path::new(glob_pattern);
             match abs.strip_prefix(project_root) {
                 Ok(rel) => rel.to_string_lossy().to_string(),
-                Err(_) => return Ok(Vec::new()),
+                Err(_) => {
+                    return Ok(SearchTextResult {
+                        rows: Vec::new(),
+                        truncated: false,
+                        next_offset: None,
+                        offset,
+                        max_results,
+                    });
+                }
             }
         } else {
             glob_pattern.to_string()
@@ -136,8 +206,8 @@ pub fn search_text(
 
     let mut results = Vec::new();
     let mut bytes_read: usize = 0;
-
-    const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MiB
+    let mut match_index: usize = 0;
+    let mut truncated = false;
 
     for line_res in reader.lines() {
         let line = line_res.context("failed to read ripgrep output")?;
@@ -146,6 +216,7 @@ pub fn search_text(
         if bytes_read > MAX_OUTPUT_BYTES {
             // try to terminate the child process
             let _ = child.kill();
+            truncated = true;
             break;
         }
 
@@ -160,6 +231,17 @@ pub fn search_text(
             } else {
                 project_root.join(raw_path)
             };
+            match_index = match_index.saturating_add(1);
+            if match_index <= offset {
+                continue;
+            }
+
+            if results.len() >= max_results {
+                truncated = true;
+                let _ = child.kill();
+                break;
+            }
+
             results.push((abs_path, line_number, lines_text.text.trim().to_string()));
         }
     }
@@ -167,13 +249,25 @@ pub fn search_text(
     // Ensure child process has exited
     let _ = child.wait();
 
-    Ok(results)
+    let next_offset = if truncated {
+        Some(offset.saturating_add(results.len()))
+    } else {
+        None
+    };
+
+    Ok(SearchTextResult {
+        rows: results,
+        truncated,
+        next_offset,
+        offset,
+        max_results,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
-    use crate::tools::search_text::search_text;
+    use crate::tools::search_text::{SearchTextOptions, search_text, search_text_with_options};
     use std::fs;
     use std::path::PathBuf;
 
@@ -237,5 +331,44 @@ mod tests {
         };
         let results = search_text("nonexistent", Some(&file_glob), &config).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_text_with_pagination() {
+        let root = create_temp_dir();
+        fs::write(root.join("test.txt"), "hit\nhit\nhit\nhit\n").unwrap();
+
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/*.txt", root_str);
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+
+        let page1 = search_text_with_options(
+            "hit",
+            Some(&file_glob),
+            SearchTextOptions {
+                max_results: Some(2),
+                offset: Some(0),
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(page1.rows.len(), 2);
+        assert!(page1.truncated);
+        assert_eq!(page1.next_offset, Some(2));
+
+        let page2 = search_text_with_options(
+            "hit",
+            Some(&file_glob),
+            SearchTextOptions {
+                max_results: Some(2),
+                offset: page1.next_offset,
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(page2.rows.len(), 2);
     }
 }

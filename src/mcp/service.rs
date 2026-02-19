@@ -77,6 +77,8 @@ pub struct FsReadManyFilesParams {
 pub struct SearchTextParams {
     pub search_pattern: String,
     pub file_glob: Option<String>,
+    pub max_results: Option<u32>,
+    pub offset: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -455,18 +457,27 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<SearchTextParams>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::search_text::search_text(
+        match crate::tools::search_text::search_text_with_options(
             &params.search_pattern,
             params.file_glob.as_deref(),
+            crate::tools::search_text::SearchTextOptions {
+                max_results: params.max_results.map(|v| v as usize),
+                offset: params.offset.map(|v| v as usize),
+            },
             &self.config,
         ) {
             Ok(results) => {
-                let formatted_results: Vec<String> = results
+                let mut formatted_results: Vec<String> = results
+                    .rows
                     .into_iter()
                     .map(|(path, line, content)| {
                         format!("{}:{}: {}", path.display(), line, content)
                     })
                     .collect();
+                if results.truncated {
+                    formatted_results
+                        .push(format!("[truncated] next_offset={:?}", results.next_offset));
+                }
                 Ok(CallToolResult::success(vec![Content::text(
                     formatted_results.join("\n"),
                 )]))

@@ -224,7 +224,21 @@ impl FsTools {
         search_pattern: &str,
         file_glob: Option<&str>,
     ) -> Result<Vec<(PathBuf, usize, String)>> {
-        search_text::search_text(search_pattern, file_glob, &self.config)
+        self.search_text_with_options(
+            search_pattern,
+            file_glob,
+            search_text::SearchTextOptions::default(),
+        )
+        .map(|result| result.rows)
+    }
+
+    pub fn search_text_with_options(
+        &self,
+        search_pattern: &str,
+        file_glob: Option<&str>,
+        options: search_text::SearchTextOptions,
+    ) -> Result<search_text::SearchTextResult> {
+        search_text::search_text_with_options(search_pattern, file_glob, options, &self.config)
     }
 
     pub async fn fs_write(&self, path: &str, content: &str) -> Result<()> {

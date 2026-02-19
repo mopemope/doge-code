@@ -106,6 +106,8 @@ mod tests {
         let params = service::SearchTextParams {
             search_pattern: "test".to_string(),
             file_glob: Some("*.txt".to_string()),
+            max_results: None,
+            offset: None,
         };
 
         let result = service.search_text(Parameters(params));
