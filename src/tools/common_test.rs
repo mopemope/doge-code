@@ -381,8 +381,9 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
         .id
         .clone();
 
-    assert_eq!(written.session_id, Some(session_id.clone()));
-    assert_eq!(written.items, items);
+    assert!(written.changed);
+    assert_eq!(written.plan.session_id, Some(session_id.clone()));
+    assert_eq!(written.plan.items, items);
 
     let plan_path = project_root
         .join(".doge/plans")
@@ -391,7 +392,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
 
     let read_back = fs_tools.plan_read()?;
     assert_eq!(read_back.session_id, Some(session_id));
-    assert_eq!(read_back.items, written.items);
+    assert_eq!(read_back.items, written.plan.items);
 
     Ok(())
 }

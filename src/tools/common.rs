@@ -375,7 +375,7 @@ impl FsTools {
         &self,
         items: Vec<plan::PlanItem>,
         mode: plan::PlanWriteMode,
-    ) -> Result<plan::PlanList> {
+    ) -> Result<plan::PlanWriteResult> {
         let session_id = self.ensure_current_session_id()?;
         let changed_files = self
             .get_current_session()

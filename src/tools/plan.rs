@@ -25,6 +25,12 @@ pub struct PlanList {
     pub items: Vec<PlanItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanWriteResult {
+    pub plan: PlanList,
+    pub changed: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanWriteMode {
@@ -111,7 +117,7 @@ pub fn plan_write(
     session_id: &str,
     config: &AppConfig,
     valid_files: Option<&[String]>,
-) -> Result<PlanList> {
+) -> Result<PlanWriteResult> {
     plan_write_from_base_path(
         items,
         mode,
@@ -133,7 +139,7 @@ pub fn plan_write_from_base_path(
     base_path: impl AsRef<Path>,
     _config: &AppConfig,
     valid_files: Option<&[String]>,
-) -> Result<PlanList> {
+) -> Result<PlanWriteResult> {
     let base = base_path.as_ref();
     let plan_dir = plans_dir(base);
     fs::create_dir_all(&plan_dir)
@@ -142,11 +148,11 @@ pub fn plan_write_from_base_path(
     let plan_file_path = plan_file_path(base, session_id);
     debug!(?plan_file_path, "write plans");
 
-    let new_items = match (
-        mode,
-        plan_read_from_path(&plan_file_path),
-        legacy_plan_read(base, session_id),
-    ) {
+    let primary_read_result = plan_read_from_path(&plan_file_path);
+    let existing_primary_plan = primary_read_result.as_ref().ok().cloned();
+    let legacy_read_result = legacy_plan_read(base, session_id);
+
+    let new_items = match (mode, primary_read_result, legacy_read_result) {
         (PlanWriteMode::Replace, _, _) => items,
         (PlanWriteMode::Merge, Ok(existing), _) => merge_items(existing.items, items),
         (PlanWriteMode::Merge, Err(_), Ok(legacy)) => merge_items(legacy.items, items),
@@ -164,12 +170,22 @@ pub fn plan_write_from_base_path(
         validate_completion_files(&plan_list.items, files)?;
     }
 
-    let json_content = serde_json::to_string_pretty(&plan_list)
-        .with_context(|| "Failed to serialize plan list to JSON")?;
-    fs::write(&plan_file_path, &json_content)
-        .with_context(|| format!("Failed to write plan file: {}", plan_file_path.display()))?;
+    let changed = existing_primary_plan
+        .as_ref()
+        .map(|existing| existing != &plan_list)
+        .unwrap_or(true);
 
-    Ok(plan_list)
+    if changed {
+        let json_content = serde_json::to_string_pretty(&plan_list)
+            .with_context(|| "Failed to serialize plan list to JSON")?;
+        fs::write(&plan_file_path, &json_content)
+            .with_context(|| format!("Failed to write plan file: {}", plan_file_path.display()))?;
+    }
+
+    Ok(PlanWriteResult {
+        plan: plan_list,
+        changed,
+    })
 }
 
 pub fn plan_read_from_base_path(
@@ -430,6 +446,75 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn plan_write_marks_noop_as_unchanged() {
+        let (_dir, base) = plan_dir();
+        let items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "Review requirements and clarify scope".into(),
+                status: "pending".into(),
+            },
+            PlanItem {
+                id: "step-2".into(),
+                parent_id: None,
+                content: "Implement feature across modules".into(),
+                status: "pending".into(),
+            },
+        ];
+
+        let first = plan_write_from_base_path(
+            items.clone(),
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            None,
+        )
+        .expect("first write should succeed");
+        assert!(first.changed);
+        assert_eq!(first.plan.items, items);
+
+        let second = plan_write_from_base_path(
+            items.clone(),
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            None,
+        )
+        .expect("second write should succeed");
+        assert!(!second.changed);
+        assert_eq!(second.plan.items, items);
+
+        let updated_items = vec![
+            PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "Review requirements and clarify scope".into(),
+                status: "completed".into(),
+            },
+            PlanItem {
+                id: "step-2".into(),
+                parent_id: None,
+                content: "Implement feature across modules".into(),
+                status: "pending".into(),
+            },
+        ];
+        let third = plan_write_from_base_path(
+            updated_items.clone(),
+            PlanWriteMode::Replace,
+            "session",
+            base,
+            &AppConfig::default(),
+            None,
+        )
+        .expect("third write should succeed");
+        assert!(third.changed);
+        assert_eq!(third.plan.items, updated_items);
     }
 
     #[test]

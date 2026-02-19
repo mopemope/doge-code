@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 
 const HISTORY_CAPACITY: usize = 10;
 const REPEAT_THRESHOLD: usize = 3;
+const PLAN_WRITE_NO_CHANGE_MARKER: &str = "plan_write_no_change";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopType {
@@ -38,11 +39,20 @@ impl LoopDetector {
         call.function.arguments.hash(&mut hasher);
         let args_hash = hasher.finish();
 
-        let entry = ToolCallEntry {
+        self.push_entry(ToolCallEntry {
             name: call.function.name.clone(),
             args_hash,
-        };
+        });
+    }
 
+    pub fn record_plan_write_no_change(&mut self) {
+        self.push_entry(ToolCallEntry {
+            name: PLAN_WRITE_NO_CHANGE_MARKER.to_string(),
+            args_hash: 0,
+        });
+    }
+
+    fn push_entry(&mut self, entry: ToolCallEntry) {
         if self.history.len() >= HISTORY_CAPACITY {
             self.history.pop_front();
         }
@@ -111,13 +121,23 @@ impl LoopDetector {
 
     pub fn loop_warning(&self, loop_type: &LoopType) -> String {
         let (base_msg, recommendation) = match loop_type {
-            LoopType::ConsecutiveRepetition(name) => (
-                format!(
-                    "You are repeatedly calling the tool '{}' with the same arguments.",
-                    name
-                ),
-                "Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify content first).",
-            ),
+            LoopType::ConsecutiveRepetition(name) => {
+                if name == PLAN_WRITE_NO_CHANGE_MARKER {
+                    (
+                        "You are repeatedly calling `plan_write`, but the plan remains unchanged."
+                            .to_string(),
+                        "Stop repeating no-op `plan_write`. Update actual task state, use a different tool, or answer the user directly.",
+                    )
+                } else {
+                    (
+                        format!(
+                            "You are repeatedly calling the tool '{}' with the same arguments.",
+                            name
+                        ),
+                        "Try a DIFFERENT tool or approach (e.g., if `edit` fails, use `fs_read` to verify content first).",
+                    )
+                }
+            }
             LoopType::CycleRepetition => (
                 "You are in a repetitive loop (A -> B -> A -> B).".to_string(),
                 "Stop repeating the same tool pattern. Either answer the user directly or choose a different next action based on the latest tool result.",
@@ -230,5 +250,29 @@ mod tests {
         detector.record_tool_call(&call2);
         assert!(detector.detect_loop().is_none());
         assert_eq!(detector.intervention_count, 0);
+    }
+
+    #[test]
+    fn test_plan_write_no_change_marker_detection() {
+        let mut detector = LoopDetector::new();
+
+        detector.record_plan_write_no_change();
+        assert!(detector.detect_loop().is_none());
+        detector.record_plan_write_no_change();
+        assert!(detector.detect_loop().is_none());
+        detector.record_plan_write_no_change();
+
+        let loop_type = detector
+            .detect_loop()
+            .expect("expected loop detection for no-change plan writes");
+        match &loop_type {
+            LoopType::ConsecutiveRepetition(name) => {
+                assert_eq!(name, PLAN_WRITE_NO_CHANGE_MARKER);
+            }
+            _ => panic!("Expected ConsecutiveRepetition"),
+        }
+
+        let warning = detector.loop_warning(&loop_type);
+        assert!(warning.contains("plan remains unchanged"));
     }
 }

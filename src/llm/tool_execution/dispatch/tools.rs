@@ -123,7 +123,7 @@ pub async fn plan_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> 
     // Remove redundant session update
 
     let plan_items = params.items;
-    match runtime.fs.plan_write(plan_items.clone(), params.mode) {
+    match runtime.fs.plan_write(plan_items, params.mode) {
         Ok(res) => {
             // Remove redundant recording
 
@@ -131,7 +131,11 @@ pub async fn plan_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> 
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: true,
-                result_summary: format!("Wrote plan with {} items", plan_items.len()),
+                result_summary: if res.changed {
+                    format!("Wrote plan with {} items", res.plan.items.len())
+                } else {
+                    format!("Plan unchanged with {} items", res.plan.items.len())
+                },
             })
         }
         Err(e) => {

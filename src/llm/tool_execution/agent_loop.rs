@@ -3,7 +3,7 @@ use crate::llm::tool_execution::error::{AgentLoopError, handle_agent_error};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
-use crate::tools::plan::PlanList;
+use crate::tools::plan::{PlanList, PlanWriteArgs, PlanWriteResult};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
 use std::hash::{Hash, Hasher};
@@ -14,6 +14,128 @@ use tracing::{debug, error, info, warn};
 use super::ui_rendering::truncate_string_with_graphemes;
 use crate::llm::message_utils::truncate_tool_output;
 use crate::tui::commands::prompt::build_system_prompt;
+
+const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
+const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanWriteBlockReason {
+    RepeatedUnchanged,
+    RepeatedIdenticalArgs,
+}
+
+fn plan_write_block_ui_status(reason: PlanWriteBlockReason) -> &'static str {
+    match reason {
+        PlanWriteBlockReason::RepeatedUnchanged => {
+            "::status:warning:Blocked repeated unchanged plan_write call."
+        }
+        PlanWriteBlockReason::RepeatedIdenticalArgs => {
+            "::status:warning:Blocked repeated identical plan_write call."
+        }
+    }
+}
+
+fn plan_write_block_error(reason: PlanWriteBlockReason) -> &'static str {
+    match reason {
+        PlanWriteBlockReason::RepeatedUnchanged => {
+            "Repeated unchanged plan_write detected and blocked. The plan has not changed in consecutive updates."
+        }
+        PlanWriteBlockReason::RepeatedIdenticalArgs => {
+            "Repeated identical plan_write detected and blocked. Do not call plan_write again unless plan items/status actually change."
+        }
+    }
+}
+
+fn plan_write_block_system_message(reason: PlanWriteBlockReason) -> &'static str {
+    match reason {
+        PlanWriteBlockReason::RepeatedUnchanged => {
+            "`plan_write` has repeatedly returned unchanged results and was blocked. Stop repeating plan-only updates; proceed with code changes, another tool, or a direct response."
+        }
+        PlanWriteBlockReason::RepeatedIdenticalArgs => {
+            "Repeated identical `plan_write` was blocked. Continue by either answering the user directly or using a different tool with new arguments."
+        }
+    }
+}
+
+fn plan_write_block_counter_field(reason: PlanWriteBlockReason) -> &'static str {
+    match reason {
+        PlanWriteBlockReason::RepeatedUnchanged => "no_change_count",
+        PlanWriteBlockReason::RepeatedIdenticalArgs => "repeat_count",
+    }
+}
+
+fn build_plan_write_blocked_value(reason: PlanWriteBlockReason, count: usize) -> serde_json::Value {
+    let mut blocked = serde_json::Map::new();
+    blocked.insert("success".to_string(), serde_json::Value::Bool(false));
+    blocked.insert(
+        "error".to_string(),
+        serde_json::Value::String(plan_write_block_error(reason).to_string()),
+    );
+    blocked.insert(
+        plan_write_block_counter_field(reason).to_string(),
+        serde_json::Value::Number(serde_json::Number::from(count as u64)),
+    );
+    serde_json::Value::Object(blocked)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn block_plan_write_call(
+    tc: &crate::llm::types::ToolCall,
+    fs: &FsTools,
+    ui_tx: &Option<std::sync::mpsc::Sender<String>>,
+    history: &mut crate::llm::tool_execution::history::HistoryManager,
+    task_sentinel: &mut crate::analysis::TaskSentinel,
+    loop_detected: &mut bool,
+    reason: PlanWriteBlockReason,
+    count: usize,
+) {
+    let reason_name = match reason {
+        PlanWriteBlockReason::RepeatedUnchanged => "repeated_unchanged",
+        PlanWriteBlockReason::RepeatedIdenticalArgs => "repeated_identical_args",
+    };
+    warn!(reason = reason_name, count, "Blocking plan_write call");
+
+    if let Err(e) = fs.update_session_with_tool_call_count() {
+        error!("Failed to update tool call count: {}", e);
+    }
+    if let Err(e) = fs.record_tool_call_failure(PLAN_WRITE_TOOL_NAME) {
+        error!("Failed to record tool failure: {}", e);
+    }
+
+    if let Some(tx) = ui_tx {
+        let _ = tx.send(plan_write_block_ui_status(reason).to_string());
+    }
+
+    let blocked = build_plan_write_blocked_value(reason, count);
+    let blocked_content = truncate_tool_output(blocked.to_string(), PLAN_WRITE_TOOL_NAME);
+    history.push(ChatMessage {
+        role: "tool".into(),
+        content: Some(blocked_content),
+        tool_calls: vec![],
+        tool_call_id: tc.id.clone(),
+    });
+    history.push(ChatMessage {
+        role: "system".into(),
+        content: Some(plan_write_block_system_message(reason).to_string()),
+        tool_calls: vec![],
+        tool_call_id: None,
+    });
+
+    *loop_detected = true;
+    task_sentinel.record_tool_call_with_progress(PLAN_WRITE_TOOL_NAME, false, Some(false));
+}
+
+fn plan_write_arguments_hash(arguments: &str) -> u64 {
+    // Normalize plan_write arguments to avoid whitespace/key-order bypass.
+    let normalized = serde_json::from_str::<PlanWriteArgs>(arguments)
+        .ok()
+        .and_then(|v| serde_json::to_string(&v).ok())
+        .unwrap_or_else(|| arguments.to_string());
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
@@ -69,6 +191,7 @@ pub async fn run_agent_loop(
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
     let mut last_plan_write_args_hash: Option<u64> = None;
     let mut repeated_plan_write_count = 0usize;
+    let mut consecutive_plan_write_no_change_count = 0usize;
 
     loop {
         iters += 1;
@@ -248,9 +371,21 @@ pub async fn run_agent_loop(
 
             let tool_name = tc.function.name.as_str();
             if tool_name == "plan_write" {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                tc.function.arguments.hash(&mut hasher);
-                let args_hash = hasher.finish();
+                if consecutive_plan_write_no_change_count >= PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD {
+                    block_plan_write_call(
+                        &tc,
+                        fs,
+                        &ui_tx,
+                        &mut history,
+                        &mut task_sentinel,
+                        &mut loop_detected,
+                        PlanWriteBlockReason::RepeatedUnchanged,
+                        consecutive_plan_write_no_change_count,
+                    );
+                    continue;
+                }
+
+                let args_hash = plan_write_arguments_hash(&tc.function.arguments);
 
                 if last_plan_write_args_hash == Some(args_hash) {
                     repeated_plan_write_count += 1;
@@ -259,53 +394,24 @@ pub async fn run_agent_loop(
                     last_plan_write_args_hash = Some(args_hash);
                 }
 
-                // Hard-stop repeated no-op plan writes to break infinite A->A loops.
+                // Hard-stop repeated identical plan_write arguments to break infinite A->A loops.
                 if repeated_plan_write_count >= 3 {
-                    warn!(
-                        repeat_count = repeated_plan_write_count,
-                        "Blocking repeated identical plan_write call"
+                    block_plan_write_call(
+                        &tc,
+                        fs,
+                        &ui_tx,
+                        &mut history,
+                        &mut task_sentinel,
+                        &mut loop_detected,
+                        PlanWriteBlockReason::RepeatedIdenticalArgs,
+                        repeated_plan_write_count,
                     );
-
-                    if let Err(e) = fs.update_session_with_tool_call_count() {
-                        error!("Failed to update tool call count: {}", e);
-                    }
-                    if let Err(e) = fs.record_tool_call_failure(tool_name) {
-                        error!("Failed to record tool failure: {}", e);
-                    }
-
-                    if let Some(tx) = &ui_tx {
-                        let _ = tx.send(
-                            "::status:warning:Blocked repeated identical plan_write call."
-                                .to_string(),
-                        );
-                    }
-
-                    let blocked = serde_json::json!({
-                        "success": false,
-                        "error": "Repeated identical plan_write detected and blocked. Do not call plan_write again unless plan items/status actually change.",
-                        "repeat_count": repeated_plan_write_count
-                    });
-                    let blocked_content = truncate_tool_output(blocked.to_string(), "plan_write");
-                    history.push(ChatMessage {
-                        role: "tool".into(),
-                        content: Some(blocked_content),
-                        tool_calls: vec![],
-                        tool_call_id: tc.id.clone(),
-                    });
-                    history.push(ChatMessage {
-                        role: "system".into(),
-                        content: Some("Repeated identical `plan_write` was blocked. Continue by either answering the user directly or using a different tool with new arguments.".to_string()),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    });
-
-                    loop_detected = true;
-                    task_sentinel.record_tool_call(tool_name, false);
                     continue;
                 }
             } else {
                 repeated_plan_write_count = 0;
                 last_plan_write_args_hash = None;
+                consecutive_plan_write_no_change_count = 0;
             }
 
             let res = tokio::select! {
@@ -330,6 +436,19 @@ pub async fn run_agent_loop(
                     None,
                 ),
             };
+            let plan_write_changed = if tool_name == "plan_write" {
+                output_value.and_then(|value| value.get("changed").and_then(|v| v.as_bool()))
+            } else {
+                None
+            };
+
+            if tool_name == "plan_write" {
+                if success && plan_write_changed == Some(false) {
+                    consecutive_plan_write_no_change_count += 1;
+                } else {
+                    consecutive_plan_write_no_change_count = 0;
+                }
+            }
 
             // Centralized Session Recording
             if let Err(e) = fs.update_session_with_tool_call_count() {
@@ -528,15 +647,25 @@ File modification detected. You MUST now verify your changes:
             // Check if the tool call is plan_write/plan_read and update the plan list in the UI
             if matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
                 && let Some(tool_result_value) = output_value
-                && let Ok(plan_list) =
-                    serde_json::from_value::<PlanList>((*tool_result_value).clone())
             {
-                debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
-                // Send the plan list to the UI
-                if let Some(tx) = &ui_tx {
-                    // Serialize the plan list to JSON and send it to the UI
-                    if let Ok(plan_list_json) = serde_json::to_string(&plan_list.items) {
-                        let _ = tx.send(format!("::plan_list:{}", plan_list_json));
+                let raw_plan_value = (*tool_result_value).clone();
+                let parsed_plan = if tc.function.name == "plan_write" {
+                    serde_json::from_value::<PlanWriteResult>(raw_plan_value.clone())
+                        .map(|result| result.plan)
+                        .or_else(|_| serde_json::from_value::<PlanList>(raw_plan_value))
+                        .ok()
+                } else {
+                    serde_json::from_value::<PlanList>(raw_plan_value).ok()
+                };
+
+                if let Some(plan_list) = parsed_plan {
+                    debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
+                    // Send the plan list to the UI
+                    if let Some(tx) = &ui_tx {
+                        // Serialize the plan list to JSON and send it to the UI
+                        if let Ok(plan_list_json) = serde_json::to_string(&plan_list.items) {
+                            let _ = tx.send(format!("::plan_list:{}", plan_list_json));
+                        }
                     }
                 }
             }
@@ -550,7 +679,11 @@ File modification detected. You MUST now verify your changes:
             });
 
             // Loop Detection
-            loop_detector.record_tool_call(&tc);
+            if tool_name == "plan_write" && success && plan_write_changed == Some(false) {
+                loop_detector.record_plan_write_no_change();
+            } else {
+                loop_detector.record_tool_call(&tc);
+            }
             if let Some(loop_type) = loop_detector.detect_loop() {
                 let warning_msg = loop_detector.loop_warning(&loop_type);
 
@@ -570,7 +703,15 @@ File modification detected. You MUST now verify your changes:
 
             // Task Sentinel (Stalled Progress Check)
             // Use the authoritative success flag
-            task_sentinel.record_tool_call(&tc.function.name, success);
+            if tool_name == "plan_write" && success && plan_write_changed == Some(false) {
+                task_sentinel.record_tool_call_with_progress(
+                    &tc.function.name,
+                    success,
+                    Some(false),
+                );
+            } else {
+                task_sentinel.record_tool_call(&tc.function.name, success);
+            }
             if let Some(stall_warning) = task_sentinel.check_stalled() {
                 warn!("Stalled progress detected: {}", stall_warning);
                 if let Some(tx) = &ui_tx {
@@ -640,5 +781,56 @@ mod tests {
         let huge_read = "na".repeat(21000); // 42000 chars
         let huge_truncated = truncate_tool_output(huge_read.clone(), "fs_read");
         assert!(huge_truncated.contains("truncated"));
+    }
+
+    #[test]
+    fn test_plan_write_arguments_hash_normalizes_json_shape() {
+        let args1 =
+            r#"{"items":[{"id":"step-1","content":"A","status":"pending"}],"mode":"replace"}"#;
+        let args2 =
+            r#"{ "mode":"replace", "items":[{"status":"pending","content":"A","id":"step-1"}] }"#;
+        assert_eq!(
+            plan_write_arguments_hash(args1),
+            plan_write_arguments_hash(args2)
+        );
+    }
+
+    #[test]
+    fn test_plan_write_arguments_hash_falls_back_for_invalid_json() {
+        let invalid = "{invalid json";
+        let hash1 = plan_write_arguments_hash(invalid);
+        let hash2 = plan_write_arguments_hash(invalid);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_build_plan_write_blocked_value_repeated_unchanged() {
+        let value = build_plan_write_blocked_value(PlanWriteBlockReason::RepeatedUnchanged, 2);
+        assert_eq!(value.get("success").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            value.get("error").and_then(|v| v.as_str()),
+            Some(plan_write_block_error(
+                PlanWriteBlockReason::RepeatedUnchanged
+            ))
+        );
+        assert_eq!(
+            value.get("no_change_count").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert!(value.get("repeat_count").is_none());
+    }
+
+    #[test]
+    fn test_build_plan_write_blocked_value_repeated_identical_args() {
+        let value = build_plan_write_blocked_value(PlanWriteBlockReason::RepeatedIdenticalArgs, 3);
+        assert_eq!(value.get("success").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            value.get("error").and_then(|v| v.as_str()),
+            Some(plan_write_block_error(
+                PlanWriteBlockReason::RepeatedIdenticalArgs
+            ))
+        );
+        assert_eq!(value.get("repeat_count").and_then(|v| v.as_u64()), Some(3));
+        assert!(value.get("no_change_count").is_none());
     }
 }
