@@ -11,6 +11,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
 use tui_textarea::TextArea;
 
+pub const MAX_COMPLETION_DISPLAY_ITEMS: usize = 10;
+
 // PlanItem definition
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct PlanItem {
@@ -572,6 +574,7 @@ impl TuiApp {
 
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
         let lines_before = self.log.len();
+        let mut lines_added = 0;
         let content = s.into();
         for line in content.split('\n') {
             let entry = LogEntry::Plain(line.to_string());
@@ -582,20 +585,26 @@ impl TuiApp {
             };
             self.log.push(entry);
             self.log_heights.push(height);
-        }
-        if self.log.len() > self.max_log_lines {
-            let overflow = self.log.len() - self.max_log_lines;
-            self.log.drain(0..overflow);
-            self.log_heights.drain(0..overflow);
+            lines_added += height;
         }
 
-        let _lines_added = self.log.len().saturating_sub(lines_before);
-        // debug!(
-        //     "push_log: added {} lines, total now {}, content: \"{}\"",
-        //     lines_added,
-        //     self.log.len(),
-        //     content.chars().take(50).collect::<String>()
-        // );
+        // Adjust offset if we are scrolled up to keep the viewport stable
+        if !self.scroll_state.auto_scroll {
+            self.scroll_state.offset = self.scroll_state.offset.saturating_add(lines_added);
+        }
+
+        if self.log.len() > self.max_log_lines {
+            let overflow = self.log.len() - self.max_log_lines;
+            let removed_height: usize = self.log_heights.iter().take(overflow).sum();
+
+            self.log.drain(0..overflow);
+            self.log_heights.drain(0..overflow);
+
+            // Adjust offset downwards so viewport doesn't jump when top logs are dropped
+            if !self.scroll_state.auto_scroll {
+                self.scroll_state.offset = self.scroll_state.offset.saturating_sub(removed_height);
+            }
+        }
 
         // Count new messages when not auto-scrolling
         if !self.scroll_state.auto_scroll {
@@ -626,10 +635,21 @@ impl TuiApp {
         self.log.push(entry);
         self.log_heights.push(height);
 
+        // Adjust offset if we are scrolled up to keep the viewport stable
+        if !self.scroll_state.auto_scroll {
+            self.scroll_state.offset = self.scroll_state.offset.saturating_add(height);
+        }
+
         if self.log.len() > self.max_log_lines {
             let overflow = self.log.len() - self.max_log_lines;
+            let removed_height: usize = self.log_heights.iter().take(overflow).sum();
+
             self.log.drain(0..overflow);
             self.log_heights.drain(0..overflow);
+
+            if !self.scroll_state.auto_scroll {
+                self.scroll_state.offset = self.scroll_state.offset.saturating_sub(removed_height);
+            }
         }
 
         if !self.scroll_state.auto_scroll {

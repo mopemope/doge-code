@@ -34,7 +34,7 @@ mod tests {
         app.scroll_state.auto_scroll = false;
 
         app.push_log("new message");
-        assert_eq!(app.scroll_state.offset, 5); // Should not change
+        assert_eq!(app.scroll_state.offset, 6); // Should increment by 1
         assert!(!app.scroll_state.auto_scroll);
     }
 

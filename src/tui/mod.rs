@@ -30,3 +30,6 @@ mod mouse_test;
 
 #[cfg(test)]
 mod integration_test;
+
+#[cfg(test)]
+mod test_completion;

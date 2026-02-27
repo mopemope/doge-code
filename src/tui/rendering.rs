@@ -49,6 +49,10 @@ impl TuiApp {
         self.render_status_line(f, chunks[0], model, &self.theme);
         self.render_main_content(f, chunks[1], &plan, &self.theme);
         self.render_input_area(f, chunks[2]);
+
+        if self.completion_active && !self.completion_candidates.is_empty() {
+            self.render_completion_popup(f, chunks[2]);
+        }
     }
 
     fn render_status_line(&self, f: &mut Frame, area: Rect, model: Option<&str>, theme: &Theme) {
@@ -383,6 +387,55 @@ impl TuiApp {
 
         let list = List::new(items).highlight_style(theme.completion_selected_style);
         f.render_widget(list, chunks[1]);
+    }
+
+    fn render_completion_popup(&self, f: &mut Frame, input_area: Rect) {
+        let max_display_items = crate::tui::state::MAX_COMPLETION_DISPLAY_ITEMS;
+        let candidates_len = self.completion_candidates.len();
+        let display_count = candidates_len.min(max_display_items);
+
+        let width = self
+            .completion_candidates
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(20)
+            .clamp(20, 60) as u16
+            + 4;
+
+        let height = display_count as u16 + 2;
+        let y = input_area.y.saturating_sub(height);
+        let x = input_area.x;
+        // Ensure the popup doesn't go off-screen vertically if the terminal is too small
+        let actual_y = if y == 0 { 0 } else { y };
+        let area = Rect::new(x, actual_y, width, height);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(self.theme.border_style)
+            .title("Suggestions");
+
+        let start_idx = self.completion_scroll;
+        let end_idx = (start_idx + display_count).min(candidates_len);
+
+        let items: Vec<ListItem> = self.completion_candidates[start_idx..end_idx]
+            .iter()
+            .enumerate()
+            .map(|(i, candidate)| {
+                let actual_idx = start_idx + i;
+                let style = if actual_idx == self.completion_index {
+                    self.theme.completion_selected_style
+                } else {
+                    self.theme.completion_style
+                };
+                ListItem::new(candidate.clone()).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(block);
+
+        f.render_widget(Clear, area);
+        f.render_widget(list, area);
     }
 }
 

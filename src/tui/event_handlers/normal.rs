@@ -35,7 +35,7 @@ pub fn handle_normal_mode_key(
                 app.completion_active
             );
             let mut submit = false;
-            if app.completion_active {
+            if app.completion_active && !app.completion_candidates.is_empty() {
                 let current_input = app.textarea.lines()[0].trim();
                 // If the user has typed a command that is in the completion list, submit it directly.
                 if app.completion_type == CompletionType::Command
@@ -111,8 +111,13 @@ pub fn handle_normal_mode_key(
         KeyEvent {
             code: KeyCode::Esc, ..
         } => {
-            app.dispatch("/cancel");
-            app.dirty = true;
+            if app.completion_active {
+                app.completion_active = false;
+                app.dirty = true;
+            } else {
+                app.dispatch("/cancel");
+                app.dirty = true;
+            }
         }
 
         KeyEvent {
@@ -231,12 +236,18 @@ pub fn handle_normal_mode_key(
             modifiers: KeyModifiers::NONE,
             ..
         } => {
-            if app.completion_active {
+            if app.completion_active && !app.completion_candidates.is_empty() {
                 app.completion_index = app.completion_index.saturating_sub(1);
 
                 // Scroll up if necessary
                 if app.completion_index < app.completion_scroll {
                     app.completion_scroll = app.completion_index;
+                } else if app.completion_index
+                    >= app.completion_scroll + crate::tui::state::MAX_COMPLETION_DISPLAY_ITEMS
+                {
+                    // Prevent index from going completely out of bounds visually if jumping
+                    app.completion_scroll =
+                        app.completion_index - crate::tui::state::MAX_COMPLETION_DISPLAY_ITEMS + 1;
                 }
 
                 app.dirty = true;
@@ -258,12 +269,12 @@ pub fn handle_normal_mode_key(
             modifiers: KeyModifiers::NONE,
             ..
         } => {
-            if app.completion_active {
-                app.completion_index =
-                    (app.completion_index + 1).min(app.completion_candidates.len() - 1);
+            if app.completion_active && !app.completion_candidates.is_empty() {
+                app.completion_index = (app.completion_index + 1)
+                    .min(app.completion_candidates.len().saturating_sub(1));
 
                 // Scroll down if necessary
-                let max_display_items = 20;
+                let max_display_items = crate::tui::state::MAX_COMPLETION_DISPLAY_ITEMS;
                 if app.completion_index >= app.completion_scroll + max_display_items {
                     app.completion_scroll = app.completion_index - max_display_items + 1;
                 }
@@ -286,7 +297,7 @@ pub fn handle_normal_mode_key(
         KeyEvent {
             code: KeyCode::Tab, ..
         } => {
-            if app.completion_active {
+            if app.completion_active && !app.completion_candidates.is_empty() {
                 let completed_item = app.completion_candidates[app.completion_index].clone();
                 let current_input = app.textarea.lines()[0].clone();
 
