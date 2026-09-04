@@ -16,8 +16,8 @@ pub fn tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
+                    "path": {"type": "string", "description": "Absolute path of the file to write (must be inside the project root or allowed paths)."},
+                    "content": {"type": "string", "description": "Full text content to write. Binary content is not allowed."}
                 },
                 "required": ["path", "content"]
             }),
@@ -39,6 +39,9 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
     // Check if the path is within the project root or in allowed paths
     let project_root = &config.project_root;
     let temp_dir = std::env::temp_dir();
+    // Canonicalize temp_dir as well so comparisons work on platforms where
+    // temp_dir contains symlinked components (e.g. /var -> /private/var on macOS).
+    let temp_dir_canonical = temp_dir.canonicalize().unwrap_or(temp_dir.clone());
     let canonical_path = if p.exists() {
         p.canonicalize()
             .context("Failed to canonicalize existing path")?
@@ -59,7 +62,7 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
 
     // Allow paths that are within the project root OR within the temp directory OR in allowed paths
     if !canonical_path.starts_with(project_root)
-        && !canonical_path.starts_with(&temp_dir)
+        && !canonical_path.starts_with(&temp_dir_canonical)
         && !is_allowed_path
     {
         anyhow::bail!(

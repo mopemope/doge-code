@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update statutes."#;
+const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update item statuses."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanItem {

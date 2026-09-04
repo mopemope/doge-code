@@ -19,9 +19,9 @@ pub fn tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "max_depth": {"type": "integer"},
-                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "Absolute path of the directory to list."},
+                    "max_depth": {"type": "integer", "description": "Maximum depth to traverse (default: 1)."},
+                    "pattern": {"type": "string", "description": "Glob pattern to filter entries (e.g. '*.rs')."},
                     "mode": {"type": "string", "enum": ["summary", "full"], "description": "Summary limits entries and budget automatically"},
                     "response_budget_chars": {"type": "integer", "description": "Approximate maximum characters to return"},
                     "cursor": {"type": "integer", "description": "Use this to continue listing from the previous response"},
@@ -247,7 +247,7 @@ mod tests {
         // With max_depth=1, we should only see direct children of the root.
         let response = fs_list(root_str, Some(1), None, &config, FsListOptions::default()).unwrap();
         let mut expected = vec![
-            format!("{}", root_str),
+            root_str.to_string(),
             format!("{}/a", root_str),
             format!("{}/c.txt", root_str),
         ];

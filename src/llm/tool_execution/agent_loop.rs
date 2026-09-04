@@ -474,6 +474,7 @@ pub async fn run_agent_loop(
                         | "search_text"
                         | "search_repomap"
                         | "execute_bash"
+                        | "execute_shell"
                 ) {
                 serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()
             } else {
@@ -608,8 +609,8 @@ File modification detected. You MUST now verify your changes:
                     }
                 }
 
-                // For execute_bash, show the command that was executed right after SUCCESS
-                if tool_name == "execute_bash"
+                // For execute_bash/execute_shell, show the command that was executed right after SUCCESS
+                if (tool_name == "execute_bash" || tool_name == "execute_shell")
                     && success
                     && let Some(args) = ui_args.as_ref()
                     && let Some(command) = args.get("command").and_then(|v| v.as_str())

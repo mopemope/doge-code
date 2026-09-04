@@ -27,6 +27,29 @@ pub async fn execute_bash(
     }
 }
 
+pub async fn execute_shell(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    match runtime.fs.execute_shell(command).await {
+        Ok(output_str) => {
+            let result: crate::tools::shell::ExecuteShellResult =
+                serde_json::from_str(&output_str)?;
+            let value = json!({ "ok": true, "stdout": result.stdout, "stderr": result.stderr, "exit_code": result.exit_code, "success": result.success });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: result.success,
+                result_summary: format!(
+                    "Shell command '{}' finished with exit code {:?}",
+                    command, result.exit_code
+                ),
+            })
+        }
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
 pub async fn edit(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let params: crate::tools::edit::EditParams = serde_json::from_value(args.clone())?;
 

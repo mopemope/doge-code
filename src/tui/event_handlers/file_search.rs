@@ -63,11 +63,10 @@ pub fn handle_file_search_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {
             // Edit query
             if !k.modifiers.contains(KeyModifiers::CONTROL)
                 && !k.modifiers.contains(KeyModifiers::ALT)
+                && let Some(state) = &mut app.file_search_state
             {
-                if let Some(state) = &mut app.file_search_state {
-                    state.query.push(c);
-                    app.update_file_search();
-                }
+                state.query.push(c);
+                app.update_file_search();
                 app.dirty = true;
             }
         }

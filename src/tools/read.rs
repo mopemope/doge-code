@@ -18,9 +18,9 @@ pub fn tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer", "description": "1-based line number to start reading from."},
-                    "limit": {"type": "integer"},
+                    "path": {"type": "string", "description": "Absolute path of the file to read."},
+                    "start_line": {"type": "integer", "description": "1-based line number to start reading from. Legacy: prefer `cursor` for pagination."},
+                    "limit": {"type": "integer", "description": "Maximum number of lines to return."},
                     "cursor": {"type": "integer", "description": "1-based alias for start_line when paginating from previous response"},
                     "page_size": {"type": "integer", "description": "Number of lines to return (overrides limit)"},
                     "response_budget_chars": {"type": "integer", "description": "Approximate maximum characters for the snippet (default 6000)"},

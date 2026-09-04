@@ -10,7 +10,7 @@ pub use search_tools::RepomapSearchTools;
 #[cfg(test)]
 mod tests;
 
-const DESCRIPTION: &str = r#"Advanced structural code search. Use `semantic_query` for natural language questions (e.g. 'how does auth work?'), `name` for specific symbol names, or `keyword_search` for exact string matches. Features: symbol-aware, relationship graph support."#;
+const DESCRIPTION: &str = r#"Advanced structural code search. Use `name` for specific symbol names, `keyword_search` for keyword matches in comments/docs, or `fields` to target specific search fields. Features: symbol-aware, relationship graph support."#;
 
 pub fn tool_def() -> ToolDef {
     ToolDef {
@@ -74,16 +74,12 @@ pub fn tool_def() -> ToolDef {
             "keyword_search": {
                 "type": ["array", "null"],
                 "items": {"type": "string"},
-                "description": "A list of search for symbols containing specific keywords in their associated comments"
-            },
-            "semantic_query": {
-                "type": ["string", "null"],
-                "description": "Natural language query to search for code by meaning (e.g. 'how is authentication handled?')"
+                "description": "List of keywords to match against symbols' associated comments and doc strings"
             },
                     "name": {
                         "type": ["array", "null"],
                         "items": {"type": "string"},
-                        "description": "A list of search for symbols containing symbol name"
+                        "description": "List of symbol name patterns to search for (substring match)"
                     },
                     "fields": {
                         "type": ["array","null"],

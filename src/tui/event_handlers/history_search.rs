@@ -81,11 +81,10 @@ pub fn handle_history_search_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {
             // Edit query
             if !k.modifiers.contains(KeyModifiers::CONTROL)
                 && !k.modifiers.contains(KeyModifiers::ALT)
+                && let Some(state) = &mut app.history_search_state
             {
-                if let Some(state) = &mut app.history_search_state {
-                    state.query.push(c);
-                    app.update_history_search();
-                }
+                state.query.push(c);
+                app.update_history_search();
                 app.dirty = true;
             }
         }

@@ -602,7 +602,7 @@ pub(super) fn filter_and_group_symbols(
                 }
             });
             filtered_symbol_results.truncate(max_symbols);
-            filtered_symbol_results.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+            filtered_symbol_results.sort_by_key(|s| s.start_line);
             symbol_count = filtered_symbol_results.len();
         }
 

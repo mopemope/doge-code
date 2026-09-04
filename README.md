@@ -75,8 +75,8 @@ Create `.doge/config.toml` in your project directory:
 model = "claude-3-5-sonnet-20241022"
 base_url = "https://api.anthropic.com"
 
-[project]
-instructions_file = "PROJECT.md"
+# Top-level key (not under [project])
+project_instructions_file = "PROJECT.md"
 ```
 
 ## 🛠️ Tools and Commands
@@ -96,7 +96,7 @@ instructions_file = "PROJECT.md"
 ### Editing Tools
 - `apply_patch`: Apply unified diff patches (multi-file support)
 - `edit`: Replace specific code blocks
-- `edit_symbol`: Edit entire symbols (functions, structs, etc.)
+- `edit_symbol`: TUI slash command (`/edit-symbol`) to edit entire symbols (functions, structs, etc.)
 
 ### Session Management
 - `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions)
@@ -109,7 +109,7 @@ instructions_file = "PROJECT.md"
 
 ### Advanced Tools
 - `undo`: Revert the last file modification (edit or write)
-- `shell`: Persistent shell session for command execution
+- `execute_shell`: Persistent shell session for stateful command execution
 
 ## 🎯 Usage Examples
 
@@ -245,11 +245,11 @@ Doge-Code builds a comprehensive symbol map of the project:
 - **Conversation History**: Maintain context across interactions
 
 ### Automatic Verification
-After file edits (`fs_write`, `edit`, `apply_patch`), automatic verification can run:
-- **Rust**: Runs `cargo check` (configurable)
-- **Python**: Syntax check (configurable)
-- **Go**: `go build` (configurable)
-- **TypeScript**: `tsc --noEmit` (configurable)
+After file edits (`fs_write`, `edit`, `apply_patch`), the agent is instructed via system notes to verify changes:
+- **Rust**: Run `cargo check` / `cargo test`
+- **Python**: Syntax check (`python -m py_compile`)
+- **Go**: `go build`
+- **TypeScript**: `tsc --noEmit`
 
 Verification failures are returned to LLM for automatic correction.
 
@@ -304,33 +304,26 @@ context_window_size = 200000
 # Token threshold for auto compaction
 auto_compact_prompt_token_threshold = 250000
 
+# Top-level key: project instructions file (AGENTS.md is used if unset)
+project_instructions_file = "PROJECT.md"
+
 [project]
-instructions_file = "PROJECT.md"
 exclude_patterns = ["target/", "node_modules/", "*.log"]
 
 [mcp]
 address = "127.0.0.1:8000"
-
-
-[verification]
-enabled = true
-timeout_ms = 30000
-
-[verification.commands]
-rust = ["cargo", "check"]
-python = ["python", "-m", "py_compile", "{path}"]
-go = ["go", "build", "-o", "/dev/null", "{path}"]
-typescript = ["npx", "tsc", "--noEmit", "-p", "{project_root}"]
-node = ["node", "--check", "{path}"]
 
 [watch]
 enabled = true
 debounce_ms = 500
 patterns = ["*.rs", "*.go", "*.ts", "*.py"]
 
-[mcp_servers]
-# Define remote MCP servers to connect to
-# name = { command = ["path/to/server"], args = ["--arg1"] }
+[[mcp_servers]]
+# Remote MCP servers to connect to (array of tables)
+# name = "my-stdio-server"
+# transport = "stdio"            # "stdio" or "http"
+# address = "path/to/server --arg1"  # stdio: command line; http: URL
+# enabled = true
 ```
 
 ## 🧪 Development

@@ -50,6 +50,7 @@ pub struct McpClient {
 
 impl McpClient {
     /// Create a new MCP client from a server configuration
+    #[allow(clippy::result_large_err)]
     pub async fn from_config(config: &McpServerConfig) -> Result<Self, RmcpError> {
         // Validate transport type
         if config.transport != "stdio" && config.transport != "http" {
@@ -148,6 +149,7 @@ impl McpClient {
     }
 
     /// Get server information
+    #[allow(clippy::result_large_err)]
     pub async fn get_server_info(&self) -> Result<rmcp::model::ServerInfo, RmcpError> {
         self.client
             .peer_info()
@@ -160,6 +162,7 @@ impl McpClient {
     }
 
     /// List available tools
+    #[allow(clippy::result_large_err)]
     pub async fn list_tools(&self) -> Result<ListToolsResult, RmcpError> {
         // Add timeout for list_tools call
         let result = timeout(
@@ -177,6 +180,7 @@ impl McpClient {
     }
 
     /// Call a tool with parameters
+    #[allow(clippy::result_large_err)]
     pub async fn call_tool(
         &self,
         params: CallToolRequestParams,

@@ -1,0 +1,22 @@
+# Project-local configuration for developing doge-code itself.
+# Committed intentionally: this repo dogfoods dgc.
+# Note: project_instructions_file is a TOP-LEVEL key (not under [project]).
+# project_instructions_file = "PROJECT.md"
+
+[llm]
+# model = "claude-3-5-sonnet-20241022"
+# base_url = "https://api.anthropic.com"
+# max_tokens = 4000
+# temperature = 0.1
+# auto_compact_prompt_token_threshold = 250000
+
+[project]
+exclude_patterns = ["target/", "resources/tree-sitter-language-pack/"]
+
+[mcp]
+address = "127.0.0.1:8000"
+
+[watch]
+enabled = true
+debounce_ms = 500
+patterns = ["*.rs"]

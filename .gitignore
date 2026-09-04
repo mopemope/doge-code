@@ -24,7 +24,10 @@ target
 # Added by cargo
 
 /target
-.doge
+# Project-local agent state (sessions, memory, workflows) is ignored,
+# but the committed dogfood config is tracked.
+.doge/*
+!.doge/config.toml
 .serena
 .amazonq
 GEMINI.md

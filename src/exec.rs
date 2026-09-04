@@ -972,7 +972,7 @@ mod tests {
             api_key: None,
             ..Default::default()
         };
-        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
         assert!(executor.client.is_none());
     }
 
@@ -982,7 +982,7 @@ mod tests {
             api_key: Some("test_key".to_string()),
             ..Default::default()
         };
-        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
         assert!(executor.client.is_some());
     }
 

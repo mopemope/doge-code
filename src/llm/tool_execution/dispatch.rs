@@ -44,6 +44,7 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
 
             // Tools and helpers
             "execute_bash" => tools::execute_bash(runtime, &args_val).await,
+            "execute_shell" => tools::execute_shell(runtime, &args_val).await,
             "edit" => tools::edit(runtime, &args_val).await,
             "apply_patch" => tools::apply_patch(runtime, &args_val).await,
             "plan_write" => tools::plan_write(runtime, &args_val).await,
@@ -153,6 +154,68 @@ mod tests {
             "execute_bash(echo hello) should be marked as success"
         );
         assert_eq!(output.value["exit_code"], 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_success_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_3".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_shell".to_string(),
+                arguments: json!({
+                    "command": "echo shell-ok"
+                })
+                .to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(
+            output.is_success,
+            "execute_shell(echo shell-ok) should be marked as success"
+        );
+        assert_eq!(output.value["exit_code"], 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_failure_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_4".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_shell".to_string(),
+                arguments: json!({
+                    "command": "nonexistent_doge_command_xyz"
+                })
+                .to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(
+            !output.is_success,
+            "execute_shell(nonexistent command) should be marked as failure"
+        );
+        assert_ne!(output.value["exit_code"], 0);
         Ok(())
     }
 }
