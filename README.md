@@ -8,7 +8,7 @@ Doge-Code is an interactive AI coding agent that provides advanced code analysis
 - **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction (10+ languages including Rust, JavaScript/TypeScript, Python, Go, Java, C/C++, C#, Markdown)
 - **Interactive Terminal UI**: Full-featured TUI with syntax highlighting, diff review, and real-time LLM interaction
 - **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
-- **Persistent Sessions**: SQLite-based session storage to maintain context across runs
+- **Persistent Sessions**: SQLite-based session storage to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
 - **Multi-Mode Interaction**: Support for both interactive TUI mode and command-line execution
 
 ### Supported Languages
@@ -54,6 +54,14 @@ Monitors file changes and automatically triggers LLM assistant.
 dgc rewrite --prompt "Convert to async/await" --code-file /tmp/code.rs
 ```
 Rewrites specific code snippets with LLM assistant.
+
+#### 6. Session Management Mode
+```bash
+dgc session list
+dgc session show <id>
+dgc session delete <id>
+```
+Non-interactive session management. Sessions are listed most recently updated first, and IDs may be given as prefixes (e.g. `0198abcd`).
 
 ## 🔧 Installation
 
@@ -101,6 +109,8 @@ project_instructions_file = "PROJECT.md"
 ### Session Management
 - `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions)
 - `session`: Automatic session persistence and resume
+- `dgc session list|show|delete`: CLI session management (ID prefixes supported)
+- `--resume` / `--resume=<SESSION_ID>`: Resume the latest or a specific session (TUI and `exec`)
 
 ### Memory Tools
 - `read_memory`: Read content from persistent memory (markdown files)
@@ -121,8 +131,11 @@ project_instructions_file = "PROJECT.md"
 # Start interactive session
 dgc
 
-# Resume last session
+# Resume the most recently updated session
 dgc --resume
+
+# Resume a specific session (ID prefix allowed)
+dgc --resume=0198abcd
 
 # Skip repomap generation for faster startup
 dgc --no-repomap
@@ -133,6 +146,12 @@ dgc --no-repomap
 # Execute single instruction
 dgc exec "Add unit tests to user authentication module"
 
+# Continue the most recently updated session
+dgc exec --resume "Add error handling to the login flow"
+
+# Continue a specific session (ID prefix allowed)
+dgc exec --resume=0198abcd "Add error handling to the login flow"
+
 # JSON output for programmatic use (includes tools_called, token usage, etc.)
 dgc exec --json "Refactor database layer"
 
@@ -141,6 +160,20 @@ dgc rewrite --prompt "Optimize this function for performance" \
     --code-file /tmp/algorithm.rs \
     --json
 ```
+
+### Session Management
+```bash
+# List sessions (most recently updated first)
+dgc session list
+
+# Show details of a session (ID prefix allowed)
+dgc session show 0198abcd
+
+# Delete a session (confirmation prompt; `--yes` skips it)
+dgc session delete 0198abcd
+```
+
+In the TUI, `/session list` shows the same table with the current session marked, and `/session switch <id>` accepts ID prefixes as well.
 
 ### Claude Desktop Integration
 1. Start MCP server: `dgc mcp-server 127.0.0.1:8000`
@@ -190,6 +223,7 @@ The TUI provides various slash commands for quick operations:
 | `/tokens` | Display token usage |
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |
+| `/session <sub>` | Manage sessions: `new`, `list`, `show`, `switch`, `save`, `delete`, `current`, `clear` |
 
 ## 🔍 search_repomap Cheat Sheet
 
@@ -320,6 +354,9 @@ base_url = "https://api.anthropic.com"
 context_window_size = 200000
 # Token threshold for auto compaction
 auto_compact_prompt_token_threshold = 250000
+
+# Resume the most recently updated session at startup (CLI --resume overrides)
+resume = false
 
 # Top-level key: project instructions file (AGENTS.md is used if unset)
 project_instructions_file = "PROJECT.md"

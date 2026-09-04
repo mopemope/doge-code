@@ -5,6 +5,13 @@ pub enum SessionError {
     #[error("Session not found: {0}")]
     NotFound(String),
 
+    #[error(
+        "Session ID prefix is ambiguous: {prefix} (matches: {matches})",
+        prefix = .0,
+        matches = .1.join(", ")
+    )]
+    AmbiguousId(String, Vec<String>),
+
     #[error("Invalid session ID: {0}")]
     InvalidId(String),
 

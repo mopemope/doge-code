@@ -59,9 +59,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub instructions_file: Option<String>,
 
-    /// Resume the latest session
-    #[arg(short, long, default_value_t = false)]
-    pub resume: bool,
+    /// Resume a session: `--resume` or `--resume=latest` for the most recently
+    /// updated session, `--resume=<id>` (prefix allowed) for a specific session
+    #[arg(
+        short,
+        long,
+        value_name = "SESSION_ID",
+        require_equals = true,
+        num_args = 0..=1,
+        default_missing_value = "latest"
+    )
+    ]
+    pub resume: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -85,6 +94,17 @@ pub enum Commands {
         /// Output in JSON format for machine parsing
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Resume a session: `--resume` or `--resume=latest` for the most
+        /// recently updated session, `--resume=<id>` (prefix allowed) for a specific session
+        #[arg(
+            long,
+            value_name = "SESSION_ID",
+            require_equals = true,
+            num_args = 0..=1,
+            default_missing_value = "latest"
+        )
+        ]
+        resume: Option<String>,
     },
 
     /// Run MCP server for tool access
@@ -100,6 +120,13 @@ pub enum Commands {
         /// The name of the workflow to run (without extension)
         workflow: String,
     },
+
+    /// Manage sessions (list, show, delete)
+    #[command()]
+    Session {
+        #[command(subcommand)]
+        command: session::cli::SessionCommands,
+    },
 }
 
 #[tokio::main]
@@ -110,6 +137,11 @@ async fn main() -> Result<()> {
 
     let cfg = AppConfig::from_cli(cli.clone())?;
     // info!(?cfg, "app config");
+
+    // Handle `dgc session` early: no repomap, no MCP server, no LLM setup.
+    if let Some(Commands::Session { command }) = &cli.command {
+        return session::cli::run(cfg, command.clone());
+    }
 
     // Initialize repomap
     let (repomap, status_rx) = if !cfg.no_repomap {
@@ -193,7 +225,17 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
-        Some(Commands::Exec { instruction, json }) => run_exec(cfg, instruction, *json).await,
+        Some(Commands::Exec {
+            instruction,
+            json,
+            resume,
+        }) => {
+            let mut cfg = cfg;
+            if resume.is_some() {
+                cfg.resume = resume.clone();
+            }
+            run_exec(cfg, instruction, *json).await
+        }
         Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
         Some(Commands::McpServer { address }) => {
             let addr = address
@@ -209,6 +251,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
+        // Handled early, before repomap/MCP initialization.
+        Some(Commands::Session { .. }) => unreachable!("session subcommand handled earlier"),
     }
 }
 
@@ -239,14 +283,43 @@ async fn run_tui(
 
     let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
         Ok(exec) => {
-            // If resume flag is set, load the latest session
-            if cfg.resume {
+            // If resume is requested, load the specified (or latest) session.
+            if let Some(resume_id) = cfg.resume.as_deref() {
                 let mut session_manager =
                     utils::safe_std_lock(&exec.session_manager, "session_manager")?;
-                if let Err(e) = session_manager.load_latest_session() {
-                    eprintln!("Failed to load latest session: {}", e);
-                } else if session_manager.current_session.is_some() {
-                    println!("Resumed latest session");
+                // The executor eagerly created an empty session for this run;
+                // drop it once we successfully resume a different session.
+                let fresh_id = session_manager.current_session_id();
+                let result = match resume_id {
+                    "latest" => {
+                        let loaded =
+                            session_manager.load_latest_session_excluding(fresh_id.as_deref())?;
+                        if loaded {
+                            println!(
+                                "Resumed session {}",
+                                session_manager.get_current_session_id()?
+                            );
+                            if let Some(fid) = fresh_id {
+                                let _ = session_manager.delete_session(&fid);
+                            }
+                        } else {
+                            println!("No sessions to resume; starting a new session");
+                        }
+                        Ok(())
+                    }
+                    id => session_manager.resolve_and_load_session(id).map(|session| {
+                        println!("Resumed session {}", session.meta.id);
+                        if Some(session.meta.id.as_str()) != fresh_id.as_deref()
+                            && let Some(fid) = fresh_id
+                        {
+                            let _ = session_manager.delete_session(&fid);
+                        }
+                    }),
+                };
+                if let Err(e) = result {
+                    eprintln!("Failed to resume session '{}': {}", resume_id, e);
+                    eprintln!("Hint: run `dgc session list` to see available sessions.");
+                    std::process::exit(1);
                 }
             }
             //            app.push_log("Repomap initialization completed.");

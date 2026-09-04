@@ -50,7 +50,9 @@ impl Executor {
             session_store,
         )));
 
-        {
+        // With --resume, skip the eager fresh session so that "latest"
+        // resolves to the most recently updated pre-existing session.
+        if cfg.resume.is_none() {
             let mut session_mgr = session_manager
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
@@ -79,37 +81,56 @@ impl Executor {
         let conversation_history =
             Arc::new(tokio::sync::Mutex::new(ChatHistory::new(max_tokens, None)));
 
-        // If resume is requested, load the latest session and populate history
-        if cfg.resume {
+        // If resume is requested, load the specified (or latest) session and
+        // populate history. Prefixes are resolved via resolve_and_load_session.
+        if let Some(resume_id) = cfg.resume.as_deref() {
             let (conversation_to_resume, session_id) = {
                 let mut session_mgr = session_manager
                     .lock()
                     .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
-                if let Ok(()) = session_mgr.load_latest_session()
-                    && let Some(session) = &session_mgr.current_session
-                {
-                    (
-                        Some(session.conversation.clone()),
-                        Some(session.meta.id.clone()),
-                    )
-                } else {
-                    (None, None)
+                match resume_id {
+                    "latest" => {
+                        session_mgr.load_latest_session()?;
+                        match &session_mgr.current_session {
+                            Some(session) => (
+                                Some(session.conversation.clone()),
+                                Some(session.meta.id.clone()),
+                            ),
+                            None => (None, None),
+                        }
+                    }
+                    id => {
+                        let session = session_mgr.resolve_and_load_session(id)?;
+                        (
+                            Some(session.conversation.clone()),
+                            Some(session.meta.id.clone()),
+                        )
+                    }
                 }
             };
 
-            if let Some(conversation) = conversation_to_resume {
-                if let Some(id) = session_id {
+            match (conversation_to_resume, session_id) {
+                (Some(conversation), Some(id)) => {
                     info!("Resuming session: {}", id);
-                }
-                let mut history = conversation_history.lock().await;
-                for entry in conversation {
-                    if let Ok(value) = serde_json::to_value(entry)
-                        && let Ok(msg) =
-                            serde_json::from_value::<crate::llm::types::ChatMessage>(value)
-                    {
-                        history.append_message(msg);
+                    let mut history = conversation_history.lock().await;
+                    for entry in conversation {
+                        if let Ok(value) = serde_json::to_value(entry)
+                            && let Ok(msg) =
+                                serde_json::from_value::<crate::llm::types::ChatMessage>(value)
+                        {
+                            history.append_message(msg);
+                        }
                     }
                 }
+                (None, None) => {
+                    // "latest" with no pre-existing sessions: start fresh.
+                    info!("No sessions to resume; starting a new session");
+                    let mut session_mgr = session_manager
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
+                    session_mgr.create_session(None)?;
+                }
+                _ => unreachable!("conversation and session id are always set together"),
             }
         }
 
@@ -787,7 +808,7 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
             no_repomap: true, // Disable repomap for simplicity
-            resume: false,    // Add resume field
+            resume: None,     // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             auto_compact_prompt_token_threshold_overrides: HashMap::new(),
@@ -825,7 +846,7 @@ mod tests {
             theme: "default".to_string(),
             project_instructions_file: Some("PROJECT.md".to_string()), // Add project_instructions_file
             no_repomap: true, // Disable repomap for simplicity
-            resume: false,    // Add resume field
+            resume: None,     // Add resume field
             auto_compact_prompt_token_threshold:
                 crate::config::DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             auto_compact_prompt_token_threshold_overrides: HashMap::new(),
@@ -984,6 +1005,113 @@ mod tests {
         };
         let executor = Executor::new(cfg).await.expect("Failed to create executor");
         assert!(executor.client.is_some());
+    }
+
+    /// Seed a session with conversation history in a temp project root and
+    /// return its ID.
+    fn seed_session(project_root: &Path, content: &str) -> String {
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to create session store");
+        let mut session = store.create().expect("Failed to create session");
+        let mut entry = HashMap::new();
+        entry.insert(
+            "role".to_string(),
+            serde_json::Value::String("user".to_string()),
+        );
+        entry.insert(
+            "content".to_string(),
+            serde_json::Value::String(content.to_string()),
+        );
+        session.add_conversation_entry(entry);
+        store.save(&session).expect("Failed to save session");
+        session.meta.id
+    }
+
+    #[tokio::test]
+    async fn test_executor_resume_latest_restores_history() {
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let seeded_id = seed_session(&project_root, "seeded instruction");
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            resume: Some("latest".to_string()),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
+
+        // The seeded conversation must be restored, and no extra fresh
+        // session may shadow the latest one.
+        let history = executor.conversation_history.lock().await;
+        let messages = history.build_messages();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.as_deref() == Some("seeded instruction")),
+            "resumed history should contain the seeded user message"
+        );
+        drop(history);
+
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to open store");
+        let summaries = store.list_with_stats().expect("Failed to list sessions");
+        assert_eq!(summaries.len(), 1, "no extra session should be created");
+        assert_eq!(summaries[0].meta.id, seeded_id);
+    }
+
+    #[tokio::test]
+    async fn test_executor_resume_by_id_prefix() {
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let seeded_id = seed_session(&project_root, "prefix resumed");
+
+        let prefix: String = seeded_id.chars().take(8).collect();
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            resume: Some(prefix),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
+
+        let history = executor.conversation_history.lock().await;
+        assert!(
+            history
+                .build_messages()
+                .iter()
+                .any(|m| m.role == "user" && m.content.as_deref() == Some("prefix resumed")),
+            "prefix resume should restore the seeded conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_resume_unknown_id_fails() {
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let cfg = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            resume: Some("deadbeef-dead-beef-dead-beefdeadbeef".to_string()),
+            ..Default::default()
+        };
+        let result = Executor::new(cfg).await;
+        assert!(result.is_err(), "resuming an unknown session ID must fail");
+    }
+
+    #[tokio::test]
+    async fn test_executor_resume_latest_with_empty_store_creates_session() {
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let cfg = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            resume: Some("latest".to_string()),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
+        assert!(executor.client.is_none());
+
+        // A fresh session must exist so the run has somewhere to record
+        // conversation history.
+        let store = crate::session::SessionStore::new(temp_dir.path().join(".doge/sessions"))
+            .expect("Failed to open store");
+        let summaries = store.list_with_stats().expect("Failed to list sessions");
+        assert_eq!(summaries.len(), 1, "a fresh session should be created");
     }
 
     // Additional tests could be added here, such as:

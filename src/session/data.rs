@@ -83,6 +83,29 @@ pub struct SessionMeta {
     pub title_is_default: bool,
 }
 
+/// Summary of a session for listings.
+///
+/// Includes the metadata plus a few usage statistics so callers (CLI
+/// `session list`, TUI `/session list`) can display useful context. Note the
+/// store still deserializes the full `session.json` to build it; only the
+/// conversation payload is dropped.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub meta: SessionMeta,
+    /// Last updated timestamp (RFC3339 string, mirrors `SessionData.timestamp`)
+    pub updated_at: String,
+    /// Number of conversation entries
+    pub messages: usize,
+    /// Number of tokens consumed
+    pub token_count: u64,
+    /// Number of requests sent to LLM
+    pub requests: u64,
+    /// Number of tool calls made
+    pub tool_calls: u64,
+    /// Number of files changed during the session
+    pub changed_files: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
     pub meta: SessionMeta,
@@ -210,6 +233,19 @@ impl SessionData {
     /// Check if there are any changed files in the session.
     pub fn has_changed_files(&self) -> bool {
         !self.changed_files.is_empty()
+    }
+
+    /// Build a lightweight summary of this session.
+    pub fn summary(&self) -> SessionSummary {
+        SessionSummary {
+            meta: self.meta.clone(),
+            updated_at: self.timestamp.clone(),
+            messages: self.conversation.len(),
+            token_count: self.token_count,
+            requests: self.requests,
+            tool_calls: self.tool_calls,
+            changed_files: self.changed_files.len(),
+        }
     }
 
     /// Clear the changed files list.

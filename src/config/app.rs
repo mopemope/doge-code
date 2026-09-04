@@ -34,7 +34,9 @@ pub struct AppConfig {
     pub theme: String,
     pub project_instructions_file: Option<String>,
     pub no_repomap: bool,
-    pub resume: bool,
+    /// Session resume target: `None` = start fresh, `Some("latest")` = resume
+    /// the most recently updated session, `Some(id)` = resume a specific session.
+    pub resume: Option<String>,
     pub auto_compact_prompt_token_threshold: u32,
     pub auto_compact_prompt_token_threshold_overrides: HashMap<String, u32>,
     pub show_diff: bool,
@@ -59,7 +61,7 @@ impl Default for AppConfig {
             theme: "dark".to_string(),
             project_instructions_file: None,
             no_repomap: false,
-            resume: false,
+            resume: None,
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             auto_compact_prompt_token_threshold_overrides: HashMap::new(),
             show_diff: true,
@@ -229,7 +231,15 @@ impl AppConfig {
             no_repomap: cli.no_repomap
                 || project_cfg.no_repomap.unwrap_or(false)
                 || file_cfg.no_repomap.unwrap_or(false),
-            resume: cli.resume,
+            // CLI flag wins; otherwise honor `resume = true` in the config
+            // files (previously this file-based setting was ignored).
+            resume: cli.resume.or_else(|| {
+                project_cfg
+                    .resume
+                    .or(file_cfg.resume)
+                    .filter(|resume| *resume)
+                    .map(|_| "latest".to_string())
+            }),
             auto_compact_prompt_token_threshold,
             auto_compact_prompt_token_threshold_overrides,
             show_diff: project_cfg.show_diff.or(file_cfg.show_diff).unwrap_or(true),

@@ -1,4 +1,4 @@
-use crate::session::data::{SessionData, SessionMeta};
+use crate::session::data::{SessionData, SessionMeta, SessionSummary};
 use crate::session::error::SessionError;
 use std::env;
 use std::fs;
@@ -35,8 +35,17 @@ impl SessionStore {
         Ok(Self { root })
     }
 
-    /// Get metadata for all sessions and return them sorted by creation date in descending order.
+    /// Get metadata for all sessions, sorted by last update in descending
+    /// order (most recently active first). Convenience wrapper over
+    /// [`SessionStore::list_with_stats`].
     pub fn list(&self) -> Result<Vec<SessionMeta>, SessionError> {
+        self.list_with_stats()
+            .map(|summaries| summaries.into_iter().map(|s| s.meta).collect())
+    }
+
+    /// Get lightweight summaries for all sessions, sorted by last update in
+    /// descending order (most recently active first).
+    pub fn list_with_stats(&self) -> Result<Vec<SessionSummary>, SessionError> {
         let mut out = Vec::new();
         if !self.root.exists() {
             return Ok(out);
@@ -55,21 +64,21 @@ impl SessionStore {
                 && let Ok(session_data) =
                     serde_json::from_str::<SessionData>(&s).map_err(SessionError::ParseError)
             {
-                out.push(session_data.meta);
+                out.push(session_data.summary());
             }
         }
-        // Sort by created_at in descending order (newest first)
-        // created_at is stored as an RFC3339 string; try to parse it for
+        // Sort by updated_at in descending order (most recently active first).
+        // updated_at is stored as an RFC3339 string; try to parse it for
         // accurate ordering. If parsing fails for either entry, fall back to
         // string comparison.
         out.sort_by(|a, b| {
-            let a_dt = chrono::DateTime::parse_from_rfc3339(&a.created_at).ok();
-            let b_dt = chrono::DateTime::parse_from_rfc3339(&b.created_at).ok();
+            let a_dt = chrono::DateTime::parse_from_rfc3339(&a.updated_at).ok();
+            let b_dt = chrono::DateTime::parse_from_rfc3339(&b.updated_at).ok();
             match (a_dt, b_dt) {
                 (Some(a_dt), Some(b_dt)) => b_dt.cmp(&a_dt),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => b.created_at.cmp(&a.created_at),
+                (None, None) => b.updated_at.cmp(&a.updated_at),
             }
         });
         Ok(out)
@@ -148,13 +157,42 @@ impl SessionStore {
     }
 
     /// Get the latest session data.
+    ///
+    /// "Latest" means the most recently updated session (not merely the most
+    /// recently created one), which matches the expectation when resuming work.
     pub fn get_latest(&self) -> Result<Option<SessionData>, SessionError> {
-        let sessions = self.list()?;
+        let sessions = self.list_with_stats()?;
         if let Some(latest_meta) = sessions.first() {
-            let session = self.load(&latest_meta.id)?;
+            let session = self.load(&latest_meta.meta.id)?;
             Ok(Some(session))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Resolve a session ID from a (possibly partial) prefix.
+    ///
+    /// Returns the full ID when exactly one session matches. Full IDs always
+    /// match themselves first, so passing a complete UUID is never ambiguous.
+    pub fn resolve_id_prefix(&self, prefix: &str) -> Result<String, SessionError> {
+        if prefix.is_empty() {
+            return Err(SessionError::InvalidId(prefix.to_string()));
+        }
+        let sessions = self.list_with_stats()?;
+        if let Some(exact) = sessions.iter().find(|s| s.meta.id == prefix) {
+            return Ok(exact.meta.id.clone());
+        }
+        let matches: Vec<&SessionSummary> = sessions
+            .iter()
+            .filter(|s| s.meta.id.starts_with(prefix))
+            .collect();
+        match matches.len() {
+            0 => Err(SessionError::NotFound(prefix.to_string())),
+            1 => Ok(matches[0].meta.id.clone()),
+            _ => Err(SessionError::AmbiguousId(
+                prefix.to_string(),
+                matches.iter().map(|s| s.meta.id.clone()).collect(),
+            )),
         }
     }
 }
@@ -174,7 +212,19 @@ fn default_store_dir() -> Result<PathBuf, SessionError> {
 
 /// Clean up old sessions if we exceed the maximum limit
 fn cleanup_old_sessions(store: &SessionStore) -> Result<(), SessionError> {
-    let sessions = store.list()?;
+    let mut sessions = store.list()?;
+    // Cleanup is based on creation date (oldest sessions are removed first),
+    // independent of the update-ordered listing.
+    sessions.sort_by(|a, b| {
+        let a_dt = chrono::DateTime::parse_from_rfc3339(&a.created_at).ok();
+        let b_dt = chrono::DateTime::parse_from_rfc3339(&b.created_at).ok();
+        match (a_dt, b_dt) {
+            (Some(a_dt), Some(b_dt)) => b_dt.cmp(&a_dt),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.created_at.cmp(&a.created_at),
+        }
+    });
     if sessions.len() > MAX_SESSIONS {
         // Calculate how many sessions to delete
         let excess_count = sessions.len() - MAX_SESSIONS;
@@ -197,6 +247,7 @@ fn cleanup_old_sessions(store: &SessionStore) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -406,6 +457,122 @@ mod tests {
             session2.meta.id,
             "Should return the most recently created session"
         );
+    }
+
+    #[test]
+    fn test_list_with_stats_sorted_by_updated_at() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        let session1 = store.create().expect("Failed to create session 1");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _session2 = store.create().expect("Failed to create session 2");
+
+        // Initially session2 is the most recently active (created last).
+        let summaries = store
+            .list_with_stats()
+            .expect("Failed to list sessions with stats");
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].meta.id, _session2.meta.id);
+        assert_eq!(summaries[0].messages, 0);
+        assert_eq!(summaries[0].token_count, 0);
+
+        // Update session1 so it becomes the most recently active.
+        let mut updated = session1.clone();
+        updated.add_conversation_entry(HashMap::new());
+        updated.increment_token_count(42);
+        store.save(&updated).expect("Failed to save session 1");
+
+        let summaries = store
+            .list_with_stats()
+            .expect("Failed to list sessions with stats");
+        assert_eq!(summaries[0].meta.id, session1.meta.id);
+        assert_eq!(summaries[0].messages, 1);
+        assert_eq!(summaries[0].token_count, 42);
+    }
+
+    #[test]
+    fn test_get_latest_prefers_most_recently_updated() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        let session1 = store.create().expect("Failed to create session 1");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _session2 = store.create().expect("Failed to create session 2");
+
+        // Touch session1 so its update timestamp is the newest.
+        let mut updated = session1.clone();
+        updated.add_conversation_entry(HashMap::new());
+        store.save(&updated).expect("Failed to save session 1");
+
+        let latest = store.get_latest().expect("Failed to get latest session");
+        assert_eq!(
+            latest.expect("Should have a latest session").meta.id,
+            session1.meta.id,
+            "Latest should be the most recently updated session"
+        );
+    }
+
+    #[test]
+    fn test_resolve_id_prefix() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        let session = store.create().expect("Failed to create session");
+
+        // Full ID resolves to itself.
+        let resolved = store
+            .resolve_id_prefix(&session.meta.id)
+            .expect("Failed to resolve full ID");
+        assert_eq!(resolved, session.meta.id);
+
+        // A unique prefix resolves to the full ID.
+        let prefix: String = session.meta.id.chars().take(8).collect();
+        let resolved = store
+            .resolve_id_prefix(&prefix)
+            .expect("Failed to resolve ID prefix");
+        assert_eq!(resolved, session.meta.id);
+
+        // Unknown prefix is not found.
+        let err = store.resolve_id_prefix("deadbeef-dead-beef-dead-beefdeadbeef");
+        assert!(err.is_err(), "Unknown ID should fail to resolve");
+
+        // Empty prefix is invalid.
+        assert!(store.resolve_id_prefix("").is_err());
+    }
+
+    #[test]
+    fn test_resolve_id_prefix_ambiguous() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+
+        // Two sessions with a shared 1-char prefix ("0" for UUIDv7) should be
+        // ambiguous for that prefix. UUIDv7 starts with a time-based byte, so
+        // both IDs very likely share the first hex char; force it by testing
+        // with the longest common prefix of the two IDs.
+        let s1 = store.create().expect("Failed to create session 1");
+        let s2 = store.create().expect("Failed to create session 2");
+
+        let mut common = String::new();
+        for (a, b) in s1.meta.id.chars().zip(s2.meta.id.chars()) {
+            if a == b {
+                common.push(a);
+            } else {
+                break;
+            }
+        }
+        if common.is_empty() {
+            // Extremely unlikely: IDs share no prefix. Skip this test.
+            return;
+        }
+        let err = store.resolve_id_prefix(&common);
+        match err {
+            Err(SessionError::AmbiguousId(prefix, matches)) => {
+                assert_eq!(prefix, common);
+                assert_eq!(matches.len(), 2);
+            }
+            other => panic!("Expected AmbiguousId, got: {:?}", other.map(|_| ())),
+        }
     }
 
     #[test]

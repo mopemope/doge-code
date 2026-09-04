@@ -29,7 +29,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("");
 
     ui.push_log("Session Management:");
-    ui.push_log("  /session <new|list|switch|save|delete|current|clear> - Manage sessions");
+    ui.push_log("  /session <new|list|show|switch|save|delete|current|clear> - Manage sessions");
     ui.push_log("  /stack [add <task>|next|list] - Manage ephemeral task stack");
 
     ui.push_log("");

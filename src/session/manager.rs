@@ -26,11 +26,6 @@ impl SessionManager {
         }
     }
 
-    /// List all sessions
-    pub fn list_sessions(&self) -> Result<Vec<crate::session::SessionMeta>> {
-        self.store.list().map_err(|e| anyhow::anyhow!(e))
-    }
-
     /// Create a new session with an optional initial prompt.
     /// If `initial_prompt` is provided the session title will be set and persisted.
     pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
@@ -61,12 +56,47 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Resolve a (possibly partial) session ID and load it.
+    ///
+    /// Returns the loaded session data so callers can inspect or display it.
+    pub fn resolve_and_load_session(&mut self, id: &str) -> Result<SessionData> {
+        let full_id = self.store.resolve_id_prefix(id)?;
+        let session = self.store.load(&full_id)?;
+        self.current_session = Some(session.clone());
+        Ok(session)
+    }
+
+    /// Get the current session ID, if any.
+    pub fn current_session_id(&self) -> Option<String> {
+        self.current_session.as_ref().map(|s| s.meta.id.clone())
+    }
+
     /// Load the latest session
     pub fn load_latest_session(&mut self) -> Result<()> {
         if let Some(session) = self.store.get_latest()? {
             self.current_session = Some(session);
         }
         Ok(())
+    }
+
+    /// Load the most recently updated session, optionally skipping one session
+    /// ID (used to skip an eagerly-created empty session when resuming).
+    ///
+    /// Returns whether a session was loaded.
+    pub fn load_latest_session_excluding(&mut self, exclude_id: Option<&str>) -> Result<bool> {
+        let summaries = self.store.list_with_stats()?;
+        let target = summaries
+            .iter()
+            .map(|s| &s.meta.id)
+            .find(|id| Some(id.as_str()) != exclude_id)
+            .cloned();
+        match target {
+            Some(id) => {
+                self.load_session(&id)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Delete a session by ID
@@ -407,6 +437,61 @@ mod tests {
             dir.path(),
             "Session store root should match the provided path"
         );
+    }
+
+    #[test]
+    fn test_load_latest_session_excluding() {
+        let dir = tempdir().expect("Failed to create temp directory");
+        let store = SessionStore::new(dir.path()).expect("Failed to create session store");
+        let mut session_manager = SessionManager {
+            store,
+            current_session: None,
+        };
+
+        // Simulate the eagerly-created fresh session.
+        session_manager
+            .create_session(None)
+            .expect("Failed to create fresh session");
+        let fresh_id = session_manager
+            .current_session_id()
+            .expect("Fresh session should exist");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Create a pre-existing session with history.
+        session_manager
+            .create_session(Some("older real session".to_string()))
+            .expect("Failed to create previous session");
+        let previous_id = session_manager
+            .current_session_id()
+            .expect("Previous session should exist");
+        // Fresh session is still the most recently created; touch the
+        // previous one so it is a realistic resume target.
+        let previous = session_manager
+            .store
+            .load(&previous_id)
+            .expect("Failed to load previous session");
+
+        // Resuming latest excluding the fresh session must pick the previous one.
+        session_manager.current_session = Some(previous);
+        let loaded = session_manager
+            .load_latest_session_excluding(Some(&fresh_id))
+            .expect("Failed to resume");
+        assert!(loaded, "a session should be loaded");
+        assert_eq!(
+            session_manager.current_session_id().as_deref(),
+            Some(previous_id.as_str())
+        );
+
+        // Excluding everything yields no load.
+        let loaded = session_manager
+            .load_latest_session_excluding(None)
+            .expect("Failed to resume");
+        assert!(loaded, "no exclusion should load the latest session");
+        let loaded = session_manager
+            .load_latest_session_excluding(Some("zzzz-no-match"))
+            .expect("Failed to resume");
+        assert!(loaded, "non-matching exclusion should not prevent loading");
+        let _ = previous_id;
     }
 
     #[test]
