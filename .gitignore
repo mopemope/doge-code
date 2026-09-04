@@ -35,3 +35,14 @@ QWEN.md
 temp
 backlog
 .fastembed_cache
+
+# Agent skills are shared repo files; un-ignore them even when a global
+# gitignore excludes .claude/ or CLAUDE.md. Local settings stay ignored.
+!CLAUDE.md
+!.claude
+.claude/*
+!.claude/skills/
+
+# Same for opencode: track skills only; local config/state stays untracked.
+.opencode/*
+!.opencode/skill/

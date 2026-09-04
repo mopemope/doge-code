@@ -21,14 +21,22 @@ Run the narrowest check first, then broaden:
 | `src/llm/tool_def.rs` | Registry of tools exposed to the LLM (`default_tools_def`) |
 | `src/llm/tool_execution/agent_loop.rs` | Main agent loop: iteration, loop detection, compaction triggers |
 | `src/llm/tool_execution/dispatch.rs` | Tool call dispatch (one arm per tool) |
+| `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
+| `src/llm/tool_execution/history.rs` | Conversation compaction (proactive + reactive) |
+| `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
+| `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
 | `src/tools/` | Tool implementations (each file exposes a `tool_def()`) |
-| `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO |
+| `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
 | `src/mcp/` | MCP server (rmcp) + client for remote MCP tools |
 | `src/config/` | AppConfig, `.doge/config.toml` loading |
 | `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
+| `src/watch.rs` | File watch mode (`dgc watch`) |
+| `src/error_recovery/` | Autonomous error recovery hints |
+| `src/hooks/` | Post-instruction hook system (repomap updates) |
 | `resources/system_prompt.md` | System prompt template (Tera, rust-embed) |
+| `elisp/` | Emacs integration (outside CI; see `elisp/emacs-integration.md`) |
 
 ## Common Change Patterns
 
@@ -41,7 +49,7 @@ Run the narrowest check first, then broaden:
 5. Add tests next to the implementation and, if dispatch-relevant, in `dispatch.rs::tests`.
 6. Document the tool in `README.md`.
 
-Skipping step 3 leaves a tool that the LLM can call but that fails with "unknown tool" — check every registration site.
+Skipping step 3 leaves a tool that the LLM can call but that fails with "unknown tool" — check every registration site. The full checklist lives in `docs/tool-output-contract.md`.
 
 ### Changing the system prompt
 
@@ -50,6 +58,12 @@ Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}
 ### RepoMap / analysis changes
 
 Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
+
+### Adding a TUI slash command
+
+1. Implement the handler in `src/tui/commands/handlers/slash_commands/<name>.rs` (see existing files; `help.rs` owns the help listing).
+2. Register the command in the slash-command dispatch there (`mod.rs` wires handlers).
+3. Document it in the README slash-command table.
 
 ## Coding Style
 
@@ -61,11 +75,12 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 
 ## Tool Output Conventions (token efficiency)
 
-These are hard requirements — the LLM consumes tool output directly:
+These are hard requirements — the LLM consumes tool output directly. Full spec: `docs/tool-output-contract.md`.
 
 - Returning-tool responses are structured JSON with `warnings` and `next_cursor` for pagination; never return unbounded text.
 - Large outputs (file reads, listings, repomap results) must support summary mode + `response_budget_chars` budgeting. Follow the pattern in `src/tools/read.rs`.
-- Non-fs tools (bash/shell) are truncated to 8,000 chars, fs/plan tools to 40,000 chars (`src/llm/message_utils.rs`).
+- Global caps (`src/llm/message_utils.rs`): 8,000 chars default, 40,000 chars only for `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read`. Everything else — including `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, bash/shell — is 8,000.
+- The cap slices the serialized JSON by characters, so over-cap outputs reach the LLM as malformed JSON. Tools must keep their own output under the cap (budget/summary/pagination); never rely on the global truncator.
 
 ## Testing Guidelines
 
@@ -77,9 +92,12 @@ These are hard requirements — the LLM consumes tool output directly:
 ## Known Pitfalls
 
 - Two workflow formats coexist: `.doge/workflows/*.yml` (shell commands, run by the `run_workflow` tool in `src/tools/workflow.rs`) and `.doge/workflows/*.md` (LLM-executed steps, run by the CLI `run` subcommand via `src/features/workflow.rs`). Keep both in mind; do not "fix" one to match the other without checking callers.
-- `fs_read` accepts both `start_line` (legacy) and `cursor` (preferred, 1-based). New code should use `cursor`.
+- `fs_read` accepts both `start_line` (legacy) and `cursor` (preferred, 1-based). New code should use `cursor`. Note `search_repomap`'s cursor is 0-based — the two conventions currently differ.
 - `.doge/`, `target/`, and agent-generated files (`GEMINI.md`, `QWEN.md`, etc.) are excluded from RepoMap via `.dogeignore`.
 - Workflow files and session state under `.doge/` are project-local; never commit them.
+- `search_history` has a dispatch arm but is not registered in `default_tools_def` — a live example of the registration-gap pitfall. Check every site listed in `docs/tool-output-contract.md` when adding tools.
+- Tests must never write to the repo root (e.g. a `temp/` directory). Leftover test artifacts used to accumulate there. Always use `tempdir()` per the Testing Guidelines.
+- The README tool list must stay in sync with `default_tools_def` (`src/llm/tool_def.rs`); new tools require a README entry (checklist step 6).
 
 ## Commit & Pull Request Guidelines
 

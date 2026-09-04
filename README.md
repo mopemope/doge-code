@@ -94,7 +94,7 @@ project_instructions_file = "PROJECT.md"
 - `fs_read_many_files`: Batch file reading with budget management
 
 ### Editing Tools
-- `apply_patch`: Apply unified diff patches (multi-file support)
+- `apply_patch`: Apply a unified diff patch to a file (single `file_path`; read the file first)
 - `edit`: Replace specific code blocks
 - `edit_symbol`: TUI slash command (`/edit-symbol`) to edit entire symbols (functions, structs, etc.)
 
@@ -106,10 +106,13 @@ project_instructions_file = "PROJECT.md"
 - `read_memory`: Read content from persistent memory (markdown files)
 - `write_memory`: Write content to persistent memory
 - `list_memories`: List all available memory keys
+- `search_memory`: Search across memory files
 
 ### Advanced Tools
 - `undo`: Revert the last file modification (edit or write)
 - `execute_shell`: Persistent shell session for stateful command execution
+- `doc_generate`: Generate documentation for a symbol or file via LLM
+- `run_workflow`: Run a predefined workflow from `.doge/workflows/`
 
 ## 🎯 Usage Examples
 
@@ -382,6 +385,7 @@ template = "Execute the following task: {args}"
 
 - **System Prompt**: `resources/system_prompt.md` - AI behavior guidelines
 - **Agent Guidelines**: `AGENTS.md` - Integration procedures
+- **Tool Output Contract**: `docs/tool-output-contract.md` - Tool response/truncation spec
 - **Emacs Integration**: `elisp/emacs-integration.md`
 - **API Documentation**: Generate with `cargo doc`
 
