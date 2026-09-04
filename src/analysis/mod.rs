@@ -20,7 +20,7 @@ pub mod ts_js_collector;
 
 pub use analyzer::Analyzer;
 pub use c_collector::CExtractor;
-pub use cache::{RepomapCache, RepomapStore};
+pub use cache::{RepomapCache, RepomapStore, ensure_repomap_ready};
 pub use collector::LanguageSpecificExtractor;
 pub use cpp_collector::CppExtractor;
 pub use csharp_collector::CSharpExtractor;

@@ -367,12 +367,26 @@ impl FsTools {
         // Use a more robust approach to handle potential RwLock poisoning
         let repomap_guard = self.repomap.read().await;
         if let Some(map) = &*repomap_guard {
-            self.search_repomap_tools
+            return self
+                .search_repomap_tools
                 .search_repomap(map, args, &self.config.project_root)
-                .await
-        } else {
-            Err(anyhow::anyhow!("repomap is still generating"))
+                .await;
         }
+        drop(repomap_guard);
+
+        // The shared map is not populated yet (initial build still running).
+        // Fall back to an on-demand build (cache-backed) instead of failing.
+        tracing::info!("shared repomap unavailable; building on demand");
+        let map = crate::analysis::ensure_repomap_ready(&self.repomap, &self.config.project_root)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "repomap is not ready yet (initial build still running and on-demand build failed: {e}); retry in a few seconds or use `search_text`/`fs_list` meanwhile"
+                )
+            })?;
+        self.search_repomap_tools
+            .search_repomap(&map, args, &self.config.project_root)
+            .await
     }
 
     pub fn plan_write(

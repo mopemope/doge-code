@@ -372,6 +372,10 @@ impl Analyzer {
             updated_repomap
                 .symbols
                 .retain(|symbol| !diff.removed.contains(&symbol.file));
+            // Relations sourced from removed files are stale as well.
+            updated_repomap
+                .relations
+                .retain(|relation| !diff.removed.contains(&relation.source_file_path));
         }
 
         // Remove symbols from changed files (to be replaced with new symbols)
@@ -379,6 +383,11 @@ impl Analyzer {
         updated_repomap
             .symbols
             .retain(|symbol| !changed_files_set.contains(&symbol.file));
+        // Relations sourced from changed files must also be pruned, otherwise
+        // stale call/type references accumulate until the next full rebuild.
+        updated_repomap
+            .relations
+            .retain(|relation| !changed_files_set.contains(&relation.source_file_path));
 
         // Add new symbols
         for new_map in new_maps {

@@ -7,7 +7,66 @@ use super::{
     AppliedBudgetSummary, MatchSpan, RelatedSymbolResult, RepomapSearchResult, ResultDensity,
     SearchRepomapArgs, SearchRepomapResponse, SymbolSearchResult,
 };
-use crate::analysis::{RepoMap, SymbolInfo};
+use crate::analysis::{RepoMap, SymbolInfo, SymbolRelation};
+
+/// Prebuilt lookup indexes over a `RepoMap`'s relations.
+///
+/// Replaces the previous per-symbol linear scan over every relation
+/// (O(symbols x relations)) with two hash lookups:
+/// - outgoing: `(source name, source file, source parent)` -> relations
+/// - incoming: `target name` -> relations (name-only, matching the data model)
+struct RelationTargetIndex<'a> {
+    outgoing: HashMap<(&'a str, &'a Path, Option<&'a str>), Vec<&'a SymbolRelation>>,
+    incoming: HashMap<&'a str, Vec<&'a SymbolRelation>>,
+}
+
+impl<'a> RelationTargetIndex<'a> {
+    fn for_map(map: &'a RepoMap) -> Self {
+        if map.relations.is_empty() {
+            return Self {
+                outgoing: HashMap::new(),
+                incoming: HashMap::new(),
+            };
+        }
+        let mut outgoing: HashMap<(&'a str, &'a Path, Option<&'a str>), Vec<&'a SymbolRelation>> =
+            HashMap::with_capacity(map.relations.len());
+        let mut incoming: HashMap<&'a str, Vec<&'a SymbolRelation>> =
+            HashMap::with_capacity(map.relations.len());
+        for rel in &map.relations {
+            outgoing
+                .entry((
+                    rel.source_symbol_name.as_str(),
+                    rel.source_file_path.as_path(),
+                    rel.source_symbol_parent.as_deref(),
+                ))
+                .or_default()
+                .push(rel);
+            incoming
+                .entry(rel.target_symbol_name.as_str())
+                .or_default()
+                .push(rel);
+        }
+        Self { outgoing, incoming }
+    }
+
+    fn outgoing(&self, symbol: &'a SymbolInfo) -> &[&'a SymbolRelation] {
+        self.outgoing
+            .get(&(
+                symbol.name.as_str(),
+                symbol.file.as_path(),
+                symbol.parent.as_deref(),
+            ))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn incoming(&self, target_name: &str) -> &[&'a SymbolRelation] {
+        self.incoming
+            .get(target_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
 
 fn normalize_filter_value(raw: &str) -> String {
     let mut value = raw.trim().to_lowercase();
@@ -248,6 +307,11 @@ pub(super) fn filter_and_group_symbols(
     }
 
     let mut results = Vec::new();
+    let relation_index = if args.include_relations.unwrap_or(false) {
+        Some(RelationTargetIndex::for_map(map))
+    } else {
+        None
+    };
 
     for (file_path, file_symbols) in file_groups {
         // Get file total lines from any symbol in the file (they should all have the same value)
@@ -526,43 +590,30 @@ pub(super) fn filter_and_group_symbols(
                 sres.matches = match_spans;
             }
 
-            if args.include_relations.unwrap_or(false) {
+            if args.include_relations.unwrap_or(false)
+                && let Some(index) = relation_index.as_ref()
+            {
                 let mut related = Vec::new();
 
-                // Outgoing relations: source is this symbol
-                // We need to match based on file path, symbol name, and parent scope
-                // Since RepoMap doesn't have an optimize lookup for this yet, we linearly scan relations (optimize later if needed)
-                // Or we can rely on ID if we had it, but currently we use name/path matching as per design.
-                for rel in &map.relations {
-                    // Check outgoing
-                    if rel.source_symbol_name == symbol.name
-                        && rel.source_file_path == symbol.file
-                        && rel.source_symbol_parent == symbol.parent
-                    {
-                        // Find target file path if possible? Converting target_symbol_name to file path is hard without lookup.
-                        // But we just return what we have.
-                        related.push(RelatedSymbolResult {
-                            name: rel.target_symbol_name.clone(),
-                            parent: None, // We don't have target parent info in relation yet (only source)
-                            file: PathBuf::new(), // Target file unknown in simplified relation
-                            relation_type: format!("{}_outgoing", rel.relation_type.as_str()),
-                            line: rel.line,
-                        });
-                    }
-
-                    // Check incoming: target matches this symbol name
-                    // Note: Target matching is weak because we only have name.
-                    // Ideally we should know if this symbol is indeed the target.
-                    if rel.target_symbol_name == symbol.name {
-                        // Check if it's a plausible match (e.g. valid scope) - for now just match name
-                        related.push(RelatedSymbolResult {
-                            name: rel.source_symbol_name.clone(),
-                            parent: rel.source_symbol_parent.clone(),
-                            file: rel.source_file_path.clone(),
-                            relation_type: format!("{}_incoming", rel.relation_type.as_str()),
-                            line: rel.line,
-                        });
-                    }
+                // Outgoing relations: source matches on (name, file, parent).
+                for rel in index.outgoing(symbol) {
+                    related.push(RelatedSymbolResult {
+                        name: rel.target_symbol_name.clone(),
+                        parent: None, // Target parent info is not stored in relations
+                        file: PathBuf::new(), // Target file unknown in simplified relation
+                        relation_type: format!("{}_outgoing", rel.relation_type.as_str()),
+                        line: rel.line,
+                    });
+                }
+                // Incoming relations: target matches this symbol by name.
+                for rel in index.incoming(&symbol.name) {
+                    related.push(RelatedSymbolResult {
+                        name: rel.source_symbol_name.clone(),
+                        parent: rel.source_symbol_parent.clone(),
+                        file: rel.source_file_path.clone(),
+                        relation_type: format!("{}_incoming", rel.relation_type.as_str()),
+                        line: rel.line,
+                    });
                 }
                 if !related.is_empty() {
                     sres.related_symbols = Some(related);
