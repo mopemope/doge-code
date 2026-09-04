@@ -3,6 +3,45 @@ use crate::llm::tool_runtime::ToolRuntime;
 use anyhow::{Result, anyhow};
 use serde_json::json;
 
+/// Handler for the `task` sub-agent tool. Runs an isolated read-only agent
+/// loop and returns its summary.
+pub async fn task(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
+    let params: crate::tools::task::TaskParams = serde_json::from_value(args.clone())?;
+    let client = runtime
+        .subagent_client
+        .as_ref()
+        .ok_or_else(|| anyhow!("LLM client is not configured for the task tool"))?;
+    let model = runtime.subagent_model.clone();
+    let cancel = runtime.cancel_token.clone();
+
+    let run = crate::llm::tool_execution::subagent::run_subagent(
+        client,
+        &model,
+        runtime,
+        &params.description,
+        &params.prompt,
+        cancel,
+        &runtime.fs.config.project_root.to_string_lossy(),
+    )
+    .await?;
+
+    let value = json!({
+        "ok": true,
+        "summary": run.summary,
+        "files_examined": run.files_examined,
+        "iterations": run.iterations,
+        "tool_calls": run.tool_calls,
+    });
+    Ok(ToolOutput {
+        value: value.clone(),
+        is_success: true,
+        result_summary: format!(
+            "Sub-agent '{}' finished in {} iterations ({} tool calls)",
+            params.description, run.iterations, run.tool_calls
+        ),
+    })
+}
+
 pub async fn execute_bash(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
@@ -10,16 +49,21 @@ pub async fn execute_bash(
     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.execute_bash(command).await {
         Ok(output_str) => {
-            // output_str is a JSON string of ExecuteBashResult
-            let result: crate::tools::execute::ExecuteBashResult =
-                serde_json::from_str(&output_str)?;
-            let value = json!({ "ok": true, "stdout": result.stdout, "stderr": result.stderr, "exit_code": result.exit_code, "success": result.success });
+            let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
+                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+            }
+            let exit_code = value.get("exit_code").and_then(|v| v.as_i64());
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: result.success,
+                is_success: value
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 result_summary: format!(
                     "Command '{}' finished with exit code {:?}",
-                    command, result.exit_code
+                    command, exit_code
                 ),
             })
         }
@@ -34,15 +78,21 @@ pub async fn execute_shell(
     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.execute_shell(command).await {
         Ok(output_str) => {
-            let result: crate::tools::shell::ExecuteShellResult =
-                serde_json::from_str(&output_str)?;
-            let value = json!({ "ok": true, "stdout": result.stdout, "stderr": result.stderr, "exit_code": result.exit_code, "success": result.success });
+            let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
+                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+            }
+            let exit_code = value.get("exit_code").and_then(|v| v.as_i64());
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: result.success,
+                is_success: value
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 result_summary: format!(
                     "Shell command '{}' finished with exit code {:?}",
-                    command, result.exit_code
+                    command, exit_code
                 ),
             })
         }

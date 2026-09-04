@@ -137,6 +137,64 @@ fn plan_write_arguments_hash(arguments: &str) -> u64 {
     hasher.finish()
 }
 
+/// Progress override for the TaskSentinel: a successful tool call that returns
+/// *new information* counts as progress, not just state changes. This prevents
+/// false stall interventions during legitimate multi-file research phases,
+/// while failing tools and empty searches still count as stalls. Repeated
+/// identical calls remain caught by the LoopDetector.
+fn json_has_non_empty_array(value: Option<&serde_json::Value>, keys: &[&str]) -> bool {
+    value.is_some_and(|value| {
+        keys.iter().any(|key| {
+            value
+                .get(key)
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+        })
+    })
+}
+
+fn tool_call_made_progress(
+    tool_name: &str,
+    success: bool,
+    output: Option<&serde_json::Value>,
+) -> Option<bool> {
+    match tool_name {
+        // Reads always yield content on success (re-reads are the LoopDetector's job).
+        "fs_read" | "fs_read_many_files" | "read_memory" | "list_memories" => Some(success),
+        // Searches/listings are only progress when they return results.
+        // search_repomap wraps the whole SearchRepomapResponse under `results`,
+        // so the actual array sits at `results.results`.
+        "search_text" => Some(success && json_has_non_empty_array(output, &["results"])),
+        "search_repomap" => Some(
+            success
+                && (json_has_non_empty_array(output, &["results"])
+                    || output
+                        .and_then(|v| v.get("results"))
+                        .is_some_and(|inner| json_has_non_empty_array(Some(inner), &["results"]))),
+        ),
+        // fs_list dispatch output nests the response under `result`.
+        "fs_list" => Some(
+            success
+                && (json_has_non_empty_array(output, &["entries"])
+                    || output
+                        .and_then(|v| v.get("result"))
+                        .is_some_and(|inner| json_has_non_empty_array(Some(inner), &["entries"]))),
+        ),
+        "find_file" => Some(success && json_has_non_empty_array(output, &["files"])),
+        "search_memory" => Some(
+            success
+                && output
+                    .and_then(|v| v.get("result"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| {
+                        !s.starts_with("No matching") && !s.starts_with("No memories")
+                    }),
+        ),
+        // Everything else keeps the default write-oriented heuristic.
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     client: &crate::llm::client_core::OpenAIClient,
@@ -183,9 +241,15 @@ pub async fn run_agent_loop(
         warn!("Failed to inject context: {}", e);
     }
 
-    let runtime = ToolRuntime::build(fs).await?;
-    let mut iters = 0usize;
     let cancel_token = cancel.unwrap_or_default();
+    let runtime = ToolRuntime::build(
+        fs,
+        Some(client.clone()),
+        model.to_string(),
+        Some(cancel_token.clone()),
+    )
+    .await?;
+    let mut iters = 0usize;
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
@@ -719,7 +783,12 @@ File modification detected. You MUST now verify your changes:
                     Some(false),
                 );
             } else {
-                task_sentinel.record_tool_call(&tc.function.name, success);
+                let progress_override = tool_call_made_progress(tool_name, success, output_value);
+                task_sentinel.record_tool_call_with_progress(
+                    &tc.function.name,
+                    success,
+                    progress_override,
+                );
             }
             if let Some(stall_warning) = task_sentinel.check_stalled() {
                 warn!("Stalled progress detected: {}", stall_warning);
@@ -790,6 +859,75 @@ mod tests {
         let huge_read = "na".repeat(21000); // 42000 chars
         let huge_truncated = truncate_tool_output(huge_read.clone(), "fs_read");
         assert!(huge_truncated.contains("truncated"));
+    }
+
+    #[test]
+    fn test_tool_call_made_progress_overrides() {
+        use serde_json::json;
+
+        // Reads: success is progress, failure is not.
+        assert_eq!(
+            tool_call_made_progress("fs_read", true, Some(&json!({"ok": true}))),
+            Some(true)
+        );
+        assert_eq!(tool_call_made_progress("fs_read", false, None), Some(false));
+
+        // Empty search results are not progress.
+        assert_eq!(
+            tool_call_made_progress(
+                "search_text",
+                true,
+                Some(&json!({"ok": true, "results": [], "meta": {}}))
+            ),
+            Some(false)
+        );
+        // Non-empty search results are progress.
+        assert_eq!(
+            tool_call_made_progress(
+                "search_text",
+                true,
+                Some(&json!({"ok": true, "results": [{"path": "a.rs"}]}))
+            ),
+            Some(true)
+        );
+
+        // search_repomap nests the whole response under `results`.
+        assert_eq!(
+            tool_call_made_progress(
+                "search_repomap",
+                true,
+                Some(&json!({"ok": true, "results": {"results": [{"file": "a.rs"}]}}))
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            tool_call_made_progress(
+                "search_repomap",
+                true,
+                Some(&json!({"ok": true, "results": {"results": [], "warnings": []}}))
+            ),
+            Some(false)
+        );
+
+        // fs_list nests under `result`.
+        assert_eq!(
+            tool_call_made_progress(
+                "fs_list",
+                true,
+                Some(&json!({"ok": true, "result": {"entries": [{"path": "x"}]}}))
+            ),
+            Some(true)
+        );
+
+        // find_file empty.
+        assert_eq!(
+            tool_call_made_progress("find_file", true, Some(&json!({"files": []}))),
+            Some(false)
+        );
+
+        // Write tools keep the default heuristic.
+        assert_eq!(tool_call_made_progress("edit", true, None), None);
+        assert_eq!(tool_call_made_progress("execute_bash", true, None), None);
     }
 
     #[test]

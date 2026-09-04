@@ -3,6 +3,7 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::tools::FsTools;
 use crate::tools::remote_tools::RemoteToolInfo;
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 const MAX_ITERS: usize = 256;
@@ -12,10 +13,22 @@ pub struct ToolRuntime<'a> {
     pub fs: &'a FsTools,
     // repomap is delegated to FsTools, removed here
     pub max_iters: usize,
+    /// LLM client used by the `task` sub-agent (same client as the main loop,
+    /// so token usage accumulates in one place).
+    pub subagent_client: Option<crate::llm::client_core::OpenAIClient>,
+    /// Model id passed to the sub-agent loop.
+    pub subagent_model: String,
+    /// Cancellation token propagated to the sub-agent loop.
+    pub cancel_token: Option<CancellationToken>,
 }
 
 impl<'a> ToolRuntime<'a> {
-    pub async fn build(fs: &'a FsTools) -> Result<Self> {
+    pub async fn build(
+        fs: &'a FsTools,
+        subagent_client: Option<crate::llm::client_core::OpenAIClient>,
+        subagent_model: impl Into<String>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<Self> {
         fs.get_remote_tool_manager().ensure_remote_tools().await?;
         let remote_tools = fs.get_remote_tool_manager().remote_tools_snapshot().await;
 
@@ -31,6 +44,9 @@ impl<'a> ToolRuntime<'a> {
             tools,
             fs,
             max_iters: MAX_ITERS,
+            subagent_client,
+            subagent_model: subagent_model.into(),
+            cancel_token,
         })
     }
 }
