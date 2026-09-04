@@ -22,10 +22,11 @@ Run the narrowest check first, then broaden:
 | `src/llm/tool_execution/agent_loop.rs` | Main agent loop: iteration, loop detection, compaction triggers |
 | `src/llm/tool_execution/dispatch.rs` | Tool call dispatch (one arm per tool) |
 | `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
-| `src/llm/tool_execution/history.rs` | Conversation compaction (proactive + reactive) |
+| `src/llm/tool_execution/history.rs` | Conversation compaction (proactive + reactive), stale tool-result clearing |
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
 | `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
-| `src/tools/` | Tool implementations (each file exposes a `tool_def()`) |
+| `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
+| `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets |
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
@@ -80,7 +81,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - Returning-tool responses are structured JSON with `warnings` and `next_cursor` for pagination; never return unbounded text.
 - Large outputs (file reads, listings, repomap results) must support summary mode + `response_budget_chars` budgeting. Follow the pattern in `src/tools/read.rs`.
 - Global caps (`src/llm/message_utils.rs`): 8,000 chars default, 40,000 chars only for `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read`. Everything else — including `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, bash/shell — is 8,000.
-- The cap slices the serialized JSON by characters, so over-cap outputs reach the LLM as malformed JSON. Tools must keep their own output under the cap (budget/summary/pagination); never rely on the global truncator.
+- The global truncator is JSON-safe (it budgets string fields in-place rather than slicing the serialized payload), but it is a safety net only: tools must keep their own output under the cap using `src/tools/budget.rs` helpers (bash/shell 6k head+tail, `apply_patch` diff-only, `find_file` 200 paths, `read_memory` 6k) or `response_budget_chars`.
 
 ## Testing Guidelines
 

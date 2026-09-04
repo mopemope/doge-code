@@ -123,6 +123,7 @@ project_instructions_file = "PROJECT.md"
 - `execute_shell`: Persistent shell session for stateful command execution
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
+- `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
 
 ## 🎯 Usage Examples
 
@@ -314,7 +315,9 @@ Verification failures are returned to LLM for automatic correction.
 
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded
+- Stale tool results are cleared first ("context editing") before full compaction
 - LLM-based summarization preserves essential context
+- Recent conversation tail is retained across compaction (tool-call pairs kept intact)
 - Structured format for files accessed, actions taken, and outcomes
 
 ### Git Worktree Management
