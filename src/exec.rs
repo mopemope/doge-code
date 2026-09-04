@@ -221,7 +221,7 @@ impl Executor {
         let tokens_used = self
             .client
             .as_ref()
-            .map(|c| c.get_prompt_tokens_used())
+            .map(|c| c.get_total_prompt_tokens_used())
             .unwrap_or(0);
 
         match res {
@@ -436,7 +436,7 @@ impl Executor {
         )
         .await;
 
-        let tokens_used = client.get_prompt_tokens_used();
+        let tokens_used = client.get_total_prompt_tokens_used() as u32;
 
         match res {
             Ok(Ok((updated_messages, final_msg))) => {

@@ -21,6 +21,7 @@ pub fn handle_clear(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     if let Some(client) = &executor.client {
         client.set_tokens(0);
         client.set_prompt_tokens(0);
+        client.clear_totals();
     }
 
     // Reset TUI token display

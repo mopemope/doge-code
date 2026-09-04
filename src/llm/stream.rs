@@ -231,6 +231,8 @@ impl OpenAIClient {
                                     client.set_tokens(usage.total_tokens);
                                     // accumulate prompt tokens separately for header display
                                     client.set_prompt_tokens(usage.prompt_tokens);
+                                    // Accumulate into the session totals.
+                                    client.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
                                 }
 
                                 for ch in json.choices {

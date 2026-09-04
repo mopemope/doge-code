@@ -238,6 +238,8 @@ async fn chat_tools_once_inner(
         client.set_tokens(usage.total_tokens);
         // Also track prompt tokens for non-streaming tools path
         client.set_prompt_tokens(usage.prompt_tokens);
+        // Accumulate into the session totals (never resets between requests).
+        client.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
     }
 
     let msg = body

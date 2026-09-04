@@ -431,8 +431,25 @@ impl TuiApp {
                     }
 
                     if let Some(tokens_str) = msg.strip_prefix("::tokens:") {
-                        if let Ok(tokens) = tokens_str.parse::<u32>() {
-                            self.tokens_used = tokens;
+                        // Expected format: "prompt:<n>,total:<n>" (see handlers).
+                        let mut prompt: Option<u64> = None;
+                        let mut total: Option<u64> = None;
+                        for part in tokens_str.split(',') {
+                            if let Some(value) = part.strip_prefix("prompt:") {
+                                prompt = value.trim().parse::<u64>().ok();
+                            } else if let Some(value) = part.strip_prefix("total:") {
+                                total = value.trim().parse::<u64>().ok();
+                            } else if let Ok(legacy) = part.trim().parse::<u32>() {
+                                // Legacy bare-number payload.
+                                prompt = Some(legacy as u64);
+                            }
+                        }
+                        if let Some(prompt_tokens) = prompt {
+                            self.tokens_prompt_used = prompt_tokens.min(u32::MAX as u64) as u32;
+                            self.dirty = true;
+                        }
+                        if let Some(total_tokens) = total {
+                            self.tokens_used = total_tokens.min(u32::MAX as u64) as u32;
                             self.dirty = true;
                         }
                         continue;

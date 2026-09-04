@@ -220,9 +220,11 @@ impl TuiExecutor {
                         None, // Pass None instead of self
                     )
                     .await;
-                    // Get token usage after the agent loop completes
+                    // Get token usage after the agent loop completes.
+                    // `prompt` is the last request's prompt size (context occupancy)
+                    // and `total` is the cumulative session total.
                     let tokens_used = c.get_prompt_tokens_used();
-                    let total_tokens = c.get_tokens_used();
+                    let total_tokens = c.get_total_tokens_used();
                     match res {
                         Ok((updated_messages, _final_msg)) => {
                             // Execute hooks after the agent loop completes
@@ -237,6 +239,14 @@ impl TuiExecutor {
                                     tokens_used,
                                     total_tokens
                                 ));
+                                // Keep the remaining-context display fresh.
+                                let remaining = cfg
+                                    .get_context_window_size()
+                                    .map(|window| window.saturating_sub(tokens_used));
+                                let _ = tx.send(match remaining {
+                                    Some(n) => format!("::update_remaining_tokens:{n}"),
+                                    None => "::update_remaining_tokens".to_string(),
+                                });
                             }
                             // Update conversation history (save all messages except system messages)
                             if let Ok(mut history) = conversation_history.lock() {
@@ -260,7 +270,7 @@ impl TuiExecutor {
                                 }
 
                                 // Update token count in session
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
                                     tracing::error!(?e, "Failed to update session with token count");
                                 }
                             }
@@ -275,8 +285,7 @@ impl TuiExecutor {
                                     tokens_used,
                                     total_tokens
                                 ));
-                            }
-                            // Update conversation history on error (only user input)
+                            }                            // Update conversation history on error (only user input)
                             if let Ok(mut history) = conversation_history.lock() {
                                 history.append_user(content.clone());
 
@@ -288,7 +297,7 @@ impl TuiExecutor {
                                 }
 
                                 // Update token count in session even on error
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens as u64) {
+                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
                                     tracing::error!(?e, "Failed to update session with token count on error");
                                 }
                             }

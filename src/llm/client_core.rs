@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,11 @@ pub struct OpenAIClient {
     pub tokens_used: Arc<AtomicU32>,
     /// Tracks prompt tokens used by this client (for header display)
     pub prompt_tokens_used: Arc<AtomicU32>,
+    /// Cumulative total tokens across the whole session (never reset by
+    /// per-request tracking; only cleared explicitly via `clear_totals`).
+    pub total_tokens_used: Arc<AtomicU64>,
+    /// Cumulative prompt tokens across the whole session.
+    pub total_prompt_tokens_used: Arc<AtomicU64>,
     pub reason_enable: bool,
 }
 
@@ -40,6 +45,8 @@ impl OpenAIClient {
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_tokens_used: Arc::new(AtomicU64::new(0)),
+            total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reason_enable,
         })
     }
@@ -93,6 +100,30 @@ impl OpenAIClient {
 
     pub fn set_prompt_tokens(&self, tokens: u32) {
         self.prompt_tokens_used.store(tokens, Ordering::Relaxed);
+    }
+
+    /// Get the cumulative total tokens used across the session.
+    pub fn get_total_tokens_used(&self) -> u64 {
+        self.total_tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Get the cumulative prompt tokens used across the session.
+    pub fn get_total_prompt_tokens_used(&self) -> u64 {
+        self.total_prompt_tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Accumulate a request's usage into the session totals.
+    pub fn add_total_tokens(&self, total_tokens: u32, prompt_tokens: u32) {
+        self.total_tokens_used
+            .fetch_add(total_tokens as u64, Ordering::Relaxed);
+        self.total_prompt_tokens_used
+            .fetch_add(prompt_tokens as u64, Ordering::Relaxed);
+    }
+
+    /// Reset the cumulative session totals (used by `/clear`).
+    pub fn clear_totals(&self) {
+        self.total_tokens_used.store(0, Ordering::Relaxed);
+        self.total_prompt_tokens_used.store(0, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -398,6 +429,8 @@ mod tests {
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_tokens_used: Arc::new(AtomicU64::new(0)),
+            total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reason_enable: false,
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
@@ -408,6 +441,8 @@ mod tests {
             llm_cfg: LlmConfig::default(),
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_tokens_used: Arc::new(AtomicU64::new(0)),
+            total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reason_enable: false,
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
@@ -421,5 +456,22 @@ mod tests {
         assert_eq!(client.get_tokens_used(), 100);
         client.add_tokens(50);
         assert_eq!(client.get_tokens_used(), 150);
+    }
+
+    #[test]
+    fn total_token_tracking_accumulates() {
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        client.add_total_tokens(1_000, 800);
+        client.add_total_tokens(2_000, 1_500);
+        assert_eq!(client.get_total_tokens_used(), 3_000);
+        assert_eq!(client.get_total_prompt_tokens_used(), 2_300);
+        // Per-request values are independent (used by compaction thresholds).
+        client.set_tokens(2_000);
+        client.set_prompt_tokens(1_500);
+        assert_eq!(client.get_tokens_used(), 2_000);
+        assert_eq!(client.get_prompt_tokens_used(), 1_500);
+        client.clear_totals();
+        assert_eq!(client.get_total_tokens_used(), 0);
+        assert_eq!(client.get_total_prompt_tokens_used(), 0);
     }
 }
