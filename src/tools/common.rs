@@ -110,6 +110,18 @@ impl FsTools {
         self.session_manager_wrapper.get_current_session()
     }
 
+    /// Get files changed by the agent in the current session (project-root relative)
+    pub fn get_session_changed_files(&self) -> Vec<std::path::PathBuf> {
+        self.get_current_session()
+            .map(|s| {
+                s.changed_files
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get session info string
     pub fn get_session_info(&self) -> Option<String> {
         self.session_manager_wrapper.get_session_info()

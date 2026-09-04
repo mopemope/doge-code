@@ -62,7 +62,7 @@ impl Default for AppConfig {
             resume: false,
             auto_compact_prompt_token_threshold: DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD,
             auto_compact_prompt_token_threshold_overrides: HashMap::new(),
-            show_diff: false,
+            show_diff: true,
             allowed_commands: vec![],
             allowed_paths: vec![],
             command_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
@@ -232,10 +232,7 @@ impl AppConfig {
             resume: cli.resume,
             auto_compact_prompt_token_threshold,
             auto_compact_prompt_token_threshold_overrides,
-            show_diff: project_cfg
-                .show_diff
-                .or(file_cfg.show_diff)
-                .unwrap_or(false),
+            show_diff: project_cfg.show_diff.or(file_cfg.show_diff).unwrap_or(true),
             allowed_commands: project_cfg
                 .allowed_commands
                 .or(file_cfg.allowed_commands)

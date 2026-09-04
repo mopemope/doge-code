@@ -209,6 +209,22 @@ Combining these enables maximum code exploration effectiveness without overwhelm
 - Recognized symbols are passed to LLM, receiving diff or full symbol replacement applied via `apply_patch`. Results can be confirmed in `diff-review` pane, with `a` to approve and `r` to revert.
 - On failure (no patch, broken parser, file updated), raw response is output to log, so modify instructions and call `/edit-symbol` again.
 
+## 📋 Diff Review Panel
+
+After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):
+
+- **Scoped to agent changes**: the diff covers only files the agent modified in the current session, so unrelated uncommitted work in your worktree is never shown or reverted
+- **Split view**: log on the left, diff preview on the right with per-file tabs showing addition/deletion counts
+- **Syntax highlighting**: additions in green, removals in red, hunk headers in yellow, etc.
+- **Keyboard controls** (active while the input box is empty):
+  - `a` — accept changes (keep them applied)
+  - `r` — reject changes (revert via `git restore`; untracked/new files are removed). The agent is notified on your next instruction that the changes were reverted
+  - `q` / `Esc` — dismiss the panel (changes remain applied)
+  - `←`/`→` — switch between changed files
+  - `↑`/`↓` — scroll; `PgUp`/`PgDn` — fast scroll; `Home`/`End` — jump to top/bottom
+
+Set `show_diff = false` in `.doge/config.toml` to disable the panel.
+
 ## 🛡️ Linter and Auto-Fix /lint
 
 - `/lint` command auto-detects Go, Rust, TypeScript files in the project and runs configured linters (`cargo clippy`, `golangci-lint`, `npm run lint`, etc.).
@@ -290,15 +306,13 @@ Verification failures are returned to LLM for automatic correction.
 - `OPENAI_API_KEY`: API key
 - `OPENAI_BASE_URL`: API base URL (default: OpenAI)
 - `OPENAI_MODEL`: Model name (default: gpt-4)
-- `DOGECODE_CONFIG`: Configuration file path
+- `DOGE_CODE_CONFIG`: Configuration file path
 
 ### Configuration File (`.doge/config.toml`)
 ```toml
 [llm]
-model = "claude-3-5-sonnet-20241022"
+model = ""
 base_url = "https://api.anthropic.com"
-max_tokens = 4000
-temperature = 0.1
 # Context window size (auto-detected if not specified)
 context_window_size = 200000
 # Token threshold for auto compaction
@@ -314,9 +328,10 @@ exclude_patterns = ["target/", "node_modules/", "*.log"]
 address = "127.0.0.1:8000"
 
 [watch]
-enabled = true
-debounce_ms = 500
-patterns = ["*.rs", "*.go", "*.ts", "*.py"]
+include_patterns = ["*.rs", "*.go", "*.ts", "*.py"]
+exclude_patterns = []
+debounce_delay_ms = 500
+ai_comment_pattern = "// AI!:"
 
 [[mcp_servers]]
 # Remote MCP servers to connect to (array of tables)

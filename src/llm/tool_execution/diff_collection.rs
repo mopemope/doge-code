@@ -10,8 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::debug;
 
-/// Collects diff review payload by examining git diffs and status
-pub async fn collect_diff_review_payload(project_root: &Path) -> Result<Option<DiffReviewPayload>> {
+/// Collects diff review payload by examining git diffs and status.
+///
+/// When `filter_paths` is non-empty, the diff is scoped to only those
+/// project-root-relative paths (the files the agent modified). This prevents
+/// unrelated uncommitted work in the worktree from being included in the
+/// review (and from being reverted on reject).
+pub async fn collect_diff_review_payload(
+    project_root: &Path,
+    filter_paths: &[PathBuf],
+) -> Result<Option<DiffReviewPayload>> {
     debug!(project_root = %project_root.display(), "Collecting diff review payload");
 
     let project_root: PathBuf = project_root.to_path_buf();
@@ -19,11 +27,14 @@ pub async fn collect_diff_review_payload(project_root: &Path) -> Result<Option<D
     // Spawn parallel tasks for git commands
     let tracked_diff_task = tokio::spawn({
         let project_root = project_root.clone();
+        let filter_paths = filter_paths.to_vec();
         async move {
-            Command::new("git")
-                .arg("diff")
-                .arg("--color=never")
-                .current_dir(&project_root)
+            let mut cmd = Command::new("git");
+            cmd.arg("diff").arg("--color=never");
+            if !filter_paths.is_empty() {
+                cmd.arg("--").args(&filter_paths);
+            }
+            cmd.current_dir(&project_root)
                 .output()
                 .context("failed to run git diff --color=never")
         }
@@ -31,11 +42,14 @@ pub async fn collect_diff_review_payload(project_root: &Path) -> Result<Option<D
 
     let names_task = tokio::spawn({
         let project_root = project_root.clone();
+        let filter_paths = filter_paths.to_vec();
         async move {
-            Command::new("git")
-                .arg("diff")
-                .arg("--name-only")
-                .current_dir(&project_root)
+            let mut cmd = Command::new("git");
+            cmd.arg("diff").arg("--name-only");
+            if !filter_paths.is_empty() {
+                cmd.arg("--").args(&filter_paths);
+            }
+            cmd.current_dir(&project_root)
                 .output()
                 .context("failed to run git diff --name-only")
         }
@@ -93,6 +107,16 @@ pub async fn collect_diff_review_payload(project_root: &Path) -> Result<Option<D
         }
 
         let path = path.trim().to_string();
+
+        // Scope to agent-modified files when a filter is provided
+        if !filter_paths.is_empty()
+            && !filter_paths.iter().any(|p| {
+                let p_str = p.to_string_lossy();
+                p_str.ends_with(path.as_str()) || path.ends_with(p_str.as_ref())
+            })
+        {
+            continue;
+        }
         let task = tokio::spawn({
             let project_root = project_root.clone();
             async move {
@@ -187,7 +211,7 @@ mod tests {
         run_git(root, &["add", "foo.txt"]);
         run_git(root, &["commit", "-q", "-m", "init"]);
 
-        let payload = collect_diff_review_payload(root).await.unwrap();
+        let payload = collect_diff_review_payload(root, &[]).await.unwrap();
         assert!(payload.is_none());
     }
 
@@ -206,12 +230,41 @@ mod tests {
         // untracked change
         write_file(root, "bar.txt", "new file\n");
 
-        let payload = collect_diff_review_payload(root).await.unwrap();
+        let payload = collect_diff_review_payload(root, &[]).await.unwrap();
         let payload = payload.expect("expected diff payload");
 
         assert!(payload.files.iter().any(|f| f == "foo.txt"));
         assert!(payload.files.iter().any(|f| f == "bar.txt"));
         assert!(payload.diff.contains("foo.txt"));
         assert!(payload.diff.contains("bar.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_diff_review_payload_filter_scopes_to_agent_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        init_repo(root);
+        write_file(root, "agent_file.txt", "original\n");
+        write_file(root, "user_file.txt", "user original\n");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+
+        // Agent modifies one file; the user has unrelated uncommitted work in another
+        write_file(root, "agent_file.txt", "agent modified\n");
+        write_file(root, "user_file.txt", "user modified\n");
+
+        let filter = vec![std::path::PathBuf::from("agent_file.txt")];
+        let payload = collect_diff_review_payload(root, &filter)
+            .await
+            .unwrap()
+            .expect("expected diff payload");
+
+        assert!(payload.files.iter().any(|f| f == "agent_file.txt"));
+        assert!(
+            !payload.files.iter().any(|f| f == "user_file.txt"),
+            "unrelated user changes must not be included in the review"
+        );
+        assert!(!payload.diff.contains("user_file.txt"));
     }
 }

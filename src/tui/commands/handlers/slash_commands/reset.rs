@@ -5,6 +5,8 @@ use crate::tui::view::TuiApp;
 pub fn handle_reset(ui: &mut TuiApp) {
     ui.status = Status::Ready;
     ui.pending_instructions.clear();
+    ui.diff_review = None;
+    ui.diff_rejected_pending = false;
 
     // Reset other processing flags
     ui.is_llm_response_active = false;

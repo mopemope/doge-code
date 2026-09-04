@@ -79,7 +79,7 @@ theme = "dark"  # "dark" or "light"
 enable_stream_tools = false
 project_instructions_file = null
 no_repomap = false
-show_diff = false
+show_diff = true
 auto_compact_prompt_token_threshold = 250000
 # auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
 resume = false

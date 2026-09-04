@@ -1,3 +1,4 @@
+use crate::tui::diff_review::DiffLineKind;
 use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
 use ratatui::{
@@ -125,6 +126,17 @@ impl TuiApp {
 
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
         f.render_widget(Clear, area);
+
+        if self.diff_review.is_some() {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(area);
+
+            self.render_log_panel(f, columns[0], plan, theme);
+            self.render_diff_review(f, columns[1], theme);
+            return;
+        }
 
         match self.input_mode {
             crate::tui::state::InputMode::HistorySearch => {
@@ -266,6 +278,101 @@ impl TuiApp {
             .style(theme.log_style)
             .block(Block::default()); // No border
         f.render_widget(paragraph, area);
+    }
+
+    fn render_diff_review(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(review) = &self.diff_review else {
+            return;
+        };
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                // Show as many changed files as fit (capped), not just one
+                Constraint::Length((review.files.len() as u16 + 2).min(10)),
+                Constraint::Min(5),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        // Record the inner height of the diff viewport so scroll clamping in
+        // the event loop can account for the visible window.
+        self.diff_viewport_height
+            .set(layout[1].height.saturating_sub(2) as usize);
+
+        // file list
+        let items: Vec<ListItem> = review
+            .files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| {
+                let mut label = file.path.clone();
+                let additions = file.additions();
+                let removals = file.removals();
+                if additions > 0 || removals > 0 {
+                    label.push_str(&format!(" (+{}/-{})", additions, removals));
+                }
+
+                let style = if idx == review.selected {
+                    theme.completion_selected_style
+                } else {
+                    theme.completion_style
+                };
+
+                ListItem::new(label).style(style)
+            })
+            .collect();
+
+        let files_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style)
+            .title("Changed Files (←/→ to focus)");
+        let files_list = List::new(items).block(files_block);
+        f.render_widget(files_list, layout[0]);
+
+        // diff content
+        let diff_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style)
+            .title("Diff Preview (↑/↓ scroll)");
+
+        if let Some(file) = review.files.get(review.selected) {
+            let diff_lines: Vec<Line> = file
+                .lines
+                .iter()
+                .map(|diff_line| {
+                    let style = match diff_line.kind {
+                        DiffLineKind::Header => Style::default().fg(Color::Cyan),
+                        DiffLineKind::FileMeta => Style::default().fg(Color::Magenta),
+                        DiffLineKind::HunkHeader => Style::default().fg(Color::Yellow),
+                        DiffLineKind::Addition => Style::default().fg(Color::Green),
+                        DiffLineKind::Removal => Style::default().fg(Color::Red),
+                        DiffLineKind::Context => Style::default().fg(Color::DarkGray),
+                        DiffLineKind::Other => Style::default(),
+                    };
+                    Line::from(Span::styled(diff_line.content.clone(), style))
+                })
+                .collect();
+
+            let scroll = file.scroll.min(u16::MAX as usize) as u16;
+            let paragraph = Paragraph::new(diff_lines)
+                .block(diff_block)
+                .scroll((scroll, 0));
+            f.render_widget(paragraph, layout[1]);
+        } else {
+            let paragraph = Paragraph::new("No diff available")
+                .block(diff_block)
+                .style(theme.log_style);
+            f.render_widget(paragraph, layout[1]);
+        }
+
+        // instructions footer for diff
+        let instructions = Paragraph::new(
+            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss",
+        )
+        .style(theme.footer_style)
+        .block(Block::default().borders(Borders::ALL));
+        f.render_widget(instructions, layout[2]);
     }
 
     fn render_input_area(&mut self, f: &mut Frame, area: Rect) {

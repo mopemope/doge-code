@@ -1,4 +1,7 @@
-use crate::{config::IGNORE_FILE, tui::shell::ShellSession, tui::theme::Theme};
+use crate::{
+    config::IGNORE_FILE,
+    tui::{diff_review::DiffReviewState, shell::ShellSession, theme::Theme},
+};
 use anyhow::Result;
 use crossterm::{
     cursor, execute,
@@ -262,6 +265,14 @@ pub struct TuiApp {
     pub task_queue: VecDeque<String>,
     // Last time we received a signal from the backend
     pub last_heartbeat: Option<std::time::Instant>,
+    // Diff review panel state (populated from `::diff_review:` agent messages)
+    pub diff_review: Option<DiffReviewState>,
+    /// Height of the diff preview viewport, updated during rendering.
+    /// Cell because rendering only has `&self`.
+    pub diff_viewport_height: std::cell::Cell<usize>,
+    /// Set when the user rejects a diff review so the next instruction can
+    /// inform the LLM that its changes were reverted.
+    pub diff_rejected_pending: bool,
 }
 
 impl TuiApp {
@@ -477,6 +488,9 @@ impl TuiApp {
             shell_output_buffer: String::new(),
             task_queue: VecDeque::new(),
             last_heartbeat: None,
+            diff_review: None,
+            diff_viewport_height: std::cell::Cell::new(0),
+            diff_rejected_pending: false,
         };
 
         Ok(app)

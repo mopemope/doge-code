@@ -1,12 +1,23 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use serde::Deserialize;
+use std::fs;
+use std::io::ErrorKind;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+use crate::diff_review::DiffReviewPayload;
+use crate::tui::diff_review::DiffReviewState;
 use crate::tui::event_handlers::{
     handle_file_search_key, handle_history_search_key, handle_normal_mode_key,
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
+
+#[derive(Debug, Deserialize)]
+struct DiffReviewError {
+    error: String,
+}
 
 impl TuiApp {
     pub fn event_loop(
@@ -21,7 +32,23 @@ impl TuiApp {
             // Process instruction queue if ready
             let is_ready = matches!(self.status, Status::Ready | Status::Error);
             if is_ready && let Some(instruction) = self.pending_instructions.pop_front() {
-                self.dispatch(&instruction);
+                // If the user rejected a diff review, prepend a system note so the
+                // LLM knows its changes were reverted. Slash commands are passed
+                // through untouched (prepending would break `/` routing); `/reset`
+                // starts a fresh context, so the pending note is dropped with it.
+                if self.diff_rejected_pending && instruction.starts_with("/reset") {
+                    self.diff_rejected_pending = false;
+                }
+                if self.diff_rejected_pending && !instruction.starts_with('/') {
+                    self.diff_rejected_pending = false;
+                    let instruction_with_note = format!(
+                        "[SYSTEM NOTE] The user rejected the previous changes and the affected files were reverted to their pre-change state. Take this into account when proceeding.\n\n{}",
+                        instruction
+                    );
+                    self.dispatch(&instruction_with_note);
+                } else {
+                    self.dispatch(&instruction);
+                }
                 self.dirty = true;
             }
 
@@ -78,9 +105,50 @@ impl TuiApp {
                         continue;
                     }
 
-                    // Removed DiffReview handling
-                    if msg.starts_with("::diff_review:") || msg.starts_with("::diff_output:") {
-                        debug!("Ignoring diff review message as feature is disabled.");
+                    // Diff review handling
+                    if let Some(payload) = msg.strip_prefix("::diff_review:") {
+                        if let Ok(payload) = serde_json::from_str::<DiffReviewPayload>(payload) {
+                            let review_state = DiffReviewState::from_payload(payload);
+                            let file_count = review_state.files.len();
+                            self.diff_review = Some(review_state);
+                            self.diff_rejected_pending = false;
+                            self.dirty = true;
+                            self.push_log(format!(
+                                "[diff] Ready for review: {} file(s) changed. Use a=accept, r=reject, q=dismiss.",
+                                file_count
+                            ));
+                        } else if let Ok(err_payload) =
+                            serde_json::from_str::<DiffReviewError>(payload)
+                        {
+                            self.push_log(format!("[diff][error] {}", err_payload.error));
+                            self.diff_review = None;
+                            self.dirty = true;
+                        } else {
+                            self.push_log(format!(
+                                "[diff][warn] Received unexpected diff payload: {}",
+                                payload
+                            ));
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
+
+                    // Legacy raw-diff payloads have no reliable file list, so
+                    // rejecting (reverting) them would be unsafe. Nothing in the
+                    // codebase emits this message anymore; view-only.
+                    if let Some(output) = msg.strip_prefix("::diff_output:") {
+                        let payload = DiffReviewPayload {
+                            diff: output.to_string(),
+                            files: vec![],
+                        };
+                        let review_state = DiffReviewState::from_payload(payload);
+                        self.diff_review = Some(review_state);
+                        self.diff_rejected_pending = false;
+                        self.dirty = true;
+                        self.push_log(
+                            "[diff] Received legacy diff payload. View only (a=accept, q=dismiss)."
+                                .to_string(),
+                        );
                         continue;
                     }
 
@@ -450,6 +518,17 @@ impl TuiApp {
                             continue;
                         }
 
+                        // Diff review keys take precedence while the panel is open,
+                        // but only when the input box is empty; otherwise the keys
+                        // must keep flowing into the textarea (typing "run the
+                        // tests" must not trigger a revert).
+                        if self.diff_review.is_some()
+                            && self.input_is_empty()
+                            && self.process_diff_review_key(k)?
+                        {
+                            continue;
+                        }
+
                         match self.input_mode {
                             InputMode::Normal => {
                                 if handle_normal_mode_key(self, k, terminal)? {
@@ -474,5 +553,334 @@ impl TuiApp {
                 self.dirty = false;
             }
         }
+    }
+}
+
+impl TuiApp {
+    /// True when the input textarea has no user-typed content.
+    fn input_is_empty(&self) -> bool {
+        self.textarea.lines().iter().all(|line| line.is_empty())
+    }
+
+    fn process_diff_review_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Result<bool> {
+        if self.diff_review.is_none() {
+            return Ok(false);
+        }
+
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.dismiss_diff_review();
+                Ok(true)
+            }
+            KeyCode::Char('a') => {
+                self.accept_diff_review();
+                Ok(true)
+            }
+            KeyCode::Char('r') => {
+                self.reject_diff_review()?;
+                Ok(true)
+            }
+            KeyCode::Left => {
+                self.move_diff_selection(-1);
+                Ok(true)
+            }
+            KeyCode::Right => {
+                self.move_diff_selection(1);
+                Ok(true)
+            }
+            KeyCode::Up => {
+                self.adjust_diff_scroll(-1);
+                Ok(true)
+            }
+            KeyCode::Down => {
+                self.adjust_diff_scroll(1);
+                Ok(true)
+            }
+            KeyCode::PageUp => {
+                self.adjust_diff_scroll(-20);
+                Ok(true)
+            }
+            KeyCode::PageDown => {
+                self.adjust_diff_scroll(20);
+                Ok(true)
+            }
+            KeyCode::Home => {
+                self.set_diff_scroll(0);
+                Ok(true)
+            }
+            KeyCode::End => {
+                self.jump_diff_scroll_to_end();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn dismiss_diff_review(&mut self) {
+        if self.diff_review.take().is_some() {
+            self.push_log("[diff] Closed diff preview. Changes remain applied.".to_string());
+            self.dirty = true;
+        }
+    }
+
+    fn accept_diff_review(&mut self) {
+        if let Some(review) = self.diff_review.take() {
+            let file_count = review.files.len();
+            self.push_log(format!("[diff] Accepted {} file change(s).", file_count));
+            self.dirty = true;
+        }
+    }
+
+    fn reject_diff_review(&mut self) -> Result<()> {
+        let Some(review) = self.diff_review.take() else {
+            return Ok(());
+        };
+
+        if !review.rejectable {
+            self.push_log(
+                "[diff] This diff has no reliable file list (legacy payload); reject is unavailable."
+                    .to_string(),
+            );
+            self.diff_review = Some(review);
+            self.dirty = true;
+            return Ok(());
+        }
+
+        let paths: Vec<String> = review.file_paths();
+        let project_root = self.cfg.as_ref().map(|c| c.project_root.clone());
+
+        // On failure, keep the panel open so the user can retry; a failed
+        // revert must never propagate out of the event loop (that would
+        // terminate the whole TUI).
+        if let Err(e) = revert_paths(&paths, project_root.as_deref()) {
+            self.push_log(format!("[diff][error] Failed to revert changes: {}", e));
+            self.diff_review = Some(review);
+            self.dirty = true;
+            return Ok(());
+        }
+
+        self.diff_rejected_pending = true;
+        self.push_log(
+            "[diff] Rejected changes and restored the agent's modified files. The agent will be notified on your next instruction."
+                .to_string(),
+        );
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn move_diff_selection(&mut self, delta: isize) {
+        if let Some(review) = self.diff_review.as_mut() {
+            if review.files.is_empty() {
+                return;
+            }
+
+            let current = review.selected as isize;
+            let max_index = review.files.len() as isize - 1;
+            let mut next = current + delta;
+            if next < 0 {
+                next = 0;
+            } else if next > max_index {
+                next = max_index;
+            }
+
+            if next != current {
+                review.selected = next as usize;
+                if let Some(file) = review.files.get_mut(review.selected) {
+                    file.scroll = 0;
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn adjust_diff_scroll(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+
+        let viewport = self.diff_viewport_height.get().max(1);
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            if file.lines.is_empty() {
+                return;
+            }
+
+            let max_scroll = file.lines.len().saturating_sub(viewport) as isize;
+            let current = file.scroll as isize;
+            let mut next = current + delta;
+            if next < 0 {
+                next = 0;
+            } else if next > max_scroll {
+                next = max_scroll;
+            }
+
+            file.scroll = next as usize;
+            self.dirty = true;
+        }
+    }
+
+    fn set_diff_scroll(&mut self, position: usize) {
+        let viewport = self.diff_viewport_height.get().max(1);
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            let max_scroll = file.lines.len().saturating_sub(viewport);
+            file.scroll = position.min(max_scroll);
+            self.dirty = true;
+        }
+    }
+
+    fn jump_diff_scroll_to_end(&mut self) {
+        let viewport = self.diff_viewport_height.get().max(1);
+        if let Some(review) = self.diff_review.as_mut()
+            && let Some(file) = review.files.get_mut(review.selected)
+        {
+            if file.lines.is_empty() {
+                return;
+            }
+            file.scroll = file.lines.len().saturating_sub(viewport);
+            self.dirty = true;
+        }
+    }
+}
+
+fn revert_paths(paths: &[String], project_root: Option<&std::path::Path>) -> Result<()> {
+    let cwd = project_root.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
+    for path in paths {
+        if path.trim().is_empty() || path == "workspace" {
+            continue;
+        }
+
+        let tracked = Command::new("git")
+            .arg("ls-files")
+            .arg("--error-unmatch")
+            .arg(path)
+            .current_dir(&cwd)
+            .output()
+            .with_context(|| format!("checking tracking status for {}", path))?
+            .status
+            .success();
+
+        if tracked {
+            let output = Command::new("git")
+                .arg("restore")
+                .arg("--worktree")
+                .arg("--")
+                .arg(path)
+                .current_dir(&cwd)
+                .output()
+                .with_context(|| format!("running git restore for {}", path))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow::anyhow!(
+                    "git restore failed for {}: {}",
+                    path,
+                    stderr.trim()
+                ));
+            }
+        } else {
+            let full_path = cwd.join(path);
+            match fs::remove_file(&full_path) {
+                Ok(_) => {}
+                Err(e) => {
+                    if e.kind() == ErrorKind::IsADirectory {
+                        fs::remove_dir_all(&full_path)
+                            .with_context(|| format!("failed to remove directory {}", path))?;
+                    } else if e.kind() != ErrorKind::NotFound {
+                        return Err(anyhow::anyhow!("failed to remove {}: {}", path, e));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        run_git(dir, &["init", "-q"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test User"]);
+    }
+
+    #[test]
+    fn test_revert_paths_restores_tracked_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        init_repo(root);
+
+        std::fs::write(root.join("foo.txt"), "original\n").unwrap();
+        run_git(root, &["add", "foo.txt"]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("foo.txt"), "modified\n").unwrap();
+
+        revert_paths(&["foo.txt".to_string()], Some(root)).unwrap();
+
+        let content = std::fs::read_to_string(root.join("foo.txt")).unwrap();
+        assert_eq!(content, "original\n");
+    }
+
+    #[test]
+    fn test_revert_paths_removes_untracked_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        init_repo(root);
+
+        std::fs::write(root.join("new_file.txt"), "created by agent\n").unwrap();
+        assert!(root.join("new_file.txt").exists());
+
+        revert_paths(&["new_file.txt".to_string()], Some(root)).unwrap();
+        assert!(!root.join("new_file.txt").exists());
+    }
+
+    #[test]
+    fn test_revert_paths_ignores_workspace_placeholder() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        init_repo(root);
+
+        // "workspace" is a synthetic placeholder and must not cause errors
+        revert_paths(&["workspace".to_string(), "".to_string()], Some(root)).unwrap();
+    }
+
+    #[test]
+    fn test_revert_paths_skips_missing_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        init_repo(root);
+
+        // A path that neither exists nor is tracked should be ignored, not error
+        revert_paths(&["does_not_exist.txt".to_string()], Some(root)).unwrap();
     }
 }

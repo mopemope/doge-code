@@ -291,8 +291,16 @@ pub async fn run_agent_loop(
                 && file_was_written
                 && let Some(tx) = &ui_tx
             {
-                match crate::llm::tool_execution::collect_diff_review_payload(&cfg.project_root)
-                    .await
+                // Scope the diff to files the agent modified in this session so
+                // unrelated uncommitted work in the worktree is not shown/reverted.
+                // Session paths are project-root relative, matching the cwd of the
+                // git commands run inside collect_diff_review_payload.
+                let filter_paths = fs.get_session_changed_files();
+                match crate::llm::tool_execution::collect_diff_review_payload(
+                    &cfg.project_root,
+                    &filter_paths,
+                )
+                .await
                 {
                     Ok(Some(payload)) => match serde_json::to_string(&payload) {
                         Ok(json) => {
