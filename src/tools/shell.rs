@@ -18,6 +18,23 @@ pub struct ExecuteShellResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub success: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ExecuteShellResult {
+    pub fn simple(stdout: String, stderr: String, exit_code: Option<i32>, success: bool) -> Self {
+        Self {
+            stdout,
+            stderr,
+            exit_code,
+            success,
+            output_truncated: false,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 pub fn tool_def() -> ToolDef {
@@ -168,26 +185,30 @@ impl ShellSession {
                 Ok(result) => result,
                 Err(_) => {
                     self.reset_session().await;
-                    return Ok(ExecuteShellResult {
-                        stdout: String::new(),
-                        stderr: format!("Command timed out after {} ms", self.command_timeout_ms),
-                        exit_code: None,
-                        success: false,
-                    });
+                    return Ok(ExecuteShellResult::simple(
+                        String::new(),
+                        format!("Command timed out after {} ms", self.command_timeout_ms),
+                        None,
+                        false,
+                    ));
                 }
             }
         };
 
-        let (stdout, exit_code) = out_res?;
-        let (stderr, _) = err_res?;
-
+        let (stdout_raw, exit_code) = out_res?;
+        let (stderr_raw, _) = err_res?;
         let success = exit_code.map(|c| c == 0).unwrap_or(false);
+
+        let (stdout, stderr, output_truncated, warnings) =
+            crate::tools::execute::budget_command_output(&stdout_raw, &stderr_raw);
 
         Ok(ExecuteShellResult {
             stdout,
             stderr,
             exit_code,
             success,
+            output_truncated,
+            warnings,
         })
     }
 

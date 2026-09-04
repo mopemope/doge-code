@@ -15,11 +15,19 @@ use std::process::Command;
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MiB
 const DEFAULT_MAX_RESULTS: usize = 200;
 const HARD_MAX_RESULTS: usize = 2_000;
+/// Per-match text cap so a single minified line cannot dominate the budget.
+const MAX_MATCH_TEXT_CHARS: usize = 500;
+/// Default response budget in chars; serialized JSON must stay under the
+/// 8,000-char global truncation cap.
+pub const DEFAULT_SEARCH_BUDGET_CHARS: usize = 6_000;
+/// Rough per-result JSON overhead (path, line, punctuation, escaping).
+const PER_RESULT_OVERHEAD: usize = 40;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SearchTextOptions {
     pub max_results: Option<usize>,
     pub offset: Option<usize>,
+    pub response_budget_chars: Option<usize>,
 }
 
 impl Default for SearchTextOptions {
@@ -27,6 +35,7 @@ impl Default for SearchTextOptions {
         Self {
             max_results: Some(DEFAULT_MAX_RESULTS),
             offset: Some(0),
+            response_budget_chars: None,
         }
     }
 }
@@ -38,6 +47,7 @@ pub struct SearchTextResult {
     pub next_offset: Option<usize>,
     pub offset: usize,
     pub max_results: usize,
+    pub warnings: Vec<String>,
 }
 
 fn glob_search_root(pattern: &str) -> PathBuf {
@@ -87,6 +97,10 @@ pub fn tool_def() -> ToolDef {
                     "offset": {
                         "type": "integer",
                         "description": "Optional: Number of matches to skip before collecting results. Use with `max_results` for pagination."
+                    },
+                    "response_budget_chars": {
+                        "type": "integer",
+                        "description": "Optional: Approximate maximum characters for the response (default 6000). Excess results are dropped with `truncated` and a resumable `next_offset`."
                     }
                 },
                 "required": ["search_pattern", "file_glob"]
@@ -152,6 +166,10 @@ pub fn search_text_with_options(
     config: &AppConfig,
 ) -> Result<SearchTextResult> {
     let (max_results, offset) = normalize_options(options);
+    let budget = options
+        .response_budget_chars
+        .unwrap_or(DEFAULT_SEARCH_BUDGET_CHARS)
+        .max(200);
 
     let mut cmd = Command::new("rg");
     cmd.arg("--json").arg("-n").arg("-e").arg(search_pattern);
@@ -169,6 +187,7 @@ pub fn search_text_with_options(
                         next_offset: None,
                         offset,
                         max_results,
+                        warnings: Vec::new(),
                     });
                 }
             }
@@ -249,7 +268,39 @@ pub fn search_text_with_options(
     // Ensure child process has exited
     let _ = child.wait();
 
-    let next_offset = if truncated {
+    // Trim per-match text and enforce the response budget.
+    let mut warnings = Vec::new();
+    for (_, _, text) in results.iter_mut() {
+        if text.chars().count() > MAX_MATCH_TEXT_CHARS {
+            *text = format!(
+                "{}...[line truncated]",
+                crate::tools::budget::safe_take_chars(text, MAX_MATCH_TEXT_CHARS)
+            );
+        }
+    }
+    // Row cost = path + text + JSON overhead. Keep a running total so the
+    // pop loop stays O(n).
+    let row_cost = |row: &(PathBuf, usize, String)| -> usize {
+        row.0.to_string_lossy().chars().count() + row.2.chars().count() + PER_RESULT_OVERHEAD
+    };
+    let mut total: usize = results.iter().map(row_cost).sum();
+    let mut truncated = truncated || total > budget;
+    while results.len() > 1 && total > budget {
+        // Never pop the last row: an empty response with `truncated=true`
+        // would leave the model no resumable pointer. If a single row exceeds
+        // the budget, emit it anyway (already text-capped).
+        total = total.saturating_sub(row_cost(results.last().expect("non-empty")));
+        results.pop();
+        truncated = true;
+    }
+    if truncated && !results.is_empty() {
+        warnings.push(format!(
+            "results limited to fit ~{} chars; re-run with `offset` (next_offset) for more",
+            budget
+        ));
+    }
+
+    let next_offset = if truncated && !results.is_empty() {
         Some(offset.saturating_add(results.len()))
     } else {
         None
@@ -261,6 +312,7 @@ pub fn search_text_with_options(
         next_offset,
         offset,
         max_results,
+        warnings,
     })
 }
 
@@ -351,6 +403,7 @@ mod tests {
             SearchTextOptions {
                 max_results: Some(2),
                 offset: Some(0),
+                response_budget_chars: None,
             },
             &config,
         )
@@ -365,10 +418,112 @@ mod tests {
             SearchTextOptions {
                 max_results: Some(2),
                 offset: page1.next_offset,
+                response_budget_chars: None,
             },
             &config,
         )
         .unwrap();
         assert_eq!(page2.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_search_text_budget_limits_rows() {
+        let root = create_temp_dir();
+        // 200 matches, each ~60 chars of text -> ~12k+ chars unbounded.
+        let mut content = String::new();
+        for i in 0..200 {
+            content.push_str(&format!("needle in line {i} with some padding text\n"));
+        }
+        fs::write(root.join("data.txt"), content).unwrap();
+
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/*.txt", root_str);
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+
+        let result = search_text_with_options(
+            "needle",
+            Some(&file_glob),
+            SearchTextOptions {
+                max_results: Some(200),
+                offset: Some(0),
+                response_budget_chars: Some(3_000),
+            },
+            &config,
+        )
+        .unwrap();
+
+        assert!(result.truncated);
+        assert!(result.next_offset.is_some());
+        assert!(!result.warnings.is_empty());
+        let estimated: usize = result
+            .rows
+            .iter()
+            .map(|(p, _, t)| p.to_string_lossy().len() + t.len() + 40)
+            .sum();
+        assert!(estimated <= 3_000, "estimated size too large: {estimated}");
+    }
+
+    #[test]
+    fn test_search_text_single_oversized_row_still_returned() {
+        let root = create_temp_dir();
+        let long_line = format!("needle {}", "x".repeat(3_000));
+        fs::write(root.join("big.txt"), long_line).unwrap();
+
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/*.txt", root_str);
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+
+        // Budget far smaller than the single (text-capped) row: the response
+        // must still contain the row so the model gets a resumable result.
+        let result = search_text_with_options(
+            "needle",
+            Some(&file_glob),
+            SearchTextOptions {
+                max_results: Some(10),
+                offset: Some(0),
+                response_budget_chars: Some(200),
+            },
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1, "last row must survive the budget cut");
+        assert!(result.rows[0].2.contains("[line truncated]"));
+    }
+
+    #[test]
+    fn test_search_text_trims_long_lines() {
+        let root = create_temp_dir();
+        let long_line = format!("needle {}", "x".repeat(2_000));
+        fs::write(root.join("min.txt"), long_line).unwrap();
+
+        let root_str = root.to_str().unwrap();
+        let file_glob = format!("{}/*.txt", root_str);
+        let config = AppConfig {
+            project_root: root.clone(),
+            ..Default::default()
+        };
+
+        let result = search_text_with_options(
+            "needle",
+            Some(&file_glob),
+            SearchTextOptions {
+                max_results: Some(10),
+                offset: Some(0),
+                response_budget_chars: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0].2.chars().count() <= 520);
+        assert!(result.rows[0].2.contains("[line truncated]"));
     }
 }

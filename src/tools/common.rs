@@ -275,12 +275,12 @@ impl FsTools {
         if !self.is_command_allowed(command) {
             tracing::warn!("Command '{}' is not allowed", command);
             // Return a structured result indicating the command is not allowed
-            let result = execute::ExecuteBashResult {
-                stdout: String::new(),
-                stderr: format!("Command '{}' is not allowed", command),
-                exit_code: None,
-                success: false,
-            };
+            let result = execute::ExecuteBashResult::simple(
+                String::new(),
+                format!("Command '{}' is not allowed", command),
+                None,
+                false,
+            );
             return Ok(serde_json::to_string(&result)?);
         }
 
@@ -288,12 +288,8 @@ impl FsTools {
             Ok(result) => Ok(serde_json::to_string(&result)?),
             Err(e) => {
                 // Return a structured result with the error details
-                let result = execute::ExecuteBashResult {
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    exit_code: None,
-                    success: false,
-                };
+                let result =
+                    execute::ExecuteBashResult::simple(String::new(), e.to_string(), None, false);
                 Ok(serde_json::to_string(&result)?)
             }
         }
@@ -303,24 +299,20 @@ impl FsTools {
         // Check if the command is allowed
         if !self.is_command_allowed(command) {
             tracing::warn!("Command '{}' is not allowed", command);
-            let result = shell::ExecuteShellResult {
-                stdout: String::new(),
-                stderr: format!("Command '{}' is not allowed", command),
-                exit_code: None,
-                success: false,
-            };
+            let result = shell::ExecuteShellResult::simple(
+                String::new(),
+                format!("Command '{}' is not allowed", command),
+                None,
+                false,
+            );
             return Ok(serde_json::to_string(&result)?);
         }
 
         match self.shell_session.exec(command).await {
             Ok(result) => Ok(result),
             Err(e) => {
-                let result = shell::ExecuteShellResult {
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    exit_code: None,
-                    success: false,
-                };
+                let result =
+                    shell::ExecuteShellResult::simple(String::new(), e.to_string(), None, false);
                 Ok(serde_json::to_string(&result)?)
             }
         }

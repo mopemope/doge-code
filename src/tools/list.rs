@@ -46,7 +46,11 @@ pub fn tool_def() -> ToolDef {
 ///
 /// A vector of strings representing the file and directory paths.
 const DEFAULT_LIST_PAGE_SIZE: usize = 200;
-const DEFAULT_LIST_BUDGET: usize = 10_000;
+/// Must stay below the 8,000-char global truncation cap, including per-entry
+/// JSON overhead.
+const DEFAULT_LIST_BUDGET: usize = 6_000;
+/// Approximate serialized JSON overhead per entry (`{"path":"..","is_dir":..}`).
+const PER_ENTRY_OVERHEAD: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FsListMode {
@@ -195,16 +199,33 @@ pub fn fs_list(
 
     let mut entries = Vec::new();
     for entry in &files[cursor..end_index] {
-        if entry.path.len() > remaining_budget {
+        let entry_cost = entry.path.len() + PER_ENTRY_OVERHEAD;
+        if entry_cost > remaining_budget {
             warnings
                 .push("response budget reached; request next cursor for remaining entries".into());
             break;
         }
-        remaining_budget = remaining_budget.saturating_sub(entry.path.len());
+        remaining_budget = remaining_budget.saturating_sub(entry_cost);
         entries.push(entry.clone());
     }
 
-    let next_cursor = if end_index < total_entries {
+    // If the budget cut the page short, resume from the last emitted entry so
+    // no entries are skipped between pages. If even the first entry did not
+    // fit the budget, still emit it and advance the cursor — otherwise the
+    // client would re-request the same cursor forever.
+    let budget_cut_short = entries.len() < end_index - cursor;
+    if budget_cut_short && entries.is_empty() && end_index > cursor {
+        let entry = &files[cursor];
+        entries.push(entry.clone());
+        warnings.push(
+            "single entry exceeds response budget; emitting it anyway to keep pagination moving"
+                .into(),
+        );
+    }
+
+    let next_cursor = if budget_cut_short && !entries.is_empty() {
+        Some(cursor + entries.len())
+    } else if end_index < total_entries {
         Some(end_index)
     } else {
         None
@@ -272,6 +293,84 @@ mod tests {
         assert!(paths.contains(&format!("{root_str}/a")));
         assert!(paths.contains(&format!("{root_str}/a/b")));
         assert!(paths.contains(&format!("{root_str}/a/b/c.txt")));
+    }
+
+    #[test]
+    fn test_fs_list_budget_cut_resumes_without_skipping_entries() {
+        let root = create_temp_dir();
+        for i in 0..50 {
+            fs::write(root.join(format!("file_{i:03}.txt")), "").unwrap();
+        }
+
+        let root_str = root.to_str().unwrap();
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        let options = FsListOptions {
+            page_size: Some(50),
+            response_budget_chars: Some(600),
+            ..Default::default()
+        };
+
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let response = fs_list(
+                root_str,
+                Some(1),
+                None,
+                &config,
+                FsListOptions { cursor, ..options },
+            )
+            .unwrap();
+            let got: Vec<_> = response
+                .entries
+                .iter()
+                .map(|e| e.path.clone())
+                .filter(|p| !seen.insert(p.clone()))
+                .collect();
+            assert!(got.is_empty(), "duplicate/skipped entries: {got:?}");
+            pages += 1;
+            match response.next_cursor {
+                Some(next) if pages < 100 => cursor = Some(next),
+                _ => break,
+            }
+        }
+        // All 50 files (+ root dir entry) must be reachable via pagination.
+        assert!(seen.len() >= 51, "expected all entries, got {}", seen.len());
+        assert!(pages > 1, "budget should force multiple pages");
+    }
+
+    #[test]
+    fn test_fs_list_budget_too_small_for_entry_still_advances() {
+        let root = create_temp_dir();
+        fs::write(root.join("a_very_long_file_name_here.txt"), "").unwrap();
+        fs::write(root.join("b.txt"), "").unwrap();
+
+        let root_str = root.to_str().unwrap();
+        let config = crate::tools::test_utils::create_test_config_with_temp_dir();
+        // Budget smaller than a single entry's path + overhead.
+        let response = fs_list(
+            root_str,
+            Some(1),
+            None,
+            &config,
+            FsListOptions {
+                page_size: Some(2),
+                response_budget_chars: Some(50),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Must not return an empty page with a self-referencing cursor.
+        assert!(
+            !response.entries.is_empty(),
+            "empty page would loop forever on the same cursor"
+        );
+        if let Some(next) = response.next_cursor {
+            assert!(next > 0, "cursor must advance past the emitted entries");
+        }
+        assert!(!response.warnings.is_empty());
     }
 
     #[test]

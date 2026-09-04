@@ -504,8 +504,13 @@ async fn test_execute_shell_large_output() -> Result<()> {
     let res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&res_str)?;
 
     assert!(res.success);
-    assert!(res.stdout.len() > 10000); // Rough check
+    // Large output is budgeted (head + tail preserved) to stay under the
+    // global tool-output caps.
+    assert!(res.output_truncated);
+    assert!(!res.warnings.is_empty());
+    assert!(res.stdout.starts_with("line 1"));
     assert!(res.stdout.contains("line 10000"));
+    assert!(res.stdout.len() < 10_000);
 
     Ok(())
 }

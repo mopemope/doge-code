@@ -463,6 +463,7 @@ impl DogeMcpService {
             crate::tools::search_text::SearchTextOptions {
                 max_results: params.max_results.map(|v| v as usize),
                 offset: params.offset.map(|v| v as usize),
+                response_budget_chars: None,
             },
             &self.config,
         ) {

@@ -26,10 +26,93 @@ pub struct ApplyPatchResult {
     pub success: bool,
     /// 結果メッセージ
     pub message: String,
-    /// 元のファイル内容（成功時も失敗時も含まれる）
-    pub original_content: Option<String>,
-    /// 変更後のファイル内容（成功時のみ）
-    pub modified_content: Option<String>,
+    /// 対象ファイルのパス
+    pub file_path: String,
+    /// 成功時のみ: unified diff（超過時は先頭部分のみ返す）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// diffが予算で切詰められたかどうか
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diff_truncated: bool,
+    /// 成功時のみ: 追加行数
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub lines_added: u64,
+    /// 成功時のみ: 削除行数
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub lines_removed: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+impl ApplyPatchResult {
+    /// 失敗/エラー用の最小結果を生成する
+    pub fn failure(message: impl Into<String>, file_path: &str) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            file_path: file_path.to_string(),
+            diff: None,
+            diff_truncated: false,
+            lines_added: 0,
+            lines_removed: 0,
+        }
+    }
+
+    /// メッセージのみの成功結果（パッチ適用済み等、差分を伴わない成功）
+    pub fn success_with_message(message: impl Into<String>, file_path: &str) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            file_path: file_path.to_string(),
+            diff: None,
+            diff_truncated: false,
+            lines_added: 0,
+            lines_removed: 0,
+        }
+    }
+
+    /// 成功結果を生成する。unified diffを生成し、予算内に収める。
+    pub fn success_from_contents(
+        file_path: &str,
+        message: impl Into<String>,
+        original_content: &str,
+        modified_content: &str,
+    ) -> Self {
+        use crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS;
+        use crate::tools::budget::head_truncate;
+
+        let diff = diffy::create_patch(original_content, modified_content).to_string();
+        let (lines_added, lines_removed) = count_patch_lines(&diff);
+        let budgeted = head_truncate(&diff, DEFAULT_TOOL_BUDGET_CHARS);
+        Self {
+            success: true,
+            message: message.into(),
+            file_path: file_path.to_string(),
+            diff: Some(budgeted.text),
+            diff_truncated: budgeted.truncated,
+            lines_added,
+            lines_removed,
+        }
+    }
+}
+
+/// Count +/- lines in a unified diff, excluding the +++/--- headers.
+fn count_patch_lines(diff_text: &str) -> (u64, u64) {
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    for line in diff_text.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 // ===== ツール定義 =====
@@ -92,12 +175,10 @@ pub async fn apply_patch_with_recovery(
             if let Some(recovered) = attempt_recovery(&params, config, &e.to_string()).await? {
                 Ok(recovered)
             } else {
-                Ok(ApplyPatchResult {
-                    success: false,
-                    message: format!("Patch application failed: {}", e),
-                    original_content: None,
-                    modified_content: None,
-                })
+                Ok(ApplyPatchResult::failure(
+                    format!("Patch application failed: {}", e),
+                    &params.file_path,
+                ))
             }
         }
     }
@@ -134,32 +215,24 @@ async fn attempt_recovery(
             Some(
                 apply_patch_impl(new_params, config)
                     .await
-                    .unwrap_or_else(|e| ApplyPatchResult {
-                        success: false,
-                        message: format!("Adjusted patch failed to apply: {}", e),
-                        original_content: None,
-                        modified_content: None,
+                    .unwrap_or_else(|e| {
+                        ApplyPatchResult::failure(
+                            format!("Adjusted patch failed to apply: {}", e),
+                            &params.file_path,
+                        )
                     }),
             )
         }
-        FixResult::RequiresHumanIntervention { message } => Some(ApplyPatchResult {
-            success: false,
+        FixResult::RequiresHumanIntervention { message } => {
+            Some(ApplyPatchResult::failure(message, &params.file_path))
+        }
+        FixResult::Failed { reason } => Some(ApplyPatchResult::failure(reason, &params.file_path)),
+        // Recovery layer reports success without a diff (e.g. "patch already
+        // applied"); preserve the original success semantics.
+        FixResult::Success { message } => Some(ApplyPatchResult::success_with_message(
             message,
-            original_content: None,
-            modified_content: None,
-        }),
-        FixResult::Failed { reason } => Some(ApplyPatchResult {
-            success: false,
-            message: reason,
-            original_content: None,
-            modified_content: None,
-        }),
-        FixResult::Success { message } => Some(ApplyPatchResult {
-            success: true,
-            message,
-            original_content: None,
-            modified_content: None,
-        }),
+            &params.file_path,
+        )),
     };
 
     Ok(recovered)
@@ -197,35 +270,29 @@ async fn apply_patch_impl(
     let patch = match parse_patch(&patch_content) {
         Ok(patch) => patch,
         Err(e) => {
-            return Ok(ApplyPatchResult {
-                success: false,
-                message: format!("Failed to parse patch content: {}", e),
-                original_content: Some(original_content_raw),
-                modified_content: None,
-            });
+            return Ok(ApplyPatchResult::failure(
+                format!("Failed to parse patch content: {}", e),
+                &file_path,
+            ));
         }
     };
 
     // ===== 6. 空の変更チェック =====
     if is_empty_patch(&patch, &patch_content) {
-        return Ok(ApplyPatchResult {
-            success: false,
-            message: "Patch content is invalid or results in no changes.".to_string(),
-            original_content: Some(original_content_raw.clone()),
-            modified_content: Some(original_content_raw.clone()),
-        });
+        return Ok(ApplyPatchResult::failure(
+            "Patch content is invalid or results in no changes.",
+            &file_path,
+        ));
     }
 
     // ===== 7. パッチ適用 =====
     let patched_content_lf = match apply_patch_to_content(&original_content, &patch, path) {
         Ok(content) => content,
         Err(e) => {
-            return Ok(ApplyPatchResult {
-                success: false,
-                message: format!("Failed to apply patch: {}", e),
-                original_content: Some(original_content_raw),
-                modified_content: None,
-            });
+            return Ok(ApplyPatchResult::failure(
+                format!("Failed to apply patch: {}", e),
+                &file_path,
+            ));
         }
     };
 
@@ -248,12 +315,12 @@ async fn apply_patch_impl(
     verify_file_content(path, &patched_content).await?;
 
     // ===== 13. 成功結果の返却 =====
-    Ok(ApplyPatchResult {
-        success: true,
-        message: file_path,
-        original_content: Some(original_content_raw),
-        modified_content: Some(patched_content),
-    })
+    Ok(ApplyPatchResult::success_from_contents(
+        &file_path,
+        file_path.clone(),
+        &original_content_raw,
+        &patched_content,
+    ))
 }
 
 // ===== ユーティリティ関数群 =====
@@ -1119,7 +1186,7 @@ second line modified
     }
 
     #[tokio::test]
-    async fn test_apply_patch_returns_content_in_success_case() {
+    async fn test_apply_patch_returns_diff_in_success_case() {
         let original_content = "Hello, world!\nThis is the original file.\n";
         let modified_content = "Hello, Rust!\nThis is the modified file.\n";
 
@@ -1136,29 +1203,18 @@ second line modified
         assert!(result.success);
         assert!(result.message.contains(&file_path));
 
-        // Verify that content is returned in the success case (this was the fix)
-        assert!(
-            result.original_content.is_some(),
-            "Original content should be returned in success case"
-        );
-        assert!(
-            result.modified_content.is_some(),
-            "Modified content should be returned in success case"
-        );
-
-        if let Some(orig_content) = &result.original_content {
-            assert_eq!(
-                orig_content, original_content,
-                "Returned original content should match"
-            );
-        }
-
-        if let Some(mod_content) = &result.modified_content {
-            assert_eq!(
-                mod_content, modified_content,
-                "Returned modified content should match"
-            );
-        }
+        // Verify that a diff (not full contents) is returned in the success case
+        let diff = result
+            .diff
+            .as_ref()
+            .expect("Diff should be returned in success case");
+        assert!(diff.contains("-Hello, world!"));
+        assert!(diff.contains("+Hello, Rust!"));
+        assert!(!diff.contains("This is the original file.\nThis is the modified file."));
+        assert_eq!(result.file_path, file_path);
+        assert_eq!(result.lines_added, 2);
+        assert_eq!(result.lines_removed, 2);
+        assert!(!result.diff_truncated);
 
         let final_content = std::fs::read_to_string(file_path).unwrap();
         assert_eq!(final_content, modified_content);
@@ -1316,6 +1372,19 @@ second line modified
             std::fs::set_permissions(&file_path, perms).unwrap();
         }
     }
+    #[test]
+    fn test_success_with_message_shape() {
+        // The recovery layer's FixResult::Success (e.g. "patch already
+        // applied") must map to a successful result without a diff.
+        let result = ApplyPatchResult::success_with_message("patch already applied", "/tmp/x.rs");
+        assert!(result.success);
+        assert!(result.diff.is_none());
+        assert!(!result.diff_truncated);
+        assert_eq!(result.lines_added, 0);
+        assert_eq!(result.lines_removed, 0);
+        assert_eq!(result.message, "patch already applied");
+    }
+
     #[tokio::test]
     async fn test_apply_patch_fuzzy_context_success() {
         let original_content = "line1\nline2\nline3\n";
@@ -1333,10 +1402,8 @@ second line modified
 
         let result = apply_patch(params).await.unwrap();
         assert!(result.success, "Fuzzy patch application should succeed");
-        assert!(
-            result.modified_content.unwrap().contains("lineNew"),
-            "Content should be modified"
-        );
+        let diff = result.diff.as_ref().expect("Diff should be returned");
+        assert!(diff.contains("+lineNew"), "Content should be modified");
     }
 
     #[tokio::test]

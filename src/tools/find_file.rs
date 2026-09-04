@@ -52,6 +52,10 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
+/// Maximum number of matching paths returned. Beyond this, `truncated` is set
+/// and `total_matches` keeps counting so the model can narrow the pattern.
+pub const MAX_RESULTS: usize = 200;
+
 /// Arguments for the `find_file` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindFileArgs {
@@ -76,6 +80,12 @@ pub struct FindFileResult {
     /// If no files are found, this vector will be empty.
     /// The paths are guaranteed to be valid UTF-8 strings.
     pub files: Vec<String>,
+    /// Total number of matches found (may exceed `files.len()` when truncated).
+    #[serde(default)]
+    pub total_matches: usize,
+    /// Whether results were cut off by the per-response cap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Finds files in the project based on a filename or pattern.
@@ -100,6 +110,8 @@ pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFil
     if path.is_absolute() && path.is_file() {
         return Ok(FindFileResult {
             files: vec![args.filename],
+            total_matches: 1,
+            truncated: false,
         });
     }
 
@@ -172,7 +184,21 @@ pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFil
         }
     }
 
-    Ok(FindFileResult { files })
+    let total_matches = files.len();
+    if total_matches > MAX_RESULTS {
+        files.truncate(MAX_RESULTS);
+        return Ok(FindFileResult {
+            files,
+            total_matches,
+            truncated: true,
+        });
+    }
+
+    Ok(FindFileResult {
+        files,
+        total_matches,
+        truncated: false,
+    })
 }
 
 #[cfg(test)]
@@ -274,5 +300,31 @@ mod tests {
         let result = find_file(args, &config).await.unwrap();
 
         assert_eq!(result.files.len(), 2);
+        assert_eq!(result.total_matches, 2);
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn test_find_file_caps_results() {
+        let temp_dir = create_temp_dir();
+        let root = temp_dir.path();
+
+        for i in 0..MAX_RESULTS + 50 {
+            fs::write(root.join(format!("hit_{i:04}.txt")), "").unwrap();
+        }
+
+        let config = AppConfig {
+            project_root: root.to_path_buf(),
+            ..Default::default()
+        };
+
+        let args = FindFileArgs {
+            filename: "hit_".to_string(),
+        };
+        let result = find_file(args, &config).await.unwrap();
+
+        assert_eq!(result.files.len(), MAX_RESULTS);
+        assert_eq!(result.total_matches, MAX_RESULTS + 50);
+        assert!(result.truncated);
     }
 }

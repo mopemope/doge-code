@@ -36,6 +36,9 @@ impl MemoryTools {
     }
 
     pub async fn read_memory(&self, key: &str) -> Result<String> {
+        use crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS;
+        use crate::tools::budget::head_truncate;
+
         let path = self.get_memory_path(key);
         if !path.exists() {
             return Ok(format!("Memory '{}' not found.", key));
@@ -43,7 +46,8 @@ impl MemoryTools {
         let content = fs::read_to_string(path)
             .await
             .context("Failed to read memory file")?;
-        Ok(content)
+        let budgeted = head_truncate(&content, DEFAULT_TOOL_BUDGET_CHARS);
+        Ok(budgeted.text)
     }
 
     pub async fn write_memory(

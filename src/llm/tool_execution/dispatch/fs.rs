@@ -111,6 +111,10 @@ pub async fn search_text(
     let options = crate::tools::search_text::SearchTextOptions {
         max_results,
         offset,
+        response_budget_chars: args
+            .get("response_budget_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
     };
     match runtime
         .fs
@@ -121,6 +125,7 @@ pub async fn search_text(
             let next_offset = result.next_offset;
             let effective_offset = result.offset;
             let effective_max_results = result.max_results;
+            let warnings = result.warnings;
             let items: Vec<_> = result
                 .rows
                 .into_iter()
@@ -141,7 +146,8 @@ pub async fn search_text(
                     "returned": items.len(),
                     "truncated": truncated,
                     "next_offset": next_offset
-                }
+                },
+                "warnings": warnings
             });
             Ok(ToolOutput {
                 value: value.clone(),

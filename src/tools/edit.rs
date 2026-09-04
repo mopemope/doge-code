@@ -47,6 +47,9 @@ pub struct EditResult {
     pub message: String,
     pub diff: Option<String>,
     pub lines_edited: Option<u64>,
+    /// Whether the diff was trimmed to fit the response budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diff_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_lines: Option<Vec<usize>>,
 }
@@ -122,6 +125,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
                     ),
                     diff: None,
                     lines_edited: Some(0),
+                    diff_truncated: false,
                     candidate_lines: Some(already_applied_lines),
                 });
             }
@@ -132,6 +136,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
             message: "Target block not found in the file (within the specified range).".to_string(),
             diff: None,
             lines_edited: None,
+            diff_truncated: false,
             candidate_lines: None,
         });
     }
@@ -147,6 +152,7 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
             ),
             diff: None,
             lines_edited: None,
+            diff_truncated: false,
             candidate_lines: Some(matches.iter().map(|(_, line)| *line).collect()),
         });
     }
@@ -172,6 +178,8 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
     modified_content.push_str(&original_content[last_end..]);
 
     // 5. Generate diff for successful operation
+    // Budget the diff like `apply_patch` does so large edits stay under the
+    // global tool-output caps (line counting uses the full diff first).
     let diff = diffy::create_patch(&original_content, &modified_content);
     let diff_text = diff.to_string();
 
@@ -183,11 +191,17 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         .await
         .with_context(|| format!("Failed to write to file: {}", path.display()))?;
 
+    let budgeted_diff = crate::tools::budget::head_truncate(
+        &diff_text,
+        crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS,
+    );
+
     Ok(EditResult {
         success: true,
         message: "File updated successfully.".to_string(),
-        diff: Some(diff_text),
+        diff: Some(budgeted_diff.text),
         lines_edited: Some(lines_edited),
+        diff_truncated: budgeted_diff.truncated,
         candidate_lines: None,
     })
 }
