@@ -18,7 +18,7 @@ every tool result before it enters the conversation:
 | Tier | Limit | Tools |
 |---|---|---|
 | Read tier | 40,000 chars | `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read` |
-| Default tier | 8,000 chars | everything else (incl. `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, `execute_bash`, `execute_shell`) |
+| Default tier | 8,000 chars | everything else (incl. `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, `execute_process`, `execute_bash`, `execute_shell`) |
 
 Note: plan tools sit in the read tier even though `plan_write` echoes data back;
 this is historical.
@@ -57,6 +57,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 
 | Tool | Self-budget |
 |---|---|
+| `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat |
 | `execute_bash` / `execute_shell` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`) |
 | `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars |
 | `apply_patch` | unified diff only (no full-content echo), diff capped at 6,000 chars |
@@ -88,6 +89,35 @@ fix these before generalizing the contract to more tools:
 Resolved gaps (kept here for history): `apply_patch` now returns only the diff
 plus line statistics (no `original_content`/`modified_content` echo), and
 truncation is JSON-safe (`truncate_tool_output` budgets string fields in-place).
+
+## `execute_process` result shape
+
+`execute_process` returns a structured `ProcessResult` (all in the default
+8,000-char tier):
+
+```json
+{
+  "ok": true,
+  "success": true,
+  "status": "completed",
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "...",
+  "output_truncated": false,
+  "warnings": []
+}
+```
+
+- `status`: `completed` | `timed_out` | `policy_denied` | `spawn_failed`
+  (snake_case). Exit non-zero is `completed` with `success: false`;
+  only policy/timeout/spawn failures change `status`.
+- Invariant: `ok == success`. Policy denials, timeouts, and spawn failures
+  all return `ok: false` / `success: false` / `is_success: false` with a
+  structured `error` message (never a bare `Err` with no LLM-visible reason).
+- Cancellation is NOT a normal result: it propagates as
+  `LlmErrorKind::Cancelled` to the agent loop after terminating the process
+  tree.
+- Environment variable values are never echoed in results, summaries, or logs.
 
 ## Sub-agent (`task` tool)
 

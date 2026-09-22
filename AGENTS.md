@@ -16,6 +16,7 @@ Run the narrowest check first, then broaden:
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | CLI entry point (clap), mode wiring |
+| `src/execution/` | Structured execution core: `policy.rs` (allow/deny, cwd/env, legacy migration), `process.rs` (shell-free spawn, timeout, cancellation), `lifecycle.rs` (Unix process groups, reap), `output.rs` (bounded capture, budgets) |
 | `src/exec.rs` | Non-interactive `exec` orchestration |
 | `src/llm/` | OpenAI-compatible client, agent loop, tool dispatch |
 | `src/llm/tool_def.rs` | Registry of tools exposed to the LLM (`default_tools_def`) |
@@ -26,7 +27,7 @@ Run the narrowest check first, then broaden:
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
 | `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
 | `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
-| `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets |
+| `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
@@ -82,6 +83,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - Large outputs (file reads, listings, repomap results) must support summary mode + `response_budget_chars` budgeting. Follow the pattern in `src/tools/read.rs`.
 - Global caps (`src/llm/message_utils.rs`): 8,000 chars default, 40,000 chars only for `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read`. Everything else — including `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, bash/shell — is 8,000.
 - The global truncator is JSON-safe (it budgets string fields in-place rather than slicing the serialized payload), but it is a safety net only: tools must keep their own output under the cap using `src/tools/budget.rs` helpers (bash/shell 6k head+tail, `apply_patch` diff-only, `find_file` 200 paths, `read_memory` 6k) or `response_budget_chars`.
+- Execution changes belong in `src/execution/` (`policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
 
 ## Testing Guidelines
 
@@ -92,7 +94,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 ## Known Pitfalls
 
-- Two workflow formats coexist: `.doge/workflows/*.yml` (shell commands, run by the `run_workflow` tool in `src/tools/workflow.rs`) and `.doge/workflows/*.md` (LLM-executed steps, run by the CLI `run` subcommand via `src/features/workflow.rs`). Keep both in mind; do not "fix" one to match the other without checking callers.
+- Two workflow formats coexist: `.doge/workflows/*.yml` (shell `run:` steps and structured `program:`/`args:` steps, run by the `run_workflow` tool in `src/tools/workflow.rs`) and `.doge/workflows/*.md` (LLM-executed steps, run by the CLI `run` subcommand via `src/features/workflow.rs`). Keep both in mind; do not "fix" one to match the other without checking callers.
 - `fs_read` accepts both `start_line` (legacy) and `cursor` (preferred, 1-based). New code should use `cursor`. Note `search_repomap`'s cursor is 0-based — the two conventions currently differ.
 - `.doge/`, `target/`, and agent-generated files (`GEMINI.md`, `QWEN.md`, etc.) are excluded from RepoMap via `.dogeignore`.
 - Workflow files and session state under `.doge/` are project-local; never commit them.
@@ -109,7 +111,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 ## Configuration & Secrets
 
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp]`, `[watch]`, `[[mcp_servers]]` — the MCP servers key is an array of tables).
+- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp]`, `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables).
 - Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
 - Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
 

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
 use super::mcp::PartialMcpServerConfig;
 
@@ -30,6 +31,7 @@ pub struct FileConfig {
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
+    pub execution: Option<PartialExecutionConfig>,
 }
 
 pub fn get_default_config_content() -> String {
@@ -86,8 +88,16 @@ resume = false
 rewrite_timeout_sec = 30
 command_timeout_ms = 300000
 
-# Allowed commands for execute_bash tool
+# Allowed commands for execute_bash tool (deprecated; prefer [execution])
 # allowed_commands = ["git", "ls", "cat", "grep", "find"]
+
+# Structured execution policy. When [execution] is absent, legacy
+# `allowed_commands` is used as a fallback.
+# [execution]
+# mode = "allowlist"  # unrestricted / allowlist / deny
+# allowed_programs = ["cargo", "rustc", "git", "rg"]
+# allow_shell = false
+# allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
 
 # Allowed paths for file access
 # allowed_paths = ["/tmp", "/home/user/project"]

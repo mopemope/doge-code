@@ -94,7 +94,8 @@ project_instructions_file = "PROJECT.md"
 - `fs_write`: Create or overwrite files
 - `fs_list`: List directory contents with pagination
 - `find_file`: Search files by glob pattern
-- `execute_bash`: Execute shell commands (with safety warnings)
+- `execute_process`: Run a program directly without a shell (preferred for builds, tests, git)
+- `execute_bash`: Shell escape hatch — use only when pipes/redirects/builtins are genuinely required (disable with `[execution] allow_shell = false`)
 
 ### Code Analysis Tools
 - `search_repomap`: Search parsed code symbols with advanced filtering
@@ -120,7 +121,7 @@ project_instructions_file = "PROJECT.md"
 
 ### Advanced Tools
 - `undo`: Revert the last file modification (edit or write)
-- `execute_shell`: Persistent shell session for stateful command execution
+- `execute_shell`: Persistent shell session for stateful command execution (escape hatch for persistent cwd/env/builtins; disable with `[execution] allow_shell = false`)
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
 - `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
@@ -382,6 +383,68 @@ ai_comment_pattern = "// AI!:"
 # transport = "stdio"            # "stdio" or "http"
 # address = "path/to/server --arg1"  # stdio: command line; http: URL
 # enabled = true
+```
+
+### Execution Policy (`[execution]`)
+
+Structured execution keeps normal commands out of the shell, so shell
+injection strings can never become a security boundary:
+
+```toml
+[execution]
+# unrestricted / allowlist / deny
+mode = "allowlist"
+allowed_programs = ["cargo", "rustc", "git", "rg"]
+# Arbitrary shell syntax is substantially more powerful than execute_process.
+allow_shell = false
+allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
+```
+
+- `execute_process` takes `program` + `args` separately and spawns the
+  program directly (never `bash -c`). `args: ["hello; touch /tmp/x"]` is one
+  literal argument — `touch` never runs.
+- `mode = "allowlist"` matches executables exactly: `allowed_programs =
+  ["cargo"]` allows `program = "cargo"` only — not `./cargo`, `/tmp/cargo`,
+  or `cargo;rm`. Absolute paths must be listed explicitly to be allowed.
+- `execute_process.cwd` must resolve under the project root or
+  `allowed_paths` (canonicalized, symlink-safe).
+- In allowlist mode only `allowed_env` keys can be overridden; `PATH` and
+  friends (`LD_PRELOAD`, `GIT_SSH_COMMAND`, …) cannot be swapped by the LLM.
+  Env values are never logged.
+- `execute_process.timeout_ms` can only shrink the run; the effective timeout
+  is `min(request, command_timeout_ms)` (`command_timeout_ms = 0` keeps the
+  historical unlimited semantics).
+- `allow_shell = false` denies both `execute_bash` and `execute_shell` with a
+  structured `policy_denied` result.
+- Legacy `allowed_commands` (deprecated) is used only when `[execution]` is
+  absent (a bare `[execution]` table with no fields does not count as
+  configured). Empty means unrestricted-legacy (with a one-time warning);
+  non-empty entries are parsed as simple `program + arg-prefix` commands —
+  shell operators (`;`, `&&`, `||`, `|`, `>`, `$()`, backticks, newlines, …)
+  are denied for both `execute_bash` and `execute_shell`. Safe simple
+  `execute_bash` commands run shell-free via the new runner; safe simple
+  `execute_shell` commands still run in the persistent session (so
+  `cd`/`export` state is preserved) but never with shell syntax attached.
+- Adding any `[execution]` field makes it authoritative and disables the
+  legacy fallback entirely (with a warning when both are set).
+- Timeouts and agent cancellation terminate the whole process tree on
+  Unix (SIGTERM → grace period → SIGKILL to the process group, then reap);
+  other platforms kill and reap the direct child.
+
+### Workflow Files
+
+`.doge/workflows/*.yml` steps support two shapes — exactly one per step:
+
+```yaml
+steps:
+  # Structured step (process policy applies, no shell)
+  - name: Test
+    program: cargo
+    args: [test, --workspace]
+    # optional: cwd, env, timeout_ms
+  # Shell step (allow_shell policy applies)
+  - name: Lint
+    run: cargo clippy --all-targets | head -50
 ```
 
 ## 🧪 Development

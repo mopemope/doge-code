@@ -125,6 +125,59 @@ fn test_load_file_config_creates_default() {
 }
 
 #[test]
+fn test_execution_merge_project_wins() {
+    let file = PartialExecutionConfig {
+        mode: Some(ExecutionMode::Allowlist),
+        allowed_programs: Some(vec!["cargo".to_string()]),
+        allow_shell: Some(false),
+        allowed_env: None,
+    };
+    let project = PartialExecutionConfig {
+        mode: None,
+        allowed_programs: Some(vec!["cargo".to_string(), "git".to_string()]),
+        allow_shell: None,
+        allowed_env: Some(vec!["RUST_BACKTRACE".to_string()]),
+    };
+    let merged = merge_execution(Some(&file), Some(&project)).expect("merged");
+    // Project list replaces global list (documented precedence).
+    assert_eq!(
+        merged.allowed_programs,
+        Some(vec!["cargo".to_string(), "git".to_string()])
+    );
+    assert_eq!(merged.mode, Some(ExecutionMode::Allowlist));
+    assert_eq!(merged.allow_shell, Some(false));
+
+    // Resolved config applies the merge.
+    let mut cfg = ExecutionConfig::default();
+    cfg.apply_partial(&merged);
+    assert_eq!(cfg.mode, ExecutionMode::Allowlist);
+    assert_eq!(
+        cfg.allowed_programs,
+        vec!["cargo".to_string(), "git".to_string()]
+    );
+    assert!(!cfg.allow_shell);
+}
+
+#[test]
+fn test_execution_config_parses_toml() {
+    let toml_str = r#"
+        [execution]
+        mode = "allowlist"
+        allowed_programs = ["cargo", "git"]
+        allow_shell = false
+        allowed_env = ["RUST_BACKTRACE"]
+    "#;
+    let cfg: FileConfig = toml::from_str(toml_str).expect("parse execution config");
+    let exec = cfg.execution.expect("execution section");
+    assert_eq!(exec.mode, Some(ExecutionMode::Allowlist));
+    assert_eq!(
+        exec.allowed_programs,
+        Some(vec!["cargo".to_string(), "git".to_string()])
+    );
+    assert_eq!(exec.allow_shell, Some(false));
+}
+
+#[test]
 fn test_file_config_ignores_unknown_fields() {
     let toml_str = r#"
         [llm]

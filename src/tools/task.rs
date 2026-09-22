@@ -99,11 +99,21 @@ mod tests {
             assert!(
                 !matches!(
                     *tool,
-                    "fs_write" | "edit" | "apply_patch" | "execute_bash" | "execute_shell" | "undo"
+                    "fs_write"
+                        | "edit"
+                        | "apply_patch"
+                        | "execute_bash"
+                        | "execute_process"
+                        | "execute_shell"
+                        | "undo"
                 ),
                 "{tool} must not be available to the sub-agent"
             );
         }
+        assert!(
+            !SUBAGENT_ALLOWED_TOOLS.contains(&"execute_process"),
+            "execute_process must stay out of the read-only sub-agent"
+        );
     }
 
     #[test]

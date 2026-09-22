@@ -13,6 +13,7 @@ pub mod error;
 pub mod diff_review;
 pub mod error_recovery;
 pub mod exec;
+pub mod execution;
 pub mod features;
 pub mod hooks;
 pub mod llm;

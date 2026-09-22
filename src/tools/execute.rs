@@ -39,35 +39,11 @@ impl ExecuteBashResult {
 
 /// Apply the combined output budget to stdout/stderr, preserving the head and
 /// tail of each stream. Returns the budgeted streams plus a truncation flag.
+///
+/// Shared implementation lives in `crate::execution::output`; this wrapper
+/// keeps the existing import path working.
 pub fn budget_command_output(stdout: &str, stderr: &str) -> (String, String, bool, Vec<String>) {
-    use crate::tools::budget::{DEFAULT_TOOL_BUDGET_CHARS, head_tail_truncate};
-
-    let budget = DEFAULT_TOOL_BUDGET_CHARS;
-    let total = stdout.chars().count() + stderr.chars().count();
-    if total <= budget {
-        return (stdout.to_string(), stderr.to_string(), false, Vec::new());
-    }
-
-    let (stdout_budget, stderr_budget) = if stderr.is_empty() {
-        (budget, 0)
-    } else {
-        let out = budget * 7 / 10;
-        (out, budget - out)
-    };
-
-    let out = head_tail_truncate(stdout, stdout_budget.max(200));
-    let err = head_tail_truncate(stderr, stderr_budget.max(200));
-    let mut warnings = vec![format!(
-        "command output trimmed to ~{} chars (head and tail preserved); refine the command (e.g. pipe to `head`, `tail`, or `grep`) to see more",
-        budget
-    )];
-    if out.truncated {
-        warnings.push("stdout was truncated".to_string());
-    }
-    if err.truncated {
-        warnings.push("stderr was truncated".to_string());
-    }
-    (out.text, err.text, true, warnings)
+    crate::execution::output::budget_command_output(stdout, stderr)
 }
 
 pub fn tool_def() -> ToolDef {
@@ -75,7 +51,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "execute_bash".to_string(),
-            description: "Executes a STATELESS bash command in project root. No persistent env/cwd. Use for build, test, ls. For stateful sequences, use `execute_shell`.".to_string(),
+            description: "Executes a stateless shell command (legacy/shell escape hatch). Prefer `execute_process` for normal builds, tests, git, and other single-program commands. Use this only when shell syntax such as pipes, redirects, or shell builtins is genuinely required. For stateful sequences, use `execute_shell`.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",

@@ -42,6 +42,47 @@ pub async fn task(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result
     })
 }
 
+pub async fn execute_process(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::execution::ExecuteProcessParams = serde_json::from_value(args.clone())
+        .map_err(|e| anyhow!("invalid execute_process args: {e}"))?;
+    let program = params.program.clone();
+    let arg_count = params.args.len();
+    match runtime
+        .fs
+        .execute_process(params, runtime.cancel_token.clone())
+        .await
+    {
+        Ok(output_str) => {
+            let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
+                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+            let success = value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Invariant: `ok == success`.
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("ok".to_string(), serde_json::Value::Bool(success));
+            }
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: success,
+                result_summary: format!(
+                    "Process '{}' ({} args) finished with status {}",
+                    program, arg_count, status
+                ),
+            })
+        }
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
 pub async fn execute_bash(
     runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,
@@ -51,16 +92,18 @@ pub async fn execute_bash(
         Ok(output_str) => {
             let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
                 .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+            let success = value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Invariant: `ok == success` (a failing command is not `ok`).
             if let Some(obj) = value.as_object_mut() {
-                obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+                obj.insert("ok".to_string(), serde_json::Value::Bool(success));
             }
             let exit_code = value.get("exit_code").and_then(|v| v.as_i64());
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: value
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                is_success: success,
                 result_summary: format!(
                     "Command '{}' finished with exit code {:?}",
                     command, exit_code
@@ -80,16 +123,18 @@ pub async fn execute_shell(
         Ok(output_str) => {
             let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
                 .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+            let success = value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Invariant: `ok == success`.
             if let Some(obj) = value.as_object_mut() {
-                obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+                obj.insert("ok".to_string(), serde_json::Value::Bool(success));
             }
             let exit_code = value.get("exit_code").and_then(|v| v.as_i64());
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: value
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                is_success: success,
                 result_summary: format!(
                     "Shell command '{}' finished with exit code {:?}",
                     command, exit_code

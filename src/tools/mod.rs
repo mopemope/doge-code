@@ -17,6 +17,7 @@ pub mod find_file;
 pub mod list;
 pub mod memory;
 pub mod plan;
+pub mod process;
 pub mod read;
 pub mod read_many;
 pub mod remote_tools;

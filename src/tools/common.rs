@@ -10,7 +10,6 @@ use crate::tools::read_many;
 use crate::tools::remote_tools::RemoteToolManager;
 use crate::tools::search_repomap;
 use crate::tools::search_text;
-use crate::tools::security::SecurityChecker;
 use crate::tools::session_manager::SessionManagerWrapper;
 use crate::tools::shell::{self, SharedShellSession};
 use crate::tools::write;
@@ -31,7 +30,7 @@ pub struct FsTools {
     session_manager_wrapper: SessionManagerWrapper,
     pub config: Arc<AppConfig>,
     remote_tool_manager: RemoteToolManager,
-    security_checker: SecurityChecker,
+    execution_policy: crate::execution::ExecutionPolicy,
     pub context_manager: Arc<RwLock<ContextManager>>,
     pub undo_stack: Arc<RwLock<crate::tools::undo::UndoStack>>,
     pub shell_session: SharedShellSession,
@@ -53,7 +52,7 @@ impl FsTools {
             session_manager_wrapper: SessionManagerWrapper::new(None),
             config: config.clone(),
             remote_tool_manager: RemoteToolManager::new(config.clone()),
-            security_checker: SecurityChecker::new(config.clone()),
+            execution_policy: crate::execution::ExecutionPolicy::new(config.clone()),
             undo_stack: Arc::new(RwLock::new(crate::tools::undo::UndoStack::new())),
             shell_session: SharedShellSession::new(
                 config.project_root.clone(),
@@ -160,8 +159,25 @@ impl FsTools {
         &self.session_manager_wrapper
     }
 
+    /// Legacy shell-gate compatibility shim (used by tests).
+    ///
+    /// Backed by `ExecutionPolicy`: under the deprecated `allowed_commands`
+    /// fallback, shell operators/expansions deny the command instead of
+    /// passing a prefix match. Under the new `[execution]` policy this only
+    /// reflects whether shell execution itself is enabled (`allow_shell`),
+    /// NOT whether any particular command string is safe — do not reuse this
+    /// as a security check for new code. Prefer structured `execute_process`.
     pub fn is_command_allowed(&self, command: &str) -> bool {
-        self.security_checker.is_command_allowed(command)
+        if self.config.allowed_commands.is_empty() && !self.config.execution_configured {
+            return true;
+        }
+        self.execution_policy
+            .check_legacy_shell_command(command)
+            .is_ok()
+    }
+
+    pub fn execution_policy(&self) -> &crate::execution::ExecutionPolicy {
+        &self.execution_policy
     }
 
     /// Update context with accessed file
@@ -270,18 +286,69 @@ impl FsTools {
         }
     }
 
+    /// Structured process execution (no shell). Returns the serialized
+    /// `ProcessResult` JSON (with `ok == success`).
+    pub async fn execute_process(
+        &self,
+        params: crate::execution::ExecuteProcessParams,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        crate::execution::warn_if_dual_config(
+            self.config.execution_configured,
+            !self.config.allowed_commands.is_empty(),
+        );
+        match crate::execution::run_process(params.into_request(), &self.config, cancel).await {
+            Ok(result) => Ok(serde_json::to_string(&result.to_json())?),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
-        // Check if the command is allowed
-        if !self.is_command_allowed(command) {
-            tracing::warn!("Command '{}' is not allowed", command);
-            // Return a structured result indicating the command is not allowed
-            let result = execute::ExecuteBashResult::simple(
-                String::new(),
-                format!("Command '{}' is not allowed", command),
-                None,
-                false,
-            );
-            return Ok(serde_json::to_string(&result)?);
+        crate::execution::warn_if_dual_config(
+            self.config.execution_configured,
+            !self.config.allowed_commands.is_empty(),
+        );
+        // Policy gate (shell on/off + legacy allowlist without shell bypass).
+        match self.execution_policy.check_legacy_shell_command(command) {
+            Err(denial) => {
+                tracing::warn!("Command denied by execution policy: {}", denial.message());
+                let result = execute::ExecuteBashResult::simple(
+                    String::new(),
+                    denial.message(),
+                    None,
+                    false,
+                );
+                return Ok(serde_json::to_string(&result)?);
+            }
+            Ok(Some(fast_req)) => {
+                // Safe simple command: run without `bash -c` via the new runner.
+                match crate::execution::run_process(fast_req, &self.config, None).await {
+                    Ok(res) => {
+                        let legacy = execute::ExecuteBashResult {
+                            stdout: res.stdout,
+                            stderr: res.stderr,
+                            exit_code: res.exit_code,
+                            success: res.success,
+                            output_truncated: res.output_truncated,
+                            warnings: res.warnings,
+                        };
+                        return Ok(serde_json::to_string(&legacy)?);
+                    }
+                    Err(e) => {
+                        if e.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
+                            return Err(e);
+                        }
+                        let result = execute::ExecuteBashResult::simple(
+                            String::new(),
+                            e.to_string(),
+                            None,
+                            false,
+                        );
+                        return Ok(serde_json::to_string(&result)?);
+                    }
+                }
+            }
+            Ok(None) => {}
         }
 
         match execute::execute_bash(command, &self.config).await {
@@ -296,15 +363,24 @@ impl FsTools {
     }
 
     pub async fn execute_shell(&self, command: &str) -> Result<String> {
-        // Check if the command is allowed
-        if !self.is_command_allowed(command) {
-            tracing::warn!("Command '{}' is not allowed", command);
-            let result = shell::ExecuteShellResult::simple(
-                String::new(),
-                format!("Command '{}' is not allowed", command),
-                None,
-                false,
+        crate::execution::warn_if_dual_config(
+            self.config.execution_configured,
+            !self.config.allowed_commands.is_empty(),
+        );
+        // Single gate for both policies: shell on/off, plus — under the
+        // legacy `allowed_commands` fallback — only provably-simple matching
+        // commands run. A `cargo …; rm …` string must not pass on a `cargo`
+        // prefix, so shell operators/expansions are denied there just like
+        // for `execute_bash`. The fast-path conversion (if any) is
+        // intentionally unused: the command runs in the persistent shell
+        // session to preserve `cd`/`export`/state.
+        if let Err(denial) = self.execution_policy.check_legacy_shell_command(command) {
+            tracing::warn!(
+                "Shell command denied by execution policy: {}",
+                denial.message()
             );
+            let result =
+                shell::ExecuteShellResult::simple(String::new(), denial.message(), None, false);
             return Ok(serde_json::to_string(&result)?);
         }
 

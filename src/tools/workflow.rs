@@ -14,7 +14,20 @@ pub struct Workflow {
 #[derive(Debug, Deserialize)]
 pub struct WorkflowStep {
     pub name: String,
-    pub run: String,
+    /// Legacy shell step (`run: ...`). Subject to `execution.allow_shell`.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Structured step (`program: ...`). Subject to the process policy.
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 pub async fn run_workflow(
@@ -66,29 +79,71 @@ pub async fn run_workflow(
 
     for step in workflow.steps {
         output.push_str(&format!("Step: {}\n", step.name));
-        info!("Running workflow step: {} ({})", step.name, step.run);
-
-        let result = fs_tools.execute_bash(&step.run).await?;
-
-        // execute_bash returns a JSON string Result
-        // We need to parse it to check success.
-        let exec_result: crate::tools::execute::ExecuteBashResult = serde_json::from_str(&result)?;
-
-        if !exec_result.success {
-            output.push_str(&format!(
-                "  Status: FAILED\n  Error: {}\n",
-                exec_result.stderr
-            ));
-            anyhow::bail!(
-                "Workflow step '{}' failed: {}",
-                step.name,
-                exec_result.stderr
-            );
-        } else {
-            output.push_str(&format!(
-                "  Status: SUCCESS\n  Output: {}\n",
-                exec_result.stdout.trim()
-            ));
+        match (&step.run, &step.program) {
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "Workflow step '{}' specifies both `run` and `program`; use exactly one",
+                    step.name
+                );
+            }
+            (None, None) => {
+                anyhow::bail!(
+                    "Workflow step '{}' specifies neither `run` nor `program`",
+                    step.name
+                );
+            }
+            (Some(run), None) => {
+                info!("Running workflow step: {} ({})", step.name, run);
+                let result = fs_tools.execute_bash(run).await?;
+                let exec_result: crate::tools::execute::ExecuteBashResult =
+                    serde_json::from_str(&result)?;
+                if !exec_result.success {
+                    output.push_str(&format!(
+                        "  Status: FAILED\n  Error: {}\n",
+                        exec_result.stderr
+                    ));
+                    anyhow::bail!(
+                        "Workflow step '{}' failed: {}",
+                        step.name,
+                        exec_result.stderr
+                    );
+                } else {
+                    output.push_str(&format!(
+                        "  Status: SUCCESS\n  Output: {}\n",
+                        exec_result.stdout.trim()
+                    ));
+                }
+            }
+            (None, Some(program)) => {
+                info!(
+                    "Running workflow step: {} ({} {:?})",
+                    step.name, program, step.args
+                );
+                let params = crate::execution::ExecuteProcessParams {
+                    program: program.clone(),
+                    args: step.args.clone(),
+                    cwd: step.cwd.clone(),
+                    env: step.env.clone(),
+                    timeout_ms: step.timeout_ms,
+                };
+                let result = fs_tools.execute_process(params, None).await?;
+                let exec_result: crate::execution::ProcessResult = serde_json::from_str(&result)?;
+                if !exec_result.success {
+                    let err = exec_result.error.unwrap_or_default();
+                    let detail = if exec_result.stderr.is_empty() {
+                        err.clone()
+                    } else {
+                        exec_result.stderr.clone()
+                    };
+                    output.push_str(&format!("  Status: FAILED\n  Error: {detail}\n"));
+                    anyhow::bail!("Workflow step '{}' failed: {err}", step.name);
+                } else {
+                    output.push_str(&format!(
+                        "  Status: SUCCESS\n  Output: {}\n",
+                        exec_result.stdout.trim()
+                    ));
+                }
+            }
         }
     }
 
@@ -233,6 +288,147 @@ steps:
                 .contains("Invalid workflow name")
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_structured_success() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+
+        let workflow_content = r#"
+name: Structured Workflow
+steps:
+  - name: Echo
+    program: echo
+    args: ["hello"]
+"#;
+        tokio::fs::write(workflows_dir.join("structured.yml"), workflow_content).await?;
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        let result = run_workflow("structured", &project_root, &fs_tools).await?;
+        assert!(result.contains("Status: SUCCESS"));
+        assert!(result.contains("hello"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_structured_failure() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+
+        let workflow_content = r#"
+name: Structured Fail
+steps:
+  - name: Fail
+    program: bash
+    args: ["-c", "exit 2"]
+"#;
+        tokio::fs::write(workflows_dir.join("sfail.yml"), workflow_content).await?;
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        let result = run_workflow("sfail", &project_root, &fs_tools).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Workflow step 'Fail' failed")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_mixed_step_is_error() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+
+        let workflow_content = r#"
+name: Mixed
+steps:
+  - name: Bad
+    run: echo hi
+    program: echo
+"#;
+        tokio::fs::write(workflows_dir.join("mixed.yml"), workflow_content).await?;
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        let result = run_workflow("mixed", &project_root, &fs_tools).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("both `run` and `program`")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_shell_disabled_but_structured_allowed() -> Result<()> {
+        use crate::config::{ExecutionConfig, ExecutionMode};
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+
+        let shell_wf = r#"
+name: Shell
+steps:
+  - name: S
+    run: echo hi
+"#;
+        tokio::fs::write(workflows_dir.join("sh.yml"), shell_wf).await?;
+        let proc_wf = r#"
+name: Proc
+steps:
+  - name: P
+    program: echo
+    args: ["hi"]
+"#;
+        tokio::fs::write(workflows_dir.join("pr.yml"), proc_wf).await?;
+
+        let exec = ExecutionConfig {
+            mode: ExecutionMode::Allowlist,
+            allowed_programs: vec!["echo".to_string()],
+            allow_shell: false,
+            ..ExecutionConfig::default()
+        };
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            execution: exec,
+            execution_configured: true,
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+
+        // Legacy shell step is denied under the policy.
+        let shell_out = run_workflow("sh", &project_root, &fs_tools).await;
+        assert!(shell_out.is_err(), "shell step should be denied");
+        // Structured step runs fine under the same policy.
+        let proc_out = run_workflow("pr", &project_root, &fs_tools).await?;
+        assert!(proc_out.contains("Status: SUCCESS"));
         Ok(())
     }
 }

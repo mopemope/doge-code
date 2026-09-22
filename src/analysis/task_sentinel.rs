@@ -48,7 +48,13 @@ impl TaskSentinel {
         let default_is_progress = success
             && matches!(
                 name,
-                "fs_write" | "edit" | "apply_patch" | "undo" | "execute_bash"
+                "fs_write"
+                    | "edit"
+                    | "apply_patch"
+                    | "undo"
+                    | "execute_bash"
+                    | "execute_process"
+                    | "execute_shell"
             );
         let is_progress = made_progress.unwrap_or(default_is_progress);
 
@@ -130,6 +136,23 @@ mod tests {
         // 1 step after write - no warning
         sentinel.record_tool_call("fs_read", true);
         assert!(sentinel.check_stalled().is_none());
+    }
+
+    #[test]
+    fn test_execute_process_counts_as_progress() {
+        let mut sentinel = TaskSentinel::new();
+        for _ in 0..14 {
+            sentinel.record_tool_call("fs_read", true);
+        }
+        // Successful execute_process resets the stall counter like execute_bash.
+        sentinel.record_tool_call("execute_process", true);
+        assert!(sentinel.check_stalled().is_none());
+        // Failed processes are not progress.
+        let mut sentinel2 = TaskSentinel::new();
+        for _ in 0..15 {
+            sentinel2.record_tool_call("execute_process", false);
+        }
+        assert!(sentinel2.check_stalled().is_some());
     }
 
     #[test]

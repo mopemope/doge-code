@@ -43,6 +43,7 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
             "search_repomap" => analysis::search_repomap(runtime, &args_val).await,
 
             // Tools and helpers
+            "execute_process" => tools::execute_process(runtime, &args_val).await,
             "execute_bash" => tools::execute_bash(runtime, &args_val).await,
             "execute_shell" => tools::execute_shell(runtime, &args_val).await,
             "edit" => tools::edit(runtime, &args_val).await,
@@ -217,6 +218,170 @@ mod tests {
             "execute_shell(nonexistent command) should be marked as failure"
         );
         assert_ne!(output.value["exit_code"], 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_is_registered() {
+        let names: Vec<String> = crate::llm::tool_def::default_tools_def()
+            .iter()
+            .map(|def| def.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"execute_process".to_string()),
+            "tools: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_success_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_proc_ok".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_process".to_string(),
+                arguments: json!({ "program": "echo", "args": ["hello"] }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(output.is_success, "execute_process(echo) should succeed");
+        assert_eq!(output.value["ok"], true);
+        assert_eq!(output.value["success"], true);
+        assert_eq!(output.value["status"], "completed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_failure_ok_mirrors_success() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_proc_fail".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_process".to_string(),
+                arguments: json!({ "program": "bash", "args": ["-c", "exit 3"] }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["success"], false);
+        assert_eq!(output.value["status"], "completed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_policy_denied() -> Result<()> {
+        use crate::config::{ExecutionConfig, ExecutionMode};
+        let dir = tempdir()?;
+        let exec = ExecutionConfig {
+            mode: ExecutionMode::Allowlist,
+            allowed_programs: vec!["cargo".to_string()],
+            allow_shell: false,
+            ..ExecutionConfig::default()
+        };
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            execution: exec,
+            execution_configured: true,
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_proc_deny".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_process".to_string(),
+                arguments: json!({ "program": "git", "args": ["status"] }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["status"], "policy_denied");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_ok_mirrors_success() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_bash_ok".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_bash".to_string(),
+                arguments: json!({ "command": "exit 1" }).to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["success"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_shell_disabled_denies_bash_and_shell() -> Result<()> {
+        use crate::config::{ExecutionConfig, ExecutionMode};
+        let dir = tempdir()?;
+        let exec = ExecutionConfig {
+            mode: ExecutionMode::Allowlist,
+            allowed_programs: vec!["cargo".to_string()],
+            allow_shell: false,
+            ..ExecutionConfig::default()
+        };
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            execution: exec,
+            execution_configured: true,
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        for name in ["execute_bash", "execute_shell"] {
+            let args = json!({ "command": "echo hi" }).to_string();
+            let tool_call = ToolCall {
+                id: Some(format!("call_{name}")),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: args,
+                },
+            };
+            let output = dispatch_tool_call(&runtime, &tool_call).await?;
+            assert!(!output.is_success, "{name} should be denied");
+            assert_eq!(output.value["ok"], false);
+            assert_eq!(output.value["success"], false);
+        }
         Ok(())
     }
 

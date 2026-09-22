@@ -1217,6 +1217,7 @@ dependencies = [
  "httptest",
  "humantime",
  "ignore",
+ "libc",
  "notify",
  "notify-rust",
  "num_cpus",

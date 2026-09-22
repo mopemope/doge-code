@@ -483,6 +483,174 @@ async fn test_execute_shell_error() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_execute_process_success() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    let params = crate::execution::ExecuteProcessParams {
+        program: "echo".to_string(),
+        args: vec!["hello".to_string()],
+        cwd: None,
+        env: Default::default(),
+        timeout_ms: Some(10_000),
+    };
+    let out = fs_tools.execute_process(params, None).await?;
+    let res: crate::execution::ProcessResult = serde_json::from_str(&out)?;
+    assert!(res.success);
+    assert_eq!(res.status, crate::execution::ProcessStatus::Completed);
+    assert!(res.stdout.contains("hello"));
+    // ok mirrors success.
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    assert_eq!(v["ok"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_process_shell_injection_not_executed() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let marker = project_root.join("OWNED_BY_TEST");
+    assert!(!marker.exists());
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    let params = crate::execution::ExecuteProcessParams {
+        program: "echo".to_string(),
+        args: vec![format!("hi; touch {}", marker.display())],
+        cwd: None,
+        env: Default::default(),
+        timeout_ms: Some(10_000),
+    };
+    let out = fs_tools.execute_process(params, None).await?;
+    let res: crate::execution::ProcessResult = serde_json::from_str(&out)?;
+    assert!(res.success);
+    assert!(!marker.exists(), "marker must not be created");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_bash_legacy_injection_denied() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec!["cargo".to_string()],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    for evil in [
+        "cargo test; echo hacked",
+        "cargo test && echo hacked",
+        "cargo test | cat",
+        "cargo test > /tmp/x",
+        "cargo test $(echo foo)",
+        "cargo test `echo foo`",
+    ] {
+        let out = fs_tools.execute_bash(evil).await?;
+        let res: execute::ExecuteBashResult = serde_json::from_str(&out)?;
+        assert!(!res.success, "should deny {evil}");
+        assert!(
+            res.stderr.contains("not allowed")
+                || res.stderr.contains("rejected")
+                || res.stderr.contains("policy")
+                || res.stderr.contains("denied")
+                || res.stderr.contains("Shell"),
+            "stderr: {}",
+            res.stderr
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_shell_legacy_injection_denied() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec!["echo".to_string()],
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    // A `;`-chained payload must not pass on the `echo` prefix, even though
+    // execute_shell is a shell session: under the legacy allowlist only
+    // provably-simple matching commands run.
+    for evil in [
+        "echo hi; echo hacked",
+        "echo hi && echo hacked",
+        "echo hi | cat",
+        "echo $HOME",
+    ] {
+        let out = fs_tools.execute_shell(evil).await?;
+        let res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&out)?;
+        assert!(!res.success, "should deny {evil}");
+    }
+    // A simple matching command still runs in-session.
+    let out = fs_tools.execute_shell("echo hello").await?;
+    let res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&out)?;
+    assert!(res.success);
+    assert_eq!(res.stdout.trim(), "hello");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_shell_disabled_denies_bash_and_shell() -> Result<()> {
+    use crate::config::{ExecutionConfig, ExecutionMode};
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let exec = ExecutionConfig {
+        mode: ExecutionMode::Allowlist,
+        allowed_programs: vec!["cargo".to_string()],
+        allow_shell: false,
+        ..ExecutionConfig::default()
+    };
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        execution: exec,
+        execution_configured: true,
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    let bash_out = fs_tools.execute_bash("echo hi").await?;
+    let bash_res: execute::ExecuteBashResult = serde_json::from_str(&bash_out)?;
+    assert!(!bash_res.success);
+    let shell_out = fs_tools.execute_shell("echo hi").await?;
+    let shell_res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&shell_out)?;
+    assert!(!shell_res.success);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_persistent_shell_timeout_resets_session() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let project_root = temp_dir.path().to_path_buf();
+    let cfg = AppConfig {
+        project_root: project_root.clone(),
+        allowed_commands: vec![],
+        command_timeout_ms: 500,
+        ..Default::default()
+    };
+    let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+    // Long sleep hits the timeout and resets the session.
+    let out = fs_tools.execute_shell("sleep 10").await?;
+    let res: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&out)?;
+    assert!(!res.success);
+    assert!(res.stderr.contains("timed out"));
+    // A new session starts cleanly afterwards.
+    let out2 = fs_tools.execute_shell("echo recovered").await?;
+    let res2: crate::tools::shell::ExecuteShellResult = serde_json::from_str(&out2)?;
+    assert!(res2.success);
+    assert_eq!(res2.stdout.trim(), "recovered");
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_execute_shell_large_output() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let project_root = temp_dir.path().to_path_buf();

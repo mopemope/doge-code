@@ -546,6 +546,7 @@ pub async fn run_agent_loop(
                         | "search_text"
                         | "search_repomap"
                         | "execute_bash"
+                        | "execute_process"
                         | "execute_shell"
                 ) {
                 serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()
@@ -603,6 +604,8 @@ File modification detected. You MUST now verify your changes:
                     "fs_write" => "📝",
                     "search_text" => "🔍",
                     "execute_bash" => "🔧",
+                    "execute_process" => "⚙️",
+                    "execute_shell" => "🐚",
                     "find_file" => "📁",
                     "search_repomap" => "🗺️",
                     "edit" => "✏️",
@@ -688,6 +691,53 @@ File modification detected. You MUST now verify your changes:
                     && let Some(command) = args.get("command").and_then(|v| v.as_str())
                 {
                     let _ = tx.send(format!("Command: {}", command));
+                }
+
+                // For execute_process, show program + args without building a
+                // shell string (and never show env values).
+                if tool_name == "execute_process"
+                    && success
+                    && let Some(args) = ui_args.as_ref()
+                {
+                    let program = args.get("program").and_then(|v| v.as_str()).unwrap_or("?");
+                    let arg_count = args
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    let preview: Vec<String> = args
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .take(5)
+                                .filter_map(|v| v.as_str())
+                                .map(|s| {
+                                    // Char-based truncation: byte slicing (`&s[..60]`)
+                                    // panics on multi-byte UTF-8 boundaries.
+                                    if s.chars().count() > 60 {
+                                        format!("{}…", s.chars().take(60).collect::<String>())
+                                    } else {
+                                        s.to_string()
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if preview.is_empty() {
+                        let _ = tx.send(format!("Process: {} ({} args)", program, arg_count));
+                    } else {
+                        let _ = tx.send(format!(
+                            "Process: {} Args: [{}]{}",
+                            program,
+                            preview.join(", "),
+                            if arg_count > preview.len() {
+                                format!(" (+{} more)", arg_count - preview.len())
+                            } else {
+                                String::new()
+                            }
+                        ));
+                    }
                 }
 
                 // If failed, try to show the error message in the TUI log

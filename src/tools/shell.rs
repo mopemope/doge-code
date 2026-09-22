@@ -42,7 +42,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "execute_shell".to_string(),
-            description: "Executes a command in a STATEFUL persistent shell session. Maintains cwd and env vars. Use for dependent commands or interactive-like workflows.".to_string(),
+            description: "Executes a command in a stateful persistent shell session (shell escape hatch). Prefer `execute_process` for normal builds, tests, git, and other single-program commands. Use this only when persistent cwd/env, shell variables, builtins, or shell-specific workflows are needed.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
@@ -119,11 +119,15 @@ impl ShellSession {
 
     pub fn start(&mut self) -> Result<()> {
         info!("Starting new persistent shell session");
-        let mut child = Command::new("bash")
-            .current_dir(&self.project_root)
+        let mut cmd = Command::new("bash");
+        cmd.current_dir(&self.project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // Own process group so a hung command can be killed as a tree.
+        crate::execution::configure_process_group(&mut cmd);
+        let mut child = cmd
             // Don't inherit environment to avoid polluting, or do?
             // Usually inheriting is fine, users expect standard env.
             .spawn()
@@ -214,8 +218,8 @@ impl ShellSession {
 
     async fn reset_session(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            // Kill the whole process group (shell + its children), then reap.
+            crate::execution::terminate_process_tree(&mut child).await;
         }
         self.stdin = None;
         self.stdout = None;

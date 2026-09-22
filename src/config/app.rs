@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::execution::{ExecutionConfig, merge_execution};
 use super::llm::LlmConfig;
 use super::mcp::McpServerConfig;
 use super::watch::WatchConfig;
@@ -43,6 +44,11 @@ pub struct AppConfig {
     pub allowed_commands: Vec<String>,
     pub allowed_paths: Vec<PathBuf>,
     pub command_timeout_ms: u64,
+    pub execution: ExecutionConfig,
+    /// True when an explicit `[execution]` section was present in either the
+    /// global/user config or the project config. Used to decide whether legacy
+    /// `allowed_commands` acts as a fallback.
+    pub execution_configured: bool,
     pub mcp_servers: Vec<McpServerConfig>,
     pub rewrite_timeout_sec: u64,
 }
@@ -68,6 +74,8 @@ impl Default for AppConfig {
             allowed_commands: vec![],
             allowed_paths: vec![],
             command_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
+            execution: ExecutionConfig::default(),
+            execution_configured: false,
             mcp_servers: vec![McpServerConfig::default()],
             rewrite_timeout_sec: 30,
         }
@@ -212,6 +220,14 @@ impl AppConfig {
             .or(file_cfg.command_timeout_ms)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS);
 
+        let merged_execution_partial =
+            merge_execution(file_cfg.execution.as_ref(), project_cfg.execution.as_ref());
+        let execution_configured = merged_execution_partial.is_some();
+        let mut execution = ExecutionConfig::default();
+        if let Some(ref partial) = merged_execution_partial {
+            execution.apply_partial(partial);
+        }
+
         Ok(Self {
             base_url,
             model,
@@ -252,6 +268,8 @@ impl AppConfig {
                 .or(file_cfg.allowed_paths)
                 .unwrap_or_default(),
             command_timeout_ms,
+            execution,
+            execution_configured,
             mcp_servers,
             rewrite_timeout_sec: project_cfg
                 .rewrite_timeout_sec
