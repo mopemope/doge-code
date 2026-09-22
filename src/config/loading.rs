@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
-use super::mcp::PartialMcpServerConfig;
+use super::mcp::{PartialLocalMcpServerConfig, PartialMcpServerConfig};
 
 use super::watch::PartialWatchConfig;
 
@@ -29,6 +29,9 @@ pub struct FileConfig {
     pub allowed_commands: Option<Vec<String>>,
     pub allowed_paths: Option<Vec<PathBuf>>,
     pub mcp_servers: Option<Vec<PartialMcpServerConfig>>,
+    /// Local MCP HTTP listener (`[mcp_server]`). Separate from `[[mcp_servers]]`
+    /// remote/outbound endpoints.
+    pub mcp_server: Option<PartialLocalMcpServerConfig>,
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub execution: Option<PartialExecutionConfig>,
@@ -102,7 +105,12 @@ command_timeout_ms = 300000
 # Allowed paths for file access
 # allowed_paths = ["/tmp", "/home/user/project"]
 
-# MCP server configurations
+# Local MCP HTTP listener (Doge-Code's own server)
+[mcp_server]
+enabled = false
+address = "127.0.0.1:8000"
+
+# Remote MCP servers Doge-Code connects to (outbound endpoints)
 [[mcp_servers]]
 name = "default"
 enabled = false

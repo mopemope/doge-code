@@ -1,41 +1,40 @@
 pub mod client;
+pub mod http_security;
+pub mod resource_path;
 pub mod server;
 pub mod service;
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{AppConfig, McpServerConfig};
-    use crate::mcp::{server, service};
+    use crate::config::AppConfig;
+    use crate::mcp::service::{DogeMcpService, McpServiceState};
     use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
+    use std::path::Path;
     use std::sync::Arc;
-    use tempfile;
     use tokio::sync::RwLock;
 
-    #[tokio::test]
-    async fn test_mcp_server_start() {
-        let _config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "127.0.0.1:0".to_string(), // Use port 0 to get a random available port
-            transport: "http".to_string(),
-        };
-
+    fn test_service(root: &Path) -> DogeMcpService {
+        let config = Arc::new(AppConfig {
+            project_root: root.to_path_buf(),
+            ..Default::default()
+        });
         let repomap = Arc::new(RwLock::new(None));
-        let handle = server::start_mcp_server(&_config, repomap);
+        let state = Arc::new(McpServiceState::new(config, repomap));
+        DogeMcpService::new(state)
+    }
 
-        // The server should start successfully
-        assert!(handle.is_some());
-
-        // Give the server a moment to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // In a real test, we would connect to the server and verify it's working
-        // For now, we'll just check that the handle exists
+    fn test_service_with_config(config: AppConfig) -> DogeMcpService {
+        let state = Arc::new(McpServiceState::new(
+            Arc::new(config),
+            Arc::new(RwLock::new(None)),
+        ));
+        DogeMcpService::new(state)
     }
 
     #[tokio::test]
     async fn test_doge_mcp_service_creation() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         assert!(service.tool_router.has_route("say_hello"));
         assert!(service.tool_router.has_route("search_repomap"));
         assert!(service.tool_router.has_route("fs_read"));
@@ -47,7 +46,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_say_hello_tool() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         let result = service.say_hello();
         assert!(result.is_ok());
 
@@ -61,10 +61,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fs_read_tool() {
-        let service = service::DogeMcpService::default();
-        let params = service::FsReadParams {
-            path: "/nonexistent/file.txt".to_string(),
+    async fn test_fs_read_tool_missing_file_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let params = crate::mcp::service::FsReadParams {
+            path: tmp
+                .path()
+                .join("nonexistent-file.txt")
+                .to_string_lossy()
+                .to_string(),
             start_line: None,
             limit: None,
             mode: None,
@@ -74,15 +79,20 @@ mod tests {
         };
 
         let result = service.fs_read(Parameters(params));
-        // This should fail because the file doesn't exist
+        // Missing file must surface as an MCP error.
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_fs_list_tool() {
-        let service = service::DogeMcpService::default();
-        let params = service::FsListParams {
-            path: "/nonexistent/directory".to_string(),
+    async fn test_fs_list_tool_missing_dir_returns_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let params = crate::mcp::service::FsListParams {
+            path: tmp
+                .path()
+                .join("nonexistent-dir")
+                .to_string_lossy()
+                .to_string(),
             max_depth: None,
             pattern: None,
             mode: None,
@@ -93,17 +103,16 @@ mod tests {
         };
 
         let result = service.fs_list(Parameters(params));
-        // This should succeed but return an empty list because the directory doesn't exist
         assert!(result.is_ok());
         let files = result.unwrap();
-        // The result should be serializable to JSON
         let _json = serde_json::to_string(&files).expect("Should be serializable");
     }
 
     #[tokio::test]
-    async fn test_search_text_tool() {
-        let service = service::DogeMcpService::default();
-        let params = service::SearchTextParams {
+    async fn test_search_text_tool_does_not_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let params = crate::mcp::service::SearchTextParams {
             search_pattern: "test".to_string(),
             file_glob: Some("*.txt".to_string()),
             max_results: None,
@@ -111,20 +120,19 @@ mod tests {
         };
 
         let result = service.search_text(Parameters(params));
-        // This might fail depending on whether ripgrep is available and files exist
-        // but it shouldn't panic
+        // Depending on ripgrep availability this may error, but must not panic.
         let _ = result;
     }
 
     #[tokio::test]
-    async fn test_find_file_tool() {
-        let service = service::DogeMcpService::default();
-        let params = service::FindFileParams {
-            filename: "nonexistent.txt".to_string(),
+    async fn test_find_file_tool_empty_result_ok() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let params = crate::mcp::service::FindFileParams {
+            filename: "nonexistent-xyz-123.txt".to_string(),
         };
 
         let result = service.find_file(Parameters(params)).await;
-        // This should succeed even if the file doesn't exist (it would return an empty list)
         assert!(result.is_ok());
     }
 
@@ -141,8 +149,8 @@ mod tests {
             ..Default::default()
         };
 
-        let service = service::DogeMcpService::new(cfg);
-        let params = service::SearchRepomapParams {
+        let service = test_service_with_config(cfg);
+        let params = crate::mcp::service::SearchRepomapParams {
             result_density: None,
             max_file_lines: None,
             max_function_lines: None,
@@ -173,7 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_json_result() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         let test_data = vec!["item1".to_string(), "item2".to_string()];
         let result = service.format_json_result(test_data);
 
@@ -185,14 +194,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_format_error() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         let error = service.format_error("Test error", Some(serde_json::json!("details")));
         assert_eq!(error.message, "Test error");
     }
 
     #[tokio::test]
     async fn test_list_resources_impl() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         let result = service.list_resources_impl().await;
         assert!(result.is_ok());
         let result = result.unwrap();
@@ -218,7 +229,7 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let service = service::DogeMcpService::new(config);
+        let service = test_service_with_config(config);
 
         let result = service
             .read_resource_impl("doge://repomap/summary".to_string())
@@ -228,11 +239,235 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_resource_impl_file_not_found() {
-        let service = service::DogeMcpService::default();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
         let result = service
             .read_resource_impl("doge://files/nonexistent".to_string())
             .await;
         assert!(result.is_err());
+    }
+
+    fn project_with_files() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root_tmp = tempfile::tempdir().expect("tempdir");
+        let project = root_tmp.path().join("project");
+        let outside = root_tmp.path().join("outside");
+        std::fs::create_dir_all(project.join("src")).expect("mkdir project/src");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write main");
+        std::fs::write(project.join("project-only.txt"), "hello project\n")
+            .expect("write project-only");
+        std::fs::write(outside.join("secret.txt"), "TOP-SECRET\n").expect("write secret");
+        // Canonicalize so `project_root` matches the canonical paths used by
+        // `fs_read` / resource resolution on symlinked tmpdirs
+        // (/var -> /private/var on macOS).
+        let project_path = project.canonicalize().unwrap_or(project);
+        (root_tmp, project_path)
+    }
+
+    #[tokio::test]
+    async fn test_resource_valid_nested_file_via_service() {
+        let (_root_tmp, project) = project_with_files();
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl("doge://files/src/main.rs".to_string())
+            .await;
+        assert!(result.is_ok(), "valid nested file must succeed");
+        let result = result.unwrap();
+        assert_eq!(result.contents.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resource_parent_traversal_rejected_via_service() {
+        let (_root_tmp, project) = project_with_files();
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl("doge://files/../outside/secret.txt".to_string())
+            .await;
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains("TOP-SECRET"), "secret must not leak");
+        assert!(!err.contains("secret.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_resource_encoded_parent_traversal_rejected_via_service() {
+        let (_root_tmp, project) = project_with_files();
+        let service = test_service(&project);
+        for uri in [
+            "doge://files/%2e%2e/outside/secret.txt",
+            "doge://files/%2E%2E/outside/secret.txt",
+            "doge://files/%2e%2e%2foutside%2fsecret.txt",
+        ] {
+            let result = service.read_resource_impl(uri.to_string()).await;
+            assert!(result.is_err(), "{uri} must be rejected");
+            let err = format!("{:?}", result.unwrap_err());
+            assert!(!err.contains("TOP-SECRET"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resource_absolute_path_rejected_via_service() {
+        let (root_tmp, project) = project_with_files();
+        let outside_abs = root_tmp.path().join("outside/secret.txt");
+        let uri = format!("doge://files/{}", outside_abs.to_string_lossy());
+        let service = test_service(&project);
+        let result = service.read_resource_impl(uri.clone()).await;
+        assert!(result.is_err(), "absolute path must be rejected");
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            !err.contains(&outside_abs.to_string_lossy().to_string()),
+            "host absolute path must not leak: {err}"
+        );
+        assert!(!err.contains("TOP-SECRET"));
+    }
+
+    #[tokio::test]
+    async fn test_resource_invalid_utf8_rejected_via_service() {
+        let (_root_tmp, project) = project_with_files();
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl("doge://files/%FF".to_string())
+            .await;
+        assert!(result.is_err(), "invalid UTF-8 must be rejected");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resource_symlink_escape_rejected_via_service() {
+        use std::os::unix::fs::symlink;
+        let (root_tmp, project) = project_with_files();
+        let outside = root_tmp.path().join("outside");
+        symlink(&outside, project.join("link")).expect("symlink");
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl("doge://files/link/secret.txt".to_string())
+            .await;
+        assert!(result.is_err(), "symlink escape must be rejected");
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains("TOP-SECRET"));
+    }
+
+    #[tokio::test]
+    async fn test_symbol_resource_traversal_rejected() {
+        let (_root_tmp, project) = project_with_files();
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl("doge://symbols/../outside/secret.rs".to_string())
+            .await;
+        assert!(result.is_err(), "symbol traversal must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_resource_error_does_not_leak_host_path() {
+        let (root_tmp, project) = project_with_files();
+        let outside_abs = root_tmp.path().join("outside/secret.txt");
+        let outside_str = outside_abs.to_string_lossy().to_string();
+        let service = test_service(&project);
+        let result = service
+            .read_resource_impl(format!("doge://files/{outside_str}"))
+            .await;
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains(&outside_str), "error leaks host path: {err}");
+        assert!(!err.contains("TOP-SECRET"));
+        // Generic message only; no canonical temp prefix.
+        assert!(!err.contains("/private"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_service_uses_supplied_app_config() {
+        // The service must serve the supplied project_root, not a default.
+        let (_root_tmp, project) = project_with_files();
+        let cfg = AppConfig {
+            project_root: project.clone(),
+            ..Default::default()
+        };
+        // Sanity: default root differs from our temp project in practice; the
+        // file only exists under the supplied root.
+        let service = test_service_with_config(cfg);
+        let result = service
+            .read_resource_impl("doge://files/project-only.txt".to_string())
+            .await;
+        assert!(
+            result.is_ok(),
+            "service must use supplied AppConfig.project_root"
+        );
+
+        // And fs_read (which honors allowed_paths) must see the same root.
+        let params = crate::mcp::service::FsReadParams {
+            path: project
+                .join("project-only.txt")
+                .to_string_lossy()
+                .to_string(),
+            start_line: None,
+            limit: None,
+            mode: Some("full".to_string()),
+            response_budget_chars: None,
+            cursor: None,
+            page_size: None,
+        };
+        let result = service.fs_read(Parameters(params));
+        assert!(
+            result.is_ok(),
+            "fs_read must use supplied AppConfig: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_fs_read_honors_allowed_paths() {
+        let (_root_tmp, project) = project_with_files();
+        let outside_file = project.join("src/main.rs");
+        // allowed_paths propagation: grant access to an outside dir and read
+        // through fs_read (resource URIs stay project-only).
+        let outer_tmp = tempfile::tempdir().expect("outer tempdir");
+        let allowed_file = outer_tmp.path().join("allowed.txt");
+        std::fs::write(&allowed_file, "allowed content\n").expect("write allowed");
+        let cfg = AppConfig {
+            project_root: project.clone(),
+            allowed_paths: vec![
+                outer_tmp
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| outer_tmp.path().to_path_buf()),
+            ],
+            ..Default::default()
+        };
+        let service = test_service_with_config(cfg);
+        let params = crate::mcp::service::FsReadParams {
+            path: allowed_file.to_string_lossy().to_string(),
+            start_line: None,
+            limit: None,
+            mode: Some("full".to_string()),
+            response_budget_chars: None,
+            cursor: None,
+            page_size: None,
+        };
+        let result = service.fs_read(Parameters(params));
+        assert!(result.is_ok(), "allowed_paths must propagate to fs_read");
+
+        // Sanity: project file still readable.
+        let _ = outside_file;
+    }
+
+    #[tokio::test]
+    async fn test_mcp_services_share_repomap_build_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = Arc::new(AppConfig {
+            project_root: tmp.path().to_path_buf(),
+            ..Default::default()
+        });
+        let repomap = Arc::new(RwLock::new(None));
+        let state = Arc::new(McpServiceState::new(config, repomap));
+        let a = DogeMcpService::new(state.clone());
+        let b = DogeMcpService::new(state.clone());
+
+        assert!(Arc::ptr_eq(&a.state().config, &b.state().config));
+        assert!(Arc::ptr_eq(&a.state().repomap, &b.state().repomap));
+        assert!(Arc::ptr_eq(
+            &a.state().repomap_build_lock,
+            &b.state().repomap_build_lock
+        ));
     }
 }
 

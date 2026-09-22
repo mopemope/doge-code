@@ -2,12 +2,12 @@ use crate::analysis::RepoMap;
 use crate::analysis::cache::ensure_repomap_ready;
 use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
+use crate::mcp::resource_path::{ResourcePathError, resolve_project_resource_path};
 use crate::tools::list::{FsListMode, FsListOptions};
 use crate::tools::read::{FsReadMode, FsReadOptions};
 use crate::tools::read_many::FsReadManyOptions;
 use crate::tools::search_repomap::RepomapSearchTools;
 use crate::tools::search_repomap::repomap::{ResultDensity, SearchRepomapArgs};
-use percent_encoding::percent_decode_str;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -104,62 +104,67 @@ pub struct HandshakeParams {
     pub capabilities: Vec<String>,
 }
 
+/// Shared state for all `DogeMcpService` instances serving one listener.
+///
+/// The Streamable HTTP service factory may create many service instances
+/// (one per session/request). They must share the same `AppConfig`,
+/// the same `RepoMap` slot, and — critically — the same repomap build lock,
+/// otherwise concurrent first-requests could build the repomap in parallel.
 #[derive(Clone)]
-pub struct DogeMcpService {
-    pub tool_router: ToolRouter<DogeMcpService>,
-    repomap: Arc<RwLock<Option<RepoMap>>>,
-    search_repomap_tools: RepomapSearchTools,
-    config: Arc<AppConfig>,
-
-    repomap_build_lock: Arc<Mutex<()>>,
+pub struct McpServiceState {
+    pub config: Arc<AppConfig>,
+    pub repomap: Arc<RwLock<Option<RepoMap>>>,
+    pub repomap_build_lock: Arc<Mutex<()>>,
 }
 
-impl Default for DogeMcpService {
-    fn default() -> Self {
-        Self::new(AppConfig::default())
-    }
-}
-
-impl DogeMcpService {
-    pub fn new(config: AppConfig) -> Self {
+impl McpServiceState {
+    pub fn new(config: Arc<AppConfig>, repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
         Self {
-            tool_router: Self::tool_router(),
-            repomap: Arc::new(RwLock::new(None)),
-            search_repomap_tools: RepomapSearchTools::new(),
-            config: Arc::new(config),
-
+            config,
+            repomap,
             repomap_build_lock: Arc::new(Mutex::new(())),
         }
     }
+}
 
-    pub fn with_repomap(self, repomap: Arc<RwLock<Option<RepoMap>>>) -> Self {
+#[derive(Clone)]
+pub struct DogeMcpService {
+    pub tool_router: ToolRouter<DogeMcpService>,
+    state: Arc<McpServiceState>,
+    search_repomap_tools: RepomapSearchTools,
+}
+
+impl DogeMcpService {
+    pub fn new(state: Arc<McpServiceState>) -> Self {
         Self {
-            tool_router: self.tool_router,
-            repomap,
-            search_repomap_tools: self.search_repomap_tools,
-            config: self.config,
-
-            repomap_build_lock: self.repomap_build_lock,
+            tool_router: Self::tool_router(),
+            state,
+            search_repomap_tools: RepomapSearchTools::new(),
         }
     }
 
+    /// Shared service state (config, repomap, build lock).
+    pub fn state(&self) -> &Arc<McpServiceState> {
+        &self.state
+    }
+
     async fn ensure_repomap_ready(&self) -> Result<RepoMap, McpError> {
-        if let Some(map) = self.repomap.read().await.clone() {
+        if let Some(map) = self.state.repomap.read().await.clone() {
             return Ok(map);
         }
 
-        let _guard = self.repomap_build_lock.lock().await;
-        if let Some(map) = self.repomap.read().await.clone() {
+        let _guard = self.state.repomap_build_lock.lock().await;
+        if let Some(map) = self.state.repomap.read().await.clone() {
             return Ok(map);
         }
 
-        ensure_repomap_ready(&self.repomap, &self.config.project_root)
+        ensure_repomap_ready(&self.state.repomap, &self.state.config.project_root)
             .await
             .map_err(|e| self.format_error("Repomap build failed", Some(json!(e.to_string()))))
     }
 
     pub async fn list_resources_impl(&self) -> Result<ListResourcesResult, McpError> {
-        let ready = self.repomap.read().await.is_some();
+        let ready = self.state.repomap.read().await.is_some();
         let status_description = format!(
             "Repomap status: {}",
             if ready { "ready" } else { "warming" }
@@ -252,7 +257,7 @@ impl DogeMcpService {
 
     pub async fn read_resource_impl(&self, uri: String) -> Result<ReadResourceResult, McpError> {
         if uri == "doge://repomap/status" {
-            let ready = self.repomap.read().await.is_some();
+            let ready = self.state.repomap.read().await.is_some();
             let summary = json!({
                 "status": if ready { "ready" } else { "warming" }
             });
@@ -264,7 +269,7 @@ impl DogeMcpService {
 
         if uri == "agent://card" {
             let tools = self.get_tool_defs();
-            let card = crate::a2a::generate_agent_card(&self.config, tools);
+            let card = crate::a2a::generate_agent_card(&self.state.config, tools);
             let content = serde_json::to_string_pretty(&card).map_err(|e| {
                 McpError::internal_error(format!("Serialization error: {}", e), None)
             })?;
@@ -286,30 +291,67 @@ impl DogeMcpService {
         }
 
         if let Some(path_str) = uri.strip_prefix("doge://files/") {
-            let decoded_path = percent_decode_str(path_str).decode_utf8_lossy();
-            let path = self.config.project_root.join(decoded_path.as_ref());
+            let canonical =
+                match resolve_project_resource_path(&self.state.config.project_root, path_str) {
+                    Ok(p) => p,
+                    Err(ResourcePathError::InvalidPath) => {
+                        return Err(McpError::resource_not_found(
+                            "invalid project resource path",
+                            None,
+                        ));
+                    }
+                    Err(ResourcePathError::NotFound) => {
+                        return Err(McpError::resource_not_found("resource not found", None));
+                    }
+                };
 
-            if path.exists() {
-                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                    McpError::internal_error(format!("Failed to read file: {}", e), None)
-                })?;
-                return Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::text(content, uri.clone())],
-                });
-            } else {
-                return Err(McpError::resource_not_found(uri, None));
-            }
+            // Note: reads the full file with no response budget (pre-existing
+            // behavior, unlike the `fs_read` tool). Local-only listener, so
+            // blast radius is limited; a response budget is a follow-up.
+            let content = tokio::fs::read_to_string(&canonical)
+                .await
+                .map_err(|_| McpError::resource_not_found("resource not found", None))?;
+            return Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(content, uri.clone())],
+            });
         }
 
         if let Some(path_str) = uri.strip_prefix("doge://symbols/") {
-            let decoded_path = percent_decode_str(path_str).decode_utf8_lossy();
-            let target_path = self.config.project_root.join(decoded_path.as_ref());
+            let canonical_target =
+                match resolve_project_resource_path(&self.state.config.project_root, path_str) {
+                    Ok(p) => p,
+                    Err(ResourcePathError::InvalidPath) => {
+                        return Err(McpError::resource_not_found(
+                            "invalid project resource path",
+                            None,
+                        ));
+                    }
+                    Err(ResourcePathError::NotFound) => {
+                        return Err(McpError::resource_not_found("resource not found", None));
+                    }
+                };
 
             let map = self.ensure_repomap_ready().await?;
+            // RepoMap stores absolute (not necessarily canonical) paths.
+            // Match against both the canonical target and the non-canonical
+            // project-root-joined form to handle symlinked tmpdirs (e.g.
+            // /tmp -> /private/tmp on macOS) without canonicalizing every
+            // symbol on every request.
+            let project_root = &self.state.config.project_root;
+            let canonical_root = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.clone());
+            let alt_target = canonical_target
+                .strip_prefix(&canonical_root)
+                .ok()
+                .map(|rel| project_root.join(rel));
             let symbols: Vec<_> = map
                 .symbols
                 .iter()
-                .filter(|s| s.file == target_path)
+                .filter(|s| {
+                    s.file == canonical_target
+                        || alt_target.as_ref().is_some_and(|alt| s.file == *alt)
+                })
                 .collect();
             let content = serde_json::to_string_pretty(&symbols).map_err(|e| {
                 McpError::internal_error(format!("Serialization error: {}", e), None)
@@ -319,7 +361,7 @@ impl DogeMcpService {
             });
         }
 
-        Err(McpError::resource_not_found(uri, None))
+        Err(McpError::resource_not_found("resource not found", None))
     }
 
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
@@ -398,7 +440,7 @@ impl DogeMcpService {
 
         match self
             .search_repomap_tools
-            .search_repomap(&map, args, &self.config.project_root)
+            .search_repomap(&map, args, &self.state.config.project_root)
             .await
         {
             Ok(results) => self.format_json_result(results),
@@ -421,7 +463,7 @@ impl DogeMcpService {
                 response_budget_chars: params.response_budget_chars.map(|v| v as usize),
                 mode: FsReadMode::from_optional_str(params.mode.as_deref()),
             },
-            &self.config,
+            &self.state.config,
         ) {
             Ok(result) => self.format_json_result(result),
             Err(e) => Err(self.format_error("Failed to read file ", Some(json!(e.to_string())))),
@@ -437,7 +479,7 @@ impl DogeMcpService {
             params.paths,
             params.exclude,
             params.recursive,
-            &self.config,
+            &self.state.config,
             FsReadManyOptions {
                 mode: FsReadMode::from_optional_str(params.mode.as_deref()),
                 cursor: params.cursor.map(|v| v as usize),
@@ -465,7 +507,7 @@ impl DogeMcpService {
                 offset: params.offset.map(|v| v as usize),
                 response_budget_chars: None,
             },
-            &self.config,
+            &self.state.config,
         ) {
             Ok(results) => {
                 let mut formatted_results: Vec<String> = results
@@ -496,7 +538,7 @@ impl DogeMcpService {
             &params.path,
             params.max_depth,
             params.pattern.as_deref(),
-            &self.config,
+            &self.state.config,
             FsListOptions {
                 mode: FsListMode::from_optional_str(params.mode.as_deref()),
                 cursor: params.cursor.map(|v| v as usize),
@@ -519,7 +561,7 @@ impl DogeMcpService {
             crate::tools::find_file::FindFileArgs {
                 filename: params.filename,
             },
-            &self.config,
+            &self.state.config,
         )
         .await
         {
@@ -536,7 +578,7 @@ impl DogeMcpService {
         tracing::info!("A2A Handshake received from agent: {}", params.agent_id);
 
         let tools = self.get_tool_defs();
-        let card = crate::a2a::generate_agent_card(&self.config, tools);
+        let card = crate::a2a::generate_agent_card(&self.state.config, tools);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&card).unwrap_or_default(),

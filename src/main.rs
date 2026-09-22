@@ -29,7 +29,7 @@ use crate::config::AppConfig;
 use crate::tui::commands::TuiExecutor;
 use crate::tui::state::TuiApp;
 use crate::watch::run_watch_mode;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 
@@ -217,13 +217,8 @@ async fn main() -> Result<()> {
         (std::sync::Arc::new(tokio::sync::RwLock::new(None)), None)
     };
 
-    // Start the MCP server if enabled
-    let _mcp_server_handle = if let Some(mcp_server) = cfg.mcp_servers.first() {
-        mcp::server::start_mcp_server(mcp_server, repomap.clone())
-    } else {
-        None
-    };
-
+    // Local MCP listener lifecycle is owned per-command below. Remote
+    // `[[mcp_servers]]` endpoints are never used to start a local listener.
     match &cli.command {
         Some(Commands::Watch) => run_watch_mode(cfg).await,
         Some(Commands::Exec {
@@ -237,18 +232,60 @@ async fn main() -> Result<()> {
             }
             run_exec(cfg, instruction, *json).await
         }
-        Some(Commands::Tui) | None => run_tui(cfg, repomap, status_rx).await,
-        Some(Commands::McpServer { address }) => {
-            let addr = address
-                .clone()
-                .unwrap_or_else(|| "127.0.0.1:8000".to_string());
-            let config = crate::config::McpServerConfig {
-                name: "doge-mcp".to_string(),
-                enabled: true,
-                address: addr,
-                transport: "http".to_string(),
+        Some(Commands::Tui) | None => {
+            // Background local MCP listener only when explicitly enabled via
+            // `[mcp_server] enabled = true`. Short-lived automation commands
+            // (exec/run/session/watch) never auto-start a network listener.
+            // A bind failure must not take the TUI down: warn and continue
+            // without the listener (fail-open for availability; the listener
+            // is an auxiliary integration point, not the primary UI).
+            let mcp_handle = if cfg.local_mcp_server.enabled {
+                let addr = cfg.local_mcp_server.address.clone();
+                match mcp::server::spawn_mcp_server(
+                    &addr,
+                    std::sync::Arc::new(cfg.clone()),
+                    repomap.clone(),
+                )
+                .await
+                {
+                    Ok(handle) => Some(handle),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            address = %addr,
+                            "failed to start background MCP server; continuing without it"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
             };
-            mcp::server::start_mcp_server(&config, repomap.clone());
+
+            let result = run_tui(cfg, repomap, status_rx).await;
+
+            if let Some(handle) = mcp_handle
+                && let Err(e) = handle.shutdown().await
+            {
+                tracing::warn!(error = %e, "failed to shut down background MCP server");
+            }
+
+            result
+        }
+        Some(Commands::McpServer { address }) => {
+            // Dedicated foreground service. The subcommand itself is an
+            // explicit opt-in, so `[mcp_server] enabled = false` does not
+            // block it. Precedence: CLI address -> config -> default.
+            let addr = mcp::server::resolve_mcp_listen_address(
+                address.as_deref(),
+                &cfg.local_mcp_server.address,
+            );
+            let handle =
+                mcp::server::spawn_mcp_server(&addr, std::sync::Arc::new(cfg), repomap.clone())
+                    .await?;
+            tracing::info!(address = %handle.local_addr(), "MCP server ready");
+            tokio::signal::ctrl_c().await.context("wait for Ctrl-C")?;
+            handle.shutdown().await?;
             Ok(())
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,

@@ -819,6 +819,7 @@ mod tests {
             execution: crate::config::ExecutionConfig::default(),
             execution_configured: false,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
+            local_mcp_server: crate::config::LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
         };
 
@@ -859,6 +860,7 @@ mod tests {
             execution: crate::config::ExecutionConfig::default(),
             execution_configured: false,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
+            local_mcp_server: crate::config::LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
         };
 

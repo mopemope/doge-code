@@ -368,7 +368,9 @@ project_instructions_file = "PROJECT.md"
 [project]
 exclude_patterns = ["target/", "node_modules/", "*.log"]
 
-[mcp]
+# Local MCP HTTP listener (Doge-Code's own server)
+[mcp_server]
+enabled = false
 address = "127.0.0.1:8000"
 
 [watch]
@@ -378,12 +380,55 @@ debounce_delay_ms = 500
 ai_comment_pattern = "// AI!:"
 
 [[mcp_servers]]
-# Remote MCP servers to connect to (array of tables)
+# Remote MCP servers Doge-Code connects to (outbound endpoints, array of tables)
 # name = "my-stdio-server"
 # transport = "stdio"            # "stdio" or "http"
 # address = "path/to/server --arg1"  # stdio: command line; http: URL
 # enabled = true
 ```
+
+### MCP Servers (Local vs Remote)
+
+Doge-Code distinguishes two MCP configurations:
+
+```toml
+# Local HTTP listener (Doge-Code itself serves MCP over HTTP)
+[mcp_server]
+enabled = false
+address = "127.0.0.1:8000"
+
+# Remote MCP servers Doge-Code connects to as a client
+[[mcp_servers]]
+name = "my-stdio-server"
+enabled = true
+transport = "stdio"
+address = "path/to/server --arg1"
+```
+
+- `[mcp_server]` is the local listener. `dgc mcp-server [address]`
+  starts it in the foreground (CLI address > `[mcp_server].address` >
+  `127.0.0.1:8000`); the TUI starts it in the background only when
+  `enabled = true`.
+- `[[mcp_servers]]` are outbound/remote endpoints used by
+  `RemoteToolManager`/`McpClient`. They never start a local listener.
+
+Doge-Code's built-in MCP HTTP listener is currently loopback-only.
+
+Allowed bind targets:
+- 127.0.0.1
+- ::1
+- localhost
+
+Remote/public MCP hosting requires a future spec-compliant authorization
+implementation.
+
+DNS rebinding protection: even on loopback, the local listener validates
+the `Host` header (`localhost`/`127.0.0.1`/`::1` only, any port) and the
+`Origin` header when present (`http://localhost:*`,
+`http://127.0.0.1:*`, `http://[::1]:*` only; missing `Origin` is allowed
+for non-browser MCP clients). Requests with an untrusted `Host`/`Origin`
+are rejected with `403` before reaching the MCP handler. No wildcard CORS
+is configured and `X-Forwarded-*` headers are never trusted.
 
 ### Execution Policy (`[execution]`)
 

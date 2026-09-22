@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::execution::{ExecutionConfig, merge_execution};
 use super::llm::LlmConfig;
-use super::mcp::McpServerConfig;
+use super::mcp::{LocalMcpServerConfig, McpServerConfig, PartialLocalMcpServerConfig};
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
 // Re-import from mod or loading
@@ -50,6 +50,8 @@ pub struct AppConfig {
     /// `allowed_commands` acts as a fallback.
     pub execution_configured: bool,
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Local MCP HTTP listener config (`[mcp_server]`).
+    pub local_mcp_server: LocalMcpServerConfig,
     pub rewrite_timeout_sec: u64,
 }
 
@@ -77,6 +79,7 @@ impl Default for AppConfig {
             execution: ExecutionConfig::default(),
             execution_configured: false,
             mcp_servers: vec![McpServerConfig::default()],
+            local_mcp_server: LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
         }
     }
@@ -181,6 +184,11 @@ impl AppConfig {
             project_cfg.mcp_servers.as_ref(),
         );
 
+        let local_mcp_server = merge_local_mcp_server(
+            file_cfg.mcp_server.as_ref(),
+            project_cfg.mcp_server.as_ref(),
+        );
+
         let theme = project_cfg
             .theme
             .or(file_cfg.theme)
@@ -271,6 +279,7 @@ impl AppConfig {
             execution,
             execution_configured,
             mcp_servers,
+            local_mcp_server,
             rewrite_timeout_sec: project_cfg
                 .rewrite_timeout_sec
                 .or(file_cfg.rewrite_timeout_sec)
@@ -328,4 +337,23 @@ pub fn merge_mcp_servers(
                 .unwrap_or_else(|| mcp_defaults.transport.clone()),
         })
         .collect()
+}
+
+/// Merge `[mcp_server]` local-listener config with precedence:
+/// default <- global config <- project config (field-wise).
+pub fn merge_local_mcp_server(
+    file_cfg: Option<&PartialLocalMcpServerConfig>,
+    project_cfg: Option<&PartialLocalMcpServerConfig>,
+) -> LocalMcpServerConfig {
+    let defaults = LocalMcpServerConfig::default();
+    LocalMcpServerConfig {
+        enabled: project_cfg
+            .and_then(|p| p.enabled)
+            .or_else(|| file_cfg.and_then(|f| f.enabled))
+            .unwrap_or(defaults.enabled),
+        address: project_cfg
+            .and_then(|p| p.address.clone())
+            .or_else(|| file_cfg.and_then(|f| f.address.clone()))
+            .unwrap_or(defaults.address),
+    }
 }

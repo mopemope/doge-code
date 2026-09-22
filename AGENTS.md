@@ -32,6 +32,10 @@ Run the narrowest check first, then broaden:
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
 | `src/mcp/` | MCP server (rmcp) + client for remote MCP tools |
+| `src/mcp/server.rs` | Local listener lifecycle / graceful shutdown (`spawn_mcp_server`, `McpServerHandle`, bind-before-spawn) |
+| `src/mcp/service.rs` | MCP tool/resource service (`DogeMcpService`, `McpServiceState` with shared `AppConfig`/RepoMap/build lock) |
+| `src/mcp/http_security.rs` | Local HTTP Host/Origin security + loopback bind validation |
+| `src/mcp/resource_path.rs` | Project resource path validation (`doge://files/`, `doge://symbols/`) |
 | `src/config/` | AppConfig, `.doge/config.toml` loading |
 | `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
 | `src/watch.rs` | File watch mode (`dgc watch`) |
@@ -111,7 +115,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 ## Configuration & Secrets
 
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp]`, `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables).
+- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints).
 - Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
 - Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
 

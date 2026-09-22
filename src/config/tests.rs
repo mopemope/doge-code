@@ -71,6 +71,51 @@ fn test_mcp_servers_no_duplicates() {
 }
 
 #[test]
+fn test_local_mcp_config_defaults() {
+    let merged = merge_local_mcp_server(None, None);
+    assert!(!merged.enabled);
+    assert_eq!(merged.address, "127.0.0.1:8000");
+}
+
+#[test]
+fn test_local_mcp_config_project_overrides_global() {
+    let global = PartialLocalMcpServerConfig {
+        enabled: Some(true),
+        address: Some("127.0.0.1:8001".to_string()),
+    };
+    let project = PartialLocalMcpServerConfig {
+        enabled: None,
+        address: Some("127.0.0.1:9000".to_string()),
+    };
+
+    let merged = merge_local_mcp_server(Some(&global), Some(&project));
+    assert!(merged.enabled);
+    assert_eq!(merged.address, "127.0.0.1:9000");
+}
+
+#[test]
+fn test_local_mcp_config_parses_toml() {
+    let toml_str = r#"
+        [mcp_server]
+        enabled = true
+        address = "127.0.0.1:8001"
+
+        [[mcp_servers]]
+        name = "remote"
+        enabled = true
+        address = "http://example.com/mcp"
+        transport = "http"
+    "#;
+    let cfg: FileConfig = toml::from_str(toml_str).expect("parse local mcp config");
+    let local = cfg.mcp_server.expect("mcp_server section");
+    assert_eq!(local.enabled, Some(true));
+    assert_eq!(local.address.as_deref(), Some("127.0.0.1:8001"));
+    let remotes = cfg.mcp_servers.expect("mcp_servers section");
+    assert_eq!(remotes.len(), 1);
+    assert_eq!(remotes[0].name.as_deref(), Some("remote"));
+}
+
+#[test]
 fn test_load_file_config_creates_default() {
     let temp_dir = TempDir::new().unwrap();
     let original_home = env::var("HOME").ok();
