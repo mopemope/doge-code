@@ -43,6 +43,7 @@ pub struct AppConfig {
     pub show_diff: bool,
     pub allowed_commands: Vec<String>,
     pub allowed_paths: Vec<PathBuf>,
+    /// Maximum duration for managed finite commands; `0` means unlimited.
     pub command_timeout_ms: u64,
     pub execution: ExecutionConfig,
     /// True when an explicit `[execution]` section was present in either the

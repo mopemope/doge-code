@@ -11,6 +11,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("Running test command...");
 
     let project_root = executor.cfg.project_root.clone();
+    let command_timeout_ms = executor.cfg.command_timeout_ms;
     ui.push_log("Running tests in background with TUI spinner...");
 
     if let Some(ui_tx) = &executor.ui_tx {
@@ -19,7 +20,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         let ui_tx_clone = ui_tx.clone();
         let project_root_clone = project_root.clone();
 
-        thread::spawn(move || test_thread(project_root_clone, ui_tx_clone));
+        thread::spawn(move || test_thread(project_root_clone, ui_tx_clone, command_timeout_ms));
     } else {
         ui.push_log("UI channel unavailable - falling back to sync test (TUI may freeze).");
     }
@@ -27,7 +28,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 
 // Logic moved to src/features/testing.rs
 
-fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
+fn test_thread(project_root: PathBuf, ui_tx: Sender<String>, command_timeout_ms: u64) {
     ui_tx.send_logged(format!(
         "::shell_output:Project root: {}",
         project_root.display()
@@ -54,6 +55,18 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     let mut has_any_failures = false;
 
     let test_configs = testing::get_test_configs(&project_root);
+    // One worker thread owns one Tokio runtime; commands run sequentially on
+    // that runtime rather than constructing a runtime per invocation.
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            ui_tx.send_logged(format!(
+                "::shell_output:Failed to create test runtime: {error}"
+            ));
+            ui_tx.send_logged("::status:idle".to_string());
+            return;
+        }
+    };
 
     // Run tests for each detected language
     for lang in detected_languages {
@@ -69,26 +82,31 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
             }
 
             for test_cmd in &config.commands {
-                // Run command async using runtime
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let mut result = rt.block_on(async {
-                    testing::run_test_command(
-                        &project_root,
-                        &test_cmd.command,
-                        &test_cmd.args,
-                        60000,
-                    )
-                    .await
-                });
+                // Run command sequentially on the worker's single runtime.
+                let mut result = runtime.block_on(testing::run_test_command(
+                    &project_root,
+                    &test_cmd.command,
+                    &test_cmd.args,
+                    command_timeout_ms,
+                ));
 
                 // Store the command output
                 all_command_outputs.push(format!(
                     "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
                     test_cmd.command,
                     test_cmd.args.join(" "),
-                    if result.success { 0 } else { 1 },
-                    result.stdout,
-                    result.stderr
+                    result
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| {
+                            if result.timed_out {
+                                "timeout".to_string()
+                            } else {
+                                "none".to_string()
+                            }
+                        }),
+                    testing::budget_diagnostic_output(&result.stdout),
+                    testing::budget_diagnostic_output(&result.stderr)
                 ));
 
                 // Check for failures
@@ -112,11 +130,17 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                 }
 
                 if !result.stdout.is_empty() {
-                    ui_tx.send_logged(format!("::shell_output:Output:\n{}", result.stdout));
+                    ui_tx.send_logged(format!(
+                        "::shell_output:Output:\n{}",
+                        testing::budget_diagnostic_output(&result.stdout)
+                    ));
                 }
 
                 if !result.stderr.is_empty() {
-                    ui_tx.send_logged(format!("::shell_output:STDERR:\n{}", result.stderr));
+                    ui_tx.send_logged(format!(
+                        "::shell_output:STDERR:\n{}",
+                        testing::budget_diagnostic_output(&result.stderr)
+                    ));
                 }
 
                 // Parse failed tests
@@ -141,7 +165,8 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
     // If there are failed tests, send them to LLM for analysis
     if has_any_failures {
-        let all_outputs = all_command_outputs.join("\n\n---\n\n");
+        let all_outputs =
+            testing::budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
 
         let mut prompt = String::from(
             "The following test(s) have failed. Please analyze the failures and provide fixes:\n\n",
@@ -170,6 +195,7 @@ fn test_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
         prompt.push_str("\n\nPlease analyze the test failures above. For each failure:\n1. Identify the root cause\n2. Read the relevant source files if needed\n3. Provide specific code fixes\n\nFocus on fixing the actual code bugs, not modifying the tests (unless the tests themselves are incorrect).");
 
+        let prompt = testing::budget_diagnostic_output(&prompt);
         ui_tx
             .send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
         ui_tx.send_logged(format!("::test_failures_analysis:{}", prompt));

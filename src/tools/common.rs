@@ -304,6 +304,20 @@ impl FsTools {
     }
 
     pub async fn execute_bash(&self, command: &str) -> Result<String> {
+        self.execute_bash_with_cancel(command, None).await
+    }
+
+    pub async fn execute_bash_with_cancel(
+        &self,
+        command: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        if cancel
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+        }
         crate::execution::warn_if_dual_config(
             self.config.execution_configured,
             !self.config.allowed_commands.is_empty(),
@@ -322,25 +336,26 @@ impl FsTools {
             }
             Ok(Some(fast_req)) => {
                 // Safe simple command: run without `bash -c` via the new runner.
-                match crate::execution::run_process(fast_req, &self.config, None).await {
-                    Ok(res) => {
+                match crate::execution::run_process(fast_req, &self.config, cancel).await {
+                    Ok(result) => {
                         let legacy = execute::ExecuteBashResult {
-                            stdout: res.stdout,
-                            stderr: res.stderr,
-                            exit_code: res.exit_code,
-                            success: res.success,
-                            output_truncated: res.output_truncated,
-                            warnings: res.warnings,
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            success: result.success,
+                            output_truncated: result.output_truncated,
+                            warnings: result.warnings,
+                            timed_out: result.status == crate::execution::ProcessStatus::TimedOut,
                         };
                         return Ok(serde_json::to_string(&legacy)?);
                     }
-                    Err(e) => {
-                        if e.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
-                            return Err(e);
+                    Err(error) => {
+                        if error.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
+                            return Err(error);
                         }
                         let result = execute::ExecuteBashResult::simple(
                             String::new(),
-                            e.to_string(),
+                            error.to_string(),
                             None,
                             false,
                         );
@@ -351,18 +366,39 @@ impl FsTools {
             Ok(None) => {}
         }
 
-        match execute::execute_bash(command, &self.config).await {
+        match execute::execute_bash_with_cancel(command, &self.config, cancel).await {
             Ok(result) => Ok(serde_json::to_string(&result)?),
-            Err(e) => {
-                // Return a structured result with the error details
-                let result =
-                    execute::ExecuteBashResult::simple(String::new(), e.to_string(), None, false);
+            Err(error) => {
+                if error.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
+                    return Err(error);
+                }
+                // Return a structured result with the error details.
+                let result = execute::ExecuteBashResult::simple(
+                    String::new(),
+                    error.to_string(),
+                    None,
+                    false,
+                );
                 Ok(serde_json::to_string(&result)?)
             }
         }
     }
 
     pub async fn execute_shell(&self, command: &str) -> Result<String> {
+        self.execute_shell_with_cancel(command, None).await
+    }
+
+    pub async fn execute_shell_with_cancel(
+        &self,
+        command: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        if cancel
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+        }
         crate::execution::warn_if_dual_config(
             self.config.execution_configured,
             !self.config.allowed_commands.is_empty(),
@@ -384,11 +420,18 @@ impl FsTools {
             return Ok(serde_json::to_string(&result)?);
         }
 
-        match self.shell_session.exec(command).await {
+        match self.shell_session.exec_with_cancel(command, cancel).await {
             Ok(result) => Ok(result),
-            Err(e) => {
-                let result =
-                    shell::ExecuteShellResult::simple(String::new(), e.to_string(), None, false);
+            Err(error) => {
+                if error.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
+                    return Err(error);
+                }
+                let result = shell::ExecuteShellResult::simple(
+                    String::new(),
+                    error.to_string(),
+                    None,
+                    false,
+                );
                 Ok(serde_json::to_string(&result)?)
             }
         }

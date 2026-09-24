@@ -59,6 +59,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 |---|---|
 | `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat |
 | `execute_bash` / `execute_shell` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`) |
+| trusted `/test` / `/lint` diagnostics | raw managed capture is bounded per stream, then failure parsing runs before an internal ~32,000-character head+tail diagnostic budget; this is intentionally separate from the LLM 6,000-character tool budget |
 | `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars |
 | `apply_patch` | unified diff only (no full-content echo), diff capped at 6,000 chars |
 | `edit` | diff capped at 6,000 chars (`diff_truncated` flag) |
@@ -66,6 +67,10 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 | `fs_list` | budget 6,000 chars incl. per-entry JSON overhead; budget cuts resume at `cursor + entries.len()` (no skipped entries) |
 | `read_memory` | content capped at 6,000 chars |
 | `task` | sub-agent summary capped at 4,000 chars |
+
+Git diff review collection is fail-closed: a timed-out or capture-truncated
+Git command returns an error instead of presenting a partial patch for approval
+or revert.
 
 ## Known gaps / follow-ups (as of this writing)
 
@@ -118,6 +123,20 @@ truncation is JSON-safe (`truncate_tool_output` budgets string fields in-place).
   `LlmErrorKind::Cancelled` to the agent loop after terminating the process
   tree.
 - Environment variable values are never echoed in results, summaries, or logs.
+
+## Managed process diagnostics (`/test`, `/lint`)
+
+`execute_process`, `execute_bash`, and `execute_shell` are LLM-facing tools.
+They apply `ExecutionPolicy` where appropriate and self-budget their returned
+JSON to the 6,000-character command budget. Their low-level mechanics are
+provided by the policy-free `src/execution/runner.rs`.
+
+The user-invoked `/test` and `/lint` slash commands are trusted internal
+commands. They reuse the same runner for streaming bounded capture,
+timeout/cancellation, process-group cleanup, and reaping, but they do not
+inherit the LLM program's allowlist. Their raw capture is parsed first so
+failure detection is not degraded by the LLM budget; only the diagnostic text
+sent to the LLM/UI is then capped at the internal diagnostic budget.
 
 ## Sub-agent (`task` tool)
 

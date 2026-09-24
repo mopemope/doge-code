@@ -14,6 +14,8 @@ use crate::tui::event_handlers::{
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
 
+const LINT_ISSUE_PROMPT_BUDGET_CHARS: usize = 32_000;
+
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -192,6 +194,11 @@ impl TuiApp {
                             }
                             prompt.push_str("Please provide specific code fixes for each issue.");
 
+                            let prompt = crate::tools::budget::head_tail_truncate(
+                                &prompt,
+                                LINT_ISSUE_PROMPT_BUDGET_CHARS,
+                            )
+                            .text;
                             self.push_log(format!("> {}", prompt));
                             self.last_user_input = Some(prompt.clone());
                             self.dispatch(&prompt);

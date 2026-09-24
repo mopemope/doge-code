@@ -38,7 +38,7 @@ pub fn tool_def() -> ToolDef {
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "Per-command timeout in milliseconds. Cannot extend beyond command_timeout_ms."
+                        "description": "Per-command timeout in milliseconds. Cannot extend beyond command_timeout_ms; command_timeout_ms = 0 means no configured process timeout."
                     }
                 },
                 "required": ["program"],

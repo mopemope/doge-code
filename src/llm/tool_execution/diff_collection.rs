@@ -5,10 +5,66 @@
 //! and prepares the data for diff review.
 
 use crate::diff_review::DiffReviewPayload;
+use crate::execution::{
+    ManagedProcessOutput, ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions,
+    run_managed_process,
+};
+use crate::llm::LlmErrorKind;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 use tracing::debug;
+
+const GIT_DIFF_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn validate_git_output(
+    allow_no_index_diff: bool,
+    output: ManagedProcessOutput,
+) -> Result<ManagedProcessOutput> {
+    match output.termination {
+        ManagedProcessTermination::TimedOut => {
+            anyhow::bail!(
+                "git command timed out after {} seconds",
+                GIT_DIFF_TIMEOUT.as_secs()
+            )
+        }
+        ManagedProcessTermination::Cancelled => {
+            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+        }
+        ManagedProcessTermination::Exited => {}
+    }
+
+    if output.capture_truncated {
+        anyhow::bail!("git output exceeded the capture limit; refusing incomplete diff review");
+    }
+
+    let accepted_exit =
+        output.exit_code == Some(0) || (allow_no_index_diff && output.exit_code == Some(1));
+    if !accepted_exit {
+        let detail = output.stderr.trim();
+        if detail.is_empty() {
+            anyhow::bail!("git command failed with exit code {:?}", output.exit_code);
+        }
+        anyhow::bail!(
+            "git command failed with exit code {:?}: {detail}",
+            output.exit_code
+        );
+    }
+
+    Ok(output)
+}
+
+async fn run_git_command(project_root: &Path, args: Vec<String>) -> Result<ManagedProcessOutput> {
+    let allow_no_index_diff = args.iter().any(|arg| arg == "--no-index");
+    let spec = ManagedProcessSpec {
+        program: "git".to_string(),
+        args,
+        cwd: project_root.to_path_buf(),
+        env: Default::default(),
+    };
+    let output = run_managed_process(spec, ManagedRunOptions::new(Some(GIT_DIFF_TIMEOUT))).await?;
+    validate_git_output(allow_no_index_diff, output)
+}
 
 /// Collects diff review payload by examining git diffs and status.
 ///
@@ -29,14 +85,16 @@ pub async fn collect_diff_review_payload(
         let project_root = project_root.clone();
         let filter_paths = filter_paths.to_vec();
         async move {
-            let mut cmd = Command::new("git");
-            cmd.arg("diff").arg("--color=never");
+            let mut args = vec!["diff".to_string(), "--color=never".to_string()];
             if !filter_paths.is_empty() {
-                cmd.arg("--").args(&filter_paths);
+                args.push("--".to_string());
+                args.extend(
+                    filter_paths
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                );
             }
-            cmd.current_dir(&project_root)
-                .output()
-                .context("failed to run git diff --color=never")
+            run_git_command(&project_root, args).await
         }
     });
 
@@ -44,26 +102,27 @@ pub async fn collect_diff_review_payload(
         let project_root = project_root.clone();
         let filter_paths = filter_paths.to_vec();
         async move {
-            let mut cmd = Command::new("git");
-            cmd.arg("diff").arg("--name-only");
+            let mut args = vec!["diff".to_string(), "--name-only".to_string()];
             if !filter_paths.is_empty() {
-                cmd.arg("--").args(&filter_paths);
+                args.push("--".to_string());
+                args.extend(
+                    filter_paths
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                );
             }
-            cmd.current_dir(&project_root)
-                .output()
-                .context("failed to run git diff --name-only")
+            run_git_command(&project_root, args).await
         }
     });
 
     let status_task = tokio::spawn({
         let project_root = project_root.clone();
         async move {
-            Command::new("git")
-                .arg("status")
-                .arg("--porcelain=v1")
-                .current_dir(&project_root)
-                .output()
-                .context("failed to run git status --porcelain")
+            run_git_command(
+                &project_root,
+                vec!["status".to_string(), "--porcelain=v1".to_string()],
+            )
+            .await
         }
     });
 
@@ -75,15 +134,13 @@ pub async fn collect_diff_review_payload(
     let tracked_diff = tracked_diff??;
     let mut diff_sections = Vec::new();
     if !tracked_diff.stdout.is_empty() {
-        let diff = String::from_utf8(tracked_diff.stdout)
-            .context("git diff output was not valid UTF-8")?;
-        diff_sections.push(diff);
+        diff_sections.push(tracked_diff.stdout);
     }
 
     // Process file names
     let names_output = names_output??;
-    let mut files = String::from_utf8(names_output.stdout)
-        .context("git diff --name-only output was not valid UTF-8")?
+    let mut files = names_output
+        .stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -92,8 +149,7 @@ pub async fn collect_diff_review_payload(
 
     // Process status and untracked files
     let status_output = status_output??;
-    let status_text = String::from_utf8(status_output.stdout)
-        .context("git status --porcelain output was not valid UTF-8")?;
+    let status_text = status_output.stdout;
 
     // Process untracked files in parallel
     let mut untracked_tasks = Vec::new();
@@ -120,15 +176,18 @@ pub async fn collect_diff_review_payload(
         let task = tokio::spawn({
             let project_root = project_root.clone();
             async move {
-                let untracked_diff = Command::new("git")
-                    .arg("diff")
-                    .arg("--color=never")
-                    .arg("--no-index")
-                    .arg("/dev/null")
-                    .arg(&path)
-                    .current_dir(&project_root)
-                    .output()
-                    .with_context(|| format!("failed to diff untracked file {path}"));
+                let untracked_diff = run_git_command(
+                    &project_root,
+                    vec![
+                        "diff".to_string(),
+                        "--color=never".to_string(),
+                        "--no-index".to_string(),
+                        "/dev/null".to_string(),
+                        path.clone(),
+                    ],
+                )
+                .await
+                .with_context(|| format!("failed to diff untracked file {path}"));
                 (path, untracked_diff)
             }
         });
@@ -142,9 +201,7 @@ pub async fn collect_diff_review_payload(
         let path = result.0;
 
         if !untracked_diff.stdout.is_empty() {
-            let diff = String::from_utf8(untracked_diff.stdout)
-                .context("git diff --no-index output for untracked file was not valid UTF-8")?;
-            diff_sections.push(diff);
+            diff_sections.push(untracked_diff.stdout);
         }
 
         if !files.contains(&path) {
@@ -173,6 +230,7 @@ pub async fn collect_diff_review_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -199,6 +257,38 @@ mod tests {
         run_git(dir, &["init", "-q"]);
         run_git(dir, &["config", "user.email", "test@example.com"]);
         run_git(dir, &["config", "user.name", "Test User"]);
+    }
+
+    fn managed_output(
+        termination: ManagedProcessTermination,
+        exit_code: Option<i32>,
+        capture_truncated: bool,
+    ) -> ManagedProcessOutput {
+        ManagedProcessOutput {
+            termination,
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+            capture_truncated,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_validate_git_output_rejects_timeout_and_truncation() {
+        let timeout = managed_output(ManagedProcessTermination::TimedOut, None, false);
+        assert!(validate_git_output(false, timeout).is_err());
+
+        let truncated = managed_output(ManagedProcessTermination::Exited, Some(0), true);
+        assert!(validate_git_output(false, truncated).is_err());
+    }
+
+    #[test]
+    fn test_validate_git_output_allows_no_index_difference_exit() {
+        let output = managed_output(ManagedProcessTermination::Exited, Some(1), false);
+        assert!(validate_git_output(true, output).is_ok());
+        let output = managed_output(ManagedProcessTermination::Exited, Some(1), false);
+        assert!(validate_git_output(false, output).is_err());
     }
 
     #[tokio::test]

@@ -1,22 +1,23 @@
-//! Structured process execution without a shell.
+//! Structured, policy-aware process execution adapter.
 //!
-//! The runner spawns `Command::new(program).args(args)` directly — never
-//! `bash -c`. Stdout/stderr are drained by background tasks into bounded
-//! captures so RAM stays flat even for verbose builds. Timeout and agent
-//! cancellation terminate the whole process tree (see `lifecycle`) and reap
-//! the direct child.
+//! This module is intentionally an adapter around the policy-free
+//! [`crate::execution::runner`]. It applies LLM-facing execution policy,
+//! resolves the request timeout, and maps the managed result into the stable
+//! `ProcessResult` JSON contract. It never implements a second process
+//! lifecycle.
 
 use crate::config::AppConfig;
-use crate::execution::lifecycle::{configure_process_group, terminate_process_tree};
-use crate::execution::output::{BoundedCapture, budget_command_output};
+use crate::execution::output::budget_command_output;
 use crate::execution::policy::{ExecutionPolicy, PolicyDenial, ProcessRequest};
+use crate::execution::runner::{
+    ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
+};
+use crate::llm::LlmErrorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 /// Terminal status of a structured process run.
@@ -77,11 +78,11 @@ impl ProcessResult {
     /// Serialize for the tool layer with `ok` mirroring `success`
     /// (`ok == success` invariant).
     pub fn to_json(&self) -> serde_json::Value {
-        let mut v = serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}));
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("ok".to_string(), serde_json::Value::Bool(self.success));
+        let mut value = serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(object) = value.as_object_mut() {
+            object.insert("ok".to_string(), serde_json::Value::Bool(self.success));
         }
-        v
+        value
     }
 }
 
@@ -117,14 +118,17 @@ impl ExecuteProcessParams {
 /// - Timeout → `Ok(timed_out result)` (tree killed, child reaped).
 /// - Agent cancellation → `Err(Cancelled)` (tree killed, child reaped,
 ///   propagates to the agent loop; NOT a normal LLM-visible failure).
-/// - Spawn failure → `Ok(spawn_failed result)`.
+/// - Spawn/wait/cleanup failure → `Ok(spawn_failed result)` for compatibility.
 pub async fn run_process(
     req: ProcessRequest,
     config: &AppConfig,
     cancel: Option<CancellationToken>,
 ) -> anyhow::Result<ProcessResult> {
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+    }
     let config_arc = Arc::new(config.clone());
-    let policy = ExecutionPolicy::new(config_arc.clone());
+    let policy = ExecutionPolicy::new(config_arc);
     if let Err(denial) = policy.check_process(&req) {
         tracing::warn!(program = %req.program, error = %denial.message(), "process denied by policy");
         return Ok(ProcessResult::policy_denied(&denial));
@@ -133,178 +137,94 @@ pub async fn run_process(
     let started = Instant::now();
     let cwd = policy.resolve_cwd(&req.cwd);
     let timeout = policy.effective_timeout(req.timeout_ms);
+    let program = req.program.clone();
+    let spec = ManagedProcessSpec {
+        program: req.program,
+        args: req.args,
+        cwd,
+        env: req.env,
+    };
+    let options = ManagedRunOptions {
+        timeout,
+        cancellation: cancel,
+    };
 
-    tracing::info!(
-        program = %req.program,
-        arg_count = req.args.len(),
-        cwd = %cwd.display(),
-        timeout_ms = ?timeout.map(|d| d.as_millis()),
-        "spawning structured process"
-    );
-
-    let mut cmd = tokio::process::Command::new(&req.program);
-    cmd.args(&req.args)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Only the allowlisted keys are overridden; the rest of the environment
-    // is inherited (PATH etc. cannot be replaced unless explicitly allowed).
-    for (k, v) in &req.env {
-        cmd.env(k, v);
-    }
-    configure_process_group(&mut cmd);
-    // Ensure descendants die if we are dropped unexpectedly.
-    cmd.kill_on_drop(true);
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            tracing::warn!(program = %req.program, error = %e, "process spawn failed");
+    let managed = match run_managed_process(spec, options).await {
+        Ok(output) => output,
+        Err(crate::execution::ManagedProcessError::Spawn(error)) => {
             return Ok(ProcessResult::spawn_failed(format!(
-                "Failed to spawn '{}': {e}",
-                req.program
+                "Failed to spawn '{program}': {error}"
+            )));
+        }
+        Err(crate::execution::ManagedProcessError::Wait(error)) => {
+            return Ok(ProcessResult::spawn_failed(format!(
+                "Failed to wait for process: {error}"
+            )));
+        }
+        Err(crate::execution::ManagedProcessError::Cleanup(error)) => {
+            return Ok(ProcessResult::spawn_failed(format!(
+                "Failed to clean up process tree: {error}"
             )));
         }
     };
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    match managed.termination {
+        ManagedProcessTermination::Cancelled => {
+            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+        }
+        ManagedProcessTermination::TimedOut => {
+            let (stdout, stderr, _budgeted, mut warnings) =
+                budget_command_output(&managed.stdout, &managed.stderr);
+            if managed.capture_truncated {
+                warnings.push(
+                    "process output exceeded capture limits; head and tail preserved".to_string(),
+                );
+            }
+            let timeout_ms = timeout.map(|duration| duration.as_millis()).unwrap_or(0);
+            tracing::warn!(
+                program = %program,
+                timeout_ms,
+                elapsed_ms = started.elapsed().as_millis(),
+                "process timed out"
+            );
+            return Ok(ProcessResult {
+                success: false,
+                status: ProcessStatus::TimedOut,
+                // A timeout has no meaningful child exit status. Do not invent
+                // a signal-derived code such as 137.
+                exit_code: None,
+                stdout,
+                stderr,
+                output_truncated: true,
+                warnings,
+                error: Some(format!("Command timed out after {timeout_ms} ms")),
+            });
+        }
+        ManagedProcessTermination::Exited => {}
+    }
 
-    let stdout_task = tokio::spawn(async move {
-        let mut cap = BoundedCapture::new();
-        if let Some(out) = stdout.as_mut() {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                match out.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => cap.push(&buf[..n]),
-                    Err(_) => break,
-                }
-            }
-        }
-        cap
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut cap = BoundedCapture::new();
-        if let Some(err) = stderr.as_mut() {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                match out_read(err, &mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => cap.push(&buf[..n]),
-                    Err(_) => break,
-                }
-            }
-        }
-        cap
-    });
-
-    let cancel_token = cancel.unwrap_or_default();
-    // If no timeout is configured, wait indefinitely (still cancellable).
-    let wait_fut = async { child.wait().await };
-    let status_opt: Option<std::process::ExitStatus> = if let Some(dur) = timeout {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                tracing::warn!(program = %req.program, "process cancelled; terminating tree");
-                terminate_process_tree(&mut child).await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
-                return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
-            }
-            res = tokio::time::timeout(dur, wait_fut) => {
-                match res {
-                    Ok(Ok(status)) => Some(status),
-                    Ok(Err(e)) => {
-                        tracing::warn!(program = %req.program, error = %e, "wait failed");
-                        let _ = stdout_task.await;
-                        let _ = stderr_task.await;
-                        return Ok(ProcessResult::spawn_failed(format!("Failed to wait: {e}")));
-                    }
-                    Err(_) => {
-                        tracing::warn!(program = %req.program, timeout_ms = dur.as_millis(), "process timed out; terminating tree");
-                        terminate_process_tree(&mut child).await;
-                        let stdout_cap = stdout_task.await.unwrap_or_default();
-                        let stderr_cap = stderr_task.await.unwrap_or_default();
-                        let (raw_out, out_trunc) = stdout_cap.finish();
-                        let (raw_err, err_trunc) = stderr_cap.finish();
-                        let (stdout_s, stderr_s, budgeted, mut warnings) =
-                            budget_command_output(&raw_out, &raw_err);
-                        if out_trunc || err_trunc {
-                            warnings.push("process output exceeded capture limits; head and tail preserved".to_string());
-                        }
-                        // Timeout means the output is necessarily partial: the
-                        // tree was killed mid-run, so always flag truncation
-                        // even when the captured bytes fit the budget.
-                        let _ = budgeted;
-                        return Ok(ProcessResult {
-                            success: false,
-                            status: ProcessStatus::TimedOut,
-                            exit_code: None,
-                            stdout: stdout_s,
-                            stderr: stderr_s,
-                            output_truncated: true,
-                            warnings,
-                            error: Some(format!("Command timed out after {} ms", dur.as_millis())),
-                        });
-                    }
-                }
-            }
-        }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                tracing::warn!(program = %req.program, "process cancelled; terminating tree");
-                terminate_process_tree(&mut child).await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
-                return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
-            }
-            res = wait_fut => {
-                match res {
-                    Ok(status) => Some(status),
-                    Err(e) => {
-                        let _ = stdout_task.await;
-                        let _ = stderr_task.await;
-                        return Ok(ProcessResult::spawn_failed(format!("Failed to wait: {e}")));
-                    }
-                }
-            }
-        }
-    };
-
-    // Normal completion: drain tasks have seen EOF; join them.
-    let stdout_cap = stdout_task.await.unwrap_or_default();
-    let stderr_cap = stderr_task.await.unwrap_or_default();
-    let (raw_out, out_trunc) = stdout_cap.finish();
-    let (raw_err, err_trunc) = stderr_cap.finish();
-    let (stdout_s, stderr_s, budgeted, mut warnings) = budget_command_output(&raw_out, &raw_err);
-    if out_trunc || err_trunc {
+    let (stdout, stderr, budgeted, mut warnings) =
+        budget_command_output(&managed.stdout, &managed.stderr);
+    if managed.capture_truncated {
         warnings
             .push("process output exceeded capture limits; head and tail preserved".to_string());
     }
-
-    let (exit_code, success) = match status_opt {
-        Some(st) => (st.code(), st.success()),
-        None => (None, false),
-    };
+    let success = managed.success();
+    let exit_code = managed.exit_code;
     tracing::info!(
-        program = %req.program,
         exit_code = ?exit_code,
         elapsed_ms = started.elapsed().as_millis(),
         "process completed"
     );
-    // NOTE: env values are never logged.
+    // Environment values are never logged.
 
     Ok(ProcessResult {
         success,
         status: ProcessStatus::Completed,
         exit_code,
-        stdout: stdout_s,
-        stderr: stderr_s,
-        output_truncated: budgeted || out_trunc || err_trunc,
+        stdout,
+        stderr,
+        output_truncated: budgeted || managed.capture_truncated,
         warnings,
         error: if success {
             None
@@ -312,10 +232,6 @@ pub async fn run_process(
             Some(format!("Process exited with code {exit_code:?}"))
         },
     })
-}
-
-async fn out_read(r: &mut tokio::process::ChildStderr, buf: &mut [u8]) -> std::io::Result<usize> {
-    r.read(buf).await
 }
 
 #[cfg(test)]
@@ -350,11 +266,11 @@ mod tests {
         let cfg = test_config();
         let mut req = req_echo("hello");
         req.cwd = Some(cfg.project_root.clone());
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(res.success);
-        assert_eq!(res.status, ProcessStatus::Completed);
-        assert_eq!(res.exit_code, Some(0));
-        assert!(res.stdout.contains("hello"));
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.status, ProcessStatus::Completed);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.contains("hello"));
     }
 
     #[tokio::test]
@@ -375,13 +291,13 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: Some(10_000),
         };
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(res.success);
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(result.success);
         assert!(
             !marker.exists(),
             "shell injection must not create the marker file"
         );
-        assert!(res.stdout.contains("hello; touch"));
+        assert!(result.stdout.contains("hello; touch"));
     }
 
     #[tokio::test]
@@ -394,12 +310,10 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: Some(10_000),
         };
-        // NOTE: this specific test spawns bash directly (not via shell
-        // string) to check exit-code semantics.
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(!res.success);
-        assert_eq!(res.status, ProcessStatus::Completed);
-        assert_eq!(res.exit_code, Some(3));
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.status, ProcessStatus::Completed);
+        assert_eq!(result.exit_code, Some(3));
     }
 
     #[tokio::test]
@@ -412,9 +326,9 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: Some(10_000),
         };
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(!res.success);
-        assert_eq!(res.status, ProcessStatus::SpawnFailed);
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.status, ProcessStatus::SpawnFailed);
     }
 
     #[tokio::test]
@@ -428,9 +342,9 @@ mod tests {
             timeout_ms: Some(500),
         };
         let start = Instant::now();
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(!res.success);
-        assert_eq!(res.status, ProcessStatus::TimedOut);
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.status, ProcessStatus::TimedOut);
         assert!(
             start.elapsed() < Duration::from_secs(15),
             "must not wait for the full sleep"
@@ -447,7 +361,6 @@ mod tests {
             project_root: dir.path().to_path_buf(),
             ..Default::default()
         };
-        // bash spawns a background sleep (grandchild) and waits.
         let req = ProcessRequest {
             program: "bash".to_string(),
             args: vec![
@@ -458,12 +371,12 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: Some(1_000),
         };
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert_eq!(res.status, ProcessStatus::TimedOut);
-        // Give the kernel a moment, then check the grandchild is gone.
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert_eq!(result.status, ProcessStatus::TimedOut);
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_file)
-            && let Ok(pid) = pid_str.trim().parse::<u32>()
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
         {
             assert!(!is_process_alive(pid), "grandchild sleep must be killed");
         }
@@ -480,19 +393,18 @@ mod tests {
             timeout_ms: Some(30_000),
         };
         let token = CancellationToken::new();
-        let t2 = token.clone();
+        let token_for_timer = token.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            t2.cancel();
+            token_for_timer.cancel();
         });
-        let err = run_process(req, &cfg, Some(token)).await.unwrap_err();
-        assert!(err.downcast_ref::<crate::llm::LlmErrorKind>().is_some());
+        let error = run_process(req, &cfg, Some(token)).await.unwrap_err();
+        assert!(error.downcast_ref::<LlmErrorKind>().is_some());
     }
 
     #[tokio::test]
     async fn test_large_output_bounded() {
         let cfg = test_config();
-        // `seq` prints 20000 lines; internal capture + final payload must stay bounded.
         let req = ProcessRequest {
             program: "seq".to_string(),
             args: vec!["1".to_string(), "20000".to_string()],
@@ -500,11 +412,31 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: Some(15_000),
         };
-        let res = run_process(req, &cfg, None).await.unwrap();
-        assert!(res.success);
-        assert!(res.output_truncated);
-        assert!(!res.warnings.is_empty());
-        let combined = res.stdout.chars().count() + res.stderr.chars().count();
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(result.success);
+        assert!(result.output_truncated);
+        assert!(!result.warnings.is_empty());
+        let combined = result.stdout.chars().count() + result.stderr.chars().count();
         assert!(combined <= 7_000, "combined too large: {combined}");
+    }
+
+    #[tokio::test]
+    async fn test_zero_config_timeout_is_unlimited_for_fast_command() {
+        let dir = TempDir::new().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            command_timeout_ms: 0,
+            ..Default::default()
+        };
+        let req = ProcessRequest {
+            program: "printf".to_string(),
+            args: vec!["ok".to_string()],
+            cwd: Some(dir.path().to_path_buf()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.status, ProcessStatus::Completed);
     }
 }

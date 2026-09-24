@@ -794,6 +794,21 @@ mod tests {
             Some(Duration::from_millis(5_000))
         );
         assert_eq!(policy0.effective_timeout(None), None);
+
+        let cfg500 = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            command_timeout_ms: 500,
+            ..Default::default()
+        });
+        let policy500 = ExecutionPolicy::new(cfg500);
+        assert_eq!(
+            policy500.effective_timeout(Some(100)),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            policy500.effective_timeout(Some(1_000)),
+            Some(Duration::from_millis(500))
+        );
     }
 
     #[test]

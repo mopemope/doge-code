@@ -16,7 +16,10 @@ Run the narrowest check first, then broaden:
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | CLI entry point (clap), mode wiring |
-| `src/execution/` | Structured execution core: `policy.rs` (allow/deny, cwd/env, legacy migration), `process.rs` (shell-free spawn, timeout, cancellation), `lifecycle.rs` (Unix process groups, reap), `output.rs` (bounded capture, budgets) |
+| `src/execution/` | Execution foundation: policy, lifecycle, bounded output, and policy-free managed process mechanics |
+| `src/execution/runner.rs` | Policy-free managed process mechanics: `ManagedProcessSpec`/`ManagedRunOptions`, bounded capture, timeout/cancellation, process-group cleanup/reap, and future-drop safety guard |
+| `src/execution/process.rs` | ExecutionPolicy-aware LLM adapter: cwd/env/program policy, timeout resolution, and stable `ProcessResult` mapping |
+| `src/execution/lifecycle.rs` | Unix process groups, SIGTERM/SIGKILL, explicit reap, and process-group existence checks |
 | `src/exec.rs` | Non-interactive `exec` orchestration |
 | `src/llm/` | OpenAI-compatible client, agent loop, tool dispatch |
 | `src/llm/tool_def.rs` | Registry of tools exposed to the LLM (`default_tools_def`) |
@@ -87,7 +90,8 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - Large outputs (file reads, listings, repomap results) must support summary mode + `response_budget_chars` budgeting. Follow the pattern in `src/tools/read.rs`.
 - Global caps (`src/llm/message_utils.rs`): 8,000 chars default, 40,000 chars only for `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read`. Everything else — including `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, bash/shell — is 8,000.
 - The global truncator is JSON-safe (it budgets string fields in-place rather than slicing the serialized payload), but it is a safety net only: tools must keep their own output under the cap using `src/tools/budget.rs` helpers (bash/shell 6k head+tail, `apply_patch` diff-only, `find_file` 200 paths, `read_memory` 6k) or `response_budget_chars`.
-- Execution changes belong in `src/execution/` (`policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
+- Execution changes belong in `src/execution/` (`runner.rs` / `policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `runner.rs` is policy-free process mechanics, while `process.rs` is the ExecutionPolicy-aware LLM adapter. `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
+- Do not create new ad-hoc `Command::output()` / `wait_with_output()` paths for finite background commands. Use `src/execution/runner.rs` unless the process is intentionally long-lived or interactive (PTY, MCP transport, daemon/service, or another documented exception).
 
 ## Testing Guidelines
 

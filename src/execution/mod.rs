@@ -8,8 +8,19 @@ pub mod lifecycle;
 pub mod output;
 pub mod policy;
 pub mod process;
+pub mod runner;
 
-pub use lifecycle::{TERMINATE_GRACE_PERIOD, configure_process_group, terminate_process_tree};
+#[cfg(unix)]
+pub use lifecycle::process_group_exists;
+pub use lifecycle::{
+    ProcessGroupHandle, TERMINATE_GRACE_PERIOD, cleanup_process_group_after_exit,
+    configure_process_group, is_process_alive, terminate_process_tree,
+    terminate_process_tree_with_group,
+};
 pub use output::{BoundedCapture, budget_command_output};
 pub use policy::{ExecutionPolicy, PolicyDenial, ProcessRequest, warn_if_dual_config};
 pub use process::{ExecuteProcessParams, ProcessResult, ProcessStatus, run_process};
+pub use runner::{
+    ManagedProcessError, ManagedProcessOutput, ManagedProcessSpec, ManagedProcessTermination,
+    ManagedRunOptions, run_managed_process,
+};

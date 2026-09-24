@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +35,17 @@ pub async fn run_workflow(
     workflow_name: &str,
     project_root: &Path,
     fs_tools: &crate::tools::FsTools,
+) -> Result<String> {
+    run_workflow_with_cancel(workflow_name, project_root, fs_tools, None).await
+}
+
+/// Cancellation-aware workflow runner. Cancellation is passed into every
+/// finite process step; a cancelled step aborts the workflow immediately.
+pub async fn run_workflow_with_cancel(
+    workflow_name: &str,
+    project_root: &Path,
+    fs_tools: &crate::tools::FsTools,
+    cancel: Option<CancellationToken>,
 ) -> Result<String> {
     if !workflow_name
         .chars()
@@ -78,6 +90,9 @@ pub async fn run_workflow(
     output.push_str(&format!("Running workflow: {}\n", workflow.name));
 
     for step in workflow.steps {
+        if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+        }
         output.push_str(&format!("Step: {}\n", step.name));
         match (&step.run, &step.program) {
             (Some(_), Some(_)) => {
@@ -94,7 +109,9 @@ pub async fn run_workflow(
             }
             (Some(run), None) => {
                 info!("Running workflow step: {} ({})", step.name, run);
-                let result = fs_tools.execute_bash(run).await?;
+                let result = fs_tools
+                    .execute_bash_with_cancel(run, cancel.clone())
+                    .await?;
                 let exec_result: crate::tools::execute::ExecuteBashResult =
                     serde_json::from_str(&result)?;
                 if !exec_result.success {
@@ -126,7 +143,7 @@ pub async fn run_workflow(
                     env: step.env.clone(),
                     timeout_ms: step.timeout_ms,
                 };
-                let result = fs_tools.execute_process(params, None).await?;
+                let result = fs_tools.execute_process(params, cancel.clone()).await?;
                 let exec_result: crate::execution::ProcessResult = serde_json::from_str(&result)?;
                 if !exec_result.success {
                     let err = exec_result.error.unwrap_or_default();
@@ -429,6 +446,70 @@ steps:
         // Structured step runs fine under the same policy.
         let proc_out = run_workflow("pr", &project_root, &fs_tools).await?;
         assert!(proc_out.contains("Status: SUCCESS"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_structured_cancellation_stops_following_steps() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+        let marker = project_root.join("structured-ran");
+        let workflow = format!(
+            "name: Cancel Structured\nsteps:\n  - name: Wait\n    program: sleep\n    args: [\"30\"]\n  - name: MustNotRun\n    program: touch\n    args: [\"{}\"]\n",
+            marker.display()
+        );
+        tokio::fs::write(workflows_dir.join("cancel.yml"), workflow).await?;
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let token = CancellationToken::new();
+        let timer_token = token.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            timer_token.cancel();
+        });
+        let error = run_workflow_with_cancel("cancel", &project_root, &fs_tools, Some(token))
+            .await
+            .expect_err("cancellation should abort workflow");
+        timer.await?;
+        assert!(error.downcast_ref::<crate::llm::LlmErrorKind>().is_some());
+        assert!(!marker.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_workflow_shell_cancellation_stops_following_steps() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let project_root = temp_dir.path().to_path_buf();
+        let workflows_dir = project_root.join(".doge/workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await?;
+        let marker = project_root.join("shell-ran");
+        let workflow = format!(
+            "name: Cancel Shell\nsteps:\n  - name: Wait\n    run: sleep 30\n  - name: MustNotRun\n    run: touch '{}'\n",
+            marker.display()
+        );
+        tokio::fs::write(workflows_dir.join("cancel-shell.yml"), workflow).await?;
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+        let token = CancellationToken::new();
+        let timer_token = token.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            timer_token.cancel();
+        });
+        let error = run_workflow_with_cancel("cancel-shell", &project_root, &fs_tools, Some(token))
+            .await
+            .expect_err("cancellation should abort workflow");
+        timer.await?;
+        assert!(error.downcast_ref::<crate::llm::LlmErrorKind>().is_some());
+        assert!(!marker.exists());
         Ok(())
     }
 }

@@ -97,6 +97,8 @@ project_instructions_file = "PROJECT.md"
 - `execute_process`: Run a program directly without a shell (preferred for builds, tests, git)
 - `execute_bash`: Shell escape hatch — use only when pipes/redirects/builtins are genuinely required (disable with `[execution] allow_shell = false`)
 
+All finite LLM-facing process tools use the same managed process lifecycle: bounded streaming capture, timeout/cancellation, Unix process-group cleanup, and direct-child reaping.
+
 ### Code Analysis Tools
 - `search_repomap`: Search parsed code symbols with advanced filtering
 - `search_text`: Text-based search across files
@@ -269,6 +271,7 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 - `/lint` command auto-detects Go, Rust, TypeScript files in the project and runs configured linters (`cargo clippy`, `golangci-lint`, `npm run lint`, etc.).
 - Attempts auto-fix (`--fix`) for detected issues, and for complex issues that can't be resolved, delegates analysis to LLM to propose fixes.
 - Projects with multiple languages can be checked all at once.
+- Linter commands are trusted internal commands and use the shared managed process lifecycle, but do not inherit the LLM execution allowlist.
 
 ## 🧪 Testing /test
 
@@ -277,6 +280,7 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
   - Go: `go test ./...`
   - Node.js: `npm test`
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
+- `/test` uses the configured `command_timeout_ms` (where `0` means unlimited) and the same managed process lifecycle as finite LLM commands, without applying the LLM execution allowlist.
 
 ## 🔄 Advanced Features
 
@@ -457,8 +461,8 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   friends (`LD_PRELOAD`, `GIT_SSH_COMMAND`, …) cannot be swapped by the LLM.
   Env values are never logged.
 - `execute_process.timeout_ms` can only shrink the run; the effective timeout
-  is `min(request, command_timeout_ms)` (`command_timeout_ms = 0` keeps the
-  historical unlimited semantics).
+  is `min(request, command_timeout_ms)`. `command_timeout_ms = 0` means no
+  configured process timeout (unlimited, while cancellation remains available).
 - `allow_shell = false` denies both `execute_bash` and `execute_shell` with a
   structured `policy_denied` result.
 - Legacy `allowed_commands` (deprecated) is used only when `[execution]` is
@@ -474,7 +478,9 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   legacy fallback entirely (with a warning when both are set).
 - Timeouts and agent cancellation terminate the whole process tree on
   Unix (SIGTERM → grace period → SIGKILL to the process group, then reap);
-  other platforms kill and reap the direct child.
+  other platforms kill and reap the direct child. The same mechanics are
+  reused by trusted `/test` and `/lint` commands, with an internal diagnostic
+  output budget rather than the LLM 6,000-character tool budget.
 
 ### Workflow Files
 

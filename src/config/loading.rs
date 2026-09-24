@@ -89,6 +89,7 @@ auto_compact_prompt_token_threshold = 250000
 # auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
 resume = false
 rewrite_timeout_sec = 30
+# Managed finite-command timeout; 0 means unlimited (cancellation still works)
 command_timeout_ms = 300000
 
 # Allowed commands for execute_bash tool (deprecated; prefer [execution])

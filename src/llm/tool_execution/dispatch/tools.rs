@@ -79,7 +79,7 @@ pub async fn execute_process(
                 ),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(error) => Err(error),
     }
 }
 
@@ -88,7 +88,11 @@ pub async fn execute_bash(
     args: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    match runtime.fs.execute_bash(command).await {
+    match runtime
+        .fs
+        .execute_bash_with_cancel(command, runtime.cancel_token.clone())
+        .await
+    {
         Ok(output_str) => {
             let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
                 .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
@@ -110,7 +114,7 @@ pub async fn execute_bash(
                 ),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(error) => Err(error),
     }
 }
 
@@ -119,7 +123,11 @@ pub async fn execute_shell(
     args: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    match runtime.fs.execute_shell(command).await {
+    match runtime
+        .fs
+        .execute_shell_with_cancel(command, runtime.cancel_token.clone())
+        .await
+    {
         Ok(output_str) => {
             let mut value = serde_json::from_str::<serde_json::Value>(&output_str)
                 .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
@@ -141,7 +149,7 @@ pub async fn execute_shell(
                 ),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(error) => Err(error),
     }
 }
 
@@ -396,10 +404,11 @@ pub async fn run_workflow(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("workflow_name is required"))?;
 
-    match crate::tools::workflow::run_workflow(
+    match crate::tools::workflow::run_workflow_with_cancel(
         workflow_name,
         &runtime.fs.config.project_root,
         runtime.fs,
+        runtime.cancel_token.clone(),
     )
     .await
     {
@@ -411,7 +420,7 @@ pub async fn run_workflow(
                 result_summary: format!("Ran workflow '{}'", workflow_name),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(error) => Err(error),
     }
 }
 

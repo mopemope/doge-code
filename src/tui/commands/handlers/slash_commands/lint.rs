@@ -1,15 +1,17 @@
+use crate::execution::{
+    ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
+};
 use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
 use regex::Regex;
 use serde_json;
 use std::collections::HashMap;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::ExitStatus;
 use std::sync::mpsc::Sender;
 use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct LintConfig {
@@ -39,6 +41,77 @@ pub struct LintResult {
     pub stdout: String,
     pub stderr: String,
     pub success: bool,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub output_truncated: bool,
+    pub warnings: Vec<String>,
+}
+
+const DIAGNOSTIC_OUTPUT_BUDGET_CHARS: usize = 32_000;
+const LINT_ISSUE_PAYLOAD_BUDGET_CHARS: usize = 24_000;
+const LINT_ISSUE_FILE_BUDGET_CHARS: usize = 512;
+const LINT_ISSUE_MESSAGE_BUDGET_CHARS: usize = 2_048;
+const LINT_ISSUE_CODE_BUDGET_CHARS: usize = 256;
+
+fn budget_diagnostic_output(output: &str) -> String {
+    crate::tools::budget::head_tail_truncate(output, DIAGNOSTIC_OUTPUT_BUDGET_CHARS).text
+}
+
+fn budget_lint_issues(issues: Vec<LintIssue>) -> (Vec<LintIssue>, bool) {
+    let mut kept = Vec::new();
+    // Account for the opening/closing JSON array and separators.
+    let mut used_chars = 2usize;
+    let mut truncated = false;
+
+    for issue in issues {
+        let issue = LintIssue {
+            file_path: crate::tools::budget::head_tail_truncate(
+                &issue.file_path,
+                LINT_ISSUE_FILE_BUDGET_CHARS,
+            )
+            .text,
+            line_number: issue.line_number,
+            severity: crate::tools::budget::head_tail_truncate(&issue.severity, 64).text,
+            message: crate::tools::budget::head_tail_truncate(
+                &issue.message,
+                LINT_ISSUE_MESSAGE_BUDGET_CHARS,
+            )
+            .text,
+            code: issue.code.map(|code| {
+                crate::tools::budget::head_tail_truncate(&code, LINT_ISSUE_CODE_BUDGET_CHARS).text
+            }),
+        };
+        let encoded_len = serde_json::to_string(&issue).unwrap_or_default().len() + 1;
+        if used_chars + encoded_len > LINT_ISSUE_PAYLOAD_BUDGET_CHARS {
+            truncated = true;
+            break;
+        }
+        used_chars += encoded_len;
+        kept.push(issue);
+    }
+
+    (kept, truncated)
+}
+
+fn lint_exit_status(result: &LintResult) -> String {
+    result
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| {
+            if result.timed_out {
+                "timeout".to_string()
+            } else {
+                "none".to_string()
+            }
+        })
+}
+
+fn lint_warnings(result: &LintResult) -> String {
+    if result.warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\nWARNINGS:\n{}", result.warnings.join("\n"))
+    }
 }
 
 /// Run linting for Go, Rust, and TypeScript projects
@@ -46,6 +119,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("Running lint command...");
 
     let project_root = executor.cfg.project_root.clone();
+    let command_timeout_ms = executor.cfg.command_timeout_ms;
     ui.push_log("Running lint in background with TUI spinner...");
 
     if let Some(ui_tx) = &executor.ui_tx {
@@ -54,7 +128,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         let ui_tx_clone = ui_tx.clone();
         let project_root_clone = project_root.clone();
 
-        thread::spawn(move || lint_thread(project_root_clone, ui_tx_clone));
+        thread::spawn(move || lint_thread(project_root_clone, ui_tx_clone, command_timeout_ms));
     } else {
         ui.push_log("UI channel unavailable - falling back to sync lint (TUI may freeze).");
         // fallback sync logic could be added here if needed
@@ -266,7 +340,21 @@ fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
     commands
 }
 
-fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
+fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>, command_timeout_ms: u64) {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            ui_tx.send_logged(format!(
+                "::shell_output:Failed to create lint runtime: {error}"
+            ));
+            ui_tx.send_logged("::status:idle".to_string());
+            return;
+        }
+    };
+    runtime.block_on(lint_thread_async(project_root, ui_tx, command_timeout_ms));
+}
+
+async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command_timeout_ms: u64) {
     ui_tx.send_logged(format!(
         "::shell_output:Project root: {}",
         project_root.display()
@@ -310,16 +398,17 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
 
             for lint_cmd in &config.commands {
                 let result =
-                    run_command_sync_with_output(&project_root, &lint_cmd.command, &lint_cmd.args);
+                    run_command_with_output(&project_root, lint_cmd, command_timeout_ms).await;
 
                 // Store the command output to send to LLM if there are warnings/errors
                 all_command_outputs.push(format!(
-                    "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}{}",
                     lint_cmd.command,
                     lint_cmd.args.join(" "),
-                    if result.success { 0 } else { 1 },
-                    result.stdout,
-                    result.stderr
+                    lint_exit_status(&result),
+                    budget_diagnostic_output(&result.stdout),
+                    budget_diagnostic_output(&result.stderr),
+                    lint_warnings(&result)
                 ));
 
                 // Check if output contains warnings or errors
@@ -341,21 +430,29 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                     ));
                 } else {
                     ui_tx.send_logged(format!(
-                        "::shell_output:Failed to run {}: Command exited with status",
-                        lint_cmd.command
+                        "::shell_output:Failed to run {} (exit code {:?}{})",
+                        lint_cmd.command,
+                        result.exit_code,
+                        if result.timed_out { ", timed out" } else { "" }
                     ));
                 }
 
                 if !result.stdout.is_empty() {
-                    ui_tx.send_logged(format!("::shell_output:Output:\n{}", result.stdout));
+                    ui_tx.send_logged(format!(
+                        "::shell_output:Output:\n{}",
+                        budget_diagnostic_output(&result.stdout)
+                    ));
                 }
 
                 if !result.stderr.is_empty() {
-                    ui_tx.send_logged(format!("::shell_output:STDERR: {}", result.stderr));
+                    ui_tx.send_logged(format!(
+                        "::shell_output:STDERR: {}",
+                        budget_diagnostic_output(&result.stderr)
+                    ));
                 }
 
                 // Parse lint issues
-                let issues = parse_lint_output(&result, &lint_cmd.command, &lang);
+                let issues = parse_lint_output(&result, lint_cmd, &lang);
                 if !issues.is_empty() {
                     ui_tx.send_logged(format!(
                         "::shell_output:Found {} issues from {}",
@@ -373,20 +470,26 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
                     let mut fix_args = lint_cmd.args.clone();
                     fix_args.push(auto_fix_flag.clone());
 
+                    let fix_command = LintCommand {
+                        command: lint_cmd.command.clone(),
+                        args: fix_args,
+                        auto_fix_flag: None,
+                    };
                     let fix_result =
-                        run_command_sync_with_output(&project_root, &lint_cmd.command, &fix_args);
+                        run_command_with_output(&project_root, &fix_command, command_timeout_ms)
+                            .await;
 
                     if fix_result.success {
                         ui_tx.send_logged(format!(
                             "::shell_output:Successfully ran auto-fix: {} {}",
                             lint_cmd.command,
-                            fix_args.join(" ")
+                            fix_command.args.join(" ")
                         ));
                     } else {
                         ui_tx.send_logged(format!(
                             "::shell_output:Auto-fix also failed: {} {}",
                             lint_cmd.command,
-                            fix_args.join(" ")
+                            fix_command.args.join(" ")
                         ));
                     }
 
@@ -409,24 +512,36 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         }
     }
 
-    // If there are issues, send them to LLM for fixing
-    if !all_issues.is_empty() {
+    // If there are issues, send a bounded subset to LLM for fixing.
+    let (lint_issues, lint_issues_truncated) = budget_lint_issues(all_issues);
+    if !lint_issues.is_empty() {
         ui_tx.send_logged(format!(
-            "::shell_output:\nFound {} total issues. Sending to LLM for analysis and fixes...",
-            all_issues.len()
+            "::shell_output:\nFound {} issues. Sending to LLM for analysis and fixes...",
+            lint_issues.len()
         ));
+        if lint_issues_truncated {
+            ui_tx.send_logged(
+                "::shell_output:Additional lint issues omitted to stay within the diagnostic budget."
+                    .to_string(),
+            );
+        }
 
         // Send a message to trigger LLM processing
         ui_tx.send_logged(format!(
             "::lint_issues:{:}",
-            serde_json::to_string(&all_issues).unwrap_or_default()
+            serde_json::to_string(&lint_issues).unwrap_or_default()
         ));
+    } else if lint_issues_truncated {
+        ui_tx.send_logged(
+            "::shell_output:Lint issues omitted because they exceeded the diagnostic budget."
+                .to_string(),
+        );
     }
 
     // If there are any warnings or errors in the output (regardless of parsed issues),
     // send all command outputs to the LLM for analysis and fixes
     if has_any_warnings_or_errors {
-        let all_outputs = all_command_outputs.join("\n\n---\n\n");
+        let all_outputs = budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
 
         // Create a specific prompt for the LLM to analyze all outputs and fix issues
         let mut prompt = String::from(
@@ -435,12 +550,13 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
         prompt.push_str(&all_outputs);
         prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
 
+        let prompt = budget_diagnostic_output(&prompt);
         ui_tx.send_logged(
             "::shell_output:\nSending full lint output to LLM for analysis and fixes..."
                 .to_string(),
         );
         // Use the existing dispatch pattern by sending the prompt via the user input mechanism
-        // This will trigger the LLM to process the full output
+        // This will trigger the LLM to process the bounded output.
         ui_tx.send_logged(format!("::lint_command_output_analysis:{}", prompt));
     }
 
@@ -448,52 +564,77 @@ fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>) {
     ui_tx.send_logged("::status:idle".to_string());
 }
 
-fn run_command_sync_with_output(project_root: &Path, cmd: &str, args: &[String]) -> LintResult {
-    let output = std::process::Command::new(cmd)
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .unwrap_or_else(|e| std::process::Output {
-            status: ExitStatus::from_raw(1),
-            stdout: format!("Failed to execute command: {}", e).into_bytes(),
-            stderr: Vec::new(),
-        });
+async fn run_command_with_output(
+    project_root: &Path,
+    command: &LintCommand,
+    timeout_ms: u64,
+) -> LintResult {
+    let spec = ManagedProcessSpec {
+        program: command.command.clone(),
+        args: command.args.clone(),
+        cwd: project_root.to_path_buf(),
+        env: Default::default(),
+    };
+    let timeout = (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms));
+    let options = ManagedRunOptions {
+        timeout,
+        cancellation: None,
+    };
+    let command_text = format!("{} {}", command.command, command.args.join(" "));
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let success = output.status.success();
-
+    let managed = match run_managed_process(spec, options).await {
+        Ok(output) => output,
+        Err(error) => {
+            return LintResult {
+                command: command_text,
+                issues: Vec::new(),
+                stdout: String::new(),
+                stderr: format!("Failed to execute command: {error}"),
+                success: false,
+                exit_code: None,
+                timed_out: false,
+                output_truncated: false,
+                warnings: vec![error.to_string()],
+            };
+        }
+    };
+    let timed_out = managed.termination == ManagedProcessTermination::TimedOut;
+    let success = managed.success();
     LintResult {
-        command: format!("{} {}", cmd, args.join(" ")),
-        issues: Vec::new(), // Will be populated by parse_lint_output
-        stdout,
-        stderr,
+        command: command_text,
+        issues: Vec::new(),
+        stdout: managed.stdout,
+        stderr: managed.stderr,
         success,
+        exit_code: managed.exit_code,
+        timed_out,
+        output_truncated: managed.capture_truncated || timed_out,
+        warnings: managed.warnings,
     }
 }
 
-fn parse_lint_output(result: &LintResult, command: &str, language: &str) -> Vec<LintIssue> {
+fn parse_lint_output(result: &LintResult, command: &LintCommand, language: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
+    let first_arg = command.args.first().map(String::as_str);
 
-    // Parse based on the command and language
-    match (command, language) {
+    // Parser dispatch uses the structured program + argv representation. Do
+    // not search the rendered command string: `cargo` alone cannot identify
+    // fmt vs clippy, and `go` alone cannot identify fmt.
+    match (command.command.as_str(), language) {
         ("golangci-lint", "go") => {
             issues.extend(parse_golangci_lint_output(&result.stdout, &result.stderr));
         }
-        ("go", "go") => {
-            if command.contains("fmt") {
-                issues.extend(parse_go_fmt_output(&result.stdout, &result.stderr));
-            }
+        ("go", "go") if first_arg == Some("fmt") => {
+            issues.extend(parse_go_fmt_output(&result.stdout, &result.stderr));
         }
-        ("cargo", "rust") => {
-            if command.contains("clippy") {
-                issues.extend(parse_cargo_clippy_output(&result.stdout, &result.stderr));
-            } else if command.contains("fmt") {
-                issues.extend(parse_cargo_fmt_output(&result.stdout, &result.stderr));
-            }
+        ("cargo", "rust") if first_arg == Some("clippy") => {
+            issues.extend(parse_cargo_clippy_output(&result.stdout, &result.stderr));
+        }
+        ("cargo", "rust") if first_arg == Some("fmt") => {
+            issues.extend(parse_cargo_fmt_output(&result.stdout, &result.stderr));
         }
         _ => {
-            // Generic parsing for other tools
+            // Generic parsing for other tools, including npm run lint/fmt.
             issues.extend(parse_generic_lint_output(&result.stdout, &result.stderr));
         }
     }
@@ -566,26 +707,50 @@ fn parse_cargo_clippy_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
     let lines: Vec<&str> = combined.lines().collect();
     let mut current_file = String::new();
     let mut current_line = None;
+    let mut pending_message = None;
 
-    for line in lines.iter() {
+    for line in lines {
         if let Some(captures) = re_location.captures(line.trim()) {
             current_file = captures.get(1).map_or("", |m| m.as_str()).to_string();
             current_line = captures.get(2).map_or("", |m| m.as_str()).parse().ok();
+            if let Some(message) = pending_message.take() {
+                issues.push(LintIssue {
+                    file_path: current_file.clone(),
+                    line_number: current_line,
+                    severity: "warning".to_string(),
+                    message,
+                    code: None,
+                });
+                current_file.clear();
+                current_line = None;
+            }
         } else if let Some(captures) = re_warning.captures(line.trim()) {
             let message = captures.get(1).map_or("", |m| m.as_str()).to_string();
-
-            issues.push(LintIssue {
-                file_path: current_file.clone(),
-                line_number: current_line,
-                severity: "warning".to_string(),
-                message,
-                code: None,
-            });
-
-            // Reset for next iteration
-            current_file.clear();
-            current_line = None;
+            if current_file.is_empty() {
+                // rustc commonly prints the warning before its location.
+                pending_message = Some(message);
+            } else {
+                issues.push(LintIssue {
+                    file_path: current_file.clone(),
+                    line_number: current_line,
+                    severity: "warning".to_string(),
+                    message,
+                    code: None,
+                });
+                current_file.clear();
+                current_line = None;
+            }
         }
+    }
+
+    if let Some(message) = pending_message {
+        issues.push(LintIssue {
+            file_path: current_file,
+            line_number: current_line,
+            severity: "warning".to_string(),
+            message,
+            code: None,
+        });
     }
 
     issues
@@ -773,5 +938,132 @@ mod tests {
 
         let commands = typescript_lint_commands(project_path);
         assert!(commands.is_empty());
+    }
+
+    fn lint_command(command: &str, args: &[&str]) -> LintCommand {
+        LintCommand {
+            command: command.to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            auto_fix_flag: None,
+        }
+    }
+
+    fn lint_result(command: LintCommand, stdout: &str, stderr: &str, success: bool) -> LintResult {
+        LintResult {
+            command: format!("{} {}", command.command, command.args.join(" ")),
+            issues: Vec::new(),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            success,
+            exit_code: if success { Some(0) } else { Some(1) },
+            timed_out: false,
+            output_truncated: false,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_cargo_clippy_parser_uses_argv() {
+        let command = lint_command("cargo", &["clippy", "--message-format=short"]);
+        let result = lint_result(
+            command.clone(),
+            "warning: unused variable `x`\n --> src/main.rs:3:5",
+            "",
+            false,
+        );
+        let issues = parse_lint_output(&result, &command, "rust");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].file_path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_cargo_fmt_parser_uses_argv() {
+        let command = lint_command("cargo", &["fmt", "--check"]);
+        let result = lint_result(command.clone(), "src/main.rs\n", "", false);
+        let issues = parse_lint_output(&result, &command, "rust");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].message, "File needs formatting");
+    }
+
+    #[test]
+    fn test_go_fmt_parser_uses_argv() {
+        let command = lint_command("go", &["fmt", "./..."]);
+        let result = lint_result(
+            command.clone(),
+            "main.go:2:3: formatting needed\n",
+            "",
+            false,
+        );
+        let issues = parse_lint_output(&result, &command, "go");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].file_path, "main.go");
+    }
+
+    #[tokio::test]
+    async fn test_managed_lint_command_success_and_spawn_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let success =
+            run_command_with_output(dir.path(), &lint_command("printf", &["lint-ok"]), 10_000)
+                .await;
+        assert!(success.success);
+        assert_eq!(success.exit_code, Some(0));
+        assert_eq!(success.stdout, "lint-ok");
+
+        let failure = run_command_with_output(
+            dir.path(),
+            &lint_command("doge-lint-command-does-not-exist", &[]),
+            10_000,
+        )
+        .await;
+        assert!(!failure.success);
+        assert_eq!(failure.exit_code, None);
+        assert!(!failure.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_managed_lint_large_output_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run_command_with_output(
+            dir.path(),
+            &lint_command("sh", &["-c", "head -c 200000 /dev/zero | tr '\\0' x"]),
+            10_000,
+        )
+        .await;
+        assert!(result.success);
+        assert!(result.output_truncated);
+        assert!(result.stdout.len() < 100_000);
+    }
+
+    #[test]
+    fn test_budget_lint_issues_keeps_json_bounded() {
+        let issues = (0..1_000)
+            .map(|index| LintIssue {
+                file_path: format!("src/{index}.rs"),
+                line_number: Some(index),
+                severity: "warning".to_string(),
+                message: "x".repeat(4_000),
+                code: Some("C".repeat(1_000)),
+            })
+            .collect();
+        let (budgeted, truncated) = budget_lint_issues(issues);
+        assert!(truncated);
+        let encoded = serde_json::to_string(&budgeted).unwrap();
+        assert!(encoded.len() <= LINT_ISSUE_PAYLOAD_BUDGET_CHARS);
+        for issue in budgeted {
+            assert!(issue.message.chars().count() <= LINT_ISSUE_MESSAGE_BUDGET_CHARS);
+            assert!(issue.file_path.chars().count() <= LINT_ISSUE_FILE_BUDGET_CHARS);
+        }
+    }
+
+    #[test]
+    fn test_lint_exit_status_preserves_timeout_and_code() {
+        let command = lint_command("cargo", &["clippy"]);
+        let mut result = lint_result(command, "", "", false);
+        result.exit_code = Some(42);
+        assert_eq!(lint_exit_status(&result), "42");
+
+        result.exit_code = None;
+        result.timed_out = true;
+        assert_eq!(lint_exit_status(&result), "timeout");
     }
 }

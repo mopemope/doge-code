@@ -1,12 +1,10 @@
 use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 /// Character budget for combined command output (stdout + stderr). Keeps the
 /// serialized JSON payload safely under the 8,000-char global truncation cap.
@@ -22,6 +20,8 @@ pub struct ExecuteBashResult {
     pub output_truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 impl ExecuteBashResult {
@@ -33,15 +33,14 @@ impl ExecuteBashResult {
             success,
             output_truncated: false,
             warnings: Vec::new(),
+            timed_out: false,
         }
     }
 }
 
 /// Apply the combined output budget to stdout/stderr, preserving the head and
-/// tail of each stream. Returns the budgeted streams plus a truncation flag.
-///
-/// Shared implementation lives in `crate::execution::output`; this wrapper
-/// keeps the existing import path working.
+/// tail of each stream. The low-level runner uses only bounded capture; this
+/// LLM-facing adapter applies the ~6,000-character tool budget.
 pub fn budget_command_output(stdout: &str, stderr: &str) -> (String, String, bool, Vec<String>) {
     crate::execution::output::budget_command_output(stdout, stderr)
 }
@@ -64,77 +63,57 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
+/// Run a trusted-after-policy shell command through the common finite-process
+/// runner. Policy is applied by `FsTools` before this function is called.
 pub async fn execute_bash(command: &str, config: &AppConfig) -> Result<ExecuteBashResult> {
-    // Change to the project root directory before executing the command
-    let project_root = &config.project_root;
-    let timeout_ms = config.command_timeout_ms;
+    execute_bash_with_cancel(command, config, None).await
+}
 
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(project_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = match run_command_with_timeout(cmd, timeout_ms).await {
-        Ok(Some(output)) => output,
-        Ok(None) => {
-            return Ok(ExecuteBashResult::simple(
-                String::new(),
-                format!("Command timed out after {} ms", timeout_ms),
-                None,
-                false,
-            ));
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to execute command: {command} in directory: {} ({})",
-                project_root.display(),
-                e
-            ));
-        }
+/// Cancellation-aware variant used by the agent loop and workflow tool.
+pub async fn execute_bash_with_cancel(
+    command: &str,
+    config: &AppConfig,
+    cancel: Option<CancellationToken>,
+) -> Result<ExecuteBashResult> {
+    let spec = crate::execution::ManagedProcessSpec {
+        program: "bash".to_string(),
+        args: vec!["-c".to_string(), command.to_string()],
+        cwd: config.project_root.clone(),
+        env: Default::default(),
+    };
+    let timeout =
+        (config.command_timeout_ms != 0).then(|| Duration::from_millis(config.command_timeout_ms));
+    let options = crate::execution::ManagedRunOptions {
+        timeout,
+        cancellation: cancel,
     };
 
-    let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code();
-    let success = output.status.success();
-    let (stdout, stderr, output_truncated, warnings) =
-        budget_command_output(&stdout_raw, &stderr_raw);
+    let managed = crate::execution::run_managed_process(spec, options).await?;
+    if managed.termination == crate::execution::ManagedProcessTermination::Cancelled {
+        return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+    }
 
+    let (stdout, stderr, budgeted, mut warnings) =
+        budget_command_output(&managed.stdout, &managed.stderr);
+    if managed.capture_truncated {
+        warnings
+            .push("command output exceeded capture limits; head and tail preserved".to_string());
+    }
+    let timed_out = managed.termination == crate::execution::ManagedProcessTermination::TimedOut;
     Ok(ExecuteBashResult {
         stdout,
         stderr,
-        exit_code,
-        success,
-        output_truncated,
+        exit_code: managed.exit_code,
+        success: managed.success(),
+        output_truncated: budgeted || managed.capture_truncated || timed_out,
         warnings,
+        timed_out,
     })
 }
 
-async fn run_command_with_timeout(
-    mut cmd: Command,
-    timeout_ms: u64,
-) -> Result<Option<std::process::Output>> {
-    cmd.kill_on_drop(true);
-    let child = cmd.spawn().with_context(|| "Failed to spawn command")?;
-
-    if timeout_ms == 0 {
-        let output = child.wait_with_output().await?;
-        return Ok(Some(output));
-    }
-
-    match timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
-        Ok(output) => Ok(Some(output?)),
-        Err(_) => Ok(None),
-    }
-}
-
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -213,13 +192,11 @@ mod tests {
             project_root: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        // Generate output well over the 6,000-char budget.
         let result = execute_bash("seq 1 20000", &config).await.unwrap();
         assert!(result.output_truncated);
         assert!(!result.warnings.is_empty());
         let combined = result.stdout.chars().count() + result.stderr.chars().count();
         assert!(combined <= 7_000, "combined output too large: {combined}");
-        // Head and tail preserved.
         assert!(result.stdout.starts_with('1'));
         assert!(result.stdout.contains("20000"));
     }
@@ -234,6 +211,41 @@ mod tests {
         let result = execute_bash("echo hello", &config).await.unwrap();
         assert!(!result.output_truncated);
         assert!(result.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_timeout() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            command_timeout_ms: 50,
+            ..Default::default()
+        };
+        let result = execute_bash("sleep 30", &config).await.unwrap();
+        assert!(!result.success);
+        assert!(result.timed_out);
+        assert!(result.output_truncated);
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn test_execute_bash_cancel() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            command_timeout_ms: 30_000,
+            ..Default::default()
+        };
+        let token = CancellationToken::new();
+        let timer_token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            timer_token.cancel();
+        });
+        let error = execute_bash_with_cancel("sleep 30", &config, Some(token))
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<crate::llm::LlmErrorKind>().is_some());
     }
 
     #[test]

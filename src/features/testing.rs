@@ -1,10 +1,21 @@
+use crate::execution::{
+    ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
-use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
+
+/// Maximum diagnostic text handed to the LLM after parsing. Raw runner output
+/// is bounded separately at 32 KiB head + 32 KiB tail per stream.
+pub const DIAGNOSTIC_OUTPUT_BUDGET_CHARS: usize = 32_000;
+
+pub fn budget_diagnostic_output(output: &str) -> String {
+    crate::tools::budget::head_tail_truncate(output, DIAGNOSTIC_OUTPUT_BUDGET_CHARS).text
+}
 
 /// Represents a single frame in a stack trace
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +48,12 @@ pub struct TestResult {
     pub success: bool,
     pub exit_code: Option<i32>,
     pub failed_tests: Vec<FailedTest>,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub output_truncated: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,53 +241,87 @@ fn python_test_commands(project_root: &Path) -> Vec<TestCommand> {
     }]
 }
 
-/// Run a command and return the result
+/// Run a trusted internal test command through the common managed lifecycle.
+/// ExecutionPolicy is intentionally not consulted: `/test` is an explicit
+/// user action, not an LLM-controlled program request.
 pub async fn run_test_command(
     project_root: &Path,
     cmd: &str,
     args: &[String],
     timeout_ms: u64,
 ) -> TestResult {
+    run_test_command_with_cancel(project_root, cmd, args, timeout_ms, None).await
+}
+
+pub async fn run_test_command_with_cancel(
+    project_root: &Path,
+    cmd: &str,
+    args: &[String],
+    timeout_ms: u64,
+    cancel: Option<CancellationToken>,
+) -> TestResult {
     debug!(
-        "Running test command: {} {:?} (timeout: {}ms)",
-        cmd, args, timeout_ms
+        program = %cmd,
+        arg_count = args.len(),
+        timeout_ms = timeout_ms,
+        "running trusted internal test command"
     );
+    let spec = ManagedProcessSpec {
+        program: cmd.to_string(),
+        args: args.to_vec(),
+        cwd: project_root.to_path_buf(),
+        env: BTreeMap::new(),
+    };
+    let timeout = (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms));
+    let options = ManagedRunOptions {
+        timeout,
+        cancellation: cancel,
+    };
+    let command = format!("{} {}", cmd, args.join(" "));
 
-    let mut command = Command::new(cmd);
-    command.args(args).current_dir(project_root);
+    let managed = match run_managed_process(spec, options).await {
+        Ok(output) => output,
+        Err(error) => {
+            return TestResult {
+                command,
+                stdout: String::new(),
+                stderr: format!("Failed to run tests: {error}"),
+                success: false,
+                exit_code: None,
+                failed_tests: Vec::new(),
+                timed_out: false,
+                output_truncated: false,
+                warnings: vec![error.to_string()],
+            };
+        }
+    };
 
-    let output_future = command.output();
-    let timeout_duration = Duration::from_millis(timeout_ms);
-
-    let (stdout, stderr, success, exit_code) =
-        match tokio::time::timeout(timeout_duration, output_future).await {
-            Ok(Ok(out)) => (
-                String::from_utf8_lossy(&out.stdout).to_string(),
-                String::from_utf8_lossy(&out.stderr).to_string(),
-                out.status.success(),
-                out.status.code(),
-            ),
-            Ok(Err(e)) => (
-                String::new(),
-                format!("Failed to run tests: {}", e),
-                false,
-                None,
-            ),
-            Err(_) => (
-                String::new(),
-                format!("Test execution timed out after {}ms", timeout_ms),
-                false,
-                None,
-            ),
-        };
+    let (timed_out, success) = match managed.termination {
+        ManagedProcessTermination::Exited => (false, managed.success()),
+        ManagedProcessTermination::TimedOut => (true, false),
+        ManagedProcessTermination::Cancelled => (false, false),
+    };
+    let mut warnings = managed.warnings;
+    if managed.capture_truncated {
+        warnings.push("test output exceeded capture limits; head and tail preserved".to_string());
+    }
+    if timed_out {
+        warnings.push(format!("test execution timed out after {timeout_ms}ms"));
+    }
+    if managed.termination == ManagedProcessTermination::Cancelled {
+        warnings.push("test execution cancelled".to_string());
+    }
 
     TestResult {
-        command: format!("{} {}", cmd, args.join(" ")),
-        stdout,
-        stderr,
+        command,
+        stdout: managed.stdout,
+        stderr: managed.stderr,
         success,
-        exit_code,
+        exit_code: managed.exit_code,
         failed_tests: Vec::new(),
+        timed_out,
+        output_truncated: managed.capture_truncated || timed_out,
+        warnings,
     }
 }
 
@@ -600,6 +651,101 @@ pub fn enhance_failed_tests_with_stack_trace(
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_test_command_success() {
+        let dir = TempDir::new().unwrap();
+        let result = run_test_command(dir.path(), "printf", &["ok".to_string()], 10_000).await;
+        assert!(result.success);
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "ok");
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn test_test_command_nonzero() {
+        let dir = TempDir::new().unwrap();
+        let result = run_test_command(
+            dir.path(),
+            "sh",
+            &["-c".to_string(), "exit 4".to_string()],
+            10_000,
+        )
+        .await;
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(4));
+    }
+
+    #[tokio::test]
+    async fn test_test_command_timeout_keeps_partial_output() {
+        let dir = TempDir::new().unwrap();
+        let result = run_test_command(
+            dir.path(),
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf partial-output; sleep 30".to_string(),
+            ],
+            50,
+        )
+        .await;
+        assert!(!result.success);
+        assert!(result.timed_out);
+        assert_eq!(result.exit_code, None);
+        assert!(result.stdout.contains("partial-output"));
+    }
+
+    #[tokio::test]
+    async fn test_test_command_zero_timeout_is_unlimited() {
+        let dir = TempDir::new().unwrap();
+        let result = run_test_command(dir.path(), "printf", &["zero".to_string()], 0).await;
+        assert!(result.success);
+        assert!(!result.timed_out);
+        assert_eq!(result.stdout, "zero");
+    }
+
+    #[tokio::test]
+    async fn test_test_command_large_output_bounded() {
+        let dir = TempDir::new().unwrap();
+        let result = run_test_command(
+            dir.path(),
+            "sh",
+            &[
+                "-c".to_string(),
+                "head -c 200000 /dev/zero | tr '\\0' x".to_string(),
+            ],
+            10_000,
+        )
+        .await;
+        assert!(result.success);
+        assert!(result.output_truncated);
+        assert!(result.stdout.len() < 100_000);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_test_command_timeout_kills_descendant() {
+        use crate::execution::lifecycle::is_process_alive;
+        let dir = TempDir::new().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let result = run_test_command(dir.path(), "bash", &["-c".to_string(), script], 100).await;
+        assert!(result.timed_out);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let pid = std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        if let Some(pid) = pid {
+            assert!(!is_process_alive(pid));
         }
     }
 }
