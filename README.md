@@ -316,7 +316,15 @@ Verification failures are returned to LLM for automatic correction.
 ### Remote MCP Tools
 - Connect to remote MCP servers for additional tool capabilities
 - Unified tool interface for local and remote tools
-- Automatic tool discovery and registration
+- Automatic paginated tool discovery and registration
+- MCP protocol negotiation is delegated to rmcp; Streamable HTTP probes the
+  2026-07-28 lifecycle when supported and falls back to legacy `initialize`,
+  while stdio uses the established initialize lifecycle
+- A completed tool result with `isError = true` is reported as a failed Doge
+  tool call; protocol/transport failures are reported separately
+- Structured MCP content and `structuredContent` are retained in a bounded
+  JSON result. Input-required and MCP Task responses are surfaced as explicit
+  unsupported results until their UI/lifecycle integrations exist.
 
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded
@@ -384,14 +392,36 @@ debounce_delay_ms = 500
 ai_comment_pattern = "// AI!:"
 
 [[mcp_servers]]
-# Remote MCP servers Doge-Code connects to (outbound endpoints, array of tables)
-# name = "my-stdio-server"
-# transport = "stdio"            # "stdio" or "http"
-# address = "path/to/server --arg1"  # stdio: command line; http: URL
-# enabled = true
+# Structured stdio: command is executed directly (never through a shell).
+name = "filesystem"
+enabled = true
+transport = "stdio"
+command = "/usr/local/bin/mcp-filesystem"
+args = ["--root", "/workspace"]
+
+# Milliseconds; 0 means unlimited.
+connect_timeout_ms = 30000
+list_timeout_ms = 10000
+call_timeout_ms = 30000
+
+# [mcp_servers.env] contains literal child-process environment values.
+# DOGE_LOG_LEVEL = "info"
+
+[[mcp_servers]]
+# Streamable HTTP uses address as its URL.
+name = "remote"
+enabled = true
+transport = "http"
+address = "https://example.com/mcp"
+connect_timeout_ms = 30000
+list_timeout_ms = 10000
+call_timeout_ms = 120000
 ```
 
 ### MCP Servers (Local vs Remote)
+
+See [`docs/mcp-3x-migration.md`](docs/mcp-3x-migration.md) for the rmcp 3.x
+migration and remote-result semantics.
 
 Doge-Code distinguishes two MCP configurations:
 
@@ -403,10 +433,18 @@ address = "127.0.0.1:8000"
 
 # Remote MCP servers Doge-Code connects to as a client
 [[mcp_servers]]
-name = "my-stdio-server"
+name = "filesystem"
 enabled = true
 transport = "stdio"
-address = "path/to/server --arg1"
+command = "/usr/local/bin/mcp-filesystem"
+args = ["--root", "/workspace"]
+
+# Legacy stdio form (deprecated; whitespace splitting is retained temporarily)
+# [[mcp_servers]]
+# name = "legacy"
+# enabled = true
+# transport = "stdio"
+# address = "server --foo bar"
 ```
 
 - `[mcp_server]` is the local listener. `dgc mcp-server [address]`
@@ -415,6 +453,21 @@ address = "path/to/server --arg1"
   `enabled = true`.
 - `[[mcp_servers]]` are outbound/remote endpoints used by
   `RemoteToolManager`/`McpClient`. They never start a local listener.
+- Structured stdio `command` and `args` are passed as an executable/argv pair;
+  no shell parser or `bash -c` is involved. `env` values are literal and are
+  merged per key with project values taking precedence over global values.
+- Do not specify both structured `command` and legacy `address`; ambiguous
+  stdio configuration is rejected. HTTP endpoints reject stdio-only fields.
+  Enabled server names must be unique.
+- `connect_timeout_ms`, `list_timeout_ms`, and `call_timeout_ms` default to
+  30,000/10,000/30,000 milliseconds. `0` means unlimited for that operation;
+  unlimited HTTP connections use legacy initialization to avoid the SDK's
+  fixed modern-discovery probe deadline. An unlimited server that does not
+  complete within the registry's five-second registration grace period is
+  recorded as failed without blocking other tools.
+- Remote tool arguments, results, environment values, and credentials are not
+  logged verbatim. A failed remote server does not prevent other servers or
+  local tools from loading.
 
 Doge-Code's built-in MCP HTTP listener is currently loopback-only.
 

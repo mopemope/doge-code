@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use super::execution::{ExecutionConfig, merge_execution};
 use super::llm::LlmConfig;
-use super::mcp::{LocalMcpServerConfig, McpServerConfig, PartialLocalMcpServerConfig};
+use super::mcp::{
+    LocalMcpServerConfig, McpServerConfig, McpTransport, PartialLocalMcpServerConfig,
+    validate_mcp_server_names,
+};
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
 // Re-import from mod or loading
@@ -184,6 +187,17 @@ impl AppConfig {
             file_cfg.mcp_servers.as_ref(),
             project_cfg.mcp_servers.as_ref(),
         );
+        // Enabled remote endpoints are validated at the configuration
+        // boundary as well as by `McpClient`. Disabled entries remain
+        // harmless and can be completed later without being contacted.
+        for server in &mcp_servers {
+            if server.enabled {
+                server.validate().map_err(|error| {
+                    anyhow::anyhow!("invalid MCP server '{}': {error}", server.name)
+                })?;
+            }
+        }
+        validate_mcp_server_names(&mcp_servers)?;
 
         let local_mcp_server = merge_local_mcp_server(
             file_cfg.mcp_server.as_ref(),
@@ -293,49 +307,134 @@ pub fn merge_mcp_servers(
     file_servers: Option<&Vec<super::mcp::PartialMcpServerConfig>>,
     project_servers: Option<&Vec<super::mcp::PartialMcpServerConfig>>,
 ) -> Vec<McpServerConfig> {
-    let mut merged_mcp_servers = Vec::new();
+    let mut merged: Vec<super::mcp::PartialMcpServerConfig> = Vec::new();
+
     if let Some(file_mcp_servers) = file_servers {
-        for server in file_mcp_servers {
-            merged_mcp_servers.push(server.clone());
-        }
+        merged.extend(file_mcp_servers.iter().cloned());
     }
+
     if let Some(project_mcp_servers) = project_servers {
         for project_server in project_mcp_servers {
-            if let Some(name) = &project_server.name {
-                if let Some(existing_server) = merged_mcp_servers
+            if let Some(name) = &project_server.name
+                && let Some(existing) = merged
                     .iter_mut()
-                    .find(|s| s.name.as_ref() == Some(name))
-                {
-                    if let Some(enabled) = project_server.enabled {
-                        existing_server.enabled = Some(enabled);
+                    .find(|server| server.name.as_deref() == Some(name.as_str()))
+            {
+                // Scalar fields are field-wise merged. Environment variables
+                // are merged per key so a project can override one secret
+                // without discarding unrelated global variables.
+                if project_server.enabled.is_some() {
+                    existing.enabled = project_server.enabled;
+                }
+                if project_server.address.is_some() {
+                    existing.address = project_server.address.clone();
+                }
+                if project_server.transport.is_some() {
+                    existing.transport = project_server.transport;
+                }
+                if project_server.command.is_some() {
+                    existing.command = project_server.command.clone();
+                    // A structured command cannot inherit an HTTP/legacy
+                    // address from the global entry unless the project
+                    // explicitly supplied one (which remains an error).
+                    if project_server.address.is_none() {
+                        existing.address = None;
                     }
-                    if let Some(address) = &project_server.address {
-                        existing_server.address = Some(address.clone());
+                }
+                if project_server.args.is_some() {
+                    existing.args = project_server.args.clone();
+                }
+                if let Some(project_env) = &project_server.env {
+                    let mut merged_env = existing.env.clone().unwrap_or_default();
+                    merged_env.extend(
+                        project_env
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    );
+                    existing.env = Some(merged_env);
+                }
+                match project_server.transport {
+                    Some(McpTransport::Http) if project_server.command.is_none() => {
+                        // Switching to HTTP must not retain stdio-only
+                        // fields from the global entry. Explicit project
+                        // args/env are preserved so validation can report
+                        // the conflict instead of silently accepting it.
+                        existing.command = None;
+                        if project_server.args.is_none() {
+                            existing.args = Some(Vec::new());
+                        }
+                        if project_server.env.is_none() {
+                            existing.env = None;
+                        }
                     }
-                    if let Some(transport) = &project_server.transport {
-                        existing_server.transport = Some(transport.clone());
+                    Some(McpTransport::Stdio) if project_server.command.is_none() => {
+                        // A stdio transport without a structured command uses
+                        // the legacy address fallback; do not carry a global
+                        // structured command/argv/env into that mode.
+                        existing.command = None;
+                        if project_server.args.is_none() {
+                            existing.args = Some(Vec::new());
+                        }
+                        if project_server.env.is_none() {
+                            existing.env = None;
+                        }
                     }
-                } else {
-                    merged_mcp_servers.push(project_server.clone());
+                    None if project_server.command.is_some() => {
+                        // `command` is an unambiguous stdio signal when a
+                        // project omits the otherwise-default transport.
+                        existing.transport = Some(McpTransport::Stdio);
+                    }
+                    _ => {}
+                }
+                if project_server.connect_timeout_ms.is_some() {
+                    existing.connect_timeout_ms = project_server.connect_timeout_ms;
+                }
+                if project_server.list_timeout_ms.is_some() {
+                    existing.list_timeout_ms = project_server.list_timeout_ms;
+                }
+                if project_server.call_timeout_ms.is_some() {
+                    existing.call_timeout_ms = project_server.call_timeout_ms;
                 }
             } else {
-                merged_mcp_servers.push(project_server.clone());
+                merged.push(project_server.clone());
             }
         }
     }
 
-    let mcp_defaults = McpServerConfig::default();
-    merged_mcp_servers
+    let defaults = McpServerConfig::default();
+    merged
         .into_iter()
-        .map(|partial| McpServerConfig {
-            name: partial.name.unwrap_or_else(|| "default".to_string()),
-            enabled: partial.enabled.unwrap_or(mcp_defaults.enabled),
-            address: partial
-                .address
-                .unwrap_or_else(|| mcp_defaults.address.clone()),
-            transport: partial
-                .transport
-                .unwrap_or_else(|| mcp_defaults.transport.clone()),
+        .map(|partial| {
+            let transport = partial.transport.unwrap_or_else(|| {
+                if partial.command.is_some() {
+                    McpTransport::Stdio
+                } else {
+                    defaults.transport
+                }
+            });
+            // Never manufacture an address for a structured/stdio entry. An
+            // explicit stdio address remains available for the deprecated
+            // fallback, while HTTP entries must provide their endpoint.
+            let address =
+                if partial.command.is_some() || transport == super::mcp::McpTransport::Stdio {
+                    partial.address
+                } else {
+                    partial.address.or_else(|| defaults.address.clone())
+                };
+            McpServerConfig {
+                name: partial.name.unwrap_or_else(|| defaults.name.clone()),
+                enabled: partial.enabled.unwrap_or(defaults.enabled),
+                address,
+                transport,
+                command: partial.command,
+                args: partial.args.unwrap_or_default(),
+                env: partial.env.unwrap_or_default(),
+                connect_timeout_ms: partial
+                    .connect_timeout_ms
+                    .unwrap_or(defaults.connect_timeout_ms),
+                list_timeout_ms: partial.list_timeout_ms.unwrap_or(defaults.list_timeout_ms),
+                call_timeout_ms: partial.call_timeout_ms.unwrap_or(defaults.call_timeout_ms),
+            }
         })
         .collect()
 }

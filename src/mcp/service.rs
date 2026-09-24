@@ -18,6 +18,7 @@ use rmcp::{
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -169,90 +170,34 @@ impl DogeMcpService {
             "Repomap status: {}",
             if ready { "ready" } else { "warming" }
         );
-        Ok(ListResourcesResult {
-            resources: vec![
-                Resource::new(
-                    RawResource {
-                        uri: "doge://repomap/summary".to_string(),
-                        name: "RepoMap Summary".to_string(),
-                        description: Some(
-                            "Summary of the repository map, including statistics and top symbols."
-                                .to_string(),
-                        ),
-                        mime_type: Some("application/json".to_string()),
-                        icons: None,
-                        size: None,
-                        title: None,
-                        meta: None,
-                    },
-                    None,
-                ),
-                Resource::new(
-                    RawResource {
-                        uri: "doge://repomap/status".to_string(),
-                        name: "RepoMap Status".to_string(),
-                        description: Some(status_description),
-                        mime_type: Some("application/json".to_string()),
-                        icons: None,
-                        size: None,
-                        title: None,
-                        meta: None,
-                    },
-                    None,
-                ),
-                Resource::new(
-                    RawResource {
-                        uri: "agent://card".to_string(),
-                        name: "Agent Card".to_string(),
-                        description: Some(
-                            "The Agent Card describing identity and capabilities (A2A Protocol)"
-                                .to_string(),
-                        ),
-                        mime_type: Some("application/json".to_string()),
-                        icons: None,
-                        size: None,
-                        title: None,
-                        meta: None,
-                    },
-                    None,
-                ),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![
+            Resource::new("doge://repomap/summary", "RepoMap Summary")
+                .with_description(
+                    "Summary of the repository map, including statistics and top symbols.",
+                )
+                .with_mime_type("application/json"),
+            Resource::new("doge://repomap/status", "RepoMap Status")
+                .with_description(status_description)
+                .with_mime_type("application/json"),
+            Resource::new("agent://card", "Agent Card")
+                .with_description(
+                    "The Agent Card describing identity and capabilities (A2A Protocol)",
+                )
+                .with_mime_type("application/json"),
+        ]))
     }
 
     pub async fn list_resource_templates_impl(
         &self,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        Ok(ListResourceTemplatesResult {
-            next_cursor: None,
-            meta: None,
-            resource_templates: vec![
-                ResourceTemplate::new(
-                    RawResourceTemplate {
-                        uri_template: "doge://files/{path}".to_string(),
-                        name: "File Content".to_string(),
-                        description: Some("Read the content of a file in the project.".to_string()),
-                        mime_type: Some("text/plain".to_string()),
-                        title: None,
-                        icons: None,
-                    },
-                    None,
-                ),
-                ResourceTemplate::new(
-                    RawResourceTemplate {
-                        uri_template: "doge://symbols/{path}".to_string(),
-                        name: "File Symbols".to_string(),
-                        description: Some("Get the symbol map for a specific file.".to_string()),
-                        mime_type: Some("application/json".to_string()),
-                        title: None,
-                        icons: None,
-                    },
-                    None,
-                ),
-            ],
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(vec![
+            ResourceTemplate::new("doge://files/{path}", "File Content")
+                .with_description("Read the content of a file in the project.")
+                .with_mime_type("text/plain"),
+            ResourceTemplate::new("doge://symbols/{path}", "File Symbols")
+                .with_description("Get the symbol map for a specific file.")
+                .with_mime_type("application/json"),
+        ]))
     }
 
     pub async fn read_resource_impl(&self, uri: String) -> Result<ReadResourceResult, McpError> {
@@ -262,9 +207,9 @@ impl DogeMcpService {
                 "status": if ready { "ready" } else { "warming" }
             });
             let content = serde_json::to_string_pretty(&summary).unwrap();
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, uri)],
-            });
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                content, uri,
+            )]));
         }
 
         if uri == "agent://card" {
@@ -273,9 +218,9 @@ impl DogeMcpService {
             let content = serde_json::to_string_pretty(&card).map_err(|e| {
                 McpError::internal_error(format!("Serialization error: {}", e), None)
             })?;
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, uri)],
-            });
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                content, uri,
+            )]));
         }
 
         if uri == "doge://repomap/summary" {
@@ -285,9 +230,9 @@ impl DogeMcpService {
                 "files_count": map.symbols.iter().map(|s| &s.file).collect::<std::collections::HashSet<_>>().len(),
             });
             let content = serde_json::to_string_pretty(&summary).unwrap();
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, uri)],
-            });
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                content, uri,
+            )]));
         }
 
         if let Some(path_str) = uri.strip_prefix("doge://files/") {
@@ -311,9 +256,10 @@ impl DogeMcpService {
             let content = tokio::fs::read_to_string(&canonical)
                 .await
                 .map_err(|_| McpError::resource_not_found("resource not found", None))?;
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, uri.clone())],
-            });
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                content,
+                uri.clone(),
+            )]));
         }
 
         if let Some(path_str) = uri.strip_prefix("doge://symbols/") {
@@ -356,16 +302,16 @@ impl DogeMcpService {
             let content = serde_json::to_string_pretty(&symbols).map_err(|e| {
                 McpError::internal_error(format!("Serialization error: {}", e), None)
             })?;
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, uri)],
-            });
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                content, uri,
+            )]));
         }
 
         Err(McpError::resource_not_found("resource not found", None))
     }
 
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
-        RawResource::new(uri, name.to_string()).no_annotation()
+        Resource::new(uri, name)
     }
 
     /// Format a result as JSON text content
@@ -379,12 +325,35 @@ impl DogeMcpService {
                 Some(serde_json::Value::String(e.to_string())),
             )
         })?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&json_result).unwrap_or_else(|_| json_result.to_string()),
         )]))
     }
 
-    /// Format an error response
+    /// Format a tool-level error response.
+    ///
+    /// A tool that was routable but could not complete its work must return
+    /// `Ok(CallToolResult::error(...))`, not a JSON-RPC protocol error. This
+    /// keeps the failure content visible to the MCP caller and lets the agent
+    /// recover from user/tool-domain failures.
+    pub fn format_tool_error(
+        &self,
+        message: &str,
+        details: Option<serde_json::Value>,
+    ) -> CallToolResult {
+        let payload = match details {
+            Some(details) => json!({
+                "message": message,
+                "details": details,
+            }),
+            None => json!({ "message": message }),
+        };
+        CallToolResult::error(vec![ContentBlock::text(
+            serde_json::to_string(&payload).unwrap_or_else(|_| message.to_string()),
+        )])
+    }
+
+    /// Format a protocol-level error response.
     pub fn format_error(&self, message: &str, details: Option<serde_json::Value>) -> McpError {
         McpError::internal_error(message.to_string(), details)
     }
@@ -394,7 +363,7 @@ impl DogeMcpService {
 impl DogeMcpService {
     #[tool(description = "Say hello to the client ")]
     pub fn say_hello(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text("hello")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("hello")]))
     }
 
     #[tool(description = "Search the repository map for symbols and code structures ")]
@@ -444,7 +413,9 @@ impl DogeMcpService {
             .await
         {
             Ok(results) => self.format_json_result(results),
-            Err(e) => Err(self.format_error("Search repomap failed ", Some(json!(e.to_string())))),
+            Err(e) => {
+                Ok(self.format_tool_error("Search repomap failed", Some(json!(e.to_string()))))
+            }
         }
     }
 
@@ -466,7 +437,7 @@ impl DogeMcpService {
             &self.state.config,
         ) {
             Ok(result) => self.format_json_result(result),
-            Err(e) => Err(self.format_error("Failed to read file ", Some(json!(e.to_string())))),
+            Err(e) => Ok(self.format_tool_error("Failed to read file", Some(json!(e.to_string())))),
         }
     }
 
@@ -490,7 +461,9 @@ impl DogeMcpService {
             },
         ) {
             Ok(result) => self.format_json_result(result),
-            Err(e) => Err(self.format_error("Failed to read files ", Some(json!(e.to_string())))),
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to read files", Some(json!(e.to_string()))))
+            }
         }
     }
 
@@ -521,11 +494,13 @@ impl DogeMcpService {
                     formatted_results
                         .push(format!("[truncated] next_offset={:?}", results.next_offset));
                 }
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     formatted_results.join("\n"),
                 )]))
             }
-            Err(e) => Err(self.format_error("Failed to search text ", Some(json!(e.to_string())))),
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to search text", Some(json!(e.to_string()))))
+            }
         }
     }
 
@@ -548,7 +523,9 @@ impl DogeMcpService {
             },
         ) {
             Ok(files) => self.format_json_result(files),
-            Err(e) => Err(self.format_error("Failed to list files ", Some(json!(e.to_string())))),
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to list files", Some(json!(e.to_string()))))
+            }
         }
     }
 
@@ -566,7 +543,9 @@ impl DogeMcpService {
         .await
         {
             Ok(result) => self.format_json_result(result),
-            Err(e) => Err(self.format_error("Failed to find files ", Some(json!(e.to_string())))),
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to find files", Some(json!(e.to_string()))))
+            }
         }
     }
 
@@ -580,7 +559,7 @@ impl DogeMcpService {
         let tools = self.get_tool_defs();
         let card = crate::a2a::generate_agent_card(&self.state.config, tools);
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&card).unwrap_or_default(),
         )]))
     }
@@ -662,24 +641,29 @@ impl DogeMcpService {
 
 #[tool_handler]
 impl ServerHandler for DogeMcpService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "This server provides file system and code analysis tools. \
-                 Resources available: \
-                 - doge://repomap/summary: Overview of the codebase. \
-                 - doge://files/{path}: Read file content. \
-                 - doge://symbols/{path}: Get symbols for a file. \
-                 - agent://card: Agent identity and capabilities (A2A Protocol)."
-                    .to_string(),
-            ),
-        }
+        )
+        .with_protocol_version(ProtocolVersion::LATEST)
+        .with_instructions(
+            "This server provides file system and code analysis tools. \
+             Resources available: \
+             - doge://repomap/summary: Overview of the codebase. \
+             - doge://files/{path}: Read file content. \
+             - doge://symbols/{path}: Get symbols for a file. \
+             - agent://card: Agent identity and capabilities (A2A Protocol).",
+        )
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        // Keep all SDK-known versions available. The SDK negotiates the
+        // legacy initialize versions and handles the stateless 2026-07-28
+        // lifecycle when the peer supports it.
+        Cow::Borrowed(ProtocolVersion::KNOWN_VERSIONS)
     }
 
     async fn list_resources(
@@ -694,8 +678,10 @@ impl ServerHandler for DogeMcpService {
         &self,
         request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
-        self.read_resource_impl(request.uri).await
+    ) -> Result<ReadResourceResponse, McpError> {
+        self.read_resource_impl(request.uri)
+            .await
+            .map(ReadResourceResponse::Complete)
     }
 
     async fn list_resource_templates(
@@ -704,13 +690,5 @@ impl ServerHandler for DogeMcpService {
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         self.list_resource_templates_impl().await
-    }
-
-    async fn initialize(
-        &self,
-        _request: InitializeRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<InitializeResult, McpError> {
-        Ok(self.get_info())
     }
 }

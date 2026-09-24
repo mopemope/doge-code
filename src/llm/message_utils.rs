@@ -104,15 +104,20 @@ pub fn max_output_chars(tool_name: &str) -> usize {
     }
 }
 
-/// Truncates tool output while keeping it valid JSON.
+/// Truncates tool output while keeping it valid JSON using the tool's normal
+/// global budget.
+pub fn truncate_tool_output(content: String, tool_name: &str) -> String {
+    truncate_tool_output_to_budget(content, max_output_chars(tool_name))
+}
+
+/// Truncates serialized output to an explicit character budget while keeping
+/// the result valid JSON.
 ///
 /// Slicing the serialized payload can land mid-structure and hand the model
 /// malformed JSON. Instead, the output is parsed and oversized string fields
 /// are shortened (and array tails dropped) so the result stays parseable.
 /// Non-JSON payloads fall back to a head slice wrapped in a JSON object.
-pub fn truncate_tool_output(content: String, tool_name: &str) -> String {
-    let max_len = max_output_chars(tool_name);
-
+pub fn truncate_tool_output_to_budget(content: String, max_len: usize) -> String {
     if content.chars().count() <= max_len {
         return content;
     }

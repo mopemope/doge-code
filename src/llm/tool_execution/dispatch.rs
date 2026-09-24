@@ -58,14 +58,17 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
         "search_history" => tools::search_history(runtime, &args_val).await,
 
         other => {
-            if let Some(result) = runtime.fs.call_remote_tool(other, &args_val).await? {
+            if let Some(outcome) = runtime
+                .fs
+                .call_remote_tool(other, &args_val, runtime.cancel_token.clone())
+                .await?
+            {
                 Ok(ToolOutput {
-                    value: result.clone(),
-                    is_success: true, // Remote tools don't yet have a standardized success flag, assume true if Ok
-                    result_summary: format!(
-                        "Remote tool result: {}",
-                        serde_json::to_string(&result).unwrap_or_default()
-                    ),
+                    value: outcome.value,
+                    // MCP transport success is not tool success. The remote
+                    // normalizer derives this from CallToolResult.is_error.
+                    is_success: outcome.success,
+                    result_summary: outcome.summary,
                 })
             } else {
                 Err(anyhow!("unknown tool: {other}"))
@@ -77,7 +80,7 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, McpServerConfig, McpTransport};
     use crate::llm::types::ToolCallFunction;
     use crate::tools::FsTools;
     use serde_json::json;
@@ -85,6 +88,49 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::RwLock;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn test_remote_tool_error_preserves_failure_flag() -> Result<()> {
+        let dir = tempdir()?;
+        let app = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let handle = crate::mcp::server::spawn_mcp_server(
+            "127.0.0.1:0",
+            app.clone(),
+            Arc::new(RwLock::new(None)),
+        )
+        .await?;
+        let mut config = (*app).clone();
+        config.mcp_servers = vec![McpServerConfig {
+            name: "local".to_string(),
+            enabled: true,
+            address: Some(format!("http://{}/mcp", handle.local_addr())),
+            transport: McpTransport::Http,
+            ..McpServerConfig::default()
+        }];
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(config));
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        let call = ToolCall {
+            id: Some("remote_error".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "mcp_local_fs_read".to_string(),
+                arguments: json!({
+                    "path": dir.path().join("missing.txt").to_string_lossy()
+                })
+                .to_string(),
+            },
+        };
+
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["is_error"], true);
+        handle.shutdown().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_execute_bash_failure_flag() -> Result<()> {

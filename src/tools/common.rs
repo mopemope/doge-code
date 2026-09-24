@@ -530,8 +530,11 @@ impl FsTools {
         &self,
         alias: &str,
         args: &serde_json::Value,
-    ) -> Result<Option<serde_json::Value>> {
-        self.remote_tool_manager.call_remote_tool(alias, args).await
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<crate::tools::remote_tools::RemoteToolOutcome>> {
+        self.remote_tool_manager
+            .call_remote_tool(alias, args, cancel_token)
+            .await
     }
     pub async fn read_memory(&self, key: &str) -> Result<String> {
         self.memory_tools.read_memory(key).await

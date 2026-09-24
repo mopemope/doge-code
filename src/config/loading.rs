@@ -112,11 +112,32 @@ enabled = false
 address = "127.0.0.1:8000"
 
 # Remote MCP servers Doge-Code connects to (outbound endpoints)
-[[mcp_servers]]
-name = "default"
-enabled = false
-address = "127.0.0.1:8000"
-transport = "http"
+# Structured stdio: command is executed directly; args are an argv array.
+# [[mcp_servers]]
+# name = "filesystem"
+# enabled = true
+# transport = "stdio"
+# command = "/usr/local/bin/mcp-filesystem"
+# args = ["--root", "/workspace"]
+# connect_timeout_ms = 30000  # 0 means unlimited
+# list_timeout_ms = 10000
+# call_timeout_ms = 30000
+# # [mcp_servers.env] is the TOML form for literal environment values.
+# # DOGE_LOG_LEVEL = "info"
+
+# Streamable HTTP example:
+# [[mcp_servers]]
+# name = "remote"
+# enabled = true
+# transport = "http"
+# address = "https://example.com/mcp"
+
+# Legacy stdio address syntax is deprecated; use command + args instead:
+# [[mcp_servers]]
+# name = "legacy"
+# enabled = true
+# transport = "stdio"
+# address = "server --foo bar"
 "#.to_string()
 }
 

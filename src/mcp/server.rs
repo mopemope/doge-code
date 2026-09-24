@@ -6,7 +6,7 @@ use crate::mcp::http_security::{
 use crate::mcp::service::{DogeMcpService, McpServiceState};
 use anyhow::{Context, Result};
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -87,14 +87,14 @@ pub async fn spawn_mcp_server(
         .context("failed to read MCP listener address")?;
 
     let state = Arc::new(McpServiceState::new(app_config.clone(), repomap));
-
+    let shutdown_token = CancellationToken::new();
     let service = StreamableHttpService::new(
         {
             let state = state.clone();
             move || Ok(DogeMcpService::new(state.clone()))
         },
         LocalSessionManager::default().into(),
-        Default::default(),
+        StreamableHttpServerConfig::default().with_cancellation_token(shutdown_token.clone()),
     );
 
     // Security layers: Host/Origin validation runs outermost, then the
@@ -107,7 +107,6 @@ pub async fn spawn_mcp_server(
         ))
         .layer(axum::middleware::from_fn(mcp_security_middleware));
 
-    let shutdown_token = CancellationToken::new();
     let shutdown = shutdown_token.clone();
 
     tracing::info!(

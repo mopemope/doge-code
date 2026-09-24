@@ -147,6 +147,40 @@ summary budget. Tool traffic inside the sub-agent never enters the main
 conversation; only `{ok, summary, files_examined, iterations, tool_calls}` is
 returned. Registration follows the same checklist as any other tool.
 
+## Remote MCP result contract
+
+Remote MCP calls are normalized in `src/tools/remote_tools.rs` after the
+`src/mcp/client.rs` protocol boundary. A JSON-RPC/transport success is not a
+tool success: for a completed `CallToolResult`, `is_error == Some(true)` maps
+to `ok: false` and `ToolOutput.is_success == false`; `Some(false)` and the
+legacy absent field (`None`) map to success.
+
+A normalized result has this shape (available fields are retained):
+
+```json
+{
+  "ok": true,
+  "server": "github",
+  "tool": "create_issue",
+  "is_error": false,
+  "content": [],
+  "structured_content": { "id": 123 },
+  "warnings": []
+}
+```
+
+`content` preserves MCP text/image/audio/resource blocks as JSON;
+`structured_content` preserves the server's arbitrary structured JSON. The
+raw `CallToolResult` envelope is not embedded a second time. Remote output is
+self-budgeted with JSON-safe truncation before it enters the LLM context, and
+`result_summary` is independently bounded. Input-required and Task responses
+are explicit unsupported tool results; protocol, transport, timeout, and
+cancellation errors do not masquerade as completed tool results.
+
+Remote MCP arguments, full results, environment values, and credentials are
+never logged verbatim. Structured stdio passes `command` and `args` directly
+to the child process; it never invokes a shell or parses a new command line.
+
 ## Tool registration checklist
 
 Every tool must be consistent at all sites; a missing site silently breaks the

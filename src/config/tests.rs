@@ -1,4 +1,5 @@
 use crate::config::*;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use tempfile::TempDir;
@@ -52,7 +53,134 @@ fn test_mcp_servers_merge_logic() {
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].name, "server1");
     assert!(!merged[0].enabled); // Project overrides file
-    assert_eq!(merged[0].address, "1.2.3.4"); // Field from file preserved
+    assert_eq!(merged[0].address.as_deref(), Some("1.2.3.4")); // Field from file preserved
+}
+
+#[test]
+fn test_mcp_structured_stdio_merge_preserves_argv_and_env_precedence() {
+    let global = PartialMcpServerConfig {
+        name: Some("filesystem".to_string()),
+        enabled: Some(true),
+        transport: Some(McpTransport::Stdio),
+        command: Some("/tmp/foo server".to_string()),
+        args: Some(vec![
+            "--config".to_string(),
+            "/tmp/foo config.json".to_string(),
+        ]),
+        env: Some(BTreeMap::from([
+            ("DOGE_GLOBAL".to_string(), "yes".to_string()),
+            ("DOGE_OVERRIDE".to_string(), "global".to_string()),
+        ])),
+        connect_timeout_ms: Some(11_000),
+        list_timeout_ms: Some(12_000),
+        call_timeout_ms: Some(13_000),
+        ..Default::default()
+    };
+    let project = PartialMcpServerConfig {
+        name: Some("filesystem".to_string()),
+        args: Some(vec![
+            "--project".to_string(),
+            "value with spaces".to_string(),
+        ]),
+        env: Some(BTreeMap::from([(
+            "DOGE_OVERRIDE".to_string(),
+            "project".to_string(),
+        )])),
+        call_timeout_ms: Some(0),
+        ..Default::default()
+    };
+
+    let global_servers = vec![global];
+    let project_servers = vec![project];
+    let merged = merge_mcp_servers(Some(&global_servers), Some(&project_servers));
+    assert_eq!(merged.len(), 1);
+    let server = &merged[0];
+    assert_eq!(server.transport, McpTransport::Stdio);
+    assert_eq!(server.command.as_deref(), Some("/tmp/foo server"));
+    assert_eq!(server.args, vec!["--project", "value with spaces"]);
+    assert_eq!(server.address, None);
+    assert_eq!(
+        server.env.get("DOGE_GLOBAL").map(String::as_str),
+        Some("yes")
+    );
+    assert_eq!(
+        server.env.get("DOGE_OVERRIDE").map(String::as_str),
+        Some("project")
+    );
+    assert_eq!(server.connect_timeout_ms, 11_000);
+    assert_eq!(server.list_timeout_ms, 12_000);
+    assert_eq!(server.call_timeout_ms, 0);
+    server.validate().expect("merged structured stdio config");
+}
+
+#[test]
+fn test_mcp_project_structured_command_does_not_inherit_http_address() {
+    let global = vec![PartialMcpServerConfig {
+        name: Some("switch".to_string()),
+        enabled: Some(true),
+        transport: Some(McpTransport::Http),
+        address: Some("http://127.0.0.1:8000/mcp".to_string()),
+        ..Default::default()
+    }];
+    let project = vec![PartialMcpServerConfig {
+        name: Some("switch".to_string()),
+        command: Some("/tmp/mcp server".to_string()),
+        ..Default::default()
+    }];
+
+    let merged = merge_mcp_servers(Some(&global), Some(&project));
+    let server = &merged[0];
+    assert_eq!(server.transport, McpTransport::Stdio);
+    assert_eq!(server.command.as_deref(), Some("/tmp/mcp server"));
+    assert_eq!(server.address, None);
+    server
+        .validate()
+        .expect("structured stdio override should validate");
+}
+
+#[test]
+fn test_mcp_project_http_switch_drops_inherited_stdio_fields() {
+    let global = vec![PartialMcpServerConfig {
+        name: Some("switch".to_string()),
+        enabled: Some(true),
+        transport: Some(McpTransport::Stdio),
+        address: Some("legacy-server --flag".to_string()),
+        command: Some("legacy-server".to_string()),
+        args: Some(vec!["--flag".to_string()]),
+        ..Default::default()
+    }];
+    let project = vec![PartialMcpServerConfig {
+        name: Some("switch".to_string()),
+        transport: Some(McpTransport::Http),
+        ..Default::default()
+    }];
+
+    let merged = merge_mcp_servers(Some(&global), Some(&project));
+    let server = &merged[0];
+    assert_eq!(server.transport, McpTransport::Http);
+    assert_eq!(server.address.as_deref(), Some("legacy-server --flag"));
+    assert_eq!(server.command, None);
+    assert!(server.args.is_empty());
+    server
+        .validate()
+        .expect_err("legacy command text is not a valid HTTP URL");
+}
+
+#[test]
+fn test_mcp_legacy_stdio_address_remains_valid() {
+    let parsed: FileConfig = toml::from_str(
+        r#"
+        [[mcp_servers]]
+        name = "legacy"
+        enabled = true
+        transport = "stdio"
+        address = "server --foo bar"
+        "#,
+    )
+    .expect("legacy MCP config should parse");
+    let merged = merge_mcp_servers(parsed.mcp_servers.as_ref(), None);
+    assert_eq!(merged[0].address.as_deref(), Some("server --foo bar"));
+    assert!(merged[0].validate().is_ok());
 }
 
 #[test]

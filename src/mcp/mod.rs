@@ -8,7 +8,7 @@ pub mod service;
 mod tests {
     use crate::config::AppConfig;
     use crate::mcp::service::{DogeMcpService, McpServiceState};
-    use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
+    use rmcp::{ServerHandler, handler::server::wrapper::Parameters, model::ContentBlock};
     use std::path::Path;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -45,6 +45,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_server_uses_sdk_protocol_version_instead_of_legacy_hardcode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let info = service.get_info();
+        assert_eq!(info.protocol_version, rmcp::model::ProtocolVersion::LATEST);
+        assert_ne!(
+            info.protocol_version,
+            rmcp::model::ProtocolVersion::V_2024_11_05
+        );
+    }
+
+    #[tokio::test]
     async fn test_say_hello_tool() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let service = test_service(tmp.path());
@@ -53,7 +65,7 @@ mod tests {
 
         let result = result.unwrap();
         assert_eq!(result.content.len(), 1);
-        if let RawContent::Text(ref text) = result.content[0].raw {
+        if let ContentBlock::Text(text) = &result.content[0] {
             assert_eq!(text.text, "hello");
         } else {
             panic!("Expected text content");
@@ -61,7 +73,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fs_read_tool_missing_file_errors() {
+    async fn test_fs_read_tool_missing_file_returns_tool_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let service = test_service(tmp.path());
         let params = crate::mcp::service::FsReadParams {
@@ -79,8 +91,9 @@ mod tests {
         };
 
         let result = service.fs_read(Parameters(params));
-        // Missing file must surface as an MCP error.
-        assert!(result.is_err());
+        // Missing file is a tool-level failure, not a JSON-RPC protocol error.
+        let result = result.expect("tool should return a result");
+        assert_eq!(result.is_error, Some(true));
     }
 
     #[tokio::test]
@@ -189,7 +202,16 @@ mod tests {
         assert!(result.is_ok());
         let call_result = result.unwrap();
         assert_eq!(call_result.content.len(), 1);
-        assert!(matches!(call_result.content[0].raw, RawContent::Text(_)));
+        assert!(matches!(&call_result.content[0], ContentBlock::Text(_)));
+    }
+
+    #[tokio::test]
+    async fn test_format_tool_error_is_completed_result() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = test_service(tmp.path());
+        let result = service.format_tool_error("tool failed", Some(serde_json::json!("details")));
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 1);
     }
 
     #[tokio::test]
@@ -473,189 +495,114 @@ mod tests {
 
 #[cfg(test)]
 mod client_tests {
-    use crate::config::McpServerConfig;
+    use crate::config::{AppConfig, McpServerConfig, McpTransport};
+    use crate::mcp::client::{McpClient, McpClientError};
+    use rmcp::model::{CallToolRequestParams, CallToolResponse};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
-    #[tokio::test]
-    async fn test_mcp_client_creation_with_invalid_transport() {
-        let _config = McpServerConfig {
+    fn http_config() -> McpServerConfig {
+        McpServerConfig {
             name: "test".to_string(),
             enabled: true,
-            address: "127.0.0.1:8000".to_string(),
-            transport: "invalid".to_string(),
-        };
-
-        let result = crate::mcp::client::McpClient::from_config(&_config).await;
-        assert!(result.is_err());
-
-        if let Err(rmcp::RmcpError::TransportCreation { .. }) = result {
-            // Expected error
-        } else {
-            panic!("Expected transport creation error for invalid transport");
+            address: Some("127.0.0.1:8000".to_string()),
+            transport: McpTransport::Http,
+            ..McpServerConfig::default()
         }
     }
 
     #[tokio::test]
-    async fn test_mcp_client_creation_with_invalid_stdio_command() {
-        let _config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "".to_string(), // Invalid command
-            transport: "stdio".to_string(),
-        };
-
-        let result = crate::mcp::client::McpClient::from_config(&_config).await;
-        assert!(result.is_err());
-
-        if let Err(rmcp::RmcpError::TransportCreation { .. }) = result {
-            // Expected error
-        } else {
-            panic!("Expected transport creation error for invalid stdio command");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_config_access() {
-        let _config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "127.0.0.1:8000".to_string(),
-            transport: "http".to_string(),
-        };
-
-        // We can't actually connect to a server in tests, so we'll just test the config access
-        assert_eq!(_config.name, "test");
-        assert_eq!(_config.address, "127.0.0.1:8000");
-        assert_eq!(_config.transport, "http");
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_http_transport_creation() {
-        let _config = McpServerConfig {
-            name: "test-http".to_string(),
-            enabled: true,
-            address: "http://127.0.0.1:8000".to_string(),
-            transport: "http".to_string(),
-        };
-
-        // We won't actually connect, but we can test that the config is processed correctly
-        // In a real test, we would mock the transport or use a test server
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_stdio_transport_creation() {
-        let _config = McpServerConfig {
-            name: "test-stdio".to_string(),
-            enabled: true,
-            address: "echo test".to_string(), // Simple command for testing
-            transport: "stdio".to_string(),
-        };
-
-        // We won't actually connect, but we can test that the config is processed correctly
-        // In a real test, we would mock the transport or use a test server
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_empty_server_name() {
-        let _config = McpServerConfig {
-            name: "".to_string(),
-            enabled: true,
-            address: "http://127.0.0.1:8000".to_string(),
-            transport: "http".to_string(),
-        };
-
-        // Test that client can be created with empty name
-        // In a real test, we would mock the transport or use a test server
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_empty_address() {
-        let _config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "".to_string(),
-            transport: "http".to_string(),
-        };
-
-        // Test that client creation fails with empty address for HTTP transport
-        // In a real test, we would expect an error when trying to connect
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_very_long_address() {
-        let long_address = "http://".to_string() + &"a".repeat(1000) + ":8000";
-        let _config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: long_address,
-            transport: "http".to_string(),
-        };
-
-        // Test that client can handle long addresses
-        // In a real test, we would mock the transport or use a test server
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_unsupported_transport_error() {
+    async fn test_mcp_client_rejects_invalid_stdio_config() {
         let config = McpServerConfig {
             name: "test".to_string(),
             enabled: true,
-            address: "127.0.0.1:8000".to_string(),
-            transport: "websocket".to_string(), // Unsupported transport
+            address: Some(String::new()),
+            transport: McpTransport::Stdio,
+            ..McpServerConfig::default()
         };
+        let result = McpClient::from_config(&config).await;
+        assert!(matches!(result, Err(McpClientError::Config(_))));
+    }
 
-        let result = crate::mcp::client::McpClient::from_config(&config).await;
+    #[test]
+    fn test_mcp_transport_enum_and_config_access() {
+        let config = http_config();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.address.as_deref(), Some("127.0.0.1:8000"));
+        assert_eq!(config.transport, McpTransport::Http);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_unsupported_transport_string_is_rejected_by_deserializer() {
+        let result = toml::from_str::<McpServerConfig>(
+            r#"
+            name = "test"
+            enabled = true
+            address = "http://example.com/mcp"
+            transport = "websocket"
+            "#,
+        );
         assert!(result.is_err());
-
-        match result {
-            Err(rmcp::RmcpError::TransportCreation { .. }) => {
-                // Expected error type
-            }
-            Err(e) => panic!("Expected TransportCreation error, got: {:?}", e),
-            Ok(_) => panic!("Expected error for unsupported transport"),
-        }
     }
 
     #[tokio::test]
-    async fn test_mcp_client_valid_transport_types() {
-        // Test that both supported transport types work in validation
-        let http_config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "http://127.0.0.1:8000".to_string(),
-            transport: "http".to_string(),
-        };
-
-        let stdio_config = McpServerConfig {
-            name: "test".to_string(),
-            enabled: true,
-            address: "echo test".to_string(),
-            transport: "stdio".to_string(),
-        };
-
-        // Both should be valid transport types
-        assert!(http_config.transport == "http" || http_config.transport == "stdio");
-        assert!(stdio_config.transport == "http" || stdio_config.transport == "stdio");
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_empty_address_error() {
+    async fn test_client_negotiates_with_local_http_server() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = Arc::new(AppConfig {
+            project_root: temp.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let handle =
+            crate::mcp::server::spawn_mcp_server("127.0.0.1:0", app, Arc::new(RwLock::new(None)))
+                .await
+                .expect("local MCP server should bind");
         let config = McpServerConfig {
-            name: "test".to_string(),
+            name: "local".to_string(),
             enabled: true,
-            address: "".to_string(),        // Empty address
-            transport: "stdio".to_string(), // stdio will fail with empty address
+            address: Some(format!("http://{}/mcp", handle.local_addr())),
+            transport: McpTransport::Http,
+            connect_timeout_ms: 5_000,
+            list_timeout_ms: 5_000,
+            call_timeout_ms: 5_000,
+            ..McpServerConfig::default()
         };
 
-        let result = crate::mcp::client::McpClient::from_config(&config).await;
-        assert!(result.is_err());
+        let client = McpClient::from_config(&config)
+            .await
+            .expect("client should negotiate with local server");
+        let peer = client
+            .get_server_info()
+            .await
+            .expect("negotiated peer info should be available");
+        assert!(rmcp::model::ProtocolVersion::KNOWN_VERSIONS.contains(&peer.protocol_version));
+        let tools = client.list_tools().await.expect("tools/list should work");
+        assert!(tools.iter().any(|tool| tool.name == "say_hello"));
+        let response = client
+            .call_tool(CallToolRequestParams::new("say_hello"))
+            .await
+            .expect("tools/call should work");
+        let CallToolResponse::Complete(result) = response else {
+            panic!("local tool should complete synchronously");
+        };
+        assert_eq!(result.is_error, Some(false));
 
-        // Should fail during stdio command parsing
-        match result {
-            Err(rmcp::RmcpError::TransportCreation { .. }) => {
-                // Expected error type
-            }
-            Err(e) => panic!("Expected TransportCreation error, got: {:?}", e),
-            Ok(_) => panic!("Expected error for empty address"),
-        }
+        let mut missing_params = CallToolRequestParams::new("fs_read");
+        missing_params.arguments = Some(
+            serde_json::json!({ "path": temp.path().join("missing.txt").to_string_lossy() })
+                .as_object()
+                .cloned()
+                .expect("arguments should be an object"),
+        );
+        let missing = client
+            .call_tool(missing_params)
+            .await
+            .expect("tool-level failure should be a completed MCP response");
+        let CallToolResponse::Complete(result) = missing else {
+            panic!("missing file should not become an unsupported response");
+        };
+        assert_eq!(result.is_error, Some(true));
+
+        handle.shutdown().await.expect("server shutdown");
     }
 }

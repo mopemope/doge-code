@@ -29,7 +29,17 @@ impl<'a> ToolRuntime<'a> {
         subagent_model: impl Into<String>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Self> {
-        fs.get_remote_tool_manager().ensure_remote_tools().await?;
+        let remote_manager = fs.get_remote_tool_manager();
+        if fs.config.mcp_servers.iter().any(|server| server.enabled) {
+            remote_manager
+                .ensure_remote_tools_with_cancellation(cancel_token.as_ref())
+                .await?;
+        } else {
+            // Preserve runtime construction semantics when no remote server
+            // is configured; the per-tool cancellation path still handles an
+            // already-cancelled agent token.
+            remote_manager.ensure_remote_tools().await?;
+        }
         let remote_tools = fs.get_remote_tool_manager().remote_tools_snapshot().await;
 
         let mut tools = default_tools_def();

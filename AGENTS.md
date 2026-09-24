@@ -34,7 +34,9 @@ Run the narrowest check first, then broaden:
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
-| `src/mcp/` | MCP server (rmcp) + client for remote MCP tools |
+| `src/mcp/` | MCP protocol/transport boundary (rmcp 3.x) |
+| `src/mcp/client.rs` | Outbound MCP transport, negotiated connection lifecycle, timeouts, cancellation, and SDK response handling |
+| `src/tools/remote_tools.rs` | Remote registry, stable aliases, and MCP-result → Doge normalized-result boundary |
 | `src/mcp/server.rs` | Local listener lifecycle / graceful shutdown (`spawn_mcp_server`, `McpServerHandle`, bind-before-spawn) |
 | `src/mcp/service.rs` | MCP tool/resource service (`DogeMcpService`, `McpServiceState` with shared `AppConfig`/RepoMap/build lock) |
 | `src/mcp/http_security.rs` | Local HTTP Host/Origin security + loopback bind validation |
@@ -92,6 +94,8 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - The global truncator is JSON-safe (it budgets string fields in-place rather than slicing the serialized payload), but it is a safety net only: tools must keep their own output under the cap using `src/tools/budget.rs` helpers (bash/shell 6k head+tail, `apply_patch` diff-only, `find_file` 200 paths, `read_memory` 6k) or `response_budget_chars`.
 - Execution changes belong in `src/execution/` (`runner.rs` / `policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `runner.rs` is policy-free process mechanics, while `process.rs` is the ExecutionPolicy-aware LLM adapter. `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
 - Do not create new ad-hoc `Command::output()` / `wait_with_output()` paths for finite background commands. Use `src/execution/runner.rs` unless the process is intentionally long-lived or interactive (PTY, MCP transport, daemon/service, or another documented exception).
+- Do not infer remote MCP tool success from transport success. For a completed call, `CallToolResult.is_error` is authoritative: `Some(true)` maps to `ToolOutput.is_success = false`; `Some(false)` and `None` map to success. Protocol/transport errors remain typed errors.
+- Never log remote MCP arguments, full results, environment values, or credentials. Structured stdio uses `command` + argv and never a shell parser.
 
 ## Testing Guidelines
 
@@ -119,7 +123,7 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 ## Configuration & Secrets
 
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints).
+- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
 - Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
 - Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
 

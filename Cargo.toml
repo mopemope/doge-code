@@ -69,7 +69,7 @@ notify-rust = "4"
 tui-textarea = { version = "0.7.0", features = ["crossterm"] }
 ansi-to-tui = "7.0.0"
 arboard = "3.4"
-rmcp = { version = "0.15.0", features = ["transport-streamable-http-server", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process", "client"] }
+rmcp = { version = "3.4.1", default-features = false, features = ["server", "client", "macros", "schemars", "transport-streamable-http-server", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process", "reqwest"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["limit"] }
 schemars = "1.0"
