@@ -43,8 +43,15 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
 
         let mut app = TuiApp::new_for_test("render-test".to_string(), None, "default");
+        app.push_log("render-marker");
+        app.textarea.insert_str("input-marker");
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
         terminal.draw(|frame| app.view(frame, None))?;
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("render-marker"));
+        assert!(rendered.contains("input-marker"));
+        assert!(rendered.contains("READY"));
 
         Ok(())
     }

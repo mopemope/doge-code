@@ -329,6 +329,12 @@ pub fn handle_normal_mode_key(
             }
         }
 
+        // Keep Shift+Tab as a no-op, matching the pre-migration textarea behavior.
+        KeyEvent {
+            code: KeyCode::BackTab,
+            ..
+        } => {}
+
         KeyEvent {
             code: KeyCode::Left,
             ..
@@ -359,8 +365,7 @@ pub fn handle_normal_mode_key(
                 | KeyCode::End
                 | KeyCode::Enter
                 | KeyCode::Esc
-                | KeyCode::F(_)
-                | KeyCode::BackTab => {
+                | KeyCode::F(_) => {
                     let handled_by_textarea = app.textarea.input(Input::from(other));
                     if handled_by_textarea {
                         app.dirty = true;
@@ -383,4 +388,79 @@ pub fn handle_normal_mode_key(
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::CompletionType;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{TerminalOptions, Viewport, layout::Rect};
+    use ratatui_textarea::{CursorMove, TextArea};
+
+    fn test_terminal() -> anyhow::Result<TerminalType> {
+        let backend = CrosstermBackend::new(std::io::stdout());
+        Ok(Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )?)
+    }
+
+    #[test]
+    fn normal_mode_keeps_shift_tab_as_a_noop() -> anyhow::Result<()> {
+        let mut app = TuiApp::new_for_test("key-routing", None, "default");
+        app.textarea = TextArea::from(vec!["abc".to_string()]);
+        app.dirty = false;
+        let mut terminal = test_terminal()?;
+
+        let should_exit = handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            &mut terminal,
+        )?;
+
+        assert!(!should_exit);
+        assert_eq!(app.textarea.lines(), ["abc"]);
+        assert_eq!(app.textarea.cursor(), (0, 0));
+        assert!(!app.dirty);
+        Ok(())
+    }
+
+    #[test]
+    fn normal_mode_routes_textarea_input_and_completion() -> anyhow::Result<()> {
+        let mut app = TuiApp::new_for_test("key-routing", None, "default");
+        let mut terminal = test_terminal()?;
+
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut terminal,
+        )?;
+        assert_eq!(app.textarea.lines(), ["x"]);
+
+        app.textarea = TextArea::from(vec!["abc".to_string()]);
+        app.textarea.move_cursor(CursorMove::End);
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &mut terminal,
+        )?;
+        assert_eq!(app.textarea.cursor(), (0, 0));
+
+        app.textarea = TextArea::from(vec!["/he".to_string()]);
+        app.completion_active = true;
+        app.completion_candidates = vec!["/help".to_string()];
+        app.completion_type = CompletionType::Command;
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut terminal,
+        )?;
+        assert_eq!(app.textarea.lines(), ["/help "]);
+        assert!(!app.completion_active);
+
+        Ok(())
+    }
 }

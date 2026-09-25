@@ -606,8 +606,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_ansi_does_not_panic_or_drop_plain_text() {
+    fn unknown_ansi_sgr_preserves_plain_text() {
         let lines = render_plain_entry("\x1b[999mplain\x1b[999m", 20, &Theme::dark());
-        assert!(lines.iter().any(|line| line.text().contains("plain")));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "plain");
+    }
+
+    #[test]
+    fn plain_text_without_ansi_uses_the_parser_default_style() {
+        let lines = render_plain_entry("[stderr] boom", 20, &Theme::dark());
+        assert_eq!(span_for(&lines, "[stderr]").style, Style::default());
     }
 }
