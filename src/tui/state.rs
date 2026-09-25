@@ -8,11 +8,11 @@ use crossterm::{
     terminal::{self},
 };
 use ratatui::widgets::Block;
+use ratatui_textarea::TextArea;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
 use tracing::debug;
-use tui_textarea::TextArea;
 
 pub const MAX_COMPLETION_DISPLAY_ITEMS: usize = 10;
 
@@ -411,12 +411,14 @@ impl TuiApp {
         self.dirty = true;
     }
 
-    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
+    fn from_parts(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+        input_history: Vec<String>,
+        history_index: usize,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (input_history, history_index) = load_input_history();
-
-        let shell_session = ShellSession::new(tx.clone()).ok();
-
         let theme = match theme_name.to_lowercase().as_str() {
             "light" => Theme::light(),
             _ => Theme::dark(),
@@ -426,7 +428,7 @@ impl TuiApp {
         textarea.set_block(Block::default().title("Input"));
         // textarea.set_placeholder_text("Enter your message...");
 
-        let app = Self {
+        Self {
             title: title.into(),
             textarea,
             log: Vec::new(),
@@ -484,16 +486,32 @@ impl TuiApp {
             processing_start_time: None,
             last_elapsed_time: None,
             cfg: None,
-            shell_session,
+            shell_session: None,
             shell_output_buffer: String::new(),
             task_queue: VecDeque::new(),
             last_heartbeat: None,
             diff_review: None,
             diff_viewport_height: std::cell::Cell::new(0),
             diff_rejected_pending: false,
-        };
+        }
+    }
 
+    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
+        let (input_history, history_index) = load_input_history();
+        let mut app = Self::from_parts(title, model, theme_name, input_history, history_index);
+        if let Some(tx) = app.inbox_tx.clone() {
+            app.shell_session = ShellSession::new(tx).ok();
+        }
         Ok(app)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+    ) -> Self {
+        Self::from_parts(title, model, theme_name, Vec::new(), 0)
     }
 
     /*

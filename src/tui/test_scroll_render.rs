@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::tui::state::{LogEntry, ScrollState, Status, TuiApp, build_render_plan};
-    // use tui_textarea::TextArea; // 不要
+    // use ratatui_textarea::TextArea; // 不要
 
     fn create_test_app() -> TuiApp {
         TuiApp::new("test", None, "dark").unwrap()

@@ -1,6 +1,6 @@
 use crate::tui::state::{InputMode, TuiApp};
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Handle keys when in File Search mode.
 pub fn handle_file_search_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {

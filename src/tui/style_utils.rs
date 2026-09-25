@@ -536,3 +536,78 @@ pub fn render_markdown_entry(
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{StyledSpan, render_plain_entry, wrap_segments};
+    use crate::tui::state_render::truncate_display;
+    use crate::tui::theme::Theme;
+    use ratatui::style::{Color, Modifier, Style};
+    use unicode_width::UnicodeWidthStr;
+
+    fn span_for<'a>(lines: &'a [super::StyledLine], needle: &str) -> &'a super::StyledSpan {
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains(needle))
+            .expect("expected rendered span")
+    }
+
+    #[test]
+    fn unicode_width_handles_common_terminal_scripts() {
+        assert_eq!(UnicodeWidthStr::width("ASCII"), 5);
+        assert_eq!(UnicodeWidthStr::width("日本語"), 6);
+        assert_eq!(UnicodeWidthStr::width("😀"), 2);
+        assert_eq!(UnicodeWidthStr::width("a\u{301}"), 1);
+        assert_eq!(UnicodeWidthStr::width("👩‍💻"), 2);
+
+        assert_eq!(truncate_display("a\u{301}b", 1), "a\u{301}");
+        assert_eq!(truncate_display("👩‍💻x", 2), "👩‍💻");
+    }
+
+    #[test]
+    fn wrapping_keeps_combining_graphemes_together() {
+        let lines = wrap_segments(
+            &[StyledSpan {
+                content: "a\u{301}b".to_string(),
+                style: Style::default(),
+            }],
+            1,
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text(), "a\u{301}");
+        assert_eq!(lines[1].text(), "b");
+    }
+
+    #[test]
+    fn ansi_rendering_preserves_foreground_background_bold_and_rgb() {
+        let theme = Theme::dark();
+        let foreground = render_plain_entry("\x1b[31mred\x1b[0m", 20, &theme);
+        assert_eq!(foreground[0].text(), "red");
+        assert_eq!(span_for(&foreground, "red").style.fg, Some(Color::Red));
+
+        let background = render_plain_entry("\x1b[48;2;1;2;3mbg\x1b[0m", 20, &theme);
+        assert_eq!(
+            span_for(&background, "bg").style.bg,
+            Some(Color::Rgb(1, 2, 3))
+        );
+
+        let bold = render_plain_entry("\x1b[1mbold\x1b[0m", 20, &theme);
+        assert!(
+            span_for(&bold, "bold")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+
+        let rgb = render_plain_entry("\x1b[38;2;12;34;56mrgb\x1b[0m", 20, &theme);
+        assert_eq!(span_for(&rgb, "rgb").style.fg, Some(Color::Rgb(12, 34, 56)));
+    }
+
+    #[test]
+    fn invalid_ansi_does_not_panic_or_drop_plain_text() {
+        let lines = render_plain_entry("\x1b[999mplain\x1b[999m", 20, &Theme::dark());
+        assert!(lines.iter().any(|line| line.text().contains("plain")));
+    }
+}

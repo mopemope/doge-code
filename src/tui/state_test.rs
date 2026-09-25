@@ -81,6 +81,66 @@ fn test_plan_list_completed_hides_on_next_dispatch() {
 }
 
 #[test]
+fn test_textarea_crossterm_input_compatibility() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui_textarea::{CursorMove, Input, Key, TextArea};
+
+    let key = |code, modifiers| KeyEvent::new(code, modifiers);
+    let mut textarea = TextArea::default();
+
+    assert!(textarea.input(key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    assert!(textarea.input(key(KeyCode::Char('b'), KeyModifiers::NONE)));
+    assert!(textarea.input(key(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert_eq!(textarea.lines(), ["a"]);
+
+    textarea.move_cursor(CursorMove::Head);
+    textarea.input(key(KeyCode::Delete, KeyModifiers::NONE));
+    assert_eq!(textarea.lines(), [""]);
+
+    assert!(textarea.input(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(textarea.input(key(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_eq!(textarea.lines(), ["", "x"]);
+
+    let mut shortcut_textarea = TextArea::from(vec!["abc".to_string()]);
+    shortcut_textarea.move_cursor(CursorMove::End);
+    assert_eq!(shortcut_textarea.cursor(), (0, 3));
+    shortcut_textarea.input(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(shortcut_textarea.cursor(), (0, 0));
+
+    let input = Input::from(Event::Key(key(KeyCode::Char('q'), KeyModifiers::SHIFT)));
+    assert_eq!(
+        input,
+        Input {
+            key: Key::Char('q'),
+            ctrl: false,
+            alt: false,
+            shift: true,
+        }
+    );
+
+    let mouse = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(matches!(
+        Input::from(Event::Mouse(mouse)),
+        Input {
+            key: Key::MouseScrollUp,
+            ..
+        }
+    ));
+
+    // Non-key events remain safe to pass through the shared input adapter.
+    assert_eq!(
+        Input::from(Event::Paste("clipboard".into())),
+        Input::default()
+    );
+    let _ = Event::Resize(80, 24);
+}
+
+#[test]
 fn test_plan_list_in_progress_does_not_hide() {
     let mut app = TuiApp::new("Test App", None, "dark").unwrap();
 

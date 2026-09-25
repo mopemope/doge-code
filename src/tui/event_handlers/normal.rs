@@ -1,10 +1,10 @@
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{Block, Borders};
+use ratatui_textarea::{CursorMove, Input, TextArea};
 use tracing::debug;
-use tui_textarea::{CursorMove, Input, TextArea};
 
 use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 

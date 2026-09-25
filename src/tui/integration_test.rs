@@ -37,4 +37,15 @@ mod tests {
 
         // If this compiles and runs without panicking, mouse capture is available
     }
+
+    #[test]
+    fn test_ratatui_test_backend_renders_main_view() -> Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut app = TuiApp::new_for_test("render-test".to_string(), None, "default");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        terminal.draw(|frame| app.view(frame, None))?;
+
+        Ok(())
+    }
 }

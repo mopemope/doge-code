@@ -66,7 +66,7 @@ Non-interactive session management. Sessions are listed most recently updated fi
 ## 🔧 Installation
 
 ### Prerequisites
-- Rust 1.70+ (Rust Edition 2024)
+- Rust 1.88+ (Rust Edition 2024)
 - OpenAI compatible API key (set via `OPENAI_API_KEY` environment variable)
 
 ### Build from Source

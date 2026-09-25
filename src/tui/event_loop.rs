@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use serde::Deserialize;
 use std::fs;
 use std::io::ErrorKind;
@@ -586,15 +586,12 @@ impl TuiApp {
         self.textarea.lines().iter().all(|line| line.is_empty())
     }
 
-    fn process_diff_review_key(
-        &mut self,
-        key: ratatui::crossterm::event::KeyEvent,
-    ) -> Result<bool> {
+    fn process_diff_review_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
         if self.diff_review.is_none() {
             return Ok(false);
         }
 
-        use ratatui::crossterm::event::KeyCode;
+        use crossterm::event::KeyCode;
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {

@@ -1,7 +1,7 @@
 use crate::tui::state::{InputMode, TuiApp};
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tui_textarea::TextArea;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_textarea::TextArea;
 
 /// Handle keys when in History Search mode.
 pub fn handle_history_search_key(app: &mut TuiApp, k: KeyEvent) -> Result<()> {
