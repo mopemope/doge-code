@@ -303,6 +303,7 @@ impl TuiApp {
             "/rebuild-repomap".to_string(),
             "/tokens".to_string(),
             "/cancel".to_string(),
+            "/jobs".to_string(),
             "/compact".to_string(),
             "/lint".to_string(),
             "/git-worktree".to_string(),

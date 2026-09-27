@@ -54,6 +54,8 @@ pub struct TestResult {
     pub output_truncated: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -292,14 +294,15 @@ pub async fn run_test_command_with_cancel(
                 timed_out: false,
                 output_truncated: false,
                 warnings: vec![error.to_string()],
+                cancelled: false,
             };
         }
     };
 
-    let (timed_out, success) = match managed.termination {
-        ManagedProcessTermination::Exited => (false, managed.success()),
-        ManagedProcessTermination::TimedOut => (true, false),
-        ManagedProcessTermination::Cancelled => (false, false),
+    let (timed_out, cancelled, success) = match managed.termination {
+        ManagedProcessTermination::Exited => (false, false, managed.success()),
+        ManagedProcessTermination::TimedOut => (true, false, false),
+        ManagedProcessTermination::Cancelled => (false, true, false),
     };
     let mut warnings = managed.warnings;
     if managed.capture_truncated {
@@ -322,6 +325,7 @@ pub async fn run_test_command_with_cancel(
         timed_out,
         output_truncated: managed.capture_truncated || timed_out,
         warnings,
+        cancelled,
     }
 }
 

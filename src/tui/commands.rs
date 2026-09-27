@@ -1,3 +1,4 @@
+pub mod agent_job;
 pub mod core;
 pub mod handlers;
 pub mod new;

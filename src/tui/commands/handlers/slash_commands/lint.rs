@@ -1,6 +1,7 @@
 use crate::execution::{
     ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
 };
+use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess};
 use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::thread;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ pub struct LintResult {
     pub timed_out: bool,
     pub output_truncated: bool,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 const DIAGNOSTIC_OUTPUT_BUDGET_CHARS: usize = 32_000;
@@ -114,24 +116,56 @@ fn lint_warnings(result: &LintResult) -> String {
     }
 }
 
-/// Run linting for Go, Rust, and TypeScript projects
+/// Run linting for Go, Rust, and TypeScript projects as a foreground job.
+/// Lint currently performs mutations (fmt/fix), so it takes `Write` access.
 pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
-    ui.push_log("Running lint command...");
+    // Fast pre-check so a busy rejection never flips the global status.
+    if let Some(active_id) = executor.jobs.foreground_id()
+        && let Some(active) = executor.jobs.get_snapshot(active_id)
+    {
+        ui.push_log(format!(
+            "[Job] {} is already running. Use /jobs or /cancel {}.",
+            active.id, active.id
+        ));
+        return;
+    }
 
+    let Some(ui_tx) = executor.ui_tx.clone() else {
+        ui.push_log("UI channel unavailable - cannot run lint.");
+        return;
+    };
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
-    ui.push_log("Running lint in background with TUI spinner...");
 
-    if let Some(ui_tx) = &executor.ui_tx {
-        ui_tx.send_logged("::status:shell_running".to_string());
-
-        let ui_tx_clone = ui_tx.clone();
-        let project_root_clone = project_root.clone();
-
-        thread::spawn(move || lint_thread(project_root_clone, ui_tx_clone, command_timeout_ms));
-    } else {
-        ui.push_log("UI channel unavailable - falling back to sync lint (TUI may freeze).");
-        // fallback sync logic could be added here if needed
+    let spec = JobSpec::new(
+        JobKind::Lint,
+        JobScope::Foreground,
+        WorkspaceAccess::Write,
+        "Run project lint",
+    );
+    let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        lint_job_async(
+            project_root,
+            ui_tx,
+            command_timeout_ms,
+            ctx.cancellation_token(),
+        )
+        .await
+    });
+    match spawn {
+        Ok(id) => {
+            ui.push_log("Running lint command...");
+            ui.push_log(format!("Lint job started as {id}."));
+        }
+        Err(JobStartError::ForegroundBusy { active }) => {
+            ui.push_log(format!(
+                "[Job] {} is already running. Use /jobs or /cancel {}.",
+                active.id, active.id
+            ));
+        }
+        Err(JobStartError::ShuttingDown) => {
+            ui.push_log("Job manager is shutting down.");
+        }
     }
 }
 
@@ -340,25 +374,23 @@ fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
     commands
 }
 
-fn lint_thread(project_root: PathBuf, ui_tx: Sender<String>, command_timeout_ms: u64) {
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            ui_tx.send_logged(format!(
-                "::shell_output:Failed to create lint runtime: {error}"
-            ));
-            ui_tx.send_logged("::status:idle".to_string());
-            return;
-        }
-    };
-    runtime.block_on(lint_thread_async(project_root, ui_tx, command_timeout_ms));
-}
-
-async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command_timeout_ms: u64) {
+async fn lint_job_async(
+    project_root: PathBuf,
+    ui_tx: Sender<String>,
+    command_timeout_ms: u64,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> JobRunOutcome {
+    ui_tx.send_logged("::status:shell_running".to_string());
     ui_tx.send_logged(format!(
         "::shell_output:Project root: {}",
         project_root.display()
     ));
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("::shell_output:Lint run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
+    }
 
     // Detect languages in the project
     let detected_languages = detect_project_languages(&project_root);
@@ -374,7 +406,7 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
                 .to_string(),
         );
         ui_tx.send_logged("::status:idle".to_string());
-        return;
+        return JobRunOutcome::Completed;
     }
 
     let mut all_issues = Vec::new();
@@ -385,6 +417,11 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
 
     // Run linters for each detected language
     for lang in detected_languages {
+        if cancellation.is_cancelled() {
+            ui_tx.send_logged("::shell_output:Lint run cancelled.");
+            ui_tx.send_logged("::status:cancelled");
+            return JobRunOutcome::Cancelled;
+        }
         ui_tx.send_logged(format!("::shell_output:\n--- Linting {} ---", lang));
 
         if let Some(config) = lint_configs.get(&lang) {
@@ -397,8 +434,24 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
             }
 
             for lint_cmd in &config.commands {
-                let result =
-                    run_command_with_output(&project_root, lint_cmd, command_timeout_ms).await;
+                if cancellation.is_cancelled() {
+                    ui_tx.send_logged("::shell_output:Lint run cancelled.");
+                    ui_tx.send_logged("::status:cancelled");
+                    return JobRunOutcome::Cancelled;
+                }
+                let result = run_command_with_output(
+                    &project_root,
+                    lint_cmd,
+                    command_timeout_ms,
+                    Some(cancellation.child_token()),
+                )
+                .await;
+
+                if result.cancelled || cancellation.is_cancelled() {
+                    ui_tx.send_logged("::shell_output:Lint run cancelled.");
+                    ui_tx.send_logged("::status:cancelled");
+                    return JobRunOutcome::Cancelled;
+                }
 
                 // Store the command output to send to LLM if there are warnings/errors
                 all_command_outputs.push(format!(
@@ -463,7 +516,13 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
 
                 all_issues.extend(issues);
 
-                // If the lint command failed and supports auto-fix, try running with auto-fix
+                // If the lint command failed and supports auto-fix, try running with auto-fix.
+                // Never start auto-fix after cancellation.
+                if cancellation.is_cancelled() {
+                    ui_tx.send_logged("::shell_output:Lint run cancelled.");
+                    ui_tx.send_logged("::status:cancelled");
+                    return JobRunOutcome::Cancelled;
+                }
                 if !result.success
                     && let Some(auto_fix_flag) = &lint_cmd.auto_fix_flag
                 {
@@ -475,9 +534,19 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
                         args: fix_args,
                         auto_fix_flag: None,
                     };
-                    let fix_result =
-                        run_command_with_output(&project_root, &fix_command, command_timeout_ms)
-                            .await;
+                    let fix_result = run_command_with_output(
+                        &project_root,
+                        &fix_command,
+                        command_timeout_ms,
+                        Some(cancellation.child_token()),
+                    )
+                    .await;
+
+                    if fix_result.cancelled || cancellation.is_cancelled() {
+                        ui_tx.send_logged("::shell_output:Lint run cancelled.");
+                        ui_tx.send_logged("::status:cancelled");
+                        return JobRunOutcome::Cancelled;
+                    }
 
                     if fix_result.success {
                         ui_tx.send_logged(format!(
@@ -560,14 +629,22 @@ async fn lint_thread_async(project_root: PathBuf, ui_tx: Sender<String>, command
         ui_tx.send_logged(format!("::lint_command_output_analysis:{}", prompt));
     }
 
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("::shell_output:Lint run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
+    }
+
     ui_tx.send_logged("::shell_output:Linting completed.".to_string());
     ui_tx.send_logged("::status:idle".to_string());
+    JobRunOutcome::Completed
 }
 
 async fn run_command_with_output(
     project_root: &Path,
     command: &LintCommand,
     timeout_ms: u64,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
 ) -> LintResult {
     let spec = ManagedProcessSpec {
         program: command.command.clone(),
@@ -578,7 +655,7 @@ async fn run_command_with_output(
     let timeout = (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms));
     let options = ManagedRunOptions {
         timeout,
-        cancellation: None,
+        cancellation,
     };
     let command_text = format!("{} {}", command.command, command.args.join(" "));
 
@@ -595,10 +672,12 @@ async fn run_command_with_output(
                 timed_out: false,
                 output_truncated: false,
                 warnings: vec![error.to_string()],
+                cancelled: false,
             };
         }
     };
     let timed_out = managed.termination == ManagedProcessTermination::TimedOut;
+    let cancelled = managed.termination == ManagedProcessTermination::Cancelled;
     let success = managed.success();
     LintResult {
         command: command_text,
@@ -610,6 +689,7 @@ async fn run_command_with_output(
         timed_out,
         output_truncated: managed.capture_truncated || timed_out,
         warnings: managed.warnings,
+        cancelled,
     }
 }
 
@@ -959,6 +1039,7 @@ mod tests {
             timed_out: false,
             output_truncated: false,
             warnings: Vec::new(),
+            cancelled: false,
         }
     }
 
@@ -1002,9 +1083,13 @@ mod tests {
     #[tokio::test]
     async fn test_managed_lint_command_success_and_spawn_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let success =
-            run_command_with_output(dir.path(), &lint_command("printf", &["lint-ok"]), 10_000)
-                .await;
+        let success = run_command_with_output(
+            dir.path(),
+            &lint_command("printf", &["lint-ok"]),
+            10_000,
+            None,
+        )
+        .await;
         assert!(success.success);
         assert_eq!(success.exit_code, Some(0));
         assert_eq!(success.stdout, "lint-ok");
@@ -1013,6 +1098,7 @@ mod tests {
             dir.path(),
             &lint_command("doge-lint-command-does-not-exist", &[]),
             10_000,
+            None,
         )
         .await;
         assert!(!failure.success);
@@ -1027,6 +1113,7 @@ mod tests {
             dir.path(),
             &lint_command("sh", &["-c", "head -c 200000 /dev/zero | tr '\\0' x"]),
             10_000,
+            None,
         )
         .await;
         assert!(result.success);
@@ -1065,5 +1152,46 @@ mod tests {
         result.exit_code = None;
         result.timed_out = true;
         assert_eq!(lint_exit_status(&result), "timeout");
+    }
+
+    #[tokio::test]
+    async fn test_lint_command_cancellation_sets_cancelled() {
+        use tokio_util::sync::CancellationToken;
+        let dir = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+        let result = run_command_with_output(
+            dir.path(),
+            &lint_command("sleep", &["30"]),
+            30_000,
+            Some(token),
+        )
+        .await;
+        assert!(result.cancelled);
+        assert!(!result.success);
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn test_lint_job_precancelled_skips_analysis() {
+        use tokio_util::sync::CancellationToken;
+        let dir = tempfile::tempdir().unwrap();
+        let (ui_tx, rx) = std::sync::mpsc::channel::<String>();
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome = lint_job_async(dir.path().to_path_buf(), ui_tx, 10_000, token).await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Cancelled));
+        let messages: Vec<String> = rx.try_iter().collect();
+        assert!(!messages.iter().any(|m| m.starts_with("::lint_issues:")));
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.starts_with("::lint_command_output_analysis:"))
+        );
+        assert!(messages.iter().any(|m| m == "::status:cancelled"));
     }
 }

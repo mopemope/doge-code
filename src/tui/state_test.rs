@@ -52,6 +52,7 @@ fn test_get_all_commands_with_custom_commands() {
     assert!(all_commands.contains(&"/git-worktree".to_string()));
 
     assert!(all_commands.contains(&"/cancel".to_string()));
+    assert!(all_commands.contains(&"/jobs".to_string()));
     assert!(all_commands.contains(&"/compact".to_string()));
 
     // カスタムコマンドが含まれていることを確認

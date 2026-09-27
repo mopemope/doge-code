@@ -16,6 +16,7 @@ pub mod exec;
 pub mod execution;
 pub mod features;
 pub mod hooks;
+pub mod jobs;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
@@ -372,6 +373,9 @@ async fn run_tui(
     let mut exec = exec;
     exec.set_ui_tx(app.sender());
     exec.publish_plan_list();
+    // Keep a clone for graceful shutdown after the UI exits. The manager
+    // owns all foreground/background job tasks via TaskTracker.
+    let jobs = exec.jobs.clone();
     // Show which project instructions file (if any) was used at startup
     if let Some(path) = crate::tui::commands::prompt::get_project_instructions_file_path(&exec.cfg)
     {
@@ -397,7 +401,13 @@ async fn run_tui(
     }
 
     //    app.push_log("Type plain prompts (no leading slash) or commands like /clear, /quit");
-    app.run()?;
+    let run_result = app.run();
+
+    // Graceful shutdown: cancel all jobs, drain the tracker, and force-abort
+    // only tasks still stuck past the grace period.
+    jobs.shutdown(crate::jobs::JOB_SHUTDOWN_GRACE).await;
+
+    run_result?;
 
     // Display session statistics on shutdown
     if let Some(handler) = &app.handler

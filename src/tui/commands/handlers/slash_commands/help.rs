@@ -13,7 +13,8 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /tools - List available tools");
     ui.push_log("  /tokens - Show token usage");
     ui.push_log("  /compact - Compact conversation history to reduce token usage");
-    ui.push_log("  /cancel - Cancel the current operation");
+    ui.push_log("  /cancel [job-id] - Cancel the current foreground job or a specific job");
+    ui.push_log("  /jobs - List running and recent jobs");
     ui.push_log("  /reset - Force reset TUI state to Idle (emergency use)");
     ui.push_log("  /lint - Run linting tools for Go, Rust, and TypeScript");
     ui.push_log("  /test - Run tests for the project");

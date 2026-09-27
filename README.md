@@ -214,7 +214,8 @@ The TUI provides various slash commands for quick operations:
 | `/help` | Display available commands and help |
 | `/quit` | Exit the application |
 | `/clear` | Clear the screen |
-| `/cancel` | Cancel current processing |
+| `/cancel [job-id]` | Cancel the current foreground job or a specific job (`/cancel job-12`) |
+| `/jobs` | List running and recent jobs |
 | `/compact` | Compact conversation history using LLM summarization |
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
@@ -228,6 +229,12 @@ The TUI provides various slash commands for quick operations:
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |
 | `/session <sub>` | Manage sessions: `new`, `list`, `show`, `switch`, `save`, `delete`, `current`, `clear` |
+| `/stack [add <task>|next|list]` | Manage ephemeral task stack (prompts waiting for manual execution) |
+
+`/stack` holds prompts waiting for manual execution; `/jobs` shows work
+currently executing or recently finished. They are different lists: a busy
+foreground job is rejected explicitly (use `/jobs` to inspect it or
+`/cancel` to stop it) and is never auto-queued into `/stack`.
 
 ## 🔍 search_repomap Cheat Sheet
 

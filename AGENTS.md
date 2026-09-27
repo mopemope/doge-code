@@ -34,6 +34,7 @@ Run the narrowest check first, then broaden:
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
+| `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
 | `src/mcp/` | MCP protocol/transport boundary (rmcp 3.x) |
 | `src/mcp/client.rs` | Outbound MCP transport, negotiated connection lifecycle, timeouts, cancellation, and SDK response handling |
 | `src/tools/remote_tools.rs` | Remote registry, stable aliases, and MCP-result → Doge normalized-result boundary |
@@ -83,6 +84,13 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 - Prefer `tracing` spans/macros over `println!`/ad-hoc logging.
 - Replace `unwrap()`/`expect()` in production paths with `?`/typed errors (`anyhow` + `thiserror`); `expect()` with a message is acceptable in tests.
 - Feature-gated code belongs under `src/features/`.
+
+## Job Lifecycle
+
+- Do not spawn new user-visible long-running TUI work directly with
+  `tokio::spawn` or `std::thread::spawn`. Register it through `JobManager`
+  (`src/jobs/`) so cancellation, shutdown and job inspection remain
+  consistent.
 
 ## Tool Output Conventions (token efficiency)
 

@@ -1,5 +1,6 @@
 use crate::analysis::RepoMap;
 use crate::hooks::HookManager;
+use crate::jobs::JobManager;
 use crate::llm::OpenAIClient;
 
 use crate::llm::types::ChatMessage;
@@ -10,7 +11,7 @@ use crate::tui::view::TuiApp;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::RwLock;
 
 const PLAN_CREATION_GUIDANCE: &str = "Plan requirements:\n- Produce at least three ordered steps with stable unique ids (e.g., step-1)\n- Default each status to \"pending\" and update via plan_write mode=\"merge\"\n- Keep only one item in_progress at a time\n- Describe expected outputs (files, tests) so implementation stays concrete\n";
 
@@ -28,7 +29,7 @@ pub struct TuiExecutor {
     #[allow(dead_code)]
     pub(crate) history: crate::llm::ChatHistory,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
-    pub(crate) cancel_tx: Option<watch::Sender<bool>>,
+    pub(crate) jobs: JobManager,
     pub(crate) last_user_prompt: Option<String>,
     // Message vector for holding conversation history
     pub(crate) conversation_history: Arc<Mutex<crate::llm::ChatHistory>>,

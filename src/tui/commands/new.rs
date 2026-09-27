@@ -1,5 +1,6 @@
 use crate::analysis::{Analyzer, RepoMap};
 use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
+use crate::jobs::JobManager;
 use crate::llm::OpenAIClient;
 use crate::session::SessionManager;
 use crate::tools::FsTools;
@@ -87,7 +88,7 @@ impl TuiExecutor {
             client,
             history,
             ui_tx: None, // This will be set by TuiApp later
-            cancel_tx: None,
+            jobs: JobManager::new(),
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
                 cfg.get_context_window_size().unwrap_or(100_000) as usize,
@@ -153,7 +154,7 @@ impl TuiExecutor {
             client,
             history,
             ui_tx: None, // This will be set by TuiApp later
-            cancel_tx: None,
+            jobs: JobManager::new(),
             last_user_prompt: None,
             conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
                 cfg.get_context_window_size().unwrap_or(100_000) as usize,

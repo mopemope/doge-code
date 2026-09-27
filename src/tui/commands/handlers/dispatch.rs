@@ -3,13 +3,16 @@ use std::any::Any;
 
 use crate::tui::commands::core::{CommandHandler, TuiExecutor};
 use crate::tui::commands::handlers::custom::load_custom_commands;
-use crate::tui::commands::handlers::slash_commands::cancel::handle_cancel;
+use crate::tui::commands::handlers::slash_commands::cancel::{
+    handle_cancel, handle_cancel_with_args,
+};
 use crate::tui::commands::handlers::slash_commands::clear::handle_clear;
 use crate::tui::commands::handlers::slash_commands::compact::handle_compact;
 use crate::tui::commands::handlers::slash_commands::edit_symbol::handle_edit_symbol;
 use crate::tui::commands::handlers::slash_commands::fix::handle_fix;
 use crate::tui::commands::handlers::slash_commands::git_worktree::handle_git_worktree;
 use crate::tui::commands::handlers::slash_commands::help::handle_help;
+use crate::tui::commands::handlers::slash_commands::jobs::handle_jobs;
 use crate::tui::commands::handlers::slash_commands::lint::handle_lint;
 use crate::tui::commands::handlers::slash_commands::map::handle_map;
 use crate::tui::commands::handlers::slash_commands::open::handle_open;
@@ -73,12 +76,18 @@ impl CommandHandler for TuiExecutor {
             "/tokens" => handle_tokens(self, ui),
             "/rebuild-repomap" => handle_rebuild_repomap(self, ui),
             "/reset" => handle_reset(ui),
-            "/cancel" => handle_cancel(self, ui),
+            "/jobs" => handle_jobs(self, ui),
             "/compact" => handle_compact(self, ui),
             "/map" => handle_map(self, ui),
             "/edit-symbol" => handle_edit_symbol(self, ui),
             "/lint" => handle_lint(self, ui),
             "/test" => handle_test(self, ui),
+
+            "/cancel" => handle_cancel(self, ui),
+            line if line.starts_with("/cancel ") => {
+                let args = line.strip_prefix("/cancel").unwrap_or("").trim();
+                handle_cancel_with_args(self, ui, Some(args));
+            }
 
             line if line.starts_with("/stack") => {
                 let args = line.strip_prefix("/stack").unwrap_or("").trim();

@@ -3,9 +3,6 @@ use crate::tui::view::TuiApp;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 /// Custom command information
 #[derive(Debug, Clone)]
@@ -101,7 +98,9 @@ fn load_commands_from_directory(
 }
 
 impl TuiExecutor {
-    /// Handle custom slash commands
+    /// Handle custom slash commands via the shared AgentTurn job path.
+    /// History is only updated inside the job lifecycle; a busy rejection
+    /// leaves conversation history untouched.
     pub fn handle_custom_command(&mut self, line: &str, ui: &mut TuiApp) {
         // Parse command and arguments
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -113,199 +112,20 @@ impl TuiExecutor {
         let args = &parts[1..];
 
         // Check if command exists
-        if let Some(command) = self.custom_commands.get(command_name) {
+        if let Some(command) = self.custom_commands.get(command_name).cloned() {
             // Process command content with arguments
             let processed_content = process_command_content(&command.content, args);
 
-            // Add to conversation history as user input
-            if let Ok(mut history) = self.conversation_history.lock() {
-                history.append_user(processed_content.clone());
-            }
-
-            // Display in UI
-            ui.push_log(format!("> {}", line));
-
-            // Send to LLM for processing
-            self.send_to_llm(ui, processed_content);
+            // Shared AgentTurn path (no pre-append to history).
+            let _ = crate::tui::commands::agent_job::spawn_agent_turn(
+                self,
+                ui,
+                line,
+                processed_content,
+                false,
+            );
         } else {
             ui.push_log(format!("Unknown command: /{}", command_name));
-        }
-    }
-
-    /// Send message to LLM for processing
-    pub fn send_to_llm(&mut self, ui: &mut TuiApp, content: String) {
-        match self.client.as_ref() {
-            Some(c) => {
-                let rt = tokio::runtime::Handle::current();
-                let model = self.cfg.model.clone();
-                let c = c.clone();
-                let tx = self.ui_tx.clone();
-                // Prepare a fresh line for the final output
-                ui.push_log(String::new());
-                let (cancel_tx, mut cancel_rx) = watch::channel(false);
-                self.cancel_tx = Some(cancel_tx);
-
-                let cancel_token = CancellationToken::new();
-                // Start timer for processing
-                ui.processing_start_time = Some(std::time::Instant::now());
-                ui.last_elapsed_time = None;
-                ui.dirty = true;
-
-                let child_token = cancel_token.clone();
-
-                // Bridge from watch::Receiver to CancellationToken
-                tokio::spawn(async move {
-                    if cancel_rx.changed().await.is_ok() && *cancel_rx.borrow() {
-                        info!("Cancellation signal received, cancelling token.");
-                        child_token.cancel();
-                    }
-                });
-
-                // Notify that LLM request preparation has started
-                if let Some(tx) = &self.ui_tx {
-                    let _ = tx.send("::status:preparing".into());
-                }
-
-                // Build initial messages with optional system prompt + user
-                let mut msgs = Vec::new();
-                // Load system prompt
-                let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
-                msgs.push(crate::llm::types::ChatMessage {
-                    role: "system".into(),
-                    content: Some(sys_prompt),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
-
-                // Add existing conversation history
-                if let Ok(history) = self.conversation_history.lock() {
-                    msgs.extend(history.build_messages());
-                }
-
-                self.enforce_plan_context(&mut msgs, &content, Some(ui));
-
-                msgs.push(crate::llm::types::ChatMessage {
-                    role: "user".into(),
-                    content: Some(content.clone()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
-                let fs = self.tools.clone();
-                let conversation_history = self.conversation_history.clone();
-                let session_manager = self.session_manager.clone();
-                let cfg = self.cfg.clone();
-                let _repomap = self.repomap.clone();
-                rt.spawn(async move {
-                    // Notify that request sending has started
-                    if let Some(tx) = &tx {
-                        let _ = tx.send("::status:sending".into());
-                    }
-
-                    // Increment request count in session
-                    {
-                        let mut sm = session_manager.lock().unwrap();
-                        if let Err(e) = sm.update_current_session_with_request_count() {
-                            tracing::error!(?e, "Failed to update session with request count");
-                        }
-                    }
-
-                    let res = crate::llm::run_agent_loop(
-                        &c,
-                        &model,
-                        &fs,
-                        msgs,
-                        tx.clone(),
-                        Some(cancel_token),
-                        &cfg,
-                        None, // Pass None instead of self
-                    )
-                    .await;
-                    // Get token usage after the agent loop completes.
-                    // `prompt` is the last request's prompt size (context occupancy)
-                    // and `total` is the cumulative session total.
-                    let tokens_used = c.get_prompt_tokens_used();
-                    let total_tokens = c.get_total_tokens_used();
-                    match res {
-                        Ok((updated_messages, _final_msg)) => {
-                            // Execute hooks after the agent loop completes
-                            // This would require cloning hook_manager which is complex in async context
-
-                            if let Some(tx) = tx {
-                                // run_agent_loop already sends the final assistant content as a
-                                // "::status:done:<content>" message. Avoid duplicating it here.
-                                // Only send token usage update (prompt + total)
-                                let _ = tx.send(format!(
-                                    "::tokens:prompt:{},total:{}",
-                                    tokens_used,
-                                    total_tokens
-                                ));
-                                // Keep the remaining-context display fresh.
-                                let remaining = cfg
-                                    .get_context_window_size()
-                                    .map(|window| window.saturating_sub(tokens_used));
-                                let _ = tx.send(match remaining {
-                                    Some(n) => format!("::update_remaining_tokens:{n}"),
-                                    None => "::update_remaining_tokens".to_string(),
-                                });
-                            }
-                            // Update conversation history (save all messages except system messages)
-                            if let Ok(mut history) = conversation_history.lock() {
-                                // Extract new messages that are not system messages
-                                let new_messages: Vec<_> = updated_messages
-                                    .into_iter()
-                                    .filter(|msg| msg.role != "system")
-                                    .collect();
-
-                                // Clear existing history and replace with new messages
-                                history.clear();
-                                for msg in new_messages {
-                                    history.append_message(msg);
-                                }
-
-                                // Also save conversation history to session
-                                let mut sm = session_manager.lock().unwrap();
-                                let msgs_vec = history.build_messages();
-                                if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
-                                    tracing::error!(?e, "Failed to update session with conversation history");
-                                }
-
-                                // Update token count in session
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
-                                    tracing::error!(?e, "Failed to update session with token count");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(tx) = tx {
-                                let _ = tx.send(format!("LLM error: {e}"));
-                                let _ = tx.send("::status:error".into());
-                                // Send token usage update even on error
-                                let _ = tx.send(format!(
-                                    "::tokens:prompt:{},total:{}",
-                                    tokens_used,
-                                    total_tokens
-                                ));
-                            }                            // Update conversation history on error (only user input)
-                            if let Ok(mut history) = conversation_history.lock() {
-                                history.append_user(content.clone());
-
-                                // Also save conversation history to session
-                                let mut sm = session_manager.lock().unwrap();
-                                let msgs_vec = history.build_messages();
-                                if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
-                                    tracing::error!(?e, "Failed to update session with conversation history on error");
-                                }
-
-                                // Update token count in session even on error
-                                if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
-                                    tracing::error!(?e, "Failed to update session with token count on error");
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            None => ui.push_log("OPENAI_API_KEY not set; cannot call LLM."),
         }
     }
 }

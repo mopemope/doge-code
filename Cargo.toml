@@ -53,7 +53,7 @@ tera = "1.20"
 num_cpus = "1.0"
 ratatui = { version = "0.30.2", features = ["serde", "crossterm_0_29"] }
 
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 ignore = "0.4"
 rand = "0.8"
 humantime = "2.1"
