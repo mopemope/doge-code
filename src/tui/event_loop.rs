@@ -14,8 +14,6 @@ use crate::tui::event_handlers::{
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
 
-const LINT_ISSUE_PROMPT_BUDGET_CHARS: usize = 32_000;
-
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -154,79 +152,17 @@ impl TuiApp {
                         continue;
                     }
 
-                    // Lint issues handling
-                    if let Some(payload) = msg.strip_prefix("::lint_issues:") {
-                        // Assuming payload is JSON array of issues
-                        // For simplicity, just log that we got issues and dispatch similar to before
-                        // but without complex struct parsing if we can avoid it, or just use regex/string manip?
-                        // The original code parsed it into `LintIssue`. We need that struct definition which is in another module.
-                        // I'll keep the parsing logic if possible, or simplify.
-                        // The original used `crate::tui::commands::handlers::slash_commands::lint::LintIssue`.
-                        // It is safe to import or refer to it.
-
-                        if let Ok(issues) = serde_json::from_str::<
-                            Vec<crate::tui::commands::handlers::slash_commands::lint::LintIssue>,
-                        >(payload)
-                        {
-                            self.push_log(format!(
-                                "[lint] Found {} issues. Sending to LLM for analysis...",
-                                issues.len()
-                            ));
-                            self.dirty = true;
-
-                            let mut prompt = String::from(
-                                "Please analyze and fix the following lint issues in the codebase:\n\n",
-                            );
-
-                            for (i, issue) in issues.iter().enumerate() {
-                                prompt.push_str(&format!("Issue {}: {}\n", i + 1, issue.message));
-                                if !issue.file_path.is_empty() {
-                                    prompt.push_str(&format!("File: {}\n", issue.file_path));
-                                }
-                                if let Some(line) = issue.line_number {
-                                    prompt.push_str(&format!("Line: {}\n", line));
-                                }
-                                prompt.push_str(&format!("Severity: {}\n", issue.severity));
-                                if let Some(code) = &issue.code {
-                                    prompt.push_str(&format!("Code: {}\n", code));
-                                }
-                                prompt.push('\n');
-                            }
-                            prompt.push_str("Please provide specific code fixes for each issue.");
-
-                            let prompt = crate::tools::budget::head_tail_truncate(
-                                &prompt,
-                                LINT_ISSUE_PROMPT_BUDGET_CHARS,
-                            )
-                            .text;
-                            self.push_log(format!("> {}", prompt));
-                            self.last_user_input = Some(prompt.clone());
-                            self.dispatch(&prompt);
-                        } else {
-                            self.push_log(format!(
-                                "[lint][warn] Failed to parse lint issues: {}",
-                                payload
-                            ));
-                            self.dirty = true;
-                        }
-                        continue;
-                    }
-
-                    if let Some(prompt) = msg.strip_prefix("::lint_command_output_analysis:") {
-                        self.push_log("[lint] Sending output to LLM...");
-                        self.dirty = true;
-                        self.push_log(format!("> {}", prompt));
-                        self.last_user_input = Some(prompt.to_string());
-                        self.dispatch(prompt);
-                        continue;
-                    }
-
-                    if let Some(prompt) = msg.strip_prefix("::test_failures_analysis:") {
-                        self.push_log("[test] Sending failures to LLM...");
-                        self.dirty = true;
-                        self.push_log(format!("> {}", prompt));
-                        self.last_user_input = Some(prompt.to_string());
-                        self.dispatch(prompt);
+                    // Deferred producer follow-ups (`::defer_followup:`) and
+                    // post-terminal completion signals (`::job_completed:`)
+                    // are routed to the executor, which releases each
+                    // follow-up only after its own producer reaches a
+                    // terminal state and frees the foreground slot. Never
+                    // dispatch them as user instructions: the producer still
+                    // owns the foreground reservation when the defer arrives,
+                    // and the user-instruction prologue (LLM dedup reset,
+                    // completed-plan hiding) must not run for signals.
+                    if crate::tui::commands::followup::is_followup_message(&msg) {
+                        self.dispatch_internal(&msg);
                         continue;
                     }
 

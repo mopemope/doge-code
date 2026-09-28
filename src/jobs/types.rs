@@ -188,6 +188,23 @@ impl JobContext {
     }
 }
 
+/// Terminal notification emitted by [`crate::jobs::JobManager`] after a job
+/// reaches a terminal status and ownership (including the foreground
+/// reservation) has been released.
+///
+/// Protocol-agnostic: carries only job identity and outcome, never UI
+/// channel strings or prompt text. UI layers subscribe via
+/// `JobManager::set_completion_hook` and decide themselves whether a
+/// follow-up is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCompletion {
+    pub id: JobId,
+    pub kind: JobKind,
+    pub scope: JobScope,
+    pub status: JobStatus,
+    pub error: Option<String>,
+}
+
 /// Spawn failure.
 #[derive(Debug, Clone)]
 pub enum JobStartError {

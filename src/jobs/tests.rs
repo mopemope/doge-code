@@ -566,3 +566,127 @@ fn test_snapshot_display_line_contains_fields() {
         assert!(line.contains("Fix login handler"));
     });
 }
+
+#[tokio::test]
+async fn test_completion_hook_fires_after_foreground_release() {
+    use crate::jobs::JobCompletion;
+    use std::sync::Mutex;
+
+    // The hook must observe the producer as terminal with the foreground
+    // slot already released, so a successor spawn inside a follow-up cannot
+    // race its own producer.
+    type Observed = Vec<(JobCompletion, Option<JobId>, Option<JobStatus>)>;
+    let manager = JobManager::new();
+    let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(Vec::new()));
+    let probe = manager.clone();
+    let observed_clone = observed.clone();
+    manager.set_completion_hook(Arc::new(move |completion: JobCompletion| {
+        let foreground = probe.foreground_id();
+        let status = probe.get_snapshot(completion.id).map(|s| s.status);
+        observed_clone
+            .lock()
+            .unwrap()
+            .push((completion, foreground, status));
+    }));
+
+    let id = manager
+        .spawn(foreground_spec("a", WorkspaceAccess::None), |_ctx| async {
+            JobRunOutcome::Completed
+        })
+        .unwrap();
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Completed);
+
+    {
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1, "hook must fire exactly once");
+        let (completion, foreground_at_hook, status_at_hook) = &observed[0];
+        assert_eq!(completion.id, id);
+        assert_eq!(completion.kind, JobKind::AgentTurn);
+        assert_eq!(completion.scope, JobScope::Foreground);
+        assert_eq!(completion.status, JobStatus::Completed);
+        assert_eq!(
+            *foreground_at_hook, None,
+            "foreground reservation must be released before the hook fires"
+        );
+        assert_eq!(
+            *status_at_hook,
+            Some(JobStatus::Completed),
+            "producer must be terminal before the hook fires"
+        );
+    }
+    // The freed slot is immediately reusable. Note: the `observed` guard
+    // above must be dropped before spawning/waiting below. The completion
+    // hook runs synchronously on the finishing job task and locks the same
+    // mutex; holding the guard across the await deadlocks the
+    // current-thread test runtime when the successor job fires the hook.
+    let next = manager
+        .spawn(foreground_spec("b", WorkspaceAccess::None), |_ctx| async {
+            JobRunOutcome::Completed
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&manager, next).await,
+        JobStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn test_completion_hook_reports_cancellation() {
+    use crate::jobs::JobCompletion;
+    use std::sync::Mutex;
+
+    let manager = JobManager::new();
+    let observed: Arc<Mutex<Vec<JobCompletion>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed_clone = observed.clone();
+    manager.set_completion_hook(Arc::new(move |completion: JobCompletion| {
+        observed_clone.lock().unwrap().push(completion);
+    }));
+
+    let id = manager
+        .spawn(
+            foreground_spec("a", WorkspaceAccess::None),
+            |ctx| async move {
+                tokio::select! {
+                    _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => JobRunOutcome::Completed,
+                }
+            },
+        )
+        .unwrap();
+    wait_for_status(&manager, id, JobStatus::Running).await;
+    manager.cancel(id);
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Cancelled);
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].id, id);
+    assert_eq!(observed[0].status, JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn test_completion_hook_reports_infrastructure_failure() {
+    use crate::jobs::JobCompletion;
+    use std::sync::Mutex;
+
+    let manager = JobManager::new();
+    let observed: Arc<Mutex<Vec<JobCompletion>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed_clone = observed.clone();
+    manager.set_completion_hook(Arc::new(move |completion: JobCompletion| {
+        observed_clone.lock().unwrap().push(completion);
+    }));
+
+    let id = manager
+        .spawn(foreground_spec("a", WorkspaceAccess::None), |_ctx| async {
+            JobRunOutcome::Failed {
+                message: "boom".to_string(),
+            }
+        })
+        .unwrap();
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Failed);
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].id, id);
+    assert_eq!(observed[0].status, JobStatus::Failed);
+    assert_eq!(observed[0].error.as_deref(), Some("boom"));
+}

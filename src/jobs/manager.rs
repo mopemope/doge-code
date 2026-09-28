@@ -1,6 +1,6 @@
 use crate::jobs::types::{
-    CancelJobResult, JobContext, JobId, JobKind, JobRunOutcome, JobScope, JobSnapshot, JobSpec,
-    JobStartError, JobStatus, WorkspaceAccess, bound_error, format_elapsed,
+    CancelJobResult, JobCompletion, JobContext, JobId, JobKind, JobRunOutcome, JobScope,
+    JobSnapshot, JobSpec, JobStartError, JobStatus, WorkspaceAccess, bound_error, format_elapsed,
 };
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -56,6 +56,11 @@ impl JobState {
     }
 }
 
+/// Post-terminal notification hook. Invoked synchronously from `finish_job`
+/// after the active record and foreground reservation are released.
+/// Protocol-agnostic: receives only [`JobCompletion`], never UI types.
+type CompletionHook = Arc<dyn Fn(JobCompletion) + Send + Sync>;
+
 struct JobManagerInner {
     state: std::sync::Mutex<JobState>,
     tracker: TaskTracker,
@@ -63,6 +68,7 @@ struct JobManagerInner {
     workspace_gate: Arc<tokio::sync::RwLock<()>>,
     next_id: AtomicU64,
     accepting: AtomicBool,
+    completion_hook: std::sync::Mutex<Option<CompletionHook>>,
 }
 
 /// Central ownership for user-visible long-running work.
@@ -89,8 +95,40 @@ impl JobManager {
                 workspace_gate: Arc::new(tokio::sync::RwLock::new(())),
                 next_id: AtomicU64::new(1),
                 accepting: AtomicBool::new(true),
+                completion_hook: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Install the post-terminal completion hook, replacing any previous one.
+    /// The hook fires exactly once per job, after `finish_job` has removed
+    /// the active record and released the foreground reservation, so a
+    /// successor foreground spawn from inside the hook cannot race its own
+    /// producer. It fires for every terminal outcome (completed, cancelled,
+    /// infrastructure failure); subscribers filter by `JobCompletion.status`.
+    pub fn set_completion_hook(&self, hook: CompletionHook) {
+        *self
+            .inner
+            .completion_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Remove the completion hook, if any.
+    pub fn clear_completion_hook(&self) {
+        *self
+            .inner
+            .completion_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// True once [`JobManager::shutdown`] has started tearing down.
+    /// The TUI consults this before draining a deferred `/test` / `/lint`
+    /// follow-up so a completion racing shutdown suppresses instead of
+    /// attempting an `AgentTurn` spawn that can only fail as `ShuttingDown`.
+    pub fn is_shutting_down(&self) -> bool {
+        !self.inner.accepting.load(Ordering::SeqCst)
     }
 
     /// Spawn a job. Reservation (foreground check, id allocation, record
@@ -344,7 +382,7 @@ impl JobManager {
     }
 
     fn finish_job(&self, id: JobId, outcome: JobRunOutcome) {
-        let snapshot = {
+        let (snapshot, hook) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(mut record) = state.active.remove(&id) else {
                 return;
@@ -370,7 +408,13 @@ impl JobManager {
             while state.recent.len() > crate::jobs::types::MAX_RECENT_JOBS {
                 state.recent.pop_back();
             }
-            terminal
+            let hook = self
+                .inner
+                .completion_hook
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            (terminal, hook)
         };
         tracing::info!(
             job_id = %id,
@@ -379,6 +423,18 @@ impl JobManager {
             elapsed = %format_elapsed(snapshot.elapsed_ms),
             "job finished"
         );
+        // Fire outside the state lock, after ownership is released: the
+        // receiver observes the producer as terminal with no foreground
+        // reservation held by it.
+        if let Some(hook) = hook {
+            hook(JobCompletion {
+                id,
+                kind: snapshot.kind,
+                scope: snapshot.scope,
+                status: snapshot.status,
+                error: snapshot.error.clone(),
+            });
+        }
     }
 
     /// Graceful shutdown: stop accepting, cancel the root token (all child

@@ -7,6 +7,7 @@ use crate::tools::FsTools;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::commands::prompt::build_system_prompt;
 use anyhow::Result;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{error, info};
@@ -104,6 +105,8 @@ impl TuiExecutor {
                 hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
                 hook_manager
             },
+            pending_followups: HashMap::new(),
+            consumed_followups: HashSet::new(),
         })
     }
 
@@ -170,6 +173,8 @@ impl TuiExecutor {
                 hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
                 hook_manager
             },
+            pending_followups: HashMap::new(),
+            consumed_followups: HashSet::new(),
         })
     }
 }

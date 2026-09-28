@@ -875,6 +875,21 @@ impl TuiApp {
         self.push_log(format!("> {}", line));
     }
 
+    /// Internal dispatch for protocol signals (`::defer_followup:`,
+    /// `::job_completed:`). Invokes the configured handler without the
+    /// user-instruction prologue above: `last_llm_response_content` and the
+    /// completed plan list are preserved. Internal signals are not user
+    /// instructions, so they must never clear LLM dedup state or hide plans.
+    pub fn dispatch_internal(&mut self, line: &str) {
+        if self.handler.is_some() {
+            let mut handler = self.handler.take().unwrap();
+            handler.handle(line, self);
+            self.handler = Some(handler);
+            return;
+        }
+        self.push_log(format!("> {}", line));
+    }
+
     pub fn run(&mut self) -> Result<()> {
         // Temporarily disable terminal check for development environments
         // Check if stdin and stdout are terminals

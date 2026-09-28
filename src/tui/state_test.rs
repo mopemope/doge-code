@@ -156,3 +156,65 @@ fn test_plan_list_in_progress_does_not_hide() {
     assert_eq!(app.plan_list, plan);
     assert!(!app.hide_plan_on_next_instruction);
 }
+
+struct RecordingHandler {
+    received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl CommandHandler for RecordingHandler {
+    fn handle(&mut self, line: &str, _ui: &mut TuiApp) {
+        self.received.lock().unwrap().push(line.to_string());
+    }
+
+    fn get_custom_commands(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[test]
+fn test_dispatch_internal_preserves_llm_and_plan_state() {
+    // Internal protocol signals must reach the handler without the
+    // user-instruction prologue (LLM dedup reset, completed-plan hiding).
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let handler = Box::new(RecordingHandler {
+        received: received.clone(),
+    });
+    let mut app = TuiApp::new("Test App", None, "dark").unwrap();
+    app = app.with_handler(handler);
+
+    app.last_llm_response_content = Some("last response".to_string());
+    let plan = vec![super::PlanItem {
+        id: "step-1".to_string(),
+        parent_id: None,
+        content: "Done".to_string(),
+        status: "completed".to_string(),
+    }];
+    app.apply_plan_list_update(plan.clone());
+    assert!(app.hide_plan_on_next_instruction);
+
+    app.dispatch_internal("::job_completed:42");
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        ["::job_completed:42".to_string()]
+    );
+    assert_eq!(
+        app.last_llm_response_content,
+        Some("last response".to_string())
+    );
+    assert_eq!(app.plan_list, plan);
+    assert!(app.hide_plan_on_next_instruction);
+
+    // Contrast: a user instruction still runs the prologue.
+    app.dispatch("hello");
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        ["::job_completed:42".to_string(), "hello".to_string()]
+    );
+    assert!(app.last_llm_response_content.is_none());
+    assert!(app.plan_list.is_empty());
+    assert!(!app.hide_plan_on_next_instruction);
+}

@@ -1,7 +1,10 @@
 use crate::features::testing;
-use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess};
+use crate::jobs::{
+    JobId, JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess,
+};
 use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
+use crate::tui::commands::followup::{DeferredFollowup, FollowupKind, defer_message};
 use crate::tui::view::TuiApp;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -24,6 +27,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         ui.push_log("UI channel unavailable - cannot run tests.");
         return;
     };
+    executor.ensure_completion_hook();
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
 
@@ -34,11 +38,13 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         "Run project tests",
     );
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        let producer = ctx.id;
         run_test_job(
             project_root,
             ui_tx,
             command_timeout_ms,
             ctx.cancellation_token(),
+            producer,
         )
         .await
     });
@@ -64,6 +70,7 @@ async fn run_test_job(
     ui_tx: Sender<String>,
     command_timeout_ms: u64,
     cancellation: CancellationToken,
+    producer: JobId,
 ) -> JobRunOutcome {
     ui_tx.send_logged("::status:shell_running".to_string());
     ui_tx.send_logged(format!(
@@ -220,8 +227,15 @@ async fn run_test_job(
     }
 
     // If there are failed tests, send them to LLM for analysis.
-    // Cancellation is never treated as a failure.
+    // Cancellation is never treated as a failure: a cancel racing the
+    // failure build must not arm a follow-up, and the terminal outcome
+    // must be Cancelled so the drain suppresses any deferred payload.
     if has_any_failures {
+        if cancellation.is_cancelled() {
+            ui_tx.send_logged("::shell_output:Test run cancelled.");
+            ui_tx.send_logged("::status:cancelled");
+            return JobRunOutcome::Cancelled;
+        }
         let all_outputs =
             testing::budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
 
@@ -255,9 +269,24 @@ async fn run_test_job(
         let prompt = testing::budget_diagnostic_output(&prompt);
         ui_tx
             .send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
-        ui_tx.send_logged(format!("::test_failures_analysis:{}", prompt));
+        // Deferred handoff: the follow-up dispatches only after this job
+        // reaches a terminal state and releases the foreground slot. Sending
+        // the prompt for immediate dispatch here would race our own
+        // reservation and be rejected as ForegroundBusy.
+        ui_tx.send_logged(defer_message(&DeferredFollowup {
+            producer: producer.0,
+            kind: FollowupKind::Test,
+            prompt,
+            notice: "[test] Sending failures to LLM...".to_string(),
+        }));
     } else {
         ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
+    }
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("::shell_output:Test run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
     }
 
     ui_tx.send_logged("::shell_output:Test run completed.");
@@ -269,7 +298,15 @@ async fn run_test_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use crate::jobs::{JobManager, JobScope, JobSpec, WorkspaceAccess};
+    use crate::tui::commands::core::{CommandHandler, TuiExecutor};
+    use crate::tui::commands::followup::{
+        DEFER_FOLLOWUP_PREFIX, completed_message, is_followup_message,
+    };
+    use crate::tui::state::LogEntry;
+    use crate::tui::view::TuiApp;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_test_cancellation_stops_remaining_commands() {
@@ -281,6 +318,7 @@ mod tests {
             ui_tx,
             10_000,
             CancellationToken::new(),
+            JobId(1),
         )
         .await;
         assert!(matches!(outcome, JobRunOutcome::Completed));
@@ -315,13 +353,20 @@ mod tests {
         let (ui_tx2, rx2) = std::sync::mpsc::channel::<String>();
         let cancelled_token = CancellationToken::new();
         cancelled_token.cancel();
-        let outcome = run_test_job(dir.path().to_path_buf(), ui_tx2, 10_000, cancelled_token).await;
+        let outcome = run_test_job(
+            dir.path().to_path_buf(),
+            ui_tx2,
+            10_000,
+            cancelled_token,
+            JobId(2),
+        )
+        .await;
         assert!(matches!(outcome, JobRunOutcome::Cancelled));
         let messages: Vec<String> = rx2.try_iter().collect();
         assert!(
             !messages
                 .iter()
-                .any(|m| m.starts_with("::test_failures_analysis:"))
+                .any(|m| m.starts_with(crate::tui::commands::followup::DEFER_FOLLOWUP_PREFIX))
         );
         let _ = ui_tx;
     }
@@ -363,5 +408,135 @@ mod tests {
         assert!(second.is_err());
         assert!(rx.try_recv().is_err());
         manager.cancel(blocker);
+    }
+
+    fn log_texts(ui: &TuiApp) -> Vec<String> {
+        ui.log
+            .iter()
+            .map(|entry| match entry {
+                LogEntry::Plain(text) | LogEntry::Markdown(text) => text.clone(),
+            })
+            .collect()
+    }
+
+    async fn wait_for_terminal(executor: &TuiExecutor, id: JobId) -> crate::jobs::JobStatus {
+        for _ in 0..400 {
+            if let Some(snapshot) = executor.jobs.get_snapshot(id)
+                && snapshot.status.is_terminal()
+            {
+                return snapshot.status;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {id} to finish");
+    }
+
+    #[tokio::test]
+    async fn test_failing_test_handler_starts_one_followup_without_busy() {
+        // Fixture-backed integration: a real `/test` producer (`handle_test`
+        // -> `run_test_job`) on a temp TypeScript fixture whose `npm run test`
+        // script fails deterministically via node (no network, no nested
+        // cargo so no registry lock contention). Channel-to-executor routing
+        // mirrors the event loop: only follow-up messages go through
+        // `executor.handle`; status/shell output is drained without dispatch.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"per14-test-fixture","scripts":{"test":"node run-fail.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("run-fail.js"),
+            "console.log('\u{2715} my failing test');\nprocess.exit(1);\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("index.ts"), "console.log('hi');\n").unwrap();
+
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            api_key: Some("test-key".to_string()),
+            base_url: "http://127.0.0.1:1".to_string(),
+            command_timeout_ms: 15_000,
+            ..Default::default()
+        };
+        let mut executor = TuiExecutor::new(cfg).unwrap();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        let (ui_tx, rx) = std::sync::mpsc::channel::<String>();
+        executor.set_ui_tx(Some(ui_tx));
+
+        let before_history = executor
+            .conversation_history
+            .lock()
+            .unwrap()
+            .build_messages()
+            .len();
+        handle_test(&mut executor, &mut ui);
+        let producer = executor
+            .jobs
+            .foreground_id()
+            .expect("real /test producer must hold the foreground slot");
+        assert_eq!(
+            wait_for_terminal(&executor, producer).await,
+            crate::jobs::JobStatus::Completed,
+            "test exit 1 is a domain result, not infrastructure failure"
+        );
+
+        // Bounded drain for the post-terminal completion signal. Both sends
+        // happen sequentially (defer inside the job, completion from the
+        // manager hook after terminalization), so channel order is send order.
+        let mut messages: Vec<String> = Vec::new();
+        for _ in 0..600 {
+            messages.extend(rx.try_iter());
+            if messages.iter().any(|m| m == &completed_message(producer)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        messages.extend(rx.try_iter());
+        let defers: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.starts_with(DEFER_FOLLOWUP_PREFIX))
+            .collect();
+        assert_eq!(
+            defers.len(),
+            1,
+            "failing /test must defer exactly one follow-up: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m == &completed_message(producer)),
+            "hook must signal post-terminal completion: {messages:?}"
+        );
+        // Pump only follow-up messages through dispatch, in channel order.
+        for msg in messages.iter().filter(|m| is_followup_message(m)) {
+            executor.handle(msg, &mut ui);
+        }
+
+        let foreground = executor.jobs.foreground_id().expect("follow-up must start");
+        assert_ne!(foreground, producer);
+        assert_eq!(
+            executor.jobs.get_snapshot(foreground).unwrap().kind,
+            JobKind::AgentTurn
+        );
+        let logs = log_texts(&ui);
+        assert!(
+            !logs.iter().any(|line| line.contains("already running")),
+            "follow-up must not race its own producer: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("[test] Sending failures to LLM...")),
+            "test follow-up notice missing: {logs:?}"
+        );
+        assert!(executor.pending_followups.is_empty());
+        assert_eq!(
+            executor
+                .conversation_history
+                .lock()
+                .unwrap()
+                .build_messages()
+                .len(),
+            before_history
+        );
+        executor.jobs.cancel(foreground);
     }
 }

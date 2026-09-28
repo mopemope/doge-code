@@ -40,6 +40,14 @@ impl CommandHandler for TuiExecutor {
             return;
         }
 
+        // Deferred producer follow-ups and post-terminal completion signals
+        // are owned by the follow-up handoff (followup.rs), which holds the
+        // JobManager access needed to gate dispatch on terminalization.
+        if crate::tui::commands::followup::is_followup_message(line) {
+            self.handle_followup_message(line, ui);
+            return;
+        }
+
         // Integrated Shell Command Handling:
         // Execute shell commands directly if prefixed with '!'
         if let Some(cmd) = line.strip_prefix('!') {

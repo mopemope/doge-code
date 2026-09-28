@@ -1,9 +1,12 @@
 use crate::execution::{
     ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
 };
-use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess};
+use crate::jobs::{
+    JobId, JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess,
+};
 use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
+use crate::tui::commands::followup::{DeferredFollowup, FollowupKind, defer_message};
 use crate::tui::view::TuiApp;
 use regex::Regex;
 use serde_json;
@@ -116,6 +119,89 @@ fn lint_warnings(result: &LintResult) -> String {
     }
 }
 
+/// Build the single coalesced follow-up prompt for a lint run, preserving
+/// the parsed-issues section and the bounded raw command-output section.
+/// Returns `None` when there is nothing worth following up on, so one lint
+/// run produces at most one automatic follow-up.
+pub(crate) fn build_lint_followup_prompt(
+    issues: &[LintIssue],
+    issues_truncated: bool,
+    command_outputs: &[String],
+    has_warnings_or_errors: bool,
+) -> Option<String> {
+    if issues.is_empty() && !has_warnings_or_errors {
+        return None;
+    }
+    let mut prompt =
+        String::from("Please analyze and fix the following lint issues in the codebase:\n\n");
+    for (i, issue) in issues.iter().enumerate() {
+        prompt.push_str(&format!("Issue {}: {}\n", i + 1, issue.message));
+        if !issue.file_path.is_empty() {
+            prompt.push_str(&format!("File: {}\n", issue.file_path));
+        }
+        if let Some(line) = issue.line_number {
+            prompt.push_str(&format!("Line: {}\n", line));
+        }
+        prompt.push_str(&format!("Severity: {}\n", issue.severity));
+        if let Some(code) = &issue.code {
+            prompt.push_str(&format!("Code: {}\n", code));
+        }
+        prompt.push('\n');
+    }
+    if issues_truncated {
+        prompt.push_str(
+            "Note: Additional lint issues were omitted to stay within the diagnostic budget.\n\n",
+        );
+    }
+    if has_warnings_or_errors {
+        let all_outputs = budget_diagnostic_output(&command_outputs.join("\n\n---\n\n"));
+        prompt.push_str("--- Lint command outputs ---\n");
+        prompt.push_str(&all_outputs);
+        prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
+    } else {
+        prompt.push_str("Please provide specific code fixes for each issue.");
+    }
+    Some(budget_diagnostic_output(&prompt))
+}
+
+/// Decide the deferred lint follow-up message, if any. Returns `None` when
+/// there is nothing worth following up on or when cancellation was
+/// requested: a late cancel must never enqueue a `DEFER_FOLLOWUP_PREFIX`
+/// message. Cancellation is checked both before building the prompt and
+/// immediately before returning the message so a cancel landing during the
+/// (synchronous) build still suppresses the enqueue. The caller maps
+/// `None`-with-cancel to `JobRunOutcome::Cancelled` via its post-check.
+pub(crate) fn deferred_lint_followup(
+    producer: JobId,
+    issues: &[LintIssue],
+    issues_truncated: bool,
+    command_outputs: &[String],
+    has_warnings_or_errors: bool,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Option<String> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    let prompt = build_lint_followup_prompt(
+        issues,
+        issues_truncated,
+        command_outputs,
+        has_warnings_or_errors,
+    )?;
+    // Re-check immediately before handing the message to the sender: no
+    // `.await` runs between here and `send_logged`, so this is the last
+    // point at which a late cancel can still suppress the enqueue.
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    Some(defer_message(&DeferredFollowup {
+        producer: producer.0,
+        kind: FollowupKind::Lint,
+        prompt,
+        notice: "[lint] Sending output to LLM...".to_string(),
+    }))
+}
+
 /// Run linting for Go, Rust, and TypeScript projects as a foreground job.
 /// Lint currently performs mutations (fmt/fix), so it takes `Write` access.
 pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
@@ -134,6 +220,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         ui.push_log("UI channel unavailable - cannot run lint.");
         return;
     };
+    executor.ensure_completion_hook();
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
 
@@ -144,11 +231,13 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         "Run project lint",
     );
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        let producer = ctx.id;
         lint_job_async(
             project_root,
             ui_tx,
             command_timeout_ms,
             ctx.cancellation_token(),
+            producer,
         )
         .await
     });
@@ -379,6 +468,7 @@ async fn lint_job_async(
     ui_tx: Sender<String>,
     command_timeout_ms: u64,
     cancellation: tokio_util::sync::CancellationToken,
+    producer: JobId,
 ) -> JobRunOutcome {
     ui_tx.send_logged("::status:shell_running".to_string());
     ui_tx.send_logged(format!(
@@ -581,7 +671,11 @@ async fn lint_job_async(
         }
     }
 
-    // If there are issues, send a bounded subset to LLM for fixing.
+    // Coalesce parsed issues and raw command output into at most one
+    // deferred follow-up. The follow-up dispatches only after this job
+    // reaches a terminal state and releases the foreground slot; sending
+    // either trigger for immediate dispatch here would race our own
+    // reservation and be rejected as ForegroundBusy.
     let (lint_issues, lint_issues_truncated) = budget_lint_issues(all_issues);
     if !lint_issues.is_empty() {
         ui_tx.send_logged(format!(
@@ -594,39 +688,34 @@ async fn lint_job_async(
                     .to_string(),
             );
         }
-
-        // Send a message to trigger LLM processing
-        ui_tx.send_logged(format!(
-            "::lint_issues:{:}",
-            serde_json::to_string(&lint_issues).unwrap_or_default()
-        ));
     } else if lint_issues_truncated {
         ui_tx.send_logged(
             "::shell_output:Lint issues omitted because they exceeded the diagnostic budget."
                 .to_string(),
         );
     }
-
-    // If there are any warnings or errors in the output (regardless of parsed issues),
-    // send all command outputs to the LLM for analysis and fixes
     if has_any_warnings_or_errors {
-        let all_outputs = budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
-
-        // Create a specific prompt for the LLM to analyze all outputs and fix issues
-        let mut prompt = String::from(
-            "Analyze the following lint command outputs and fix any warnings or errors detected:\n\n",
-        );
-        prompt.push_str(&all_outputs);
-        prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
-
-        let prompt = budget_diagnostic_output(&prompt);
         ui_tx.send_logged(
             "::shell_output:\nSending full lint output to LLM for analysis and fixes..."
                 .to_string(),
         );
-        // Use the existing dispatch pattern by sending the prompt via the user input mechanism
-        // This will trigger the LLM to process the bounded output.
-        ui_tx.send_logged(format!("::lint_command_output_analysis:{}", prompt));
+    }
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("::shell_output:Lint run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
+    }
+
+    if let Some(deferred) = deferred_lint_followup(
+        producer,
+        &lint_issues,
+        lint_issues_truncated,
+        &all_command_outputs,
+        has_any_warnings_or_errors,
+        &cancellation,
+    ) {
+        ui_tx.send_logged(deferred);
     }
 
     if cancellation.is_cancelled() {
@@ -898,8 +987,17 @@ fn parse_generic_lint_output(stdout: &str, stderr: &str) -> Vec<LintIssue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use crate::jobs::JobStatus;
+    use crate::tui::commands::core::{CommandHandler, TuiExecutor};
+    use crate::tui::commands::followup::{
+        DEFER_FOLLOWUP_PREFIX, DeferredFollowup, completed_message, is_followup_message,
+    };
+    use crate::tui::state::LogEntry;
+    use crate::tui::view::TuiApp;
     use std::fs::File;
     use std::io::Write;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -1178,20 +1276,226 @@ mod tests {
 
     #[tokio::test]
     async fn test_lint_job_precancelled_skips_analysis() {
+        use crate::jobs::JobId;
         use tokio_util::sync::CancellationToken;
         let dir = tempfile::tempdir().unwrap();
         let (ui_tx, rx) = std::sync::mpsc::channel::<String>();
         let token = CancellationToken::new();
         token.cancel();
-        let outcome = lint_job_async(dir.path().to_path_buf(), ui_tx, 10_000, token).await;
+        let outcome =
+            lint_job_async(dir.path().to_path_buf(), ui_tx, 10_000, token, JobId(7)).await;
         assert!(matches!(outcome, crate::jobs::JobRunOutcome::Cancelled));
         let messages: Vec<String> = rx.try_iter().collect();
-        assert!(!messages.iter().any(|m| m.starts_with("::lint_issues:")));
         assert!(
             !messages
                 .iter()
-                .any(|m| m.starts_with("::lint_command_output_analysis:"))
+                .any(|m| m.starts_with(crate::tui::commands::followup::DEFER_FOLLOWUP_PREFIX))
         );
         assert!(messages.iter().any(|m| m == "::status:cancelled"));
+    }
+
+    #[test]
+    fn test_lint_followup_prompt_coalesces_issues_and_raw_output() {
+        // Parsed issues plus raw warnings collapse to a single prompt.
+        let issues = vec![LintIssue {
+            file_path: "src/main.rs".to_string(),
+            line_number: Some(3),
+            severity: "warning".to_string(),
+            message: "unused variable `x`".to_string(),
+            code: None,
+        }];
+        let prompt = build_lint_followup_prompt(
+            &issues,
+            false,
+            &["Command: cargo clippy\nExit code: 101\nSTDOUT:\nwarning: unused".to_string()],
+            true,
+        )
+        .expect("issues + warnings must produce a follow-up");
+        assert!(prompt.contains("unused variable `x`"));
+        assert!(prompt.contains("src/main.rs"));
+        assert!(prompt.contains("Lint command outputs"));
+        assert!(prompt.contains("warning: unused"));
+
+        // Issues without raw warnings still produce one follow-up.
+        let prompt = build_lint_followup_prompt(&issues, true, &[], false)
+            .expect("parsed issues alone must produce a follow-up");
+        assert!(prompt.contains("unused variable `x`"));
+        assert!(prompt.contains("omitted to stay within the diagnostic budget"));
+        assert!(prompt.contains("specific code fixes"));
+
+        // Clean runs produce no follow-up at all.
+        assert!(build_lint_followup_prompt(&[], false, &[], false).is_none());
+        // Raw warnings without parsed issues still produce one follow-up.
+        let prompt = build_lint_followup_prompt(&[], false, &["error: boom".to_string()], true)
+            .expect("raw warnings alone must produce a follow-up");
+        assert!(prompt.contains("error: boom"));
+    }
+
+    #[test]
+    fn test_deferred_lint_followup_suppressed_when_cancelled() {
+        // Late-cancellation gate: no DEFER_FOLLOWUP_PREFIX message may be
+        // enqueued once cancellation is requested. Deterministic: the
+        // cancelled token is set before the call, no timing involved.
+        use tokio_util::sync::CancellationToken;
+        let issues = vec![LintIssue {
+            file_path: "src/main.rs".to_string(),
+            line_number: Some(3),
+            severity: "warning".to_string(),
+            message: "unused variable `x`".to_string(),
+            code: None,
+        }];
+        let outputs =
+            vec!["Command: cargo clippy\nExit code: 101\nSTDOUT:\nwarning: unused".to_string()];
+        let live = CancellationToken::new();
+        let deferred = deferred_lint_followup(JobId(7), &issues, false, &outputs, true, &live)
+            .expect("live token with issues must defer");
+        assert!(
+            deferred.starts_with(crate::tui::commands::followup::DEFER_FOLLOWUP_PREFIX),
+            "unexpected message: {deferred:?}"
+        );
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(
+            deferred_lint_followup(JobId(7), &issues, false, &outputs, true, &cancelled).is_none(),
+            "late cancellation must enqueue no DEFER_FOLLOWUP_PREFIX message"
+        );
+        // No issues and no warnings: nothing to enqueue even when live.
+        assert!(deferred_lint_followup(JobId(7), &[], false, &[], false, &live).is_none());
+    }
+
+    fn log_texts(ui: &TuiApp) -> Vec<String> {
+        ui.log
+            .iter()
+            .map(|entry| match entry {
+                LogEntry::Plain(text) | LogEntry::Markdown(text) => text.clone(),
+            })
+            .collect()
+    }
+
+    async fn wait_for_terminal(executor: &TuiExecutor, id: JobId) -> JobStatus {
+        for _ in 0..400 {
+            if let Some(snapshot) = executor.jobs.get_snapshot(id)
+                && snapshot.status.is_terminal()
+            {
+                return snapshot.status;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {id} to finish");
+    }
+
+    #[tokio::test]
+    async fn test_lint_issues_handler_starts_one_followup_without_busy() {
+        // Fixture-backed integration: a real `/lint` producer (`handle_lint`
+        // -> `lint_job_async`) on a temp TypeScript fixture whose
+        // `npm run lint` script emits a parsed issue line plus a nonzero exit
+        // (parsed-issues + raw-warning dual trigger) via node, with no
+        // network and no nested cargo (no registry lock contention).
+        // Channel-to-executor routing mirrors the event loop: only follow-up
+        // messages go through `executor.handle`.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"per14-lint-fixture","scripts":{"lint":"node run-lint.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("run-lint.js"),
+            "console.log('src/index.ts:3: fake lint warning');\nprocess.exit(1);\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("index.ts"), "console.log('hi');\n").unwrap();
+
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            api_key: Some("test-key".to_string()),
+            base_url: "http://127.0.0.1:1".to_string(),
+            command_timeout_ms: 15_000,
+            ..Default::default()
+        };
+        let mut executor = TuiExecutor::new(cfg).unwrap();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        let (ui_tx, rx) = std::sync::mpsc::channel::<String>();
+        executor.set_ui_tx(Some(ui_tx));
+
+        let before_history = executor
+            .conversation_history
+            .lock()
+            .unwrap()
+            .build_messages()
+            .len();
+        handle_lint(&mut executor, &mut ui);
+        let producer = executor
+            .jobs
+            .foreground_id()
+            .expect("real /lint producer must hold the foreground slot");
+        assert_eq!(
+            wait_for_terminal(&executor, producer).await,
+            JobStatus::Completed
+        );
+
+        // Bounded drain for the post-terminal completion signal.
+        let mut messages: Vec<String> = Vec::new();
+        for _ in 0..600 {
+            messages.extend(rx.try_iter());
+            if messages.iter().any(|m| m == &completed_message(producer)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        messages.extend(rx.try_iter());
+        let defers: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.starts_with(DEFER_FOLLOWUP_PREFIX))
+            .collect();
+        assert_eq!(
+            defers.len(),
+            1,
+            "one lint run must coalesce to exactly one follow-up: {messages:?}"
+        );
+        // The single prompt preserves both the parsed issue and the bounded
+        // raw command-output section.
+        let payload = defers[0]
+            .strip_prefix(DEFER_FOLLOWUP_PREFIX)
+            .expect("defer prefix");
+        let followup: DeferredFollowup =
+            serde_json::from_str(payload).expect("defer payload decodes");
+        assert!(followup.prompt.contains("fake lint warning"));
+        assert!(followup.prompt.contains("Lint command outputs"));
+        assert!(
+            messages.iter().any(|m| m == &completed_message(producer)),
+            "hook must signal post-terminal completion: {messages:?}"
+        );
+        for msg in messages.iter().filter(|m| is_followup_message(m)) {
+            executor.handle(msg, &mut ui);
+        }
+
+        let foreground = executor.jobs.foreground_id().expect("follow-up must start");
+        assert_ne!(foreground, producer);
+        assert_eq!(
+            executor.jobs.get_snapshot(foreground).unwrap().kind,
+            JobKind::AgentTurn
+        );
+        let logs = log_texts(&ui);
+        assert!(
+            !logs.iter().any(|line| line.contains("already running")),
+            "follow-up must not race its own producer: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("[lint] Sending output to LLM...")),
+            "lint follow-up notice missing: {logs:?}"
+        );
+        assert!(executor.pending_followups.is_empty());
+        assert_eq!(
+            executor
+                .conversation_history
+                .lock()
+                .unwrap()
+                .build_messages()
+                .len(),
+            before_history
+        );
+        executor.jobs.cancel(foreground);
     }
 }

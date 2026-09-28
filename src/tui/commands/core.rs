@@ -9,7 +9,7 @@ use crate::tools::{FsTools, plan};
 use crate::tui::commands::handlers::custom::CustomCommand;
 use crate::tui::view::TuiApp;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -41,6 +41,15 @@ pub struct TuiExecutor {
 
     // Hook manager for executing custom processing after each instruction
     pub(crate) hook_manager: HookManager,
+
+    /// Deferred `/test` / `/lint` follow-ups keyed by producer job id
+    /// (`JobId.0`). Stored on arrival while the producer still owns the
+    /// foreground slot; drained only by the post-terminal completion signal
+    /// for that exact producer. See `followup.rs`.
+    pub(crate) pending_followups: HashMap<u64, crate::tui::commands::followup::DeferredFollowup>,
+    /// Producer ids whose follow-up was dispatched or suppressed. Guards
+    /// against stale/duplicate events re-arming a follow-up.
+    pub(crate) consumed_followups: HashSet<u64>,
 }
 
 impl TuiExecutor {
