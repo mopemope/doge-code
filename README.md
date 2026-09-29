@@ -254,9 +254,16 @@ Combining these enables maximum code exploration effectiveness without overwhelm
 
 ## 🎯 Symbol-Specific Editing /edit-symbol
 
-- Running `/edit-symbol` identifies symbols (functions/impl/struct etc.) from the currently displayed diff review or most recent `@path:line`/`@path#Lline` file/line specification. If diff review is open, scroll position becomes the target, and file specification is not needed.
-- Recognized symbols are passed to LLM, receiving diff or full symbol replacement applied via `apply_patch`. Results can be confirmed in `diff-review` pane, with `a` to approve and `r` to revert.
-- On failure (no patch, broken parser, file updated), raw response is output to log, so modify instructions and call `/edit-symbol` again.
+- Running `/edit-symbol` identifies symbols (functions/impl/struct etc.) from the most recent `@path:line`/`@path#Lline` file/line specification.
+- Each symbol carries a stable ID (`sym-v1-...`, returned by `search_repomap` as `symbol_id`). IDs are deterministic from project-relative path, kind, parent, and name — never absolute paths, line numbers, or tree-sitter node IDs — so the same symbol in another worktree has the same ID.
+- After target selection the edit no longer depends on line numbers: the transaction prepares a `SymbolId` + content fingerprint, asks the LLM for the complete symbol replacement only (never a diff), then re-resolves the ID at the current location, checks the fingerprint, validates the candidate in memory, race-checks immediately before write, and commits atomically.
+- Fail-closed: if the target changed (`StaleTarget`), disappeared (`TargetNotFound`), was renamed (`IdentityChanged`), or the file raced (`ConcurrentModification`), nothing is written — re-run `/edit-symbol`. Unrelated same-file edits are preserved and only the target file is shown in diff review.
+- Runs as a `semantic_edit` foreground job: visible in `/jobs`, cancellable via `/cancel` (cancel never mutates the file).
+- v1 limitations: `rename`, `move`, and intent-scoped undo are not supported; `Variable`/`Comment` kinds are rejected; same-name overloads use a collision ordinal that can shift if a sibling is inserted above.
+
+### Stable Symbol IDs
+
+`search_repomap` returns `symbol_id` for every symbol (no fingerprint in search results; fingerprints are computed only for the edit target to avoid extra I/O and token cost).
 
 ## 📋 Diff Review Panel
 

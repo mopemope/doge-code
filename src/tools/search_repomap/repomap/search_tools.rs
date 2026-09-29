@@ -18,12 +18,12 @@ impl RepomapSearchTools {
         &self,
         map: &RepoMap,
         args: SearchRepomapArgs,
-        _project_root: &Path,
+        project_root: &Path,
     ) -> Result<SearchRepomapResponse> {
         let warnings = Vec::new();
 
         // Avoid cloning the entire symbols vector; pass a reference-aware API
-        let mut response = filter_and_group_symbols(map, args);
+        let mut response = filter_and_group_symbols(map, args, project_root);
         response.warnings.extend(warnings);
         Ok(response)
     }

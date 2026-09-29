@@ -369,25 +369,17 @@ impl Analyzer {
         let mut updated_repomap = cached_data.repomap;
         if !diff.removed.is_empty() {
             info!("Removing symbols from {} deleted files", diff.removed.len());
-            updated_repomap
-                .symbols
-                .retain(|symbol| !diff.removed.contains(&symbol.file));
-            // Relations sourced from removed files are stale as well.
-            updated_repomap
-                .relations
-                .retain(|relation| !diff.removed.contains(&relation.source_file_path));
+            for removed in &diff.removed {
+                updated_repomap.remove_file(removed);
+            }
         }
 
-        // Remove symbols from changed files (to be replaced with new symbols)
-        let changed_files_set: std::collections::HashSet<_> = changed_files.iter().collect();
-        updated_repomap
-            .symbols
-            .retain(|symbol| !changed_files_set.contains(&symbol.file));
+        // Remove symbols from changed files (to be replaced with new symbols).
         // Relations sourced from changed files must also be pruned, otherwise
         // stale call/type references accumulate until the next full rebuild.
-        updated_repomap
-            .relations
-            .retain(|relation| !changed_files_set.contains(&relation.source_file_path));
+        for changed in &changed_files {
+            updated_repomap.remove_file(changed);
+        }
 
         // Add new symbols
         for new_map in new_maps {

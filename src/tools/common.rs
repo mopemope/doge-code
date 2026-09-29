@@ -209,6 +209,15 @@ impl FsTools {
         Ok(())
     }
 
+    /// Record an undo snapshot with explicit content.
+    ///
+    /// Used by transactional edits where the pre-write content is already
+    /// known and the write has succeeded. Must only be called on success so
+    /// failed transactions never pollute the undo stack.
+    pub async fn record_undo_snapshot(&self, path: PathBuf, content: String) {
+        self.undo_stack.write().await.push(path, content);
+    }
+
     pub fn fs_list(
         &self,
         path: &str,
