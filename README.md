@@ -128,6 +128,32 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
 - `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
+- `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
+
+## Provenance & Evidence
+
+Doge-Code observes its own work and links it as:
+
+```text
+Plan Item
+ -> Semantic Change
+ -> Verification Observation
+```
+
+```text
+step-2
+ ├─ change chg-...
+ │   └─ src/auth.rs / sym-v1-...
+ └─ verification
+     └─ cargo test [passed]
+```
+
+- A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
+- Tracked mutations (v1): transactional `/edit-symbol`.
+- Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
+- Not tracked in v1 (reported honestly, never inferred): `edit`, `apply_patch`, `fs_write`, `execute_bash`, `execute_shell`, workflow runs, remote MCP verification.
+- Storage: `.doge/sessions/<id>/provenance/v1/events/<uuid>.json` (one atomic file per event). Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`).
 
 ## 🎯 Usage Examples
 

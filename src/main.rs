@@ -20,6 +20,7 @@ pub mod jobs;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
+pub mod provenance;
 pub mod session;
 pub mod tools;
 mod tui;

@@ -289,6 +289,23 @@ async fn commit_semantic_edit_success(
     candidate_map: crate::analysis::RepoMap,
     before_content: String,
 ) {
+    // Provenance first: the source commit already succeeded, so a recording
+    // failure must never roll it back. Mark incomplete and continue.
+    match crate::tools::provenance::record_semantic_change(tools, result) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::debug!("provenance.record_skipped: no session context");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "provenance.record_failed");
+            let _ = tools.mark_current_session_provenance_failure();
+            ui_tx.send_logged(
+                "[provenance][warning] Change was committed, but provenance recording failed."
+                    .to_string(),
+            );
+        }
+    }
+
     // Undo snapshot only on success, with the exact overwritten content.
     tools
         .record_undo_snapshot(prepared.file.clone(), before_content)
