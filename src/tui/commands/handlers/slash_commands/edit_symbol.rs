@@ -1,25 +1,27 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::{Arc, mpsc::Sender};
 
 use anyhow::{Context, Result, anyhow};
 use diffy::create_patch;
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
-use crate::analysis::{SymbolSpan, find_enclosing_symbol};
 use crate::config::AppConfig;
-use crate::llm::{
-    EditTarget, SymbolEditRequest, SymbolEditResponse, build_symbol_edit_chat_request,
-    parse_symbol_edit_response, read_target_source,
+use crate::features::semantic_edit::{
+    PreparedSemanticEdit, SemanticEditError, apply_edit, prepare_edit_async,
 };
+use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, JobStartError, WorkspaceAccess};
+use crate::llm::{
+    EditTarget, LlmErrorKind, OpenAIClient, SymbolEditRequest, SymbolEditResponse,
+    build_symbol_edit_chat_request, parse_legacy_symbol_edit_response, parse_symbol_edit_response,
+};
+use crate::tools::FsTools;
 use crate::tools::apply_patch::{ApplyPatchParams, apply_patch as apply_patch_tool};
+use crate::tui::channel::SenderExt;
 use crate::tui::commands::core::TuiExecutor;
 use crate::tui::view::TuiApp;
 
-/// シンボル限定編集コマンドを処理する。
-///
-/// 現時点では最小実装として、以下を想定:
-/// - 引数なし: カーソル位置のファイル/行に対してシンボルを特定
-/// - 引数は将来拡張（明示的なファイル/行指定など）
+/// Handle `/edit-symbol` via a transactional semantic edit job.
 pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let (file, line) = match current_file_and_line(ui) {
         Some(v) => v,
@@ -29,40 +31,6 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         }
     };
 
-    let file_path = PathBuf::from(&file);
-
-    let symbol = {
-        let repomap_guard = executor.repomap.blocking_read();
-        let repo_map = match repomap_guard.as_ref() {
-            Some(map) => map,
-            None => {
-                ui.push_log("Repomap is not ready. Please run /rebuild-repomap first.");
-                return;
-            }
-        };
-
-        match find_enclosing_symbol(repo_map, &file_path, line) {
-            Ok(Some(sym)) => sym,
-            Ok(None) => {
-                ui.push_log("No symbol found at current location.");
-                return;
-            }
-            Err(e) => {
-                ui.push_log(format!("Failed to find symbol: {e}"));
-                return;
-            }
-        }
-    };
-
-    let original = match read_target_source(&file_path, symbol.start_line, symbol.end_line) {
-        Ok(code) => code,
-        Err(e) => {
-            ui.push_log(format!("Failed to read symbol source: {e}"));
-            return;
-        }
-    };
-
-    // ユーザの編集指示は現時点では直近の入力行を利用（本格UIは今後拡張）
     let instruction = match latest_instruction(ui) {
         Some(text) => text,
         None => {
@@ -71,49 +39,307 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         }
     };
 
-    if executor.ui_tx.is_none() {
-        executor.ui_tx = ui.sender();
-    }
-
-    let model = executor.cfg.model.clone();
-    let req = SymbolEditRequest {
-        model,
-        target: EditTarget {
-            file: symbol.file.clone(),
-            start_line: symbol.start_line,
-            end_line: symbol.end_line,
-            name: Some(symbol.name.clone()),
-            kind: format_symbol_kind(&symbol).to_string(),
-        },
-        original_code: original,
-        instruction,
-    };
-
-    let target_display = make_relative_display(&req.target.file, &executor.cfg.project_root);
-    ui.push_log(format!(
-        "[edit-symbol] Targeting {} ({}) lines {}-{}",
-        req.target.name.as_deref().unwrap_or("?"),
-        target_display,
-        req.target.start_line,
-        req.target.end_line
-    ));
-
-    let chat_req = build_symbol_edit_chat_request(&req);
-
-    // 既存の LLM 実行パスを利用するため、ここではリクエスト構築までに留める。
-    // 実際の送信とレスポンス処理への統合は今後のステップで行う。
-    if let Err(e) = enqueue_symbol_edit_request(executor, req, chat_req) {
-        ui.push_log(format!("Failed to enqueue symbol edit request: {e}"));
+    if let Some(active_id) = executor.jobs.foreground_id()
+        && let Some(active) = executor.jobs.get_snapshot(active_id)
+    {
+        ui.push_log(format!(
+            "[Job] {} is already running. Use /jobs or /cancel {}.",
+            active.id, active.id
+        ));
         return;
     }
 
-    ui.push_log("Symbol edit request enqueued.");
+    if executor.ui_tx.is_none() {
+        executor.ui_tx = ui.sender();
+    }
+    let Some(ui_tx) = executor.ui_tx.clone() else {
+        ui.push_log("UI channel unavailable - cannot run semantic edit.");
+        return;
+    };
+
+    let project_root = executor.cfg.project_root.clone();
+    let model = executor.cfg.model.clone();
+    let client = executor.client.clone();
+    let tools = executor.tools.clone();
+    let repomap = executor.repomap.clone();
+    let file_input = PathBuf::from(&file);
+
+    let target_display = make_relative_display(&file_input, &project_root);
+    ui.push_log(format!(
+        "[edit-symbol] Targeting {target_display}:{line} (instruction: {instruction})"
+    ));
+
+    let spec = JobSpec::new(
+        JobKind::SemanticEdit,
+        JobScope::Foreground,
+        WorkspaceAccess::Write,
+        format!("semantic edit {target_display}:{line}"),
+    );
+    let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        run_semantic_edit_job(
+            project_root,
+            file_input,
+            line,
+            instruction,
+            model,
+            client,
+            tools,
+            repomap,
+            ui_tx,
+            ctx.cancellation_token(),
+        )
+        .await
+    });
+    match spawn {
+        Ok(id) => {
+            ui.push_log(format!("Semantic edit started as {id}."));
+        }
+        Err(JobStartError::ForegroundBusy { active }) => {
+            ui.push_log(format!(
+                "[Job] {} is already running. Use /jobs or /cancel {}.",
+                active.id, active.id
+            ));
+        }
+        Err(JobStartError::ShuttingDown) => {
+            ui.push_log("Job manager is shutting down.");
+        }
+    }
 }
 
-fn current_file_and_line(ui: &TuiApp) -> Option<(String, u32)> {
-    inline_path_reference(ui)
+#[allow(clippy::too_many_arguments)]
+async fn run_semantic_edit_job(
+    project_root: PathBuf,
+    file_input: PathBuf,
+    line: u32,
+    instruction: String,
+    model: String,
+    client: Option<OpenAIClient>,
+    tools: FsTools,
+    repomap: Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
+    ui_tx: Sender<String>,
+    cancellation: CancellationToken,
+) -> JobRunOutcome {
+    ui_tx.send_logged("::status:processing".to_string());
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled before prepare.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
+
+    let prepared = match prepare_edit_async(&project_root, &file_input, line).await {
+        Ok(p) => p,
+        Err(e) => {
+            ui_tx.send_logged(format!("[edit-symbol][error] Prepare failed: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            return match &e {
+                SemanticEditError::WriteFailed(_) | SemanticEditError::AnalysisFailed(_) => {
+                    JobRunOutcome::Failed {
+                        message: e.to_string(),
+                    }
+                }
+                _ => JobRunOutcome::Completed,
+            };
+        }
+    };
+
+    ui_tx.send_logged(format!(
+        "[edit-symbol] Targeting {} ({}) {}",
+        prepared.name,
+        prepared.file.display(),
+        prepared.symbol_id
+    ));
+
+    let Some(client) = client else {
+        ui_tx.send_logged(
+            "[edit-symbol][error] LLM client is not configured. Use --api-key to set it."
+                .to_string(),
+        );
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Failed {
+            message: "LLM client is not configured".to_string(),
+        };
+    };
+
+    let req = SymbolEditRequest {
+        model: model.clone(),
+        target: EditTarget {
+            file: prepared.file.clone(),
+            start_line: prepared.start_line as u32,
+            end_line: prepared.end_line as u32,
+            name: Some(prepared.name.clone()),
+            kind: kind_display(&prepared.kind).to_string(),
+        },
+        original_code: prepared.original_source.clone(),
+        instruction: instruction.clone(),
+        symbol_id: Some(prepared.symbol_id.as_str().to_string()),
+        parent: prepared.parent.clone(),
+    };
+    let chat_req = build_symbol_edit_chat_request(&req);
+    let crate::llm::types::ChatRequest { messages, .. } = chat_req;
+
+    ui_tx.send_logged(format!(
+        "[edit-symbol] Requesting LLM edit for {}...",
+        prepared.symbol_id
+    ));
+    let response = match client
+        .chat_once(&model, messages, Some(cancellation.clone()))
+        .await
+    {
+        Ok(choice) => choice.content,
+        Err(e) => {
+            if cancellation.is_cancelled()
+                || e.downcast_ref::<LlmErrorKind>() == Some(&LlmErrorKind::Cancelled)
+            {
+                ui_tx.send_logged("[edit-symbol] Cancelled while waiting for LLM.".to_string());
+                ui_tx.send_logged("::status:cancelled".to_string());
+                return JobRunOutcome::Cancelled;
+            }
+            ui_tx.send_logged(format!("[edit-symbol][error] LLM request failed: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled after LLM response.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
+
+    if response.trim().is_empty() {
+        ui_tx.send_logged("[edit-symbol][error] LLM returned an empty response.".to_string());
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Completed;
+    }
+
+    let parsed = match parse_symbol_edit_response(&response) {
+        Ok(resp) => resp,
+        Err(e) => {
+            ui_tx.send_logged(format!(
+                "[edit-symbol][error] Failed to parse response: {e}"
+            ));
+            ui_tx.send_logged(format!(
+                "[edit-symbol] Raw response snippet:\n{}",
+                truncate_for_log(&response)
+            ));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Completed;
+        }
+    };
+    let Some(replacement) = parsed.replacement else {
+        ui_tx.send_logged(
+            "[edit-symbol][error] LLM response did not include a replacement block.".to_string(),
+        );
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Completed;
+    };
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled before mutation.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
+
+    match apply_edit(&prepared, &replacement, &project_root).await {
+        Ok((result, candidate_map, before_content)) => {
+            commit_semantic_edit_success(
+                &project_root,
+                &tools,
+                &repomap,
+                &ui_tx,
+                &prepared,
+                &result,
+                candidate_map,
+                before_content,
+            )
+            .await;
+            JobRunOutcome::Completed
+        }
+        Err(e) => {
+            if cancellation.is_cancelled() {
+                ui_tx.send_logged("[edit-symbol] Cancelled during commit.".to_string());
+                ui_tx.send_logged("::status:cancelled".to_string());
+                return JobRunOutcome::Cancelled;
+            }
+            ui_tx.send_logged(format!("[edit-symbol][error] Failed to apply edit: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            match &e {
+                SemanticEditError::WriteFailed(_) | SemanticEditError::AnalysisFailed(_) => {
+                    JobRunOutcome::Failed {
+                        message: e.to_string(),
+                    }
+                }
+                _ => JobRunOutcome::Completed,
+            }
+        }
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn commit_semantic_edit_success(
+    project_root: &Path,
+    tools: &FsTools,
+    repomap: &Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
+    ui_tx: &Sender<String>,
+    prepared: &PreparedSemanticEdit,
+    result: &crate::features::semantic_edit::SemanticEditResult,
+    candidate_map: crate::analysis::RepoMap,
+    before_content: String,
+) {
+    // Undo snapshot only on success, with the exact overwritten content.
+    tools
+        .record_undo_snapshot(prepared.file.clone(), before_content)
+        .await;
+
+    let relative =
+        make_relative_path(&prepared.file, project_root).unwrap_or_else(|| prepared.file.clone());
+    let _ = tools.update_session_with_changed_file(relative.clone());
+    let _ =
+        tools.update_session_with_lines_edited((result.lines_added + result.lines_removed) as u64);
+    tools.update_context(prepared.file.clone());
+
+    {
+        let mut guard = repomap.write().await;
+        if let Some(map) = guard.as_mut() {
+            map.replace_file(&prepared.file, candidate_map);
+        }
+    }
+
+    ui_tx.send_logged(format!(
+        "[edit-symbol] Applied {} ({} +{} -{})",
+        prepared.symbol_id,
+        make_relative_display(&prepared.file, project_root),
+        result.lines_added,
+        result.lines_removed
+    ));
+
+    match crate::llm::tool_execution::collect_diff_review_payload(project_root, &[relative]).await {
+        Ok(Some(payload)) => {
+            if let Ok(json) = serde_json::to_string(&payload) {
+                ui_tx.send_logged(format!("::diff_review:{json}"));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            ui_tx.send_logged(format!("[edit-symbol] Diff review unavailable: {e}"));
+        }
+    }
+    ui_tx.send_logged("::status:done".to_string());
+}
+
+/// Legacy line-range enqueue used by `/fix`.
+///
+/// Kept separate from the transactional semantic path. Runs as a managed job
+/// so no user-visible work uses a bare `tokio::spawn`.
+/// Intentionally shares the Foreground/Write slot with semantic edits (both
+/// mutate files, so they must not overlap) and reuses `JobKind::SemanticEdit`
+/// so `/jobs` shows a single edit family; the label (`fix ...` vs
+/// `semantic edit ...`) distinguishes them. The lenient legacy parser is kept
+/// here so `/fix` still accepts diffs, while `/edit-symbol` uses the strict
+/// semantic parser.
 pub fn enqueue_symbol_edit_request(
     executor: &mut TuiExecutor,
     request: SymbolEditRequest,
@@ -129,6 +355,15 @@ pub fn enqueue_symbol_edit_request(
         .clone()
         .ok_or_else(|| anyhow!("UI channel is not available yet"))?;
 
+    if let Some(active_id) = executor.jobs.foreground_id()
+        && let Some(active) = executor.jobs.get_snapshot(active_id)
+    {
+        anyhow::bail!(
+            "Foreground job {} is already running. Use /jobs to inspect it or /cancel to stop it.",
+            active.id
+        );
+    }
+
     let fs_tools = executor.tools.clone();
     let cfg = executor.cfg.clone();
 
@@ -142,80 +377,128 @@ pub fn enqueue_symbol_edit_request(
         make_relative_display(&request.target.file, &cfg.project_root)
     );
 
-    tokio::runtime::Handle::current().spawn(async move {
-        send_ui(
-            &ui_tx,
-            format!("[edit-symbol] Requesting LLM edit for {symbol_label}..."),
-        );
-        let _ = ui_tx.send("::status:processing".to_string());
+    let spec = JobSpec::new(
+        JobKind::SemanticEdit,
+        JobScope::Foreground,
+        WorkspaceAccess::Write,
+        format!("fix {symbol_label}"),
+    );
+    executor
+        .jobs
+        .spawn(spec, move |ctx| async move {
+            run_legacy_line_edit_job(
+                client,
+                fs_tools,
+                cfg,
+                ui_tx,
+                model,
+                messages,
+                request,
+                symbol_label,
+                ctx.cancellation_token(),
+            )
+            .await
+        })
+        .map(|_| ())
+        .map_err(|e| anyhow!("{e}"))
+}
 
-        let response = match client.chat_once(&model, messages, None).await {
-            Ok(choice) => choice.content,
-            Err(e) => {
-                send_ui(
-                    &ui_tx,
-                    format!("[edit-symbol][error] LLM request failed: {e}"),
-                );
-                let _ = ui_tx.send("::status:error".to_string());
-                return;
+#[allow(clippy::too_many_arguments)]
+async fn run_legacy_line_edit_job(
+    client: OpenAIClient,
+    fs_tools: FsTools,
+    cfg: AppConfig,
+    ui_tx: Sender<String>,
+    model: String,
+    messages: Vec<crate::llm::ChatMessage>,
+    request: SymbolEditRequest,
+    symbol_label: String,
+    cancellation: CancellationToken,
+) -> JobRunOutcome {
+    ui_tx.send_logged(format!(
+        "[edit-symbol] Requesting LLM edit for {symbol_label}..."
+    ));
+    ui_tx.send_logged("::status:processing".to_string());
+
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
+
+    let response = match client
+        .chat_once(&model, messages, Some(cancellation.clone()))
+        .await
+    {
+        Ok(choice) => choice.content,
+        Err(e) => {
+            if cancellation.is_cancelled() {
+                ui_tx.send_logged("[edit-symbol] Cancelled.".to_string());
+                ui_tx.send_logged("::status:cancelled".to_string());
+                return JobRunOutcome::Cancelled;
             }
-        };
-
-        if response.trim().is_empty() {
-            send_ui(
-                &ui_tx,
-                "[edit-symbol][error] LLM returned an empty response.",
-            );
-            let _ = ui_tx.send("::status:error".to_string());
-            return;
+            ui_tx.send_logged(format!("[edit-symbol][error] LLM request failed: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Failed {
+                message: e.to_string(),
+            };
         }
+    };
 
-        let parsed = match parse_symbol_edit_response(&response) {
-            Ok(resp) => resp,
-            Err(e) => {
-                send_ui(
-                    &ui_tx,
-                    format!("[edit-symbol][error] Failed to parse response: {e}"),
-                );
-                send_ui(
-                    &ui_tx,
-                    format!(
-                        "[edit-symbol] Raw response snippet:\n{}",
-                        truncate_for_log(&response)
-                    ),
-                );
-                let _ = ui_tx.send("::status:error".to_string());
-                return;
-            }
-        };
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
 
-        match apply_symbol_edit_response(parsed, request, &cfg).await {
-            Ok(changed_path) => {
-                send_ui(
-                    &ui_tx,
-                    format!(
-                        "[edit-symbol] Patch applied to {}",
-                        make_relative_display(&changed_path, &cfg.project_root)
-                    ),
-                );
+    if response.trim().is_empty() {
+        ui_tx.send_logged("[edit-symbol][error] LLM returned an empty response.".to_string());
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Completed;
+    }
 
-                let relative_for_session = make_relative_path(&changed_path, &cfg.project_root)
-                    .unwrap_or(changed_path.clone());
-                let _ = fs_tools.update_session_with_changed_file(relative_for_session);
-
-                let _ = ui_tx.send("::status:done".to_string());
-            }
-            Err(e) => {
-                send_ui(
-                    &ui_tx,
-                    format!("[edit-symbol][error] Failed to apply suggestion: {e}"),
-                );
-                let _ = ui_tx.send("::status:error".to_string());
-            }
+    let parsed = match parse_legacy_symbol_edit_response(&response) {
+        Ok(resp) => resp,
+        Err(e) => {
+            ui_tx.send_logged(format!(
+                "[edit-symbol][error] Failed to parse response: {e}"
+            ));
+            ui_tx.send_logged(format!(
+                "[edit-symbol] Raw response snippet:\n{}",
+                truncate_for_log(&response)
+            ));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Completed;
         }
-    });
+    };
 
-    Ok(())
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("[edit-symbol] Cancelled before apply.".to_string());
+        ui_tx.send_logged("::status:cancelled".to_string());
+        return JobRunOutcome::Cancelled;
+    }
+
+    match apply_legacy_line_edit_response(parsed, request, &cfg).await {
+        Ok(changed_path) => {
+            ui_tx.send_logged(format!(
+                "[edit-symbol] Patch applied to {}",
+                make_relative_display(&changed_path, &cfg.project_root)
+            ));
+
+            let relative_for_session = make_relative_path(&changed_path, &cfg.project_root)
+                .unwrap_or(changed_path.clone());
+            let _ = fs_tools.update_session_with_changed_file(relative_for_session);
+            ui_tx.send_logged("::status:done".to_string());
+            JobRunOutcome::Completed
+        }
+        Err(e) => {
+            ui_tx.send_logged(format!(
+                "[edit-symbol][error] Failed to apply suggestion: {e}"
+            ));
+            ui_tx.send_logged("::status:error".to_string());
+            JobRunOutcome::Completed
+        }
+    }
 }
 
 fn latest_instruction(ui: &TuiApp) -> Option<String> {
@@ -229,10 +512,6 @@ fn latest_instruction(ui: &TuiApp) -> Option<String> {
     })
 }
 
-fn send_ui(tx: &Sender<String>, message: impl Into<String>) {
-    let _ = tx.send(message.into());
-}
-
 fn truncate_for_log(raw: &str) -> String {
     const MAX_CHARS: usize = 2000;
     if raw.chars().count() <= MAX_CHARS {
@@ -241,6 +520,18 @@ fn truncate_for_log(raw: &str) -> String {
         let truncated: String = raw.chars().take(MAX_CHARS).collect();
         format!("{truncated}…")
     }
+}
+
+/// Legacy line-range apply for `/fix` (diff or replacement via `apply_patch`).
+///
+/// The transactional semantic path never uses this; it is kept so `/fix`
+/// behavior is unchanged.
+pub async fn apply_legacy_line_edit_response(
+    response: SymbolEditResponse,
+    request: SymbolEditRequest,
+    cfg: &AppConfig,
+) -> Result<PathBuf> {
+    apply_symbol_edit_response(response, request, cfg).await
 }
 
 pub async fn apply_symbol_edit_response(
@@ -403,6 +694,26 @@ fn make_relative_display(path: &Path, root: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn kind_display(kind: &crate::analysis::SymbolKind) -> &'static str {
+    use crate::analysis::SymbolKind;
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Method => "method",
+        SymbolKind::AssocFn => "assoc_fn",
+        SymbolKind::Mod => "mod",
+        SymbolKind::Variable => "var",
+        SymbolKind::Comment => "comment",
+    }
+}
+
+fn current_file_and_line(ui: &TuiApp) -> Option<(String, u32)> {
+    inline_path_reference(ui)
+}
+
 fn inline_path_reference(ui: &TuiApp) -> Option<(String, u32)> {
     let last_input = ui.last_user_input.as_deref()?;
     parse_inline_file_reference(last_input)
@@ -465,26 +776,9 @@ fn parse_line_marker(marker: &str) -> Option<u32> {
     }
 }
 
-fn format_symbol_kind(symbol: &SymbolSpan) -> &'static str {
-    use crate::analysis::SymbolKind;
-    match symbol.kind {
-        SymbolKind::Function => "function",
-        SymbolKind::Struct => "struct",
-        SymbolKind::Enum => "enum",
-        SymbolKind::Trait => "trait",
-        SymbolKind::Impl => "impl",
-        SymbolKind::Method => "method",
-        SymbolKind::AssocFn => "assoc_fn",
-        SymbolKind::Mod => "mod",
-        SymbolKind::Variable => "var",
-        SymbolKind::Comment => "comment",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::SymbolKind;
     #[test]
     fn parses_inline_reference_with_colon() {
         let text = "Apply change to @src/lib.rs:42 based on review.";
@@ -504,30 +798,20 @@ mod tests {
     }
 
     #[test]
+    fn build_patch_from_replacement_produces_diff() {
+        let content = "fn foo() {}\nfn bar() {}\n";
+        let replacement = "fn foo() { println!(\"ok\"); }\n";
+        let patch = build_patch_from_replacement(content, 1, 1, replacement).unwrap();
+        assert!(patch.contains("-fn foo() {}"));
+        assert!(patch.contains("+fn foo() { println!(\"ok\"); }"));
+    }
+
+    #[test]
     fn normalize_llm_patch_inserts_headers_when_missing() {
         let patch = "+fn foo() {}\n";
         let normalized = normalize_llm_patch(patch, Path::new("src/lib.rs"), Path::new("/proj"));
         assert!(normalized.contains("--- a/src/lib.rs"));
         assert!(normalized.contains("+++ b/src/lib.rs"));
         assert!(normalized.ends_with('\n'));
-    }
-
-    #[test]
-    fn build_patch_from_replacement_produces_diff() {
-        let content = "fn foo() {}\nfn bar() {}\n";
-        let symbol = SymbolSpan {
-            file: PathBuf::from("src/lib.rs"),
-            name: "foo".to_string(),
-            kind: SymbolKind::Function,
-            start_line: 1,
-            end_line: 1,
-            parent: None,
-        };
-        let replacement = "fn foo() { println!(\"ok\"); }\n";
-        let patch =
-            build_patch_from_replacement(content, symbol.start_line, symbol.end_line, replacement)
-                .unwrap();
-        assert!(patch.contains("-fn foo() {}"));
-        assert!(patch.contains("+fn foo() { println!(\"ok\"); }"));
     }
 }

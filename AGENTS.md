@@ -32,6 +32,9 @@ Run the narrowest check first, then broaden:
 | `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
 | `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
+| `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
+| `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
+| `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/atomic commit) |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
 | `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |

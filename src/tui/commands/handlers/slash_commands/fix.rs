@@ -107,6 +107,8 @@ pub fn handle_fix(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) {
         },
         original_code: original,
         instruction: instruction.to_string(),
+        symbol_id: None,
+        parent: None,
     };
 
     ui.push_log(format!(
