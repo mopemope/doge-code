@@ -124,6 +124,8 @@ pub struct RelatedSymbolResult {
 pub struct SymbolSearchResult {
     pub name: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<String>,
     pub start_line: usize,
     pub end_line: usize,
     pub function_lines: Option<usize>,
@@ -169,6 +171,7 @@ impl From<SymbolInfo> for SymbolSearchResult {
         Self {
             name: s.name,
             kind: s.kind.as_str().to_string(),
+            symbol_id: None,
             start_line: s.start_line,
             end_line: s.end_line,
             function_lines: s.function_lines,
@@ -187,6 +190,7 @@ impl From<&SymbolInfo> for SymbolSearchResult {
         Self {
             name: s.name.clone(),
             kind: s.kind.as_str().to_string(),
+            symbol_id: None,
             start_line: s.start_line,
             end_line: s.end_line,
             function_lines: s.function_lines,

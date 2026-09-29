@@ -539,6 +539,11 @@ fn test_job_id_display_and_parse() {
 }
 
 #[test]
+fn test_semantic_edit_kind_display() {
+    assert_eq!(JobKind::SemanticEdit.to_string(), "semantic_edit");
+}
+
+#[test]
 fn test_snapshot_display_line_contains_fields() {
     let manager = JobManager::new();
     let spec = JobSpec::new(
@@ -565,4 +570,87 @@ fn test_snapshot_display_line_contains_fields() {
         assert!(line.contains("completed"));
         assert!(line.contains("Fix login handler"));
     });
+}
+
+#[tokio::test]
+async fn test_semantic_edit_foreground_exclusivity() {
+    let manager = JobManager::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started_clone = started.clone();
+    let release_clone = release.clone();
+    let a = manager
+        .spawn(
+            JobSpec::new(
+                JobKind::SemanticEdit,
+                JobScope::Foreground,
+                WorkspaceAccess::Write,
+                "semantic edit a",
+            ),
+            move |ctx| async move {
+                started_clone.notify_one();
+                tokio::select! {
+                    _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                    _ = release_clone.notified() => JobRunOutcome::Completed,
+                }
+            },
+        )
+        .unwrap();
+    started.notified().await;
+    let err = manager
+        .spawn(
+            JobSpec::new(
+                JobKind::SemanticEdit,
+                JobScope::Foreground,
+                WorkspaceAccess::Write,
+                "semantic edit b",
+            ),
+            |_ctx| async { JobRunOutcome::Completed },
+        )
+        .unwrap_err();
+    assert!(matches!(err, JobStartError::ForegroundBusy { .. }));
+    release.notify_one();
+    assert_eq!(wait_for_terminal(&manager, a).await, JobStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_semantic_edit_cancellation_leaves_file_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.rs");
+    std::fs::write(&path, "fn foo() {}\n").unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let manager = JobManager::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_clone = started.clone();
+    let path_clone = path.clone();
+    let id = manager
+        .spawn(
+            JobSpec::new(
+                JobKind::SemanticEdit,
+                JobScope::Foreground,
+                WorkspaceAccess::Write,
+                "semantic edit cancel",
+            ),
+            move |ctx| async move {
+                started_clone.notify_one();
+                // Simulate LLM wait: cancellable sleep, no mutation.
+                tokio::select! {
+                    _ = ctx.cancellation.cancelled() => {
+                        let content = std::fs::read_to_string(&path_clone)
+                            .unwrap_or_default();
+                        assert_eq!(content, "fn foo() {}\n");
+                        JobRunOutcome::Cancelled
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => JobRunOutcome::Completed,
+                }
+            },
+        )
+        .unwrap();
+    started.notified().await;
+    wait_for_status(&manager, id, JobStatus::Running).await;
+    manager.cancel(id);
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Cancelled);
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(before, after);
 }

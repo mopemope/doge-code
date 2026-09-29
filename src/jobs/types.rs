@@ -28,6 +28,7 @@ pub enum JobKind {
     AgentTurn,
     Test,
     Lint,
+    SemanticEdit,
 }
 
 impl fmt::Display for JobKind {
@@ -36,6 +37,7 @@ impl fmt::Display for JobKind {
             JobKind::AgentTurn => write!(f, "agent_turn"),
             JobKind::Test => write!(f, "test"),
             JobKind::Lint => write!(f, "lint"),
+            JobKind::SemanticEdit => write!(f, "semantic_edit"),
         }
     }
 }

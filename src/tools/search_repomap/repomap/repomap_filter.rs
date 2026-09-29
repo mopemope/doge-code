@@ -7,7 +7,7 @@ use super::{
     AppliedBudgetSummary, MatchSpan, RelatedSymbolResult, RepomapSearchResult, ResultDensity,
     SearchRepomapArgs, SearchRepomapResponse, SymbolSearchResult,
 };
-use crate::analysis::{RepoMap, SymbolInfo, SymbolRelation};
+use crate::analysis::{RepoMap, SymbolIdentityIndex, SymbolInfo, SymbolRelation};
 
 /// Prebuilt lookup indexes over a `RepoMap`'s relations.
 ///
@@ -141,11 +141,12 @@ const DEFAULT_BUDGET_SYMBOLS_PER_FILE: usize = 12;
 const MIN_RESULT_LIMIT_FOR_BUDGET: usize = 5;
 const MIN_SYMBOLS_PER_FILE_FOR_BUDGET: usize = 2;
 const MIN_SNIPPET_CHARS_FOR_BUDGET: usize = 80;
-const BASE_SYMBOL_METADATA_CHARS: usize = 180;
+const BASE_SYMBOL_METADATA_CHARS: usize = 270;
 
 pub(super) fn filter_and_group_symbols(
     map: &RepoMap,
     mut args: SearchRepomapArgs,
+    project_root: &Path,
 ) -> SearchRepomapResponse {
     let symbols = &map.symbols;
     let mut warnings: Vec<String> = Vec::new();
@@ -298,12 +299,30 @@ pub(super) fn filter_and_group_symbols(
         && (allowed_fields.contains("code") || allowed_fields.contains("doc"));
 
     // Group symbols by file
-    let mut file_groups: HashMap<PathBuf, Vec<&SymbolInfo>> = HashMap::new();
-    for symbol in symbols {
+    // Build stable symbol IDs once (metadata only, no per-symbol file reads).
+    // Un-relativizable entries are skipped per-symbol so one stale path never
+    // strips IDs from all other symbols; report the gap instead of staying silent.
+    let identity_index = match SymbolIdentityIndex::build(map, project_root) {
+        Ok(index) => {
+            let skipped = index.skipped_count(map);
+            if skipped > 0 {
+                warnings.push(format!(
+                    "{skipped} symbol(s) skipped for stable IDs (outside project root)."
+                ));
+            }
+            Some(index)
+        }
+        Err(e) => {
+            warnings.push(format!("stable symbol IDs unavailable: {e}."));
+            None
+        }
+    };
+    let mut file_groups: HashMap<PathBuf, Vec<(usize, &SymbolInfo)>> = HashMap::new();
+    for (idx, symbol) in symbols.iter().enumerate() {
         file_groups
             .entry(symbol.file.clone())
             .or_default()
-            .push(symbol);
+            .push((idx, symbol));
     }
 
     let mut results = Vec::new();
@@ -317,7 +336,7 @@ pub(super) fn filter_and_group_symbols(
         // Get file total lines from any symbol in the file (they should all have the same value)
         let file_total_lines = file_symbols
             .first()
-            .map(|s| s.file_total_lines)
+            .map(|(_, s)| s.file_total_lines)
             .unwrap_or(0);
 
         // Apply file-level filters
@@ -366,7 +385,7 @@ pub(super) fn filter_and_group_symbols(
 
         // Filter symbols within the file and collect SymbolSearchResult directly with match info
         let mut filtered_symbol_results: Vec<SymbolSearchResult> = Vec::new();
-        for symbol in file_symbols {
+        for (symbol_idx, symbol) in file_symbols {
             // Apply symbol kind filter
             if let Some(kinds) = &args.symbol_kinds
                 && !kinds.is_empty()
@@ -588,6 +607,11 @@ pub(super) fn filter_and_group_symbols(
             if let Some(match_score) = computed_match_score {
                 sres.match_score = Some(match_score);
                 sres.matches = match_spans;
+            }
+            if let Some(identity) = identity_index.as_ref()
+                && let Some(id) = identity.id_for_index(symbol_idx)
+            {
+                sres.symbol_id = Some(id.as_str().to_string());
             }
 
             if args.include_relations.unwrap_or(false)
