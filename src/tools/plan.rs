@@ -29,6 +29,8 @@ pub struct PlanList {
 pub struct PlanWriteResult {
     pub plan: PlanList,
     pub changed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -185,6 +187,7 @@ pub fn plan_write_from_base_path(
     Ok(PlanWriteResult {
         plan: plan_list,
         changed,
+        warnings: Vec::new(),
     })
 }
 

@@ -159,6 +159,18 @@ impl FsTools {
         &self.session_manager_wrapper
     }
 
+    /// Storage context for provenance and other per-session durable state.
+    pub fn current_session_storage_context(&self) -> Option<crate::session::SessionStorageContext> {
+        self.session_manager_wrapper
+            .current_session_storage_context()
+    }
+
+    /// Mark a provenance recording failure on the current session.
+    pub fn mark_current_session_provenance_failure(&self) -> Result<()> {
+        self.session_manager_wrapper
+            .mark_current_session_provenance_failure()
+    }
+
     /// Legacy shell-gate compatibility shim (used by tests).
     ///
     /// Backed by `ExecutionPolicy`: under the deprecated `allowed_commands`
@@ -527,7 +539,51 @@ impl FsTools {
             .get_current_session()
             .map(|s| s.changed_files)
             .unwrap_or_default();
-        plan::plan_write(items, mode, &session_id, &self.config, Some(&changed_files))
+        let before_items = plan::plan_read(&session_id, &self.config)
+            .map(|p| p.items)
+            .unwrap_or_default();
+        let mut result =
+            plan::plan_write(items, mode, &session_id, &self.config, Some(&changed_files))?;
+
+        let mut warnings = Vec::new();
+        if self
+            .get_current_session()
+            .is_some_and(|s| s.provenance_incomplete)
+        {
+            warnings.push(
+                "Provenance trace is incomplete because one or more event writes failed."
+                    .to_string(),
+            );
+        }
+
+        if result.changed {
+            let transitions =
+                crate::tools::provenance::diff_plan_transitions(&before_items, &result.plan.items);
+            if !transitions.is_empty() {
+                match crate::tools::provenance::record_plan_changed(self, transitions.clone()) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "provenance.record_failed");
+                        let _ = self.mark_current_session_provenance_failure();
+                        warnings.push(
+                            "Plan was saved, but provenance recording failed; trace is incomplete."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            // Completion warnings: newly completed items with active linked
+            // changes that no successful verification has observed. Never
+            // blocks completion; research-only items with no linked changes
+            // produce no warning.
+            warnings.extend(crate::tools::provenance::plan_completion_warnings(
+                self,
+                &transitions,
+            ));
+        }
+
+        result.warnings = warnings;
+        Ok(result)
     }
 
     pub fn plan_read(&self) -> Result<plan::PlanList> {

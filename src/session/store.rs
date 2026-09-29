@@ -121,7 +121,7 @@ impl SessionStore {
     /// Save the session data.
     /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
-        let dir = self.root.join(&data.meta.id);
+        let dir = self.session_dir(&data.meta.id);
         fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
 
         // Save the entire session data as a single JSON file
@@ -194,6 +194,13 @@ impl SessionStore {
                 matches.iter().map(|s| s.meta.id.clone()).collect(),
             )),
         }
+    }
+    /// Directory holding one session (`session.json` plus `provenance/`).
+    ///
+    /// Single source of truth for session storage layout; callers must not
+    /// hand-assemble `.doge/sessions/...` paths.
+    pub fn session_dir(&self, id: &str) -> PathBuf {
+        self.root.join(id)
     }
 }
 
