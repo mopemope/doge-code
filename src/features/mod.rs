@@ -1,5 +1,6 @@
 pub mod doc_skill;
 
+pub mod semantic_edit;
 pub mod test_gen;
 pub mod testing;
 

@@ -56,7 +56,7 @@ fn run_response(
         symbols,
         relations: vec![],
     };
-    filter_and_group_symbols(&map, args)
+    filter_and_group_symbols(&map, args, std::path::Path::new("."))
 }
 
 fn collect_results(
@@ -639,7 +639,8 @@ fn test_include_relations_returns_callers_and_callees() {
         include_relations: Some(true),
         ..Default::default()
     };
-    let response_outgoing = filter_and_group_symbols(&map, args_outgoing);
+    let response_outgoing =
+        filter_and_group_symbols(&map, args_outgoing, std::path::Path::new("."));
     assert_eq!(response_outgoing.results.len(), 1);
     let caller_result = &response_outgoing.results[0].symbols[0];
     assert!(caller_result.related_symbols.is_some());
@@ -654,7 +655,8 @@ fn test_include_relations_returns_callers_and_callees() {
         include_relations: Some(true),
         ..Default::default()
     };
-    let response_incoming = filter_and_group_symbols(&map, args_incoming);
+    let response_incoming =
+        filter_and_group_symbols(&map, args_incoming, std::path::Path::new("."));
     assert_eq!(response_incoming.results.len(), 1);
     let callee_result = &response_incoming.results[0].symbols[0];
     assert!(callee_result.related_symbols.is_some());
@@ -692,7 +694,8 @@ fn test_include_relations_returns_type_usage() {
         include_relations: Some(true),
         ..Default::default()
     };
-    let response_outgoing = filter_and_group_symbols(&map, args_outgoing);
+    let response_outgoing =
+        filter_and_group_symbols(&map, args_outgoing, std::path::Path::new("."));
     assert_eq!(response_outgoing.results.len(), 1);
     let struct_result = &response_outgoing.results[0].symbols[0];
     assert!(struct_result.related_symbols.is_some());
@@ -707,7 +710,8 @@ fn test_include_relations_returns_type_usage() {
         include_relations: Some(true),
         ..Default::default()
     };
-    let response_incoming = filter_and_group_symbols(&map, args_incoming);
+    let response_incoming =
+        filter_and_group_symbols(&map, args_incoming, std::path::Path::new("."));
     assert_eq!(response_incoming.results.len(), 1);
     let type_result = &response_incoming.results[0].symbols[0];
     assert!(type_result.related_symbols.is_some());
@@ -715,4 +719,96 @@ fn test_include_relations_returns_type_usage() {
     assert_eq!(relations.len(), 1);
     assert_eq!(relations[0].name, "MyStruct");
     assert_eq!(relations[0].relation_type, "use_incoming");
+}
+
+#[test]
+fn test_symbol_id_exists_and_deterministic() {
+    let symbols = vec![
+        create_test_symbol("func1", SymbolKind::Function, "a.rs", 50, Some(10)),
+        create_test_symbol("func2", SymbolKind::Function, "a.rs", 50, Some(10)),
+    ];
+    let args = SearchRepomapArgs::default();
+    let first = run_response(symbols.clone(), args.clone());
+    let second = run_response(symbols, args);
+    let ids_first: Vec<_> = first
+        .results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.symbol_id.clone()))
+        .collect();
+    let ids_second: Vec<_> = second
+        .results
+        .iter()
+        .flat_map(|r| r.symbols.iter().map(|s| s.symbol_id.clone()))
+        .collect();
+    assert!(!ids_first.is_empty());
+    for id in &ids_first {
+        let id = id.as_ref().expect("symbol_id must exist");
+        assert!(id.starts_with("sym-v1-"));
+        assert_eq!(id.len(), "sym-v1-".len() + 64);
+    }
+    assert_eq!(ids_first, ids_second);
+    // Fingerprints must never appear in search results.
+    let json = serde_json::to_string(&first).unwrap();
+    assert!(!json.contains("fp-v1-"));
+    assert!(!json.contains("fingerprint"));
+}
+
+#[test]
+fn test_symbol_id_in_compact_mode_keeps_budget() {
+    let symbols = vec![create_test_symbol(
+        "func1",
+        SymbolKind::Function,
+        "a.rs",
+        50,
+        Some(10),
+    )];
+    let args = SearchRepomapArgs {
+        result_density: Some(ResultDensity::Compact),
+        response_budget_chars: Some(2000),
+        ..Default::default()
+    };
+    let response = run_response(symbols, args);
+    assert!(!response.results.is_empty());
+    assert!(response.results[0].symbols[0].symbol_id.is_some());
+    assert!(response.results[0].symbols[0].code_snippet.is_empty());
+}
+
+#[test]
+fn test_symbol_id_pagination_stable() {
+    let symbols: Vec<_> = (0..6)
+        .map(|i| {
+            create_test_symbol(
+                &format!("func{i}"),
+                SymbolKind::Function,
+                &format!("file{i}.rs"),
+                100,
+                Some(5),
+            )
+        })
+        .collect();
+    let base = SearchRepomapArgs {
+        page_size: Some(2),
+        ..Default::default()
+    };
+    let p0 = run_response(
+        symbols.clone(),
+        SearchRepomapArgs {
+            cursor: Some(0),
+            ..base.clone()
+        },
+    );
+    let p1 = run_response(
+        symbols.clone(),
+        SearchRepomapArgs {
+            cursor: Some(2),
+            ..base.clone()
+        },
+    );
+    assert_eq!(p0.next_cursor, Some(2));
+    assert_eq!(p1.results.len(), 2);
+    for r in p0.results.iter().chain(p1.results.iter()) {
+        for s in &r.symbols {
+            assert!(s.symbol_id.is_some());
+        }
+    }
 }
