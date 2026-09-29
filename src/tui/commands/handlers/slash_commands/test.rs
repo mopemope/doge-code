@@ -26,6 +26,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     };
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
+    let tools = executor.tools.clone();
 
     let spec = JobSpec::new(
         JobKind::Test,
@@ -36,6 +37,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
         run_test_job(
             project_root,
+            tools,
             ui_tx,
             command_timeout_ms,
             ctx.cancellation_token(),
@@ -61,6 +63,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 
 async fn run_test_job(
     project_root: PathBuf,
+    tools: crate::tools::FsTools,
     ui_tx: Sender<String>,
     command_timeout_ms: u64,
     cancellation: CancellationToken,
@@ -129,6 +132,10 @@ async fn run_test_job(
                 ui_tx.send_logged("::status:cancelled");
                 return JobRunOutcome::Cancelled;
             }
+            // Snapshot verification context before the command starts so a
+            // change landing mid-run is never attributed to this run.
+            let verification_context =
+                crate::tools::provenance::capture_verification_context_for_fs(&tools);
             // Per-command child token so parent cancel stops all commands.
             let child = cancellation.child_token();
             let mut result = testing::run_test_command_with_cancel(
@@ -144,6 +151,34 @@ async fn run_test_job(
                 ui_tx.send_logged("::shell_output:Test run cancelled.");
                 ui_tx.send_logged("::status:cancelled");
                 return JobRunOutcome::Cancelled;
+            }
+
+            // One command = one observed verification event (never a proof).
+            // Timed-out runs are recorded; cancellations above are not.
+            // A recording failure never fails the test run itself; the
+            // session is marked incomplete and the UI is told, matching the
+            // semantic-edit and plan_write paths.
+            if !crate::tools::provenance::record_tui_test_verification(
+                &tools,
+                &test_cmd.command,
+                &test_cmd.args,
+                result.success,
+                if result.timed_out {
+                    "timed_out"
+                } else {
+                    "completed"
+                },
+                result.exit_code,
+                result.timed_out,
+                &result.stdout,
+                &result.stderr,
+                result.output_truncated,
+                result.warnings.clone(),
+                verification_context,
+            ) {
+                ui_tx.send_logged(
+                    "[provenance][warning] Test ran, but provenance recording failed.".to_string(),
+                );
             }
 
             // Store the command output
@@ -271,13 +306,23 @@ mod tests {
     use super::*;
     use crate::jobs::{JobManager, JobScope, JobSpec, WorkspaceAccess};
 
+    fn test_tools_for(project_root: &std::path::Path) -> crate::tools::FsTools {
+        let config = std::sync::Arc::new(crate::config::AppConfig {
+            project_root: project_root.to_path_buf(),
+            ..crate::config::AppConfig::default()
+        });
+        crate::tools::FsTools::new(std::sync::Arc::new(tokio::sync::RwLock::new(None)), config)
+    }
+
     #[tokio::test]
     async fn test_test_cancellation_stops_remaining_commands() {
         let dir = tempfile::tempdir().unwrap();
         // A project with no supported languages completes immediately.
         let (ui_tx, _rx) = std::sync::mpsc::channel::<String>();
+        let tools = test_tools_for(dir.path());
         let outcome = run_test_job(
             dir.path().to_path_buf(),
+            tools,
             ui_tx,
             10_000,
             CancellationToken::new(),
@@ -315,7 +360,15 @@ mod tests {
         let (ui_tx2, rx2) = std::sync::mpsc::channel::<String>();
         let cancelled_token = CancellationToken::new();
         cancelled_token.cancel();
-        let outcome = run_test_job(dir.path().to_path_buf(), ui_tx2, 10_000, cancelled_token).await;
+        let tools2 = test_tools_for(dir.path());
+        let outcome = run_test_job(
+            dir.path().to_path_buf(),
+            tools2,
+            ui_tx2,
+            10_000,
+            cancelled_token,
+        )
+        .await;
         assert!(matches!(outcome, JobRunOutcome::Cancelled));
         let messages: Vec<String> = rx2.try_iter().collect();
         assert!(

@@ -1,4 +1,4 @@
-use crate::session::{SessionData, SessionManager};
+use crate::session::{SessionData, SessionManager, SessionStorageContext};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -99,5 +99,24 @@ impl SessionManagerWrapper {
         } else {
             None
         }
+    }
+
+    /// Storage context for provenance and other per-session durable state.
+    ///
+    /// Single source of truth for the session directory; callers must not
+    /// hand-assemble `.doge/sessions/...` paths.
+    pub fn current_session_storage_context(&self) -> Option<SessionStorageContext> {
+        let session_manager = self.session_manager.as_ref()?;
+        let mgr = session_manager.lock().unwrap();
+        mgr.current_session_storage_context()
+    }
+
+    /// Mark a provenance recording failure on the current session.
+    pub fn mark_current_session_provenance_failure(&self) -> Result<()> {
+        if let Some(session_manager) = &self.session_manager {
+            let mut mgr = session_manager.lock().unwrap();
+            mgr.mark_current_session_provenance_failure()?;
+        }
+        Ok(())
     }
 }

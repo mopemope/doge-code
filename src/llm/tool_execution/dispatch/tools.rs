@@ -49,7 +49,15 @@ pub async fn execute_process(
     let params: crate::execution::ExecuteProcessParams = serde_json::from_value(args.clone())
         .map_err(|e| anyhow!("invalid execute_process args: {e}"))?;
     let program = params.program.clone();
+    let process_args = params.args.clone();
+    let cwd_param = params.cwd.clone();
     let arg_count = params.args.len();
+    // Classify before execution; only structured `execute_process` is auto
+    // evidence. Bash/shell strings are never inferred as verification.
+    let verification_kind = crate::provenance::classify_verification(&program, &process_args);
+    let verification_context = verification_kind
+        .map(|_| crate::tools::provenance::capture_verification_context_for_fs(runtime.fs));
+    let cwd_relative = crate::tools::provenance::relative_cwd_for_evidence(runtime.fs, &cwd_param);
     match runtime
         .fs
         .execute_process(params, runtime.cancel_token.clone())
@@ -70,6 +78,23 @@ pub async fn execute_process(
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
+            // Record observed verification for completed/timed-out runs only.
+            // Policy denials and spawn failures never started execution;
+            // cancellation propagates as Err below and is never recorded.
+            if let (Some(kind), Some(context)) = (verification_kind, verification_context)
+                && (status == "completed" || status == "timed_out")
+            {
+                record_execute_process_verification(
+                    runtime,
+                    kind,
+                    &program,
+                    &process_args,
+                    cwd_relative,
+                    &context,
+                    &value,
+                    status,
+                );
+            }
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: success,
@@ -80,6 +105,79 @@ pub async fn execute_process(
             })
         }
         Err(error) => Err(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_execute_process_verification(
+    runtime: &ToolRuntime<'_>,
+    kind: crate::provenance::VerificationKind,
+    program: &str,
+    process_args: &[String],
+    cwd_relative: Option<String>,
+    context: &crate::provenance::VerificationContext,
+    value: &serde_json::Value,
+    status: &str,
+) {
+    let success = value
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exit_code = value
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+    let stdout = value.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let output_truncated = value
+        .get("output_truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let timed_out = status == "timed_out";
+    let mut extra_warnings = Vec::new();
+    if let Some(warnings) = value.get("warnings").and_then(|v| v.as_array()) {
+        for w in warnings.iter().filter_map(|v| v.as_str()) {
+            extra_warnings.push(w.to_string());
+        }
+    }
+    let event =
+        crate::provenance::build_verification_event(crate::provenance::VerificationRecordInput {
+            kind,
+            source: crate::provenance::VerificationSource::ExecuteProcess,
+            program,
+            args: process_args,
+            cwd_relative,
+            success,
+            status,
+            exit_code,
+            timed_out,
+            stdout,
+            stderr,
+            capture_truncated: output_truncated,
+            context: context.clone(),
+            extra_warnings,
+        });
+    let change_count = event.observed_change_ids.len();
+    let Some(ctx) = runtime.fs.current_session_storage_context() else {
+        return;
+    };
+    let store = crate::provenance::ProvenanceStore::new(ctx.session_dir);
+    match store.append(
+        &ctx.session_id,
+        crate::provenance::ProvenanceEvent::VerificationObserved(event),
+    ) {
+        Ok(_) => {
+            tracing::info!(
+                kind = ?kind,
+                success,
+                change_count,
+                "provenance.verification_observed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "provenance.record_failed");
+            let _ = runtime.fs.mark_current_session_provenance_failure();
+        }
     }
 }
 
@@ -288,6 +386,26 @@ pub async fn plan_read(runtime: &ToolRuntime<'_>, _args: &serde_json::Value) -> 
             // Remove redundant recording
             Err(anyhow!("{e}"))
         }
+    }
+}
+
+pub async fn provenance_read(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::tools::provenance::ProvenanceReadArgs =
+        serde_json::from_value(args.clone())?;
+    match crate::tools::provenance::provenance_read(runtime.fs, params) {
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            let count = res.events.len();
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Read {count} provenance events"),
+            })
+        }
+        Err(e) => Err(anyhow!("{e}")),
     }
 }
 

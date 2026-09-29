@@ -35,6 +35,7 @@ Run the narrowest check first, then broaden:
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
 | `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
 | `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/atomic commit) |
+| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (versioned envelope), `store.rs` (atomic per-event files), `query.rs` (active/diverged coverage), `verification.rs` (conservative classifier) |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
 | `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
@@ -124,6 +125,8 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - `search_history` has a dispatch arm but is not registered in `default_tools_def` — a live example of the registration-gap pitfall. Check every site listed in `docs/tool-output-contract.md` when adding tools.
 - Tests must never write to the repo root (e.g. a `temp/` directory). Leftover test artifacts used to accumulate there. Always use `tempdir()` per the Testing Guidelines.
 - The README tool list must stay in sync with `default_tools_def` (`src/llm/tool_def.rs`); new tools require a README entry (checklist step 6).
+- `.doge/repomap.sqlite` is rebuildable analysis/cache state and may be recreated during database recovery. Never store durable session/provenance state there.
+- Legacy `action_log` is not the provenance store. Do not build new durable features on legacy `action_log`/repomap DB.
 
 ## Commit & Pull Request Guidelines
 

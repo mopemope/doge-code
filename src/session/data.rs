@@ -131,6 +131,14 @@ pub struct SessionData {
     pub tool_call_failures: HashMap<String, u64>,
     /// Changed files during the session for repomap update
     pub changed_files: Vec<String>,
+    /// True when at least one provenance event write failed. The source
+    /// change is never rolled back for a provenance failure; this flag keeps
+    /// the gap visible instead.
+    #[serde(default)]
+    pub provenance_incomplete: bool,
+    /// Count of failed provenance event writes in this session.
+    #[serde(default)]
+    pub provenance_record_failures: u64,
 }
 
 impl SessionData {
@@ -155,6 +163,8 @@ impl SessionData {
             tool_call_successes: HashMap::new(),
             tool_call_failures: HashMap::new(),
             changed_files: Vec::new(),
+            provenance_incomplete: false,
+            provenance_record_failures: 0,
         }
     }
 
@@ -252,6 +262,14 @@ impl SessionData {
     pub fn clear_changed_files(&mut self) {
         self.changed_files.clear();
         self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
+    }
+
+    /// Mark a provenance recording failure without touching the committed
+    /// source change. Sets the incomplete flag and bumps the counter.
+    pub fn mark_provenance_failure(&mut self) {
+        self.provenance_incomplete = true;
+        self.provenance_record_failures = self.provenance_record_failures.saturating_add(1);
+        self.timestamp = Utc::now().to_rfc3339();
     }
 }
 
@@ -448,5 +466,37 @@ mod tests {
         assert_eq!(*session_data.tool_call_failures.get("fs_read").unwrap(), 1);
         assert_eq!(*session_data.tool_call_failures.get("fs_write").unwrap(), 2);
         assert!(session_data.tool_call_successes.is_empty());
+    }
+
+    #[test]
+    fn test_provenance_failure_bookkeeping() {
+        let mut session_data = SessionData::new();
+        assert!(!session_data.provenance_incomplete);
+        assert_eq!(session_data.provenance_record_failures, 0);
+        session_data.mark_provenance_failure();
+        assert!(session_data.provenance_incomplete);
+        assert_eq!(session_data.provenance_record_failures, 1);
+        session_data.mark_provenance_failure();
+        assert_eq!(session_data.provenance_record_failures, 2);
+    }
+
+    #[test]
+    fn test_legacy_session_json_without_provenance_fields() {
+        // Sessions written before provenance must still load.
+        let legacy = serde_json::json!({
+            "meta": {"id": "sess-1", "created_at": "2026-01-01T00:00:00+00:00", "title": "t", "title_is_default": true},
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "conversation": [],
+            "token_count": 0,
+            "requests": 0,
+            "tool_calls": 0,
+            "lines_edited": 0,
+            "tool_call_successes": {},
+            "tool_call_failures": {},
+            "changed_files": []
+        });
+        let data: SessionData = serde_json::from_value(legacy).unwrap();
+        assert!(!data.provenance_incomplete);
+        assert_eq!(data.provenance_record_failures, 0);
     }
 }
