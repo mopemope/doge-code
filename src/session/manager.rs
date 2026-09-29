@@ -411,6 +411,41 @@ impl SessionManager {
             .map(|session| session.meta.id.clone())
             .ok_or_else(|| anyhow::anyhow!("No current session"))
     }
+
+    /// Storage context for provenance and other per-session durable state.
+    ///
+    /// Returns the session id plus its on-disk directory without exposing
+    /// the whole store layout.
+    pub fn current_session_storage_context(&self) -> Option<SessionStorageContext> {
+        let session = self.current_session.as_ref()?;
+        Some(SessionStorageContext {
+            session_id: session.meta.id.clone(),
+            session_dir: self.store.session_dir(&session.meta.id),
+        })
+    }
+
+    /// Mark a provenance recording failure on the current session.
+    ///
+    /// Never rolls back the committed source change; it only flips the
+    /// incomplete flag and bumps the counter so coverage can warn.
+    pub fn mark_current_session_provenance_failure(&mut self) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.mark_provenance_failure();
+            if let Err(e) = self.store.save(session) {
+                tracing::error!(?e, "Failed to save session provenance failure flag");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Minimal session storage context for provenance and similar per-session
+/// durable state. Built only by [`SessionManager`].
+#[derive(Debug, Clone)]
+pub struct SessionStorageContext {
+    pub session_id: String,
+    pub session_dir: std::path::PathBuf,
 }
 
 #[cfg(test)]

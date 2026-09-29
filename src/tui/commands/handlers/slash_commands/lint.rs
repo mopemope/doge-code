@@ -136,6 +136,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     };
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
+    let tools = executor.tools.clone();
 
     let spec = JobSpec::new(
         JobKind::Lint,
@@ -146,6 +147,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
         lint_job_async(
             project_root,
+            tools,
             ui_tx,
             command_timeout_ms,
             ctx.cancellation_token(),
@@ -376,6 +378,7 @@ fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
 
 async fn lint_job_async(
     project_root: PathBuf,
+    tools: crate::tools::FsTools,
     ui_tx: Sender<String>,
     command_timeout_ms: u64,
     cancellation: tokio_util::sync::CancellationToken,
@@ -439,6 +442,8 @@ async fn lint_job_async(
                     ui_tx.send_logged("::status:cancelled");
                     return JobRunOutcome::Cancelled;
                 }
+                let verification_context =
+                    crate::tools::provenance::capture_verification_context_for_fs(&tools);
                 let result = run_command_with_output(
                     &project_root,
                     lint_cmd,
@@ -451,6 +456,41 @@ async fn lint_job_async(
                     ui_tx.send_logged("::shell_output:Lint run cancelled.");
                     ui_tx.send_logged("::status:cancelled");
                     return JobRunOutcome::Cancelled;
+                }
+
+                // One command = one observed verification event. Kind comes
+                // from the structured program + argv; unrecognized lint
+                // commands are not forced into evidence.
+                if let Some(kind) = crate::tools::provenance::classify_lint_command(
+                    &lint_cmd.command,
+                    &lint_cmd.args,
+                ) {
+                    // A recording failure never fails the lint run itself;
+                    // the session is marked incomplete and the UI is told.
+                    if !crate::tools::provenance::record_tui_lint_verification(
+                        &tools,
+                        kind,
+                        &lint_cmd.command,
+                        &lint_cmd.args,
+                        result.success,
+                        if result.timed_out {
+                            "timed_out"
+                        } else {
+                            "completed"
+                        },
+                        result.exit_code,
+                        result.timed_out,
+                        &result.stdout,
+                        &result.stderr,
+                        result.output_truncated,
+                        result.warnings.clone(),
+                        verification_context,
+                    ) {
+                        ui_tx.send_logged(
+                            "[provenance][warning] Lint ran, but provenance recording failed."
+                                .to_string(),
+                        );
+                    }
                 }
 
                 // Store the command output to send to LLM if there are warnings/errors
@@ -1183,7 +1223,14 @@ mod tests {
         let (ui_tx, rx) = std::sync::mpsc::channel::<String>();
         let token = CancellationToken::new();
         token.cancel();
-        let outcome = lint_job_async(dir.path().to_path_buf(), ui_tx, 10_000, token).await;
+        let tools = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::config::AppConfig {
+                project_root: dir.path().to_path_buf(),
+                ..crate::config::AppConfig::default()
+            }),
+        );
+        let outcome = lint_job_async(dir.path().to_path_buf(), tools, ui_tx, 10_000, token).await;
         assert!(matches!(outcome, crate::jobs::JobRunOutcome::Cancelled));
         let messages: Vec<String> = rx.try_iter().collect();
         assert!(!messages.iter().any(|m| m.starts_with("::lint_issues:")));

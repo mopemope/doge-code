@@ -48,6 +48,7 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
         "task" => tools::task(runtime, &args_val).await,
         "plan_write" => tools::plan_write(runtime, &args_val).await,
         "plan_read" => tools::plan_read(runtime, &args_val).await,
+        "provenance_read" => tools::provenance_read(runtime, &args_val).await,
         "undo" => tools::undo(runtime, &args_val).await,
         "read_memory" => tools::read_memory(runtime, &args_val).await,
         "write_memory" => tools::write_memory(runtime, &args_val).await,
@@ -573,6 +574,181 @@ mod tests {
             err.to_string().contains("prompt") || err.to_string().contains("invalid"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_provenance_read_is_registered() {
+        let names: Vec<String> = crate::llm::tool_def::default_tools_def()
+            .iter()
+            .map(|def| def.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"provenance_read".to_string()),
+            "tools: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provenance_read_dispatch_returns_coverage() -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_prov".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "provenance_read".to_string(),
+                arguments: json!({}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(output.is_success);
+        assert!(output.value.get("events").is_some());
+        assert!(output.value.get("coverage").is_some());
+        assert!(output.value.get("next_cursor").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_records_verification_observed() -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        std::fs::write(project_root.join("dummy.py"), "x = 1\n")?;
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let session_id = manager.lock().unwrap().current_session_id().unwrap();
+        let session_dir = project_root.join(".doge/sessions").join(&session_id);
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_verify".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_process".to_string(),
+                arguments: json!({
+                    "program": "python3",
+                    "args": ["-m", "py_compile", "dummy.py"]
+                })
+                .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(output.is_success, "value: {}", output.value);
+
+        let store = crate::provenance::ProvenanceStore::new(session_dir);
+        let loaded = store.load_all()?;
+        let verifications: Vec<_> = loaded
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.event,
+                    crate::provenance::ProvenanceEvent::VerificationObserved(_)
+                )
+            })
+            .collect();
+        assert_eq!(verifications.len(), 1);
+        if let crate::provenance::ProvenanceEvent::VerificationObserved(v) = &verifications[0].event
+        {
+            assert_eq!(
+                v.verification_kind,
+                crate::provenance::VerificationKind::SyntaxCheck
+            );
+            assert_eq!(
+                v.source,
+                crate::provenance::VerificationSource::ExecuteProcess
+            );
+            assert!(v.outcome.success);
+            assert_eq!(v.command.program, "python3");
+            assert!(!format!("{:?}", v).contains("API_KEY"));
+            assert!(v.output_digest.starts_with("blake3:"));
+        } else {
+            panic!("expected verification");
+        }
+        // Raw event JSON must not contain environment values.
+        for env in loaded.events {
+            let raw = serde_json::to_string(&env).unwrap();
+            assert!(!raw.contains("OPENAI_API_KEY"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_process_policy_denied_records_nothing() -> Result<()> {
+        use crate::config::{ExecutionConfig, ExecutionMode};
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let exec = ExecutionConfig {
+            mode: ExecutionMode::Allowlist,
+            allowed_programs: vec!["cargo".to_string()],
+            allow_shell: false,
+            ..ExecutionConfig::default()
+        };
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let session_id = manager.lock().unwrap().current_session_id().unwrap();
+        let session_dir = project_root.join(".doge/sessions").join(&session_id);
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            execution: exec,
+            execution_configured: true,
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        let tool_call = ToolCall {
+            id: Some("call_deny".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "execute_process".to_string(),
+                arguments: json!({"program": "python3", "args": ["-m", "py_compile", "x.py"]})
+                    .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["status"], "policy_denied");
+        let store = crate::provenance::ProvenanceStore::new(session_dir);
+        let loaded = store.load_all()?;
+        assert!(loaded.events.is_empty());
         Ok(())
     }
 }

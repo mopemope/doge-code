@@ -25,5 +25,6 @@ pub fn default_tools_def() -> Vec<ToolDef> {
         tools::doc::tool_def(),
         tools::workflow::run_workflow_tool_def(),
         tools::task::tool_def(),
+        tools::provenance::tool_def(),
     ]
 }
