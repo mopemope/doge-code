@@ -68,6 +68,7 @@ Non-interactive session management. Sessions are listed most recently updated fi
 ### Prerequisites
 - Rust 1.88+ (Rust Edition 2024)
 - OpenAI compatible API key (set via `OPENAI_API_KEY` environment variable)
+- ripgrep (`rg` on `PATH`; required at runtime by the `search_text` tool, which shells out to `rg` with no fallback)
 
 ### Build from Source
 ```bash
