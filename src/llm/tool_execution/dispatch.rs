@@ -627,6 +627,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_dispatch_records_text_edit_and_undo() -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let target = project_root.join("a.txt");
+        std::fs::write(&target, "hello\n")?;
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let session_id = manager.lock().unwrap().current_session_id().unwrap();
+        let session_dir = project_root.join(".doge/sessions").join(&session_id);
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+
+        let tool_call = ToolCall {
+            id: Some("call_edit".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "edit".to_string(),
+                arguments: json!({
+                    "file_path": target.to_str().unwrap(),
+                    "target_block": "hello",
+                    "new_block": "goodbye",
+                })
+                .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        assert_eq!(output.value["changed"], true);
+        assert_eq!(std::fs::read_to_string(&target)?, "goodbye\n");
+
+        let store = crate::provenance::ProvenanceStore::new(session_dir.clone());
+        let loaded = store.load_all()?;
+        assert_eq!(loaded.events.len(), 1);
+        match &loaded.events[0].event {
+            crate::provenance::ProvenanceEvent::ChangeCommitted(c) => {
+                assert_eq!(c.change_kind, crate::provenance::ChangeKind::TextEdit);
+            }
+            _ => panic!("expected change"),
+        }
+
+        // Undo via dispatch restores and records an Undo event.
+        let undo_call = ToolCall {
+            id: Some("call_undo".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "undo".to_string(),
+                arguments: json!({}).to_string(),
+            },
+        };
+        let undo_out = dispatch_tool_call(&runtime, &undo_call).await?;
+        assert!(undo_out.is_success, "value: {}", undo_out.value);
+        assert_eq!(undo_out.value["changed"], true);
+        assert_eq!(std::fs::read_to_string(&target)?, "hello\n");
+        let loaded = store.load_all()?;
+        assert_eq!(loaded.events.len(), 2);
+
+        // No-op edit records nothing further.
+        let noop_call = ToolCall {
+            id: Some("call_noop".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "edit".to_string(),
+                arguments: json!({
+                    "file_path": target.to_str().unwrap(),
+                    "target_block": "hello",
+                    "new_block": "hello",
+                })
+                .to_string(),
+            },
+        };
+        let noop_out = dispatch_tool_call(&runtime, &noop_call).await?;
+        assert!(noop_out.is_success);
+        assert_eq!(noop_out.value["changed"], false);
+        let loaded = store.load_all()?;
+        assert_eq!(loaded.events.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_execute_process_records_verification_observed() -> Result<()> {
         let dir = tempdir()?;
         let project_root = dir.path().to_path_buf();
