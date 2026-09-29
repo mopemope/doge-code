@@ -534,7 +534,15 @@ pub async fn run_agent_loop(
                 error!("Failed to record tool failure: {}", e);
             }
 
-            let modifies_files = matches!(tool_name, "fs_write" | "edit" | "apply_patch");
+            let modifies_files = matches!(tool_name, "fs_write" | "edit" | "apply_patch" | "undo");
+
+            // Actual-mutation flag: only `success && changed` counts for diff
+            // review and verification notes. No-op writes never trigger them.
+            let output_changed = output_value
+                .and_then(|v| v.get("changed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let actually_changed = success && output_changed;
 
             let ui_args = if success
                 && ui_tx.is_some()
@@ -554,8 +562,8 @@ pub async fn run_agent_loop(
                 None
             };
 
-            // Set file_was_written flag for tools that modify files
-            if modifies_files && success {
+            // Set file_was_written flag for tools that actually mutated files
+            if modifies_files && actually_changed {
                 file_was_written = true;
             }
 
@@ -577,8 +585,8 @@ pub async fn run_agent_loop(
                 }
             };
 
-            // Inject verification note if file was written
-            if modifies_files && success {
+            // Inject verification note if a file was actually mutated
+            if modifies_files && actually_changed {
                 let verification_note = r#"
 
 <SYSTEM_NOTE>
