@@ -62,6 +62,11 @@ pub struct SemanticEditResult {
     pub diff: String,
     pub lines_added: usize,
     pub lines_removed: usize,
+    /// Whole-file exact identity for the v2 mutation chain.
+    pub before_file_hash: Option<String>,
+    pub after_file_hash: Option<String>,
+    pub before_byte_len: Option<u64>,
+    pub after_byte_len: Option<u64>,
 }
 
 fn resolve_absolute(project_root: &Path, file: &Path) -> PathBuf {
@@ -388,38 +393,22 @@ pub fn apply_with_snapshots(
         diff,
         lines_added,
         lines_removed,
+        before_file_hash: Some(crate::provenance::file_content_hash(current_source)),
+        after_file_hash: Some(crate::provenance::file_content_hash(&candidate)),
+        before_byte_len: Some(current_source.len() as u64),
+        after_byte_len: Some(candidate.len() as u64),
     };
     Ok((candidate, result, candidate_analyzed.repomap))
 }
 
-/// Atomic write via a sibling temp file (same directory) + persist.
-pub fn atomic_write(path: &Path, content: &str) -> Result<(), SemanticEditError> {
-    if content.as_bytes().contains(&0) {
-        return Err(SemanticEditError::WriteFailed(
-            "binary content is not allowed".to_string(),
-        ));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| SemanticEditError::WriteFailed("no parent directory".to_string()))?;
-    std::fs::create_dir_all(parent).map_err(|e| SemanticEditError::WriteFailed(e.to_string()))?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".tmp_semantic_edit_")
-        .tempfile_in(parent)
-        .map_err(|e| SemanticEditError::WriteFailed(e.to_string()))?;
-    use std::io::Write as _;
-    temp.write_all(content.as_bytes())
-        .map_err(|e| SemanticEditError::WriteFailed(e.to_string()))?;
-    temp.persist(path)
-        .map_err(|e| SemanticEditError::WriteFailed(e.to_string()))?;
-    Ok(())
-}
-
-/// File-backed apply: re-reads, validates, race-checks, then atomically writes.
+/// File-backed apply: re-reads, validates, race-checks, then commits via
+/// the shared mutation writer.
 ///
 /// Returns the commit result plus the candidate file `RepoMap` for shared-map
 /// updates. No session/undo side effects happen here; the caller commits them
-/// only on `Ok`.
+/// only on `Ok`. Semantic validation order (resolve -> fingerprint ->
+/// candidate parse -> identity -> syntax) is unchanged; only the final write
+/// goes through the common commit helper.
 pub async fn apply_edit(
     prepared: &PreparedSemanticEdit,
     replacement: &str,
@@ -453,7 +442,27 @@ pub async fn apply_edit(
         project_root,
     )?;
     debug_assert_eq!(candidate, candidate2);
-    atomic_write(&prepared.file, &candidate)?;
+    // Shared commit: pre-write race check + sibling-temp persist + verify.
+    // Permission inheritance and fsync live in the common writer now.
+    let before_snapshot = crate::tools::mutation::MutationSnapshot {
+        exists: true,
+        content: Some(current_source.clone()),
+        content_hash: Some(crate::provenance::file_content_hash(&current_source)),
+        byte_len: Some(current_source.len() as u64),
+    };
+    crate::tools::mutation::commit_text_candidate(&prepared.file, &before_snapshot, &candidate)
+        .await
+        .map_err(|e| match e {
+            crate::tools::mutation::MutationCommitError::ConcurrentModification => {
+                SemanticEditError::ConcurrentModification
+            }
+            crate::tools::mutation::MutationCommitError::WriteFailed(msg) => {
+                SemanticEditError::WriteFailed(msg)
+            }
+            crate::tools::mutation::MutationCommitError::VerifyFailed(msg) => {
+                SemanticEditError::WriteFailed(msg)
+            }
+        })?;
     Ok((result2, candidate_map2, current_source))
 }
 
@@ -637,5 +646,115 @@ mod tests {
         assert!(after.contains("2;"));
         assert!(before.contains("1;"));
         assert!(!result.diff.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn test_semantic_result_carries_whole_file_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn foo() {\n    1;\n}\n").unwrap();
+        let prepared = prepare_edit(root, &root.join("src/lib.rs"), 2).unwrap();
+        let current = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let (_candidate, result, _) = apply_with_snapshots(
+            &prepared,
+            "fn foo() {\n    2;\n}\n",
+            &current,
+            &current,
+            root,
+        )
+        .unwrap();
+        assert!(result.before_file_hash.is_some());
+        assert!(result.after_file_hash.is_some());
+        assert_ne!(result.before_file_hash, result.after_file_hash);
+        assert!(result.before_file_hash.unwrap().starts_with("blake3:"));
+        assert_eq!(result.before_byte_len, Some(current.len() as u64));
+    }
+
+    #[tokio::test]
+    async fn test_semantic_commit_produces_v2_event_with_target() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(proj.path().join("src")).unwrap();
+        std::fs::write(proj.path().join("src/lib.rs"), "fn foo() {\n    1;\n}\n").unwrap();
+        let sessions_root = proj.path().join(".doge/sessions");
+        let store = crate::session::SessionStore::new(sessions_root).unwrap();
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None).unwrap();
+        }
+        let config = std::sync::Arc::new(crate::config::AppConfig {
+            project_root: proj.path().to_path_buf(),
+            ..crate::config::AppConfig::default()
+        });
+        let fs =
+            crate::tools::FsTools::new(std::sync::Arc::new(tokio::sync::RwLock::new(None)), config)
+                .with_session_manager(manager);
+        let root = proj.path().to_path_buf();
+        let file = root.join("src/lib.rs");
+        let prepared = prepare_edit(&root, &file, 2).unwrap();
+        let (result, _, before_content) = apply_edit(&prepared, "fn foo() {\n    2;\n}\n", &root)
+            .await
+            .unwrap();
+        let after_content = std::fs::read_to_string(&file).unwrap();
+        let receipt = crate::tools::mutation::MutationReceipt {
+            kind: crate::provenance::ChangeKind::SemanticEdit,
+            path: file.clone(),
+            before: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some(before_content),
+                content_hash: result.before_file_hash.clone(),
+                byte_len: result.before_byte_len,
+            },
+            after: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some(after_content),
+                content_hash: result.after_file_hash.clone(),
+                byte_len: result.after_byte_len,
+            },
+            target: crate::tools::mutation::MutationTargetReceipt::SemanticSymbol {
+                symbol_id: result.symbol_id.as_str().to_string(),
+                before_fingerprint: result.before_fingerprint.as_str().to_string(),
+                after_fingerprint: result.after_fingerprint.as_str().to_string(),
+            },
+            diff: result.diff.clone(),
+            lines_added: result.lines_added,
+            lines_removed: result.lines_removed,
+        };
+        let report = fs
+            .finalize_mutation(
+                receipt,
+                crate::tools::FinalizeMutationOptions {
+                    record_undo: true,
+                    reverts_change_id: None,
+                },
+            )
+            .await;
+        assert!(report.change_id.is_some());
+        let events = crate::tools::provenance::load_current_events(&fs)
+            .unwrap()
+            .unwrap()
+            .events;
+        assert_eq!(events.len(), 1);
+        match &events[0].event {
+            crate::provenance::ProvenanceEvent::ChangeCommitted(c) => {
+                assert_eq!(c.change_kind, crate::provenance::ChangeKind::SemanticEdit);
+                assert!(matches!(
+                    c.target,
+                    crate::provenance::ChangeTarget::SemanticSymbol { .. }
+                ));
+                assert!(c.before.content_hash.is_some());
+                assert!(c.after.content_hash.is_some());
+            }
+            _ => panic!("expected change"),
+        }
     }
 }

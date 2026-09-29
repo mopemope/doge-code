@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use super::types::{ProvenanceEvent, ProvenanceEventEnvelope};
+use super::types::{ChangeTarget, ProvenanceEvent, ProvenanceEventEnvelope};
 
 /// Current lifecycle state of a committed change versus the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +10,7 @@ pub enum ActiveChangeState {
     Superseded,
     Diverged,
     Missing,
+    Reverted,
 }
 
 #[derive(Debug, Clone)]
@@ -29,79 +30,296 @@ pub struct ProvenanceCoverage {
     pub diverged_change_ids: Vec<String>,
     pub unlinked_change_ids: Vec<String>,
     pub untracked_changed_files: Vec<String>,
+    #[serde(default)]
+    pub reverted_change_ids: Vec<String>,
     pub provenance_incomplete: bool,
 }
 
-/// Resolve every `ChangeCommitted` to Active/Superseded/Diverged/Missing.
+fn symbol_of(committed: &super::types::ChangeCommittedEvent) -> String {
+    match &committed.target {
+        ChangeTarget::File => String::new(),
+        ChangeTarget::SemanticSymbol { symbol_id, .. } => symbol_id.clone(),
+    }
+}
+
+fn is_v1_semantic(committed: &super::types::ChangeCommittedEvent) -> bool {
+    committed.before.content_hash.is_none() && committed.after.content_hash.is_none()
+}
+
+/// Resolve every `ChangeCommitted` to Active/Superseded/Diverged/Missing/Reverted.
 ///
-/// Files are read and parsed once each; the same file is never re-read per
-/// change. Event order is the caller-provided order (load with
-/// `ProvenanceStore::load_all` for `(timestamp, event_id)` order).
+/// v1 semantic events (no whole-file hashes) use the legacy symbol resolver.
+/// v2 events use the file mutation chain: the current exact file state is
+/// read once per file, the latest matching event is found, and its
+/// `predecessor_change_id` chain is walked. Chain members are Active
+/// candidates; same-file events off the chain are Superseded; when nothing
+/// matches the workspace the file's events are Diverged (or Missing when the
+/// file is gone). v2 semantic targets get secondary symbol validation, and
+/// Undo events mark their `reverts_change_id` target as Reverted.
+///
+/// Files are read once per file group; event order is the caller-provided
+/// order (load with `ProvenanceStore::load_all` for `(timestamp, event_id)`
+/// order).
 pub fn resolve_active_states(
     project_root: &Path,
     events: &[ProvenanceEventEnvelope],
 ) -> Vec<ResolvedChangeState> {
-    // Collect changes per symbol, preserving event order.
-    let mut by_symbol: HashMap<String, Vec<&ProvenanceEventEnvelope>> = HashMap::new();
-    let mut files: HashSet<String> = HashSet::new();
+    let mut out: Vec<ResolvedChangeState> = Vec::new();
+    // Partition commits.
+    let mut v1_by_symbol: HashMap<String, Vec<&ProvenanceEventEnvelope>> = HashMap::new();
+    let mut v1_files: HashSet<String> = HashSet::new();
+    let mut v2_by_file: HashMap<String, Vec<&ProvenanceEventEnvelope>> = HashMap::new();
+    let mut id_to_event: HashMap<String, &ProvenanceEventEnvelope> = HashMap::new();
+
     for env in events {
         if let ProvenanceEvent::ChangeCommitted(committed) = &env.event {
-            files.insert(committed.file.clone());
-            by_symbol
-                .entry(committed.symbol_id.clone())
-                .or_default()
-                .push(env);
+            id_to_event.insert(env.event_id.clone(), env);
+            if is_v1_semantic(committed) {
+                v1_files.insert(committed.file.clone());
+                v1_by_symbol
+                    .entry(symbol_of(committed))
+                    .or_default()
+                    .push(env);
+            } else {
+                v2_by_file
+                    .entry(committed.file.clone())
+                    .or_default()
+                    .push(env);
+            }
         }
     }
-    if by_symbol.is_empty() {
-        return Vec::new();
-    }
 
-    // Read + analyze each touched file exactly once.
-    let mut file_states: HashMap<String, FileSnapshot> = HashMap::new();
-    for file in &files {
-        file_states.insert(file.clone(), snapshot_file(project_root, file));
-    }
-
-    let mut out = Vec::new();
-    for (symbol_id, envs) in &by_symbol {
-        let Some(latest) = envs.last() else {
-            continue;
-        };
-        let latest_committed = match &latest.event {
-            ProvenanceEvent::ChangeCommitted(c) => c,
-            _ => continue,
-        };
-        let snapshot = file_states.get(&latest_committed.file);
-        let latest_state = classify_latest(
-            latest,
-            latest_committed.after_fingerprint.as_str(),
-            snapshot,
-        );
-        for env in envs.iter() {
-            let committed = match &env.event {
+    // Legacy v1 symbol resolver (unchanged semantics).
+    if !v1_by_symbol.is_empty() {
+        let mut file_states: HashMap<String, FileSnapshot> = HashMap::new();
+        for file in &v1_files {
+            file_states.insert(file.clone(), snapshot_file(project_root, file));
+        }
+        for (symbol_id, envs) in &v1_by_symbol {
+            let Some(latest) = envs.last() else {
+                continue;
+            };
+            let latest_committed = match &latest.event {
                 ProvenanceEvent::ChangeCommitted(c) => c,
                 _ => continue,
             };
-            let is_latest = env.event_id == latest.event_id;
-            let state = if !is_latest {
-                ActiveChangeState::Superseded
-            } else {
-                latest_state
+            let after_fp = match &latest_committed.target {
+                ChangeTarget::SemanticSymbol {
+                    after_fingerprint, ..
+                } => after_fingerprint.as_str(),
+                ChangeTarget::File => "",
             };
-            out.push(ResolvedChangeState {
-                change_id: env.event_id.clone(),
-                state,
-                file: committed.file.clone(),
-                symbol_id: symbol_id.clone(),
-                plan_item_id: committed.plan_item_id.clone(),
-            });
+            let snapshot = file_states.get(&latest_committed.file);
+            let latest_state = classify_latest_v1(latest, after_fp, snapshot);
+            for env in envs.iter() {
+                let committed = match &env.event {
+                    ProvenanceEvent::ChangeCommitted(c) => c,
+                    _ => continue,
+                };
+                let is_latest = env.event_id == latest.event_id;
+                let state = if !is_latest {
+                    ActiveChangeState::Superseded
+                } else {
+                    latest_state
+                };
+                out.push(ResolvedChangeState {
+                    change_id: env.event_id.clone(),
+                    state,
+                    file: committed.file.clone(),
+                    symbol_id: symbol_id.clone(),
+                    plan_item_id: committed.plan_item_id.clone(),
+                });
+            }
         }
     }
+
+    // v2 file-chain resolver.
+    if !v2_by_file.is_empty() {
+        // Read each file once: exact state + lazy parse for semantic checks.
+        let mut exact_states: HashMap<String, ExactFileState> = HashMap::new();
+        for file in v2_by_file.keys() {
+            exact_states.insert(file.clone(), read_exact_file(project_root, file));
+        }
+        // Parse once per file only when a semantic target needs it.
+        let mut parsed_cache: HashMap<String, Option<ParsedSymbols>> = HashMap::new();
+
+        for (file, envs) in &v2_by_file {
+            let current = exact_states.get(file).cloned().unwrap_or(ExactFileState {
+                exists: false,
+                content_hash: None,
+            });
+            // Latest event whose `after` explains the current state.
+            let tip: Option<&ProvenanceEventEnvelope> = envs.iter().rev().find_map(|env| {
+                let ProvenanceEvent::ChangeCommitted(c) = &env.event else {
+                    return None;
+                };
+                if states_match(&c.after, &current) {
+                    Some(*env)
+                } else {
+                    None
+                }
+            });
+
+            // Walk the predecessor chain from the tip.
+            let mut chain_ids: HashSet<String> = HashSet::new();
+            if let Some(tip) = tip {
+                let mut cursor: Option<String> = Some(tip.event_id.clone());
+                let mut guard = 0usize;
+                while let Some(id) = cursor {
+                    if guard > 10_000 {
+                        break;
+                    }
+                    guard += 1;
+                    chain_ids.insert(id.clone());
+                    let next = id_to_event.get(&id).and_then(|env| match &env.event {
+                        ProvenanceEvent::ChangeCommitted(c) => c.predecessor_change_id.clone(),
+                        _ => None,
+                    });
+                    // Stop when the predecessor is missing or belongs to
+                    // another file (never guess across files).
+                    match next {
+                        Some(prev) if id_to_event.contains_key(&prev) => {
+                            let same_file =
+                                id_to_event.get(&prev).is_some_and(|env| match &env.event {
+                                    ProvenanceEvent::ChangeCommitted(c) => c.file == *file,
+                                    _ => false,
+                                });
+                            if same_file {
+                                cursor = Some(prev);
+                            } else {
+                                cursor = None;
+                            }
+                        }
+                        _ => cursor = None,
+                    }
+                }
+            }
+
+            // Collect Undo -> reverted links on this file's chain for later.
+            for env in envs.iter() {
+                let committed = match &env.event {
+                    ProvenanceEvent::ChangeCommitted(c) => c,
+                    _ => continue,
+                };
+                let in_chain = chain_ids.contains(&env.event_id);
+                let state = if chain_ids.is_empty() {
+                    // Nothing explains the workspace.
+                    if !current.exists {
+                        ActiveChangeState::Missing
+                    } else {
+                        ActiveChangeState::Diverged
+                    }
+                } else if !in_chain {
+                    ActiveChangeState::Superseded
+                } else {
+                    // Chain candidate: secondary semantic validation.
+                    match &committed.target {
+                        ChangeTarget::File => ActiveChangeState::Active,
+                        ChangeTarget::SemanticSymbol {
+                            symbol_id,
+                            after_fingerprint,
+                            ..
+                        } => {
+                            let parsed = parsed_cache
+                                .entry(file.clone())
+                                .or_insert_with(|| parse_symbols(project_root, file));
+                            match parsed {
+                                Some(p) => match p.fingerprints.get(symbol_id) {
+                                    Some(cur) if cur == after_fingerprint => {
+                                        ActiveChangeState::Active
+                                    }
+                                    _ => ActiveChangeState::Diverged,
+                                },
+                                None => ActiveChangeState::Diverged,
+                            }
+                        }
+                    }
+                };
+                out.push(ResolvedChangeState {
+                    change_id: env.event_id.clone(),
+                    state,
+                    file: committed.file.clone(),
+                    symbol_id: symbol_of(committed),
+                    plan_item_id: committed.plan_item_id.clone(),
+                });
+            }
+        }
+
+        // Reverted overlay: an Undo on/near the active chain marks its
+        // `reverts_change_id` target as Reverted. The Undo itself stays Active.
+        let mut reverted_targets: HashSet<String> = HashSet::new();
+        for env in events {
+            let ProvenanceEvent::ChangeCommitted(c) = &env.event else {
+                continue;
+            };
+            if c.change_kind != super::types::ChangeKind::Undo {
+                continue;
+            }
+            let Some(target) = c.reverts_change_id.clone() else {
+                continue;
+            };
+            // Only honor reverts whose Undo event is itself Active (on the
+            // current chain); stale undos do not rewrite history.
+            let undo_active = out
+                .iter()
+                .any(|r| r.change_id == env.event_id && r.state == ActiveChangeState::Active);
+            if undo_active {
+                reverted_targets.insert(target);
+            }
+        }
+        for r in out.iter_mut() {
+            if reverted_targets.contains(&r.change_id) {
+                r.state = ActiveChangeState::Reverted;
+            }
+        }
+    }
+
     // Deterministic output: sort by change id for stable tests, but callers
     // that need event order can re-sort via the envelope list.
     out.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     out
+}
+
+#[derive(Debug, Clone)]
+struct ExactFileState {
+    exists: bool,
+    content_hash: Option<String>,
+}
+
+fn states_match(after: &super::types::FileStateEvidence, current: &ExactFileState) -> bool {
+    if after.exists != current.exists {
+        return false;
+    }
+    if !after.exists {
+        return true;
+    }
+    after.content_hash == current.content_hash
+}
+
+fn read_exact_file(project_root: &Path, relative_file: &str) -> ExactFileState {
+    let absolute = project_root.join(relative_file);
+    let Ok(bytes) = std::fs::read(&absolute) else {
+        return ExactFileState {
+            exists: false,
+            content_hash: None,
+        };
+    };
+    if bytes.contains(&0) {
+        return ExactFileState {
+            exists: true,
+            content_hash: None,
+        };
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        return ExactFileState {
+            exists: true,
+            content_hash: None,
+        };
+    };
+    ExactFileState {
+        exists: true,
+        content_hash: Some(super::types::file_content_hash(&content)),
+    }
 }
 
 struct FileSnapshot {
@@ -109,6 +327,20 @@ struct FileSnapshot {
     /// symbol_id -> current fingerprint, when parseable.
     fingerprints: HashMap<String, String>,
     parseable: bool,
+}
+
+struct ParsedSymbols {
+    fingerprints: HashMap<String, String>,
+}
+
+fn parse_symbols(project_root: &Path, relative_file: &str) -> Option<ParsedSymbols> {
+    let snapshot = snapshot_file(project_root, relative_file);
+    if !snapshot.parseable {
+        return None;
+    }
+    Some(ParsedSymbols {
+        fingerprints: snapshot.fingerprints,
+    })
 }
 
 fn snapshot_file(project_root: &Path, relative_file: &str) -> FileSnapshot {
@@ -161,7 +393,7 @@ fn snapshot_file(project_root: &Path, relative_file: &str) -> FileSnapshot {
     }
 }
 
-fn classify_latest(
+fn classify_latest_v1(
     latest: &ProvenanceEventEnvelope,
     after_fingerprint: &str,
     snapshot: Option<&FileSnapshot>,
@@ -176,7 +408,10 @@ fn classify_latest(
         return ActiveChangeState::Diverged;
     }
     let symbol_id = match &latest.event {
-        ProvenanceEvent::ChangeCommitted(c) => c.symbol_id.as_str(),
+        ProvenanceEvent::ChangeCommitted(c) => match &c.target {
+            ChangeTarget::SemanticSymbol { symbol_id, .. } => symbol_id.as_str(),
+            ChangeTarget::File => return ActiveChangeState::Diverged,
+        },
         _ => return ActiveChangeState::Missing,
     };
     match snapshot.fingerprints.get(symbol_id) {
@@ -186,13 +421,15 @@ fn classify_latest(
     }
 }
 
-/// Active change ids (latest per symbol, currently `Active`).
+/// Active change ids (latest per symbol / current file chain, minus reverted).
 pub fn active_change_ids(project_root: &Path, events: &[ProvenanceEventEnvelope]) -> Vec<String> {
-    resolve_active_states(project_root, events)
+    let mut ids: Vec<String> = resolve_active_states(project_root, events)
         .into_iter()
         .filter(|r| r.state == ActiveChangeState::Active)
         .map(|r| r.change_id)
-        .collect()
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Coverage model for `provenance_read` and plan completion warnings.
@@ -209,15 +446,18 @@ pub fn compute_coverage(
 
     let mut tracked_active = Vec::new();
     let mut diverged = Vec::new();
+    let mut reverted = Vec::new();
     for r in &resolved {
         match r.state {
             ActiveChangeState::Active => tracked_active.push(r.change_id.clone()),
             ActiveChangeState::Diverged => diverged.push(r.change_id.clone()),
+            ActiveChangeState::Reverted => reverted.push(r.change_id.clone()),
             _ => {}
         }
     }
     tracked_active.sort();
     diverged.sort();
+    reverted.sort();
 
     // Successful verifications only. A failed run is evidence it ran, not
     // evidence the change was observed passing.
@@ -279,6 +519,7 @@ pub fn compute_coverage(
         diverged_change_ids: diverged,
         unlinked_change_ids: unlinked,
         untracked_changed_files: untracked,
+        reverted_change_ids: reverted,
         provenance_incomplete,
     }
 }
@@ -296,8 +537,9 @@ mod tests {
     use super::*;
     use crate::provenance::store::ProvenanceStore;
     use crate::provenance::types::{
-        ChangeCommittedEvent, ChangeKind, CommandEvidence, ProvenanceEvent, VerificationContext,
-        VerificationKind, VerificationObservedEvent, VerificationOutcome, VerificationSource,
+        ChangeCommittedEvent, ChangeKind, ChangeTarget, CommandEvidence, FileStateEvidence,
+        ProvenanceEvent, VerificationContext, VerificationKind, VerificationObservedEvent,
+        VerificationOutcome, VerificationSource, file_content_hash,
     };
     use crate::provenance::verification::{VerificationRecordInput, build_verification_event};
 
@@ -312,13 +554,32 @@ mod tests {
         dir
     }
 
-    fn commit_for(
+    #[allow(clippy::too_many_arguments)]
+    fn v2_semantic_commit(
         store: &ProvenanceStore,
         session: &str,
         file: &str,
         symbol_id: &str,
+        before_content: &str,
+        after_content: &str,
+        before_fp: &str,
         after_fp: &str,
     ) -> ProvenanceEventEnvelope {
+        // Write the after content so the file chain matches, then record.
+        // Caller sets up project files; here we only build the event with
+        // exact hashes and predecessor linkage.
+        let before = FileStateEvidence {
+            exists: true,
+            content_hash: Some(file_content_hash(before_content)),
+            byte_len: Some(before_content.len() as u64),
+        };
+        let after = FileStateEvidence {
+            exists: true,
+            content_hash: Some(file_content_hash(after_content)),
+            byte_len: Some(after_content.len() as u64),
+        };
+        let loaded = store.load_all().unwrap();
+        let predecessor = ProvenanceStore::find_predecessor(&loaded.events, file, &before);
         store
             .append(
                 session,
@@ -327,15 +588,67 @@ mod tests {
                     plan_item_id: Some("step-2".to_string()),
                     change_kind: ChangeKind::SemanticEdit,
                     file: file.to_string(),
-                    symbol_id: symbol_id.to_string(),
-                    before_fingerprint: "fp-v1-before".to_string(),
-                    after_fingerprint: after_fp.to_string(),
+                    target: ChangeTarget::SemanticSymbol {
+                        symbol_id: symbol_id.to_string(),
+                        before_fingerprint: before_fp.to_string(),
+                        after_fingerprint: after_fp.to_string(),
+                    },
+                    before,
+                    after,
+                    predecessor_change_id: predecessor,
+                    reverts_change_id: None,
                     diff: "d".to_string(),
                     diff_hash: "blake3:x".to_string(),
                     lines_added: 1,
                     lines_removed: 1,
                 }),
             )
+            .unwrap()
+    }
+
+    fn commit_for(
+        store: &ProvenanceStore,
+        session: &str,
+        file: &str,
+        symbol_id: &str,
+        after_fp: &str,
+    ) -> ProvenanceEventEnvelope {
+        // Legacy helper for v1-behavior tests: build a v1-shaped event by
+        // writing raw v1 JSON, so conversion (hashes = None) is exercised.
+        let v1_dir = store.legacy_events_path();
+        std::fs::create_dir_all(&v1_dir).unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "event_id": id,
+            "session_id": session,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "event": {
+                "type": "change_committed",
+                "transaction_id": "",
+                "plan_item_id": "step-2",
+                "change_kind": "semantic_edit",
+                "file": file,
+                "symbol_id": symbol_id,
+                "before_fingerprint": "fp-v1-before",
+                "after_fingerprint": after_fp,
+                "diff": "d",
+                "diff_hash": "blake3:x",
+                "lines_added": 1,
+                "lines_removed": 1
+            }
+        });
+        std::fs::write(
+            v1_dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&payload).unwrap(),
+        )
+        .unwrap();
+        store
+            .load_all()
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|e| e.event_id == id)
             .unwrap()
     }
 
@@ -458,6 +771,238 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_linear_chain_all_active() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let h0 = std::fs::read_to_string(proj.path().join("a.txt")).unwrap();
+        // A: h0 -> h1
+        std::fs::write(proj.path().join("a.txt"), "h1\n").unwrap();
+        let h1 = std::fs::read_to_string(proj.path().join("a.txt")).unwrap();
+        let a = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            &h0,
+            &h1,
+            crate::provenance::ChangeKind::TextEdit,
+            None,
+        );
+        // B: h1 -> h2
+        std::fs::write(proj.path().join("a.txt"), "h2\n").unwrap();
+        let h2 = std::fs::read_to_string(proj.path().join("a.txt")).unwrap();
+        let b = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            &h1,
+            &h2,
+            crate::provenance::ChangeKind::TextEdit,
+            None,
+        );
+        // C: h2 -> h3
+        std::fs::write(proj.path().join("a.txt"), "h3\n").unwrap();
+        let h3 = std::fs::read_to_string(proj.path().join("a.txt")).unwrap();
+        let c = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            &h2,
+            &h3,
+            crate::provenance::ChangeKind::TextEdit,
+            None,
+        );
+        let loaded = store.load_all().unwrap();
+        // Predecessor links form A -> B -> C.
+        let by_id: HashMap<_, _> = loaded
+            .events
+            .iter()
+            .filter_map(|e| match &e.event {
+                ProvenanceEvent::ChangeCommitted(cc) => {
+                    Some((e.event_id.clone(), cc.predecessor_change_id.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(by_id[&a.event_id], None);
+        assert_eq!(by_id[&b.event_id], Some(a.event_id.clone()));
+        assert_eq!(by_id[&c.event_id], Some(b.event_id.clone()));
+        // Current h3: whole chain active.
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        for r in &resolved {
+            assert_eq!(r.state, ActiveChangeState::Active, "change {}", r.change_id);
+        }
+        let active = active_change_ids(proj.path(), &loaded.events);
+        assert_eq!(active.len(), 3);
+        let _ = h3;
+    }
+
+    fn v2_file_commit(
+        store: &ProvenanceStore,
+        session: &str,
+        file: &str,
+        before_content: &str,
+        after_content: &str,
+        kind: ChangeKind,
+        reverts: Option<String>,
+    ) -> ProvenanceEventEnvelope {
+        let before = FileStateEvidence {
+            exists: true,
+            content_hash: Some(file_content_hash(before_content)),
+            byte_len: Some(before_content.len() as u64),
+        };
+        let after = FileStateEvidence {
+            exists: true,
+            content_hash: Some(file_content_hash(after_content)),
+            byte_len: Some(after_content.len() as u64),
+        };
+        let loaded = store.load_all().unwrap();
+        let predecessor = ProvenanceStore::find_predecessor(&loaded.events, file, &before);
+        store
+            .append(
+                session,
+                ProvenanceEvent::ChangeCommitted(ChangeCommittedEvent {
+                    transaction_id: String::new(),
+                    plan_item_id: None,
+                    change_kind: kind,
+                    file: file.to_string(),
+                    target: ChangeTarget::File,
+                    before,
+                    after,
+                    predecessor_change_id: predecessor,
+                    reverts_change_id: reverts,
+                    diff: "d".to_string(),
+                    diff_hash: "blake3:x".to_string(),
+                    lines_added: 1,
+                    lines_removed: 1,
+                }),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_v2_broken_chain_does_not_guess() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let h0 = "h0\n".to_string();
+        let h1 = "h1\n".to_string();
+        let a = v2_file_commit(&store, "s", "a.txt", &h0, &h1, ChangeKind::TextEdit, None);
+        // External edit h1 -> hx, then tracked B: hx -> h2.
+        std::fs::write(proj.path().join("a.txt"), "hx\n").unwrap();
+        let hx = "hx\n".to_string();
+        std::fs::write(proj.path().join("a.txt"), "h2\n").unwrap();
+        let h2 = "h2\n".to_string();
+        let b = v2_file_commit(&store, "s", "a.txt", &hx, &h2, ChangeKind::TextEdit, None);
+        let loaded = store.load_all().unwrap();
+        let b_event = loaded
+            .events
+            .iter()
+            .find(|e| e.event_id == b.event_id)
+            .unwrap();
+        match &b_event.event {
+            ProvenanceEvent::ChangeCommitted(c) => {
+                assert_eq!(c.predecessor_change_id, None);
+            }
+            _ => panic!("expected change"),
+        }
+        // A is now superseded/diverged (not on the current chain).
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        let by_id: HashMap<_, _> = resolved
+            .into_iter()
+            .map(|r| (r.change_id.clone(), r))
+            .collect();
+        assert_eq!(by_id[&b.event_id].state, ActiveChangeState::Active);
+        assert_ne!(by_id[&a.event_id].state, ActiveChangeState::Active);
+    }
+
+    #[test]
+    fn test_v2_multi_file_chains_do_not_cross() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "a0\n").unwrap();
+        std::fs::write(proj.path().join("b.txt"), "b0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let a = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "a0\n",
+            "a1\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        std::fs::write(proj.path().join("a.txt"), "a1\n").unwrap();
+        let b = v2_file_commit(
+            &store,
+            "s",
+            "b.txt",
+            "b0\n",
+            "b1\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        std::fs::write(proj.path().join("b.txt"), "b1\n").unwrap();
+        let loaded = store.load_all().unwrap();
+        for env in &loaded.events {
+            if let ProvenanceEvent::ChangeCommitted(c) = &env.event {
+                assert_eq!(c.predecessor_change_id, None);
+            }
+        }
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert!(
+            resolved
+                .iter()
+                .all(|r| r.state == ActiveChangeState::Active)
+        );
+        let _ = (a, b);
+    }
+
+    #[test]
+    fn test_undo_marks_reverted() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        std::fs::write(proj.path().join("a.txt"), "h1\n").unwrap();
+        let a = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "h0\n",
+            "h1\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        // Undo U: h1 -> h0, reverts A.
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let _u = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "h1\n",
+            "h0\n",
+            ChangeKind::Undo,
+            Some(a.event_id.clone()),
+        );
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        let by_id: HashMap<_, _> = resolved
+            .into_iter()
+            .map(|r| (r.change_id.clone(), r))
+            .collect();
+        assert_eq!(by_id[&a.event_id].state, ActiveChangeState::Reverted);
+        // Undo itself is active; verification observes the undo, not A.
+        let active = active_change_ids(proj.path(), &loaded.events);
+        assert!(!active.contains(&a.event_id));
+        assert_eq!(active.len(), 1);
+        let cov = compute_coverage(proj.path(), &loaded.events, &[], false);
+        assert!(cov.reverted_change_ids.contains(&a.event_id));
+    }
+
+    #[test]
     fn test_coverage_success_failure_and_later_change() {
         let proj = write_rust_project();
         let (sym_id, fp) = current_fp(proj.path(), "src/lib.rs", "foo");
@@ -544,5 +1089,34 @@ mod tests {
         let cov = compute_coverage(proj.path(), &loaded.events, &[], false);
         assert!(cov.verified_active_change_ids.is_empty());
         assert_eq!(cov.unverified_active_change_ids, vec![change.event_id]);
+    }
+
+    #[test]
+    fn test_v2_semantic_secondary_validation_diverges_on_fingerprint_mismatch() {
+        // v2 semantic edit rides the file chain, but a wrong after_fingerprint
+        // (e.g. external symbol edit preserving bytes? simulated here by
+        // direct fingerprint mismatch after the file matches) falls to Diverged.
+        let proj = write_rust_project();
+        let (sym_id, fp) = current_fp(proj.path(), "src/lib.rs", "foo");
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let before_content = std::fs::read_to_string(proj.path().join("src/lib.rs")).unwrap();
+        // after content == current file (chain matches) but fingerprint wrong.
+        let after_content = before_content.clone();
+        let _env = v2_semantic_commit(
+            &store,
+            "s",
+            "src/lib.rs",
+            &sym_id,
+            &before_content,
+            &after_content,
+            "fp-before",
+            "fp-WRONG",
+        );
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        // Fingerprint mismatch despite file-chain match -> Diverged.
+        assert_eq!(resolved[0].state, ActiveChangeState::Diverged);
+        let _ = fp;
     }
 }
