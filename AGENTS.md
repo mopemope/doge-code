@@ -6,8 +6,8 @@ Guidelines for AI coding agents working on doge-code (an AI coding agent itself,
 
 Run the narrowest check first, then broaden:
 
-- `cargo test <module_or_name>` — run matching tests only (fast feedback). Full `cargo test` (370+ tests) is slow; run it only before finishing.
-- `cargo clippy --all-targets --all-features` — must produce zero warnings. This is a merge gate (CI enforces `-D warnings`).
+- `cargo test --locked <module_or_name>` — run matching tests only (fast feedback). Full `cargo test --locked` (370+ tests) is slow; run it only before finishing. The `search_text` tests shell out to ripgrep, so `rg` must be on `PATH`.
+- `cargo clippy --locked --all-targets --all-features` — must produce zero warnings. This is a merge gate (CI enforces `-D warnings`).
 - `cargo fmt --all` — format before finishing; CI runs `cargo fmt --check`.
 - `cargo run --release -- <flags>` — launch the TUI agent for manual verification of TUI changes.
 
@@ -137,4 +137,4 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`. Keep it green.
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR: `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked`. Keep it green.
