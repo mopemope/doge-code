@@ -172,12 +172,24 @@ pub async fn fs_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Re
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     match runtime.fs.fs_write(path, content).await {
-        Ok(()) => {
-            let value = json!({ "ok": true, "path": path, "bytesWritten": content.len() });
+        Ok(res) => {
+            let value = json!({
+                "ok": true,
+                "success": res.success,
+                "changed": res.changed,
+                "path": path,
+                "bytesWritten": res.bytes_written,
+                "message": res.message,
+                "warnings": res.warnings,
+            });
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: true,
-                result_summary: format!("Wrote {} bytes to {}", content.len(), path),
+                is_success: res.success,
+                result_summary: if res.changed {
+                    format!("Wrote {} bytes to {}", res.bytes_written, path)
+                } else {
+                    format!("No change needed for {}", path)
+                },
             })
         }
         Err(e) => Err(anyhow!("{e}")),

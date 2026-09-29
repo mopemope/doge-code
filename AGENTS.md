@@ -34,8 +34,9 @@ Run the narrowest check first, then broaden:
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
 | `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
-| `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/atomic commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (versioned envelope), `store.rs` (atomic per-event files), `query.rs` (active/diverged coverage), `verification.rs` (conservative classifier) |
+| `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
+| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v2 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` current), `store.rs` (v1+v2 merged reads, v2 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier) |
+| `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
 | `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
@@ -88,6 +89,18 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 - Prefer `tracing` spans/macros over `println!`/ad-hoc logging.
 - Replace `unwrap()`/`expect()` in production paths with `?`/typed errors (`anyhow` + `thiserror`); `expect()` with a message is acceptable in tests.
 - Feature-gated code belongs under `src/features/`.
+
+## Mutation Contract (workspace text changes)
+
+All workspace text mutations must produce a `MutationReceipt` via the shared
+commit helper (`src/tools/mutation.rs`). Never update undo/session/provenance
+independently from a write tool — use `FsTools::finalize_mutation` after a
+successful commit.
+
+New workspace mutation tools must implement: candidate generation, shared
+commit helper, `MutationReceipt`, `finalize_mutation`, and regression tests
+(success / no-op / failure / race / undo / provenance). This prevents future
+tracking gaps.
 
 ## Job Lifecycle
 

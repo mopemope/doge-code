@@ -254,55 +254,36 @@ pub async fn execute_shell(
 pub async fn edit(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let params: crate::tools::edit::EditParams = serde_json::from_value(args.clone())?;
 
-    // Count the tool call attempt (to be removed once centralized)
-    // Actually, per plan, we remove redundant recording here.
-    // However, Plan Step 3 says "Remove redundant record_tool_call_success/failure".
-    // "Count the tool call attempt" is `update_session_with_tool_call_count`.
-    // We will leave the centralized recording for `agent_loop.rs` and REMOVE it here.
-
     let file_path = params.file_path.clone();
 
-    // Backup existing file before editing
-    if let Err(e) = runtime
-        .fs
-        .backup_file(std::path::Path::new(&file_path))
-        .await
-    {
-        tracing::warn!("Failed to backup file {}: {}", file_path, e);
-    }
-
-    match crate::tools::edit::edit(params, &runtime.fs.config).await {
-        Ok(res) => {
-            if res.success {
-                // We do NOT record success here anymore.
-                // But we DO need to update lines edited count and context.
-                if let Some(lines_edited) = res.lines_edited
-                    && let Err(e) = runtime.fs.update_session_with_lines_edited(lines_edited)
-                {
-                    tracing::error!(?e, "Failed to update session with lines edited count");
-                }
-
-                let p = std::path::PathBuf::from(&file_path);
-                runtime.fs.update_context(p.clone());
-                let _ = runtime.fs.update_session_if_changed(&p);
+    match crate::tools::edit::edit_with_receipt(params, &runtime.fs.config).await {
+        Ok(mut exec) => {
+            if let Some(receipt) = exec.receipt.take() {
+                let report = runtime
+                    .fs
+                    .finalize_mutation(
+                        receipt,
+                        crate::tools::FinalizeMutationOptions {
+                            record_undo: true,
+                            reverts_change_id: None,
+                        },
+                    )
+                    .await;
+                exec.result.warnings.extend(report.warnings);
             }
-            // We do NOT record failure here anymore.
 
-            let value = serde_json::to_value(&res)?;
+            let value = serde_json::to_value(&exec.result)?;
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: res.success,
-                result_summary: if res.success {
+                is_success: exec.result.success,
+                result_summary: if exec.result.success {
                     format!("Successfully edited {}", file_path)
                 } else {
-                    format!("Failed to edit {}: {:?}", file_path, res.message)
+                    format!("Failed to edit {}: {:?}", file_path, exec.result.message)
                 },
             })
         }
-        Err(e) => {
-            // We do NOT record failure here anymore.
-            Err(anyhow!("{e}"))
-        }
+        Err(e) => Err(anyhow!("{e}")),
     }
 }
 
@@ -311,33 +292,40 @@ pub async fn apply_patch(
     args: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let params: crate::tools::apply_patch::ApplyPatchParams = serde_json::from_value(args.clone())?;
-    let file_path = params.file_path.clone();
 
-    // Remove redundant session update
-
-    match crate::tools::apply_patch::apply_patch_with_recovery(params, &runtime.fs.config).await {
-        Ok(res) => {
-            // Remove redundant recording
-            if res.success {
-                let p = std::path::PathBuf::from(&file_path);
-                let _ = runtime.fs.update_session_if_changed(&p);
+    match crate::tools::apply_patch::apply_patch_with_recovery_and_receipt(
+        params,
+        &runtime.fs.config,
+    )
+    .await
+    {
+        Ok(mut exec) => {
+            if let Some(receipt) = exec.receipt.take() {
+                let report = runtime
+                    .fs
+                    .finalize_mutation(
+                        receipt,
+                        crate::tools::FinalizeMutationOptions {
+                            record_undo: true,
+                            reverts_change_id: None,
+                        },
+                    )
+                    .await;
+                exec.result.warnings.extend(report.warnings);
             }
 
-            let value = serde_json::to_value(&res)?;
+            let value = serde_json::to_value(&exec.result)?;
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: res.success,
-                result_summary: if res.success {
+                is_success: exec.result.success,
+                result_summary: if exec.result.success {
                     "Successfully applied patch".to_string()
                 } else {
                     "Failed to apply patch".to_string()
                 },
             })
         }
-        Err(e) => {
-            // Remove redundant recording
-            Err(anyhow!("{e}"))
-        }
+        Err(e) => Err(anyhow!("{e}")),
     }
 }
 
@@ -410,22 +398,24 @@ pub async fn provenance_read(
 }
 
 pub async fn undo(runtime: &ToolRuntime<'_>, _args: &serde_json::Value) -> Result<ToolOutput> {
-    // Remove redundant session update
-
     match crate::tools::undo::undo(runtime.fs).await {
         Ok(res) => {
-            // Remove redundant recording
             let value = serde_json::to_value(&res)?;
             Ok(ToolOutput {
                 value: value.clone(),
-                is_success: true, // Undo success depends on if there was something to undo, typically yes if Ok
-                result_summary: "Undid last action".to_string(),
+                // Empty-stack and conflict undos are failures so the LLM
+                // does not mistake them for successful reverts.
+                is_success: res.success,
+                result_summary: if res.success {
+                    format!("Undid last action: {}", res.path)
+                } else if res.conflict {
+                    format!("Undo conflict for {}: {}", res.path, res.message)
+                } else {
+                    res.message.clone()
+                },
             })
         }
-        Err(e) => {
-            // Remove redundant recording
-            Err(anyhow!("{e}"))
-        }
+        Err(e) => Err(anyhow!("{e}")),
     }
 }
 

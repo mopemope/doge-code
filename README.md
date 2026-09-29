@@ -123,7 +123,7 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `search_memory`: Search across memory files
 
 ### Advanced Tools
-- `undo`: Revert the last file modification (edit or write)
+- `undo`: Safe LIFO rollback of the last tracked mutation (fails closed on conflict, deletes created files, no redo yet)
 - `execute_shell`: Persistent shell session for stateful command execution (escape hatch for persistent cwd/env/builtins; disable with `[execution] allow_shell = false`)
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
@@ -149,11 +149,13 @@ step-2
 ```
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
-- Tracked mutations (v1): transactional `/edit-symbol`.
+- A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
+- Tracked mutations (v2): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
-- Not tracked in v1 (reported honestly, never inferred): `edit`, `apply_patch`, `fs_write`, `execute_bash`, `execute_shell`, workflow runs, remote MCP verification.
-- Storage: `.doge/sessions/<id>/provenance/v1/events/<uuid>.json` (one atomic file per event). Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
-- Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`).
+- Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
+- `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
+- Storage: `.doge/sessions/<id>/provenance/v2/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/` remains readable but is never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`).
 
 ## 🎯 Usage Examples
 
