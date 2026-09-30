@@ -224,6 +224,8 @@ pub async fn collect_diff_review_payload(
     Ok(Some(DiffReviewPayload {
         diff: combined_diff,
         files,
+        evidence: Vec::new(),
+        evidence_warnings: Vec::new(),
     }))
 }
 

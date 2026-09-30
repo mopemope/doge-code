@@ -372,7 +372,9 @@ async fn commit_semantic_edit_success(
 
     match crate::llm::tool_execution::collect_diff_review_payload(project_root, &[relative]).await {
         Ok(Some(payload)) => {
-            if let Ok(json) = serde_json::to_string(&payload) {
+            let enriched =
+                crate::tools::provenance::enrich_diff_review_with_evidence(tools, payload);
+            if let Ok(json) = serde_json::to_string(&enriched) {
                 ui_tx.send_logged(format!("::diff_review:{json}"));
             }
         }

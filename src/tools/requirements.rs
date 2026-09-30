@@ -302,6 +302,14 @@ pub struct RequirementsReadArgs {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct RequirementObligationSummary {
+    pub id: String,
+    pub plan_item_id: String,
+    pub kind: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RequirementReadEntry {
     pub id: String,
     pub statement: String,
@@ -312,6 +320,8 @@ pub struct RequirementReadEntry {
     pub verified_change_ids: Vec<String>,
     pub unverified_change_ids: Vec<String>,
     pub evidence_state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_obligations: Vec<RequirementObligationSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -380,6 +390,57 @@ pub fn requirements_read(
         .map(|c| (c.requirement_id.as_str(), c))
         .collect();
 
+    // Obligation coverage: compact per-requirement summary (no descriptions).
+    let obligation_coverages = crate::provenance::obligations::compute_obligation_coverage(
+        &fs_tools.config.project_root,
+        &loaded.events,
+        &current_plan,
+    );
+    // requirement_id -> obligation summaries via current plan links.
+    let mut obligations_by_req: std::collections::HashMap<
+        String,
+        Vec<RequirementObligationSummary>,
+    > = std::collections::HashMap::new();
+    // plan_item_id -> requirement_ids for quick lookup.
+    let plan_reqs: std::collections::HashMap<&str, &[String]> = current_plan
+        .iter()
+        .map(|item| (item.id.as_str(), item.requirement_ids.as_slice()))
+        .collect();
+    for cov in &obligation_coverages {
+        if let Some(reqs) = plan_reqs.get(cov.plan_item_id.as_str()) {
+            for req in reqs.iter() {
+                obligations_by_req.entry((*req).clone()).or_default().push(
+                    RequirementObligationSummary {
+                        id: cov.obligation_id.clone(),
+                        plan_item_id: cov.plan_item_id.clone(),
+                        kind: match cov.kind {
+                            crate::provenance::VerificationKind::Test => "test".to_string(),
+                            crate::provenance::VerificationKind::Build => "build".to_string(),
+                            crate::provenance::VerificationKind::Lint => "lint".to_string(),
+                            crate::provenance::VerificationKind::TypeCheck => {
+                                "type_check".to_string()
+                            }
+                            crate::provenance::VerificationKind::FormatCheck => {
+                                "format_check".to_string()
+                            }
+                            crate::provenance::VerificationKind::SyntaxCheck => {
+                                "syntax_check".to_string()
+                            }
+                        },
+                        state: cov.state.as_str().to_string(),
+                    },
+                );
+            }
+        }
+    }
+    for v in obligations_by_req.values_mut() {
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        // Compact summary: cap per-requirement obligations to keep budget.
+        if v.len() > 20 {
+            v.truncate(20);
+        }
+    }
+
     // Build full entries, then paginate + budget.
     let mut entries: Vec<RequirementReadEntry> = Vec::new();
     for r in items {
@@ -405,6 +466,7 @@ pub fn requirements_read(
             evidence_state: cov
                 .map(|c| c.evidence_state.as_str().to_string())
                 .unwrap_or_else(|| "no_linked_work".to_string()),
+            verification_obligations: obligations_by_req.get(&r.id).cloned().unwrap_or_default(),
         });
     }
 

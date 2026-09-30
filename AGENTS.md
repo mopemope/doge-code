@@ -35,7 +35,7 @@ Run the narrowest check first, then broaden:
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
 | `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
 | `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v3 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` current), `store.rs` (v1+v2+v3 merged reads, v3 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
+| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v4 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` legacy read-only, `v4.rs` current), `store.rs` (v1+v2+v3+v4 merged reads, v4 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `obligations.rs` (obligation matching, binding hash, evidence states), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
 | `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
 | `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
