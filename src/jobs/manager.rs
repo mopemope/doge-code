@@ -171,16 +171,17 @@ impl JobManager {
         // the shutdown path) and record the terminal state here: the
         // aborted task never reaches finish_job itself, and finish_job is
         // a no-op when the record is already gone, so exactly one of the
-        // two paths records the outcome.
+        // two paths records the outcome. The shutdown flag is checked
+        // independently of whether the record is still present: the
+        // shutdown fallback may have already terminalized (removed) this
+        // record, in which case the handle must still be aborted to avoid
+        // leaking a running task past shutdown.
         let shutdown_race = {
-            let mut race = false;
-            if let Ok(mut state) = self.inner.state.lock()
-                && let Some(record) = state.active.get_mut(&id)
-            {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = state.active.get_mut(&id) {
                 record.abort_handle = Some(abort_handle.clone());
-                race = !self.inner.accepting.load(Ordering::SeqCst);
             }
-            race
+            !self.inner.accepting.load(Ordering::SeqCst)
         };
         if shutdown_race {
             abort_handle.abort();
@@ -257,15 +258,13 @@ impl JobManager {
     }
 
     fn set_status(&self, id: JobId, status: JobStatus) {
-        if let Ok(mut state) = self.inner.state.lock()
-            && let Some(record) = state.active.get_mut(&id)
-        {
-            // Do not overwrite a terminal state or step backwards from
-            // Cancelling to Running.
-            if record.status.is_terminal() {
-                return;
-            }
-            if record.status == JobStatus::Cancelling && status == JobStatus::Running {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = state.active.get_mut(&id) {
+            // Monotonic visibility: terminal states never leave, and
+            // Cancelling never regresses into execution/waiting states
+            // (a task racing cancellation must not step back to
+            // WaitingForWorkspace or Running).
+            if !record.status.allows_transition(status) {
                 return;
             }
             record.status = status;
@@ -397,21 +396,63 @@ impl JobManager {
         // Fallback: abort stuck tasks. Cooperative cancellation remains the
         // primary path; this only fires when a job ignores its token past
         // the grace period during process shutdown.
-        let handles: Vec<tokio::task::AbortHandle> = {
+        let (stuck, handles): (usize, Vec<tokio::task::AbortHandle>) = {
             let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            state
+            // Count every still-active record as stuck (some may not have a
+            // stored abort handle yet; the leftover sweep below re-aborts
+            // with current handles and terminalizes regardless).
+            let stuck = state.active.len();
+            let handles = state
                 .active
                 .values()
                 .filter_map(|record| record.abort_handle.clone())
-                .collect()
+                .collect();
+            (stuck, handles)
         };
-        let stuck = handles.len();
         for handle in &handles {
             handle.abort();
         }
         if stuck > 0 {
             tracing::warn!(stuck, "force-aborted jobs stuck past shutdown grace period");
         }
+        let _ = tokio::time::timeout(SHUTDOWN_FALLBACK_WAIT, self.inner.tracker.wait()).await;
+        // A force-aborted future never reaches `run_job_task -> finish_job`,
+        // so terminalize every record still active through the same
+        // bookkeeping authority that clears foreground ownership and creates
+        // terminal history. `finish_job` removes the active record first, so
+        // a normal completion racing this fallback cannot double-terminalize
+        // (exactly one path records the outcome per JobId). Forced abort is
+        // never reported as successful completion: leftovers become
+        // `Cancelled`. Collect all still-active records (not just the
+        // pre-abort snapshot) so a spawn racing shutdown cannot leak, and
+        // re-abort their current handles to cover handles stored after the
+        // first snapshot.
+        let leftover: Vec<(JobId, Option<tokio::task::AbortHandle>)> = {
+            let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .active
+                .iter()
+                .map(|(id, record)| (*id, record.abort_handle.clone()))
+                .collect()
+        };
+        if !leftover.is_empty() {
+            tracing::warn!(
+                count = leftover.len(),
+                "terminalizing jobs still active after forced abort"
+            );
+        }
+        for (id, handle) in &leftover {
+            // Abort is idempotent: covers handles stored after the first
+            // sweep and late-spawned records alike.
+            if let Some(handle) = handle {
+                handle.abort();
+            }
+            self.finish_job(*id, JobRunOutcome::Cancelled);
+        }
+        // The second sweep may have aborted handles stored after the first
+        // snapshot (or a spawn-race task aborted by the spawn guard), so
+        // drain once more. Bounded by the same fallback timeout; aborts are
+        // not ignorable, so this converges while keeping shutdown bounded.
         let _ = tokio::time::timeout(SHUTDOWN_FALLBACK_WAIT, self.inner.tracker.wait()).await;
     }
 }
