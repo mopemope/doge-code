@@ -112,6 +112,7 @@ pub(crate) fn spawn_agent_turn(
     );
 
     let content_for_job = content.clone();
+    let display_for_job = display.to_string();
     let spawn_result = executor.jobs.spawn(spec, move |ctx| async move {
         let token = ctx.cancellation_token();
         if let Some(tx) = &ui_tx {
@@ -123,6 +124,29 @@ pub(crate) fn spawn_agent_turn(
                 tracing::error!(?e, "Failed to update session with request count");
             }
         }
+        // Record the observed directive after the job started but before any
+        // LLM call. `display` is the raw user input, `content` is the
+        // effective instruction handed to the agent. A recording failure
+        // never aborts the turn: mark provenance_incomplete and continue
+        // with directive_id = None.
+        let origin = if display_for_job == content_for_job {
+            crate::provenance::DirectiveOrigin::TuiPrompt
+        } else {
+            crate::provenance::DirectiveOrigin::TuiCustomCommand
+        };
+        let attribution = match crate::tools::provenance::record_directive_observed(
+            &fs,
+            origin,
+            &display_for_job,
+            &content_for_job,
+        ) {
+            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.directive_record_failed");
+                let _ = fs.mark_current_session_provenance_failure();
+                crate::provenance::ProvenanceAttribution::none()
+            }
+        };
         let res = crate::llm::run_agent_loop(
             &client,
             &model,
@@ -132,6 +156,7 @@ pub(crate) fn spawn_agent_turn(
             Some(token),
             &cfg,
             None,
+            attribution,
         )
         .await;
         let tokens_used = client.get_prompt_tokens_used();
@@ -346,5 +371,119 @@ mod tests {
             assert_eq!(executor.jobs.foreground_id(), Some(id));
             executor.jobs.cancel(id);
         }
+    }
+
+    #[tokio::test]
+    async fn test_busy_rejection_records_no_directive() {
+        let (mut executor, _dir) = test_executor_with_client();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        executor.set_ui_tx(ui.sender());
+        let blocker = executor
+            .jobs
+            .spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::Write,
+                    "blocker",
+                ),
+                |ctx| async move {
+                    tokio::select! {
+                        _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => JobRunOutcome::Completed,
+                    }
+                },
+            )
+            .unwrap();
+        let result = spawn_agent_turn(
+            &mut executor,
+            &mut ui,
+            "second prompt",
+            "second prompt".to_string(),
+            true,
+        );
+        assert!(matches!(result, Err(JobStartError::ForegroundBusy { .. })));
+        // Busy rejection must not record a directive.
+        let events = crate::tools::provenance::load_current_events(&executor.tools)
+            .unwrap()
+            .map(|l| l.events)
+            .unwrap_or_default();
+        assert!(
+            events.iter().all(|e| !matches!(
+                e.event,
+                crate::provenance::ProvenanceEvent::DirectiveObserved(_)
+            )),
+            "busy rejection must not create DirectiveObserved"
+        );
+        executor.jobs.cancel(blocker);
+    }
+
+    #[tokio::test]
+    async fn test_missing_api_key_records_no_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            api_key: None,
+            base_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        };
+        let mut executor = TuiExecutor::new(cfg).unwrap();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        executor.set_ui_tx(ui.sender());
+        let result = spawn_agent_turn(&mut executor, &mut ui, "hello", "hello".to_string(), true);
+        assert!(matches!(result, Err(JobStartError::ShuttingDown)));
+        assert!(log_contains(&ui, "OPENAI_API_KEY"));
+        // No agent start means no directive.
+        let events = crate::tools::provenance::load_current_events(&executor.tools)
+            .unwrap()
+            .map(|l| l.events)
+            .unwrap_or_default();
+        assert!(events.iter().all(|e| !matches!(
+            e.event,
+            crate::provenance::ProvenanceEvent::DirectiveObserved(_)
+        )),);
+    }
+
+    #[tokio::test]
+    async fn test_directive_origin_prompt_vs_custom() {
+        // Plain prompt: raw == effective, origin TuiPrompt.
+        // Custom command: raw != effective, origin TuiCustomCommand.
+        // Origin is decided as display == content ? TuiPrompt : TuiCustomCommand.
+        let plain_display = "hello";
+        let plain_content = "hello".to_string();
+        let custom_display = "/fix-cache arg";
+        let custom_content = "Expanded: fix the cache with arg".to_string();
+        assert_eq!(plain_display, plain_content.as_str());
+        assert_ne!(custom_display, custom_content.as_str());
+        // Record both and verify hashes differ appropriately.
+        let (executor, _dir) = test_executor_with_client();
+        let fs = executor.tools.clone();
+        let plain = crate::tools::provenance::record_directive_observed(
+            &fs,
+            crate::provenance::DirectiveOrigin::TuiPrompt,
+            plain_display,
+            &plain_content,
+        )
+        .unwrap();
+        let custom = crate::tools::provenance::record_directive_observed(
+            &fs,
+            crate::provenance::DirectiveOrigin::TuiCustomCommand,
+            custom_display,
+            &custom_content,
+        )
+        .unwrap();
+        match &plain.event {
+            crate::provenance::ProvenanceEvent::DirectiveObserved(d) => {
+                assert_eq!(d.raw_input, d.effective_instruction);
+            }
+            _ => panic!("expected directive"),
+        }
+        match &custom.event {
+            crate::provenance::ProvenanceEvent::DirectiveObserved(d) => {
+                assert_ne!(d.raw_input, d.effective_instruction);
+            }
+            _ => panic!("expected directive"),
+        }
+        let _ = executor;
     }
 }

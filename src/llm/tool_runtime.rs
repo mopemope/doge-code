@@ -1,5 +1,6 @@
 use crate::llm::tool_def::default_tools_def;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
+use crate::provenance::ProvenanceAttribution;
 use crate::tools::FsTools;
 use crate::tools::remote_tools::RemoteToolInfo;
 use anyhow::Result;
@@ -20,6 +21,9 @@ pub struct ToolRuntime<'a> {
     pub subagent_model: String,
     /// Cancellation token propagated to the sub-agent loop.
     pub cancel_token: Option<CancellationToken>,
+    /// Per-turn provenance attribution (directive id, if any). Propagated to
+    /// every tool execution in this turn; never stored globally.
+    pub attribution: ProvenanceAttribution,
 }
 
 impl<'a> ToolRuntime<'a> {
@@ -28,6 +32,23 @@ impl<'a> ToolRuntime<'a> {
         subagent_client: Option<crate::llm::client_core::OpenAIClient>,
         subagent_model: impl Into<String>,
         cancel_token: Option<CancellationToken>,
+    ) -> Result<Self> {
+        Self::build_with_attribution(
+            fs,
+            subagent_client,
+            subagent_model,
+            cancel_token,
+            ProvenanceAttribution::none(),
+        )
+        .await
+    }
+
+    pub async fn build_with_attribution(
+        fs: &'a FsTools,
+        subagent_client: Option<crate::llm::client_core::OpenAIClient>,
+        subagent_model: impl Into<String>,
+        cancel_token: Option<CancellationToken>,
+        attribution: ProvenanceAttribution,
     ) -> Result<Self> {
         let remote_manager = fs.get_remote_tool_manager();
         if fs.config.mcp_servers.iter().any(|server| server.enabled) {
@@ -57,6 +78,7 @@ impl<'a> ToolRuntime<'a> {
             subagent_client,
             subagent_model: subagent_model.into(),
             cancel_token,
+            attribution,
         })
     }
 }

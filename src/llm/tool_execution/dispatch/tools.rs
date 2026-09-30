@@ -55,8 +55,12 @@ pub async fn execute_process(
     // Classify before execution; only structured `execute_process` is auto
     // evidence. Bash/shell strings are never inferred as verification.
     let verification_kind = crate::provenance::classify_verification(&program, &process_args);
-    let verification_context = verification_kind
-        .map(|_| crate::tools::provenance::capture_verification_context_for_fs(runtime.fs));
+    let verification_context = verification_kind.map(|_| {
+        crate::tools::provenance::capture_verification_context_for_fs_with_attribution(
+            runtime.fs,
+            &runtime.attribution,
+        )
+    });
     let cwd_relative = crate::tools::provenance::relative_cwd_for_evidence(runtime.fs, &cwd_param);
     match runtime
         .fs
@@ -266,6 +270,7 @@ pub async fn edit(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result
                         crate::tools::FinalizeMutationOptions {
                             record_undo: true,
                             reverts_change_id: None,
+                            attribution: runtime.attribution.clone(),
                         },
                     )
                     .await;
@@ -308,6 +313,7 @@ pub async fn apply_patch(
                         crate::tools::FinalizeMutationOptions {
                             record_undo: true,
                             reverts_change_id: None,
+                            attribution: runtime.attribution.clone(),
                         },
                     )
                     .await;
@@ -335,7 +341,10 @@ pub async fn plan_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> 
     // Remove redundant session update
 
     let plan_items = params.items;
-    match runtime.fs.plan_write(plan_items, params.mode) {
+    match runtime
+        .fs
+        .plan_write_with_attribution(plan_items, params.mode, &runtime.attribution)
+    {
         Ok(res) => {
             // Remove redundant recording
 
@@ -397,8 +406,59 @@ pub async fn provenance_read(
     }
 }
 
+pub async fn requirements_write(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::tools::requirements::RequirementsWriteArgs =
+        serde_json::from_value(args.clone())?;
+    match crate::tools::requirements::requirements_write(runtime.fs, params, &runtime.attribution) {
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            let changed = res.changed;
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: if changed {
+                    format!("Wrote {} requirements", res.requirements.len())
+                } else {
+                    "Requirements unchanged".to_string()
+                },
+            })
+        }
+        Err(e) => {
+            let err_json = serde_json::json!({ "error": e.to_string() });
+            Ok(ToolOutput {
+                value: err_json.clone(),
+                is_success: false,
+                result_summary: e.to_string(),
+            })
+        }
+    }
+}
+
+pub async fn requirements_read(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::tools::requirements::RequirementsReadArgs =
+        serde_json::from_value(args.clone())?;
+    match crate::tools::requirements::requirements_read(runtime.fs, params) {
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            let count = res.requirements.len();
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!("Read {count} requirements"),
+            })
+        }
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
 pub async fn undo(runtime: &ToolRuntime<'_>, _args: &serde_json::Value) -> Result<ToolOutput> {
-    match crate::tools::undo::undo(runtime.fs).await {
+    match crate::tools::undo::undo_with_attribution(runtime.fs, &runtime.attribution).await {
         Ok(res) => {
             let value = serde_json::to_value(&res)?;
             Ok(ToolOutput {

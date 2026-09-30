@@ -17,6 +17,8 @@ pub struct PlanItem {
     pub parent_id: Option<String>,
     pub content: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirement_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +75,11 @@ pub fn plan_write_tool_def() -> ToolDef {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
                                 },
+                                "requirement_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Requirement ids this plan item implements (must exist in requirements state)",
+                                },
                             },
                             "required": ["id", "content", "status"],
                             "additionalProperties": false,
@@ -113,6 +120,12 @@ use regex::Regex;
 
 // ... imports ...
 
+/// Legacy plan write without requirement validation.
+///
+/// Prefer `plan_write_from_base_path` with explicit `valid_requirement_ids`
+/// (used by `FsTools::plan_write_with_attribution`). This entry point skips
+/// requirement-link validation and exists for tests and non-agent callers
+/// that manage requirements separately.
 pub fn plan_write(
     items: Vec<PlanItem>,
     mode: PlanWriteMode,
@@ -127,6 +140,7 @@ pub fn plan_write(
         &config.project_root,
         config,
         valid_files,
+        None,
     )
 }
 
@@ -141,6 +155,7 @@ pub fn plan_write_from_base_path(
     base_path: impl AsRef<Path>,
     _config: &AppConfig,
     valid_files: Option<&[String]>,
+    valid_requirement_ids: Option<&[String]>,
 ) -> Result<PlanWriteResult> {
     let base = base_path.as_ref();
     let plan_dir = plans_dir(base);
@@ -170,6 +185,10 @@ pub fn plan_write_from_base_path(
 
     if let Some(files) = valid_files {
         validate_completion_files(&plan_list.items, files)?;
+    }
+
+    if let Some(valid_reqs) = valid_requirement_ids {
+        validate_requirement_links(&plan_list.items, valid_reqs)?;
     }
 
     let changed = existing_primary_plan
@@ -354,6 +373,44 @@ fn validate_plan_items(items: &[PlanItem]) -> Result<()> {
     Ok(())
 }
 
+/// Validate that every `requirement_ids` link refers to a known requirement.
+///
+/// Unknown ids are rejected. Links to withdrawn requirements are allowed but
+/// reported by the caller as a soft warning (existing plans must not break
+/// when a requirement is later withdrawn).
+pub fn validate_requirement_links(items: &[PlanItem], valid_ids: &[String]) -> Result<()> {
+    let valid: HashSet<&str> = valid_ids.iter().map(String::as_str).collect();
+    for item in items {
+        for req in &item.requirement_ids {
+            if !valid.contains(req.as_str()) {
+                anyhow::bail!(
+                    "Plan item '{}' references unknown requirement '{}'",
+                    item.id,
+                    req
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Warn when a plan item links a withdrawn requirement.
+pub fn withdrawn_requirement_warnings(items: &[PlanItem], withdrawn_ids: &[String]) -> Vec<String> {
+    let withdrawn: HashSet<&str> = withdrawn_ids.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    for item in items {
+        for req in &item.requirement_ids {
+            if withdrawn.contains(req.as_str()) {
+                out.push(format!(
+                    "Plan item '{}' references withdrawn requirement '{req}'.",
+                    item.id
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn validate_completion_files(items: &[PlanItem], valid_files: &[String]) -> Result<()> {
     // Extensions: rs, toml, js, ts, jsx, tsx, md, json, yml, yaml, html, css, py, c, cpp, h, hpp, go, java, sql, sh, bat, ps1, txt, check
     let file_pattern = Regex::new(r"(?x)
@@ -426,18 +483,21 @@ mod tests {
                 parent_id: None,
                 content: "Review requirements and clarify scope".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-3".into(),
                 parent_id: None,
                 content: "Run tests and verify results".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -446,6 +506,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_ok());
@@ -460,12 +521,14 @@ mod tests {
                 parent_id: None,
                 content: "Review requirements and clarify scope".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
 
@@ -475,6 +538,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
             None,
         )
         .expect("first write should succeed");
@@ -488,6 +552,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             None,
+            None,
         )
         .expect("second write should succeed");
         assert!(!second.changed);
@@ -499,12 +564,14 @@ mod tests {
                 parent_id: None,
                 content: "Review requirements and clarify scope".into(),
                 status: "completed".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let third = plan_write_from_base_path(
@@ -513,6 +580,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
             None,
         )
         .expect("third write should succeed");
@@ -529,12 +597,14 @@ mod tests {
                 parent_id: None,
                 content: "Do something".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-1".into(),
                 parent_id: None,
                 content: "Do another".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -543,6 +613,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -557,12 +628,14 @@ mod tests {
                 parent_id: None,
                 content: "Work item".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "Another".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -571,6 +644,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -587,12 +661,14 @@ mod tests {
                 parent_id: None,
                 content: "Parent task".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "child".into(),
                 parent_id: Some("parent".into()),
                 content: "Child task".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -601,6 +677,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_ok());
@@ -611,7 +688,7 @@ mod tests {
             parent_id: Some("non-existent".into()),
             content: "Child task".into(),
             status: "pending".into(),
-            // ...
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -619,6 +696,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -629,6 +707,7 @@ mod tests {
             parent_id: Some("self".into()),
             content: "Infinite loop".into(),
             status: "pending".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -636,6 +715,7 @@ mod tests {
             "session",
             base.clone(),
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -648,12 +728,14 @@ mod tests {
                 parent_id: Some("B".into()),
                 content: "Task A".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "B".into(),
                 parent_id: Some("A".into()),
                 content: "Task B".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -662,6 +744,7 @@ mod tests {
             "session",
             base,
             &AppConfig::default(),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -676,12 +759,14 @@ mod tests {
                 parent_id: None,
                 content: "Task 1".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "Task 2".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let summary = format_plan_summary(&items).unwrap();
@@ -708,6 +793,7 @@ mod tests {
             parent_id: None,
             content: "Update src/main.rs".into(),
             status: "completed".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -716,6 +802,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             Some(&valid_files),
+            None,
         );
         assert!(result.is_ok());
 
@@ -725,6 +812,7 @@ mod tests {
             parent_id: None,
             content: "Update utils.rs".into(),
             status: "completed".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -733,6 +821,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             Some(&valid_files),
+            None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("modified"));
@@ -743,6 +832,7 @@ mod tests {
             parent_id: None,
             content: "Think about life".into(),
             status: "completed".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -751,6 +841,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             Some(&valid_files),
+            None,
         );
         assert!(result.is_ok());
 
@@ -760,6 +851,7 @@ mod tests {
             parent_id: None,
             content: "Will update utils.rs".into(),
             status: "pending".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -768,6 +860,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             Some(&valid_files),
+            None,
         );
         assert!(result.is_ok());
 
@@ -777,6 +870,7 @@ mod tests {
             parent_id: None,
             content: "Review this and/or that".into(),
             status: "completed".into(),
+            requirement_ids: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -785,6 +879,7 @@ mod tests {
             base.clone(),
             &AppConfig::default(),
             Some(&valid_files),
+            None,
         );
         assert!(result.is_ok());
     }
