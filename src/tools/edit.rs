@@ -68,21 +68,15 @@ pub async fn edit(params: EditParams, config: &AppConfig) -> Result<EditResult> 
         anyhow::bail!("File path must be absolute: {}", file_path);
     }
 
-    // Check if the path is within the project root or in allowed paths
-    let project_root = &config.project_root;
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-
-    let is_allowed_path = config
-        .allowed_paths
-        .iter()
-        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-    if !canonical_path.starts_with(project_root) && !is_allowed_path {
-        anyhow::bail!(
-            "Access to files outside the project root is not allowed: {}",
+    // Check if the path is within the project root or in allowed paths.
+    // Roots and target share one canonical-path contract so symlink-alias
+    // spellings (e.g. macOS `/var` vs `/private/var`) authorize correctly.
+    crate::tools::scope::ensure_in_project_scope(path, config).map_err(|e| {
+        anyhow::anyhow!(
+            "Access to files outside the project root is not allowed: {} ({e})",
             file_path
-        );
-    }
+        )
+    })?;
 
     // 1. Read file content
     let original_content = fs::read_to_string(path)

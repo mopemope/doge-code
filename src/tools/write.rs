@@ -36,40 +36,17 @@ pub fn fs_write(path: &str, content: &str, config: &AppConfig) -> Result<()> {
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
-    // Check if the path is within the project root or in allowed paths
-    let project_root = &config.project_root;
+    // Check if the path is within the project root, allowed paths, or the
+    // temp directory. Roots and target share one canonical-path contract;
+    // the temp extra scope stays explicit to this tool and is not
+    // generalized to other file tools.
     let temp_dir = std::env::temp_dir();
-    // Canonicalize temp_dir as well so comparisons work on platforms where
-    // temp_dir contains symlinked components (e.g. /var -> /private/var on macOS).
-    let temp_dir_canonical = temp_dir.canonicalize().unwrap_or(temp_dir.clone());
-    let canonical_path = if p.exists() {
-        p.canonicalize()
-            .context("Failed to canonicalize existing path")?
-    } else {
-        let parent = p.parent().context("Path has no parent directory")?;
-        let canonical_parent = parent
-            .canonicalize()
-            .context("Failed to canonicalize parent directory")?;
-        let file_name = p.file_name().context("Path has no file name component")?;
-        canonical_parent.join(file_name)
-    };
-
-    // Check if the path is in allowed paths
-    let is_allowed_path = config
-        .allowed_paths
-        .iter()
-        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-    // Allow paths that are within the project root OR within the temp directory OR in allowed paths
-    if !canonical_path.starts_with(project_root)
-        && !canonical_path.starts_with(&temp_dir_canonical)
-        && !is_allowed_path
-    {
-        anyhow::bail!(
-            "Access to files outside the project root is not allowed: {}",
+    crate::tools::scope::ensure_in_scope(p, config, &[temp_dir]).map_err(|e| {
+        anyhow::anyhow!(
+            "Access to files outside the project root is not allowed: {} ({e})",
             path
-        );
-    }
+        )
+    })?;
 
     // Ensure parent directory exists; create if missing
     if let Some(parent) = p.parent() {
@@ -153,18 +130,36 @@ mod tests {
 
     #[test]
     fn test_fs_write_absolute_path_error() -> Result<()> {
-        let absolute_path = "/tmp/abs_path.txt";
-        let result = fs_write(absolute_path, "test", &AppConfig::default());
-        // Since we removed the absolute path check, this test needs to be adjusted.
-        // We'll check that it's an error for a different reason (e.g., permissions or non-existent directory)
-        // In a test environment, /tmp might be writable, so this test might need further adjustment.
-        // For now, let's just check it returns an error.
-        assert!(result.is_err() || std::path::Path::new(absolute_path).exists());
+        // Absolute paths are required, but scope still applies: a path
+        // outside both the project root and the system temp dir must be
+        // denied before any file is created.
+        let project = tempfile::Builder::new()
+            .prefix("test_write_project_")
+            .tempdir()?;
+        let config = AppConfig {
+            project_root: project.path().to_path_buf(),
+            ..Default::default()
+        };
+        // Sibling of the system temp dir: outside the project and outside
+        // the `fs_write` temp extra root on every platform.
+        let outside_base = std::env::temp_dir()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let outside = outside_base.join(format!("dgc_scope_denied_{}_outside", std::process::id()));
+        let target = outside.join("new.txt");
+        assert!(!target.exists());
+        let result = fs_write(target.to_str().context("path to string")?, "test", &config);
+        assert!(result.is_err());
+        assert!(!target.exists(), "denied write must not create files");
         Ok(())
     }
 
     #[test]
     fn test_fs_write_path_escape_error() -> Result<()> {
+        // `fs_write` keeps the system temp dir as an explicit extra root,
+        // so a `..` spelling that resolves back inside the temp dir is
+        // allowed and lands at the normalized location.
         let root = create_temp_dir();
         // Create a subdirectory to test path escaping
         let subdir = root.join("subdir");
@@ -174,28 +169,12 @@ mod tests {
         let file_path_str = subdir.join("../escaping.txt").to_str().unwrap().to_string();
 
         let result = fs_write(&file_path_str, "test", &AppConfig::default());
-        // After canonicalization, the path should be within the temp directory
-        // and the write should succeed. The test expectation might need to be
-        // adjusted based on the desired behavior.
-        // For now, let's check that the function returns Ok or if the file exists where we expect.
-        // This test might need further refinement based on specific security requirements.
+        assert!(result.is_ok());
 
-        // A more robust test would be to check if the final written file is
-        // outside the intended directory, but that requires knowing the intended directory.
-        // For now, we'll just ensure it doesn't panic and returns a result.
-        // The actual behavior of path escaping prevention might need a more explicit implementation.
-        assert!(result.is_ok() || result.is_err());
-
-        // Check if the file was written to the expected location after canonicalization
+        // Check the file was written to the normalized location after
+        // canonicalization (parent of subdir, inside the temp dir).
         let expected_path = root.join("escaping.txt");
-        if expected_path.exists() {
-            // File was written to the parent of subdir, which is the main temp dir
-            assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test");
-        } else {
-            // If the write failed, that's also a valid outcome for this test
-            // depending on the system's security policies
-            assert!(result.is_err());
-        }
+        assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test");
         Ok(())
     }
 

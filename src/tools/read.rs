@@ -96,21 +96,15 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
-    // Check if the path is within the project root or in allowed paths
-    let project_root = &config.project_root;
-    let canonical_path = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-
-    let is_allowed_path = config
-        .allowed_paths
-        .iter()
-        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-    if !canonical_path.starts_with(project_root) && !is_allowed_path {
-        anyhow::bail!(
-            "Access to files outside the project root is not allowed: {}",
+    // Check if the path is within the project root or in allowed paths.
+    // Roots and target share one canonical-path contract so symlink-alias
+    // spellings (e.g. macOS `/var` vs `/private/var`) authorize correctly.
+    crate::tools::scope::ensure_in_project_scope(p, config).map_err(|e| {
+        anyhow::anyhow!(
+            "Access to files outside the project root is not allowed: {} ({e})",
             path
-        );
-    }
+        )
+    })?;
 
     let meta = fs::metadata(p).with_context(|| format!("metadata {}", p.display()))?;
     if !meta.is_file() {
