@@ -601,6 +601,8 @@ mod tests {
                     diff_hash: "blake3:x".to_string(),
                     lines_added: 1,
                     lines_removed: 1,
+                    directive_id: None,
+                    requirement_ids: Vec::new(),
                 }),
             )
             .unwrap()
@@ -876,6 +878,8 @@ mod tests {
                     diff_hash: "blake3:x".to_string(),
                     lines_added: 1,
                     lines_removed: 1,
+                    directive_id: None,
+                    requirement_ids: Vec::new(),
                 }),
             )
             .unwrap()
@@ -1026,6 +1030,8 @@ mod tests {
             context: VerificationContext {
                 plan_item_id: Some("step-2".to_string()),
                 observed_change_ids: vec![change.event_id.clone()],
+                directive_id: None,
+                requirement_ids: Vec::new(),
             },
             extra_warnings: vec![],
         });
@@ -1081,6 +1087,8 @@ mod tests {
             output_digest: "blake3:x".to_string(),
             output_truncated: false,
             warnings: vec![],
+            directive_id: None,
+            requirement_ids: Vec::new(),
         };
         store
             .append("s", ProvenanceEvent::VerificationObserved(event))

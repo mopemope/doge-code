@@ -49,6 +49,8 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
         "plan_write" => tools::plan_write(runtime, &args_val).await,
         "plan_read" => tools::plan_read(runtime, &args_val).await,
         "provenance_read" => tools::provenance_read(runtime, &args_val).await,
+        "requirements_write" => tools::requirements_write(runtime, &args_val).await,
+        "requirements_read" => tools::requirements_read(runtime, &args_val).await,
         "undo" => tools::undo(runtime, &args_val).await,
         "read_memory" => tools::read_memory(runtime, &args_val).await,
         "write_memory" => tools::write_memory(runtime, &args_val).await,
@@ -587,6 +589,97 @@ mod tests {
             names.contains(&"provenance_read".to_string()),
             "tools: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_requirements_tools_are_registered() {
+        let names: Vec<String> = crate::llm::tool_def::default_tools_def()
+            .iter()
+            .map(|def| def.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"requirements_write".to_string()),
+            "tools: {names:?}"
+        );
+        assert!(
+            names.contains(&"requirements_read".to_string()),
+            "tools: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_requirements_write_needs_directive_via_dispatch() -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        // No directive attribution: must fail without creating requirements.
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        let tool_call = ToolCall {
+            id: Some("call_req".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "requirements_write".to_string(),
+                arguments: json!({
+                    "upserts": [{"id": "r1", "statement": "do things"}]
+                })
+                .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert!(
+            output
+                .result_summary
+                .contains("without an observed directive")
+                || output
+                    .value
+                    .to_string()
+                    .contains("without an observed directive")
+        );
+        // With a directive, the same call succeeds.
+        let directive = crate::tools::provenance::record_directive_observed(
+            &fs_tools,
+            crate::provenance::DirectiveOrigin::TuiPrompt,
+            "do things",
+            "do things",
+        )?;
+        let runtime2 = ToolRuntime::build_with_attribution(
+            &fs_tools,
+            None,
+            "test-model",
+            None,
+            crate::provenance::ProvenanceAttribution::with_directive(directive.event_id),
+        )
+        .await?;
+        let output2 = dispatch_tool_call(&runtime2, &tool_call).await?;
+        assert!(output2.is_success, "value: {}", output2.value);
+        // requirements_read via dispatch returns coverage.
+        let read_call = ToolCall {
+            id: Some("call_req_read".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "requirements_read".to_string(),
+                arguments: json!({}).to_string(),
+            },
+        };
+        let read_out = dispatch_tool_call(&runtime2, &read_call).await?;
+        assert!(read_out.is_success);
+        assert!(read_out.value.get("requirements").is_some());
+        Ok(())
     }
 
     #[tokio::test]

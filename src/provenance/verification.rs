@@ -207,13 +207,56 @@ pub fn current_in_progress_plan_item(items: &[crate::tools::plan::PlanItem]) -> 
 /// Build the pre-execution snapshot: current plan item + active change ids.
 ///
 /// Call this before the process starts so a change that lands mid-run is
-/// never attributed to the running command.
+/// never attributed to the running command. Requirement ids are the union of
+/// active change requirement ids, falling back to current plan item links
+/// (for contract/test-only or pre-change validation runs).
 pub fn capture_verification_context(
     plan_items: &[crate::tools::plan::PlanItem],
     active_change_ids: &[String],
 ) -> VerificationContext {
+    capture_verification_context_full(
+        plan_items,
+        active_change_ids,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// Full capture with directive attribution and requirement resolution.
+///
+/// `change_requirement_ids` maps `change_id -> requirement_ids` (frozen ids
+/// from `ChangeCommitted`); `plan_requirement_ids` are the current plan item
+/// links used only as a fallback when no active change carries requirements.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_verification_context_full(
+    plan_items: &[crate::tools::plan::PlanItem],
+    active_change_ids: &[String],
+    change_requirement_ids: &[Vec<String>],
+    directive_id: Option<String>,
+    plan_requirement_ids: &std::collections::HashMap<String, Vec<String>>,
+) -> VerificationContext {
+    let plan_item_id = current_in_progress_plan_item(plan_items);
+    let mut requirement_ids: Vec<String> = change_requirement_ids
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    requirement_ids.sort();
+    if requirement_ids.is_empty()
+        && let Some(current) = plan_item_id.as_deref()
+        && let Some(linked) = plan_requirement_ids.get(current)
+    {
+        requirement_ids = linked.clone();
+        requirement_ids.sort();
+        requirement_ids.dedup();
+    }
     VerificationContext {
-        plan_item_id: current_in_progress_plan_item(plan_items),
+        directive_id,
+        plan_item_id,
+        requirement_ids,
         observed_change_ids: active_change_ids.to_vec(),
     }
 }
@@ -261,7 +304,9 @@ pub fn build_verification_event(input: VerificationRecordInput<'_>) -> Verificat
     }
 
     VerificationObservedEvent {
-        plan_item_id: input.context.plan_item_id,
+        directive_id: input.context.directive_id.clone(),
+        plan_item_id: input.context.plan_item_id.clone(),
+        requirement_ids: input.context.requirement_ids.clone(),
         verification_kind: input.kind,
         source: input.source,
         command: CommandEvidence {
@@ -459,6 +504,8 @@ mod tests {
             context: VerificationContext {
                 plan_item_id: Some("step-1".to_string()),
                 observed_change_ids: vec!["chg-1".to_string()],
+                directive_id: None,
+                requirement_ids: Vec::new(),
             },
             extra_warnings: vec![],
         });
@@ -495,12 +542,14 @@ mod tests {
                 parent_id: None,
                 content: "a".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "b".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         assert_eq!(
@@ -512,6 +561,7 @@ mod tests {
             parent_id: None,
             content: "a".into(),
             status: "completed".into(),
+            requirement_ids: Vec::new(),
         }];
         // Never infer from completed items.
         assert_eq!(current_in_progress_plan_item(&completed), None);

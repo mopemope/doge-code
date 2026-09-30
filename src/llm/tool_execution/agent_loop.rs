@@ -205,6 +205,7 @@ pub async fn run_agent_loop(
     cancel: Option<CancellationToken>,
     cfg: &crate::config::AppConfig,
     _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
+    attribution: crate::provenance::ProvenanceAttribution,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
 
@@ -242,11 +243,12 @@ pub async fn run_agent_loop(
     }
 
     let cancel_token = cancel.unwrap_or_default();
-    let runtime = ToolRuntime::build(
+    let runtime = ToolRuntime::build_with_attribution(
         fs,
         Some(client.clone()),
         model.to_string(),
         Some(cancel_token.clone()),
+        attribution,
     )
     .await?;
     let mut iters = 0usize;

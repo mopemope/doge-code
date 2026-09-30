@@ -108,6 +108,13 @@ pub struct UndoResult {
 }
 
 pub async fn undo(fs_tools: &crate::tools::FsTools) -> Result<UndoResult> {
+    undo_with_attribution(fs_tools, &crate::provenance::ProvenanceAttribution::none()).await
+}
+
+pub async fn undo_with_attribution(
+    fs_tools: &crate::tools::FsTools,
+    attribution: &crate::provenance::ProvenanceAttribution,
+) -> Result<UndoResult> {
     use crate::provenance::{ChangeKind, FileStateEvidence};
     use crate::tools::mutation::{MutationTargetReceipt, commit_text_candidate};
 
@@ -265,6 +272,7 @@ pub async fn undo(fs_tools: &crate::tools::FsTools) -> Result<UndoResult> {
     let finalize_opts = crate::tools::FinalizeMutationOptions {
         record_undo: false,
         reverts_change_id: entry.change_id.clone(),
+        attribution: attribution.clone(),
     };
     let report = fs_tools.finalize_mutation(receipt, finalize_opts).await;
 
