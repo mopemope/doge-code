@@ -96,6 +96,31 @@ impl JobStatus {
             JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
         )
     }
+
+    /// Whether `self -> next` is a legal visible transition.
+    ///
+    /// Terminal states never leave, and `Cancelling` never regresses into
+    /// execution/waiting states (`Starting`/`WaitingForWorkspace`/`Running`).
+    /// Forward edges (`Starting -> WaitingForWorkspace -> Running`,
+    /// anything `-> Cancelling`, anything `-> terminal`) stay legal so valid
+    /// startup behavior is preserved.
+    pub fn allows_transition(self, next: JobStatus) -> bool {
+        if self == next {
+            return true;
+        }
+        if self.is_terminal() {
+            return false;
+        }
+        if self == JobStatus::Cancelling
+            && matches!(
+                next,
+                JobStatus::Starting | JobStatus::WaitingForWorkspace | JobStatus::Running
+            )
+        {
+            return false;
+        }
+        true
+    }
 }
 
 impl fmt::Display for JobStatus {

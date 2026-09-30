@@ -530,6 +530,362 @@ async fn test_shutdown_drains_and_rejects_new_spawns() {
 }
 
 #[test]
+fn test_cancelling_transition_monotonicity() {
+    use JobStatus::*;
+    // Cancelling never regresses into execution/waiting states.
+    assert!(!Cancelling.allows_transition(Starting));
+    assert!(!Cancelling.allows_transition(WaitingForWorkspace));
+    assert!(!Cancelling.allows_transition(Running));
+    // Cancelling itself and terminal outcomes stay reachable.
+    assert!(Cancelling.allows_transition(Cancelling));
+    assert!(Cancelling.allows_transition(Cancelled));
+    assert!(Cancelling.allows_transition(Completed));
+    assert!(Cancelling.allows_transition(Failed));
+    // Terminal states are frozen.
+    for terminal in [Completed, Failed, Cancelled] {
+        for next in [
+            Starting,
+            WaitingForWorkspace,
+            Running,
+            Cancelling,
+            Completed,
+            Failed,
+            Cancelled,
+        ] {
+            assert_eq!(
+                terminal.allows_transition(next),
+                terminal == next,
+                "{terminal} -> {next}"
+            );
+        }
+    }
+    // Valid startup/cancel edges are preserved.
+    assert!(Starting.allows_transition(WaitingForWorkspace));
+    assert!(Starting.allows_transition(Running));
+    assert!(Starting.allows_transition(Cancelling));
+    assert!(WaitingForWorkspace.allows_transition(Running));
+    assert!(WaitingForWorkspace.allows_transition(Cancelling));
+    assert!(Running.allows_transition(Cancelling));
+    assert!(Running.allows_transition(Completed));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_cancel_before_workspace_acquisition_never_regresses() {
+    // On the current-thread runtime a spawned task cannot run before the
+    // test task yields, so spawn+cancel back-to-back deterministically puts
+    // cancellation before the task's first set_status(WaitingForWorkspace).
+    let manager = JobManager::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_clone = release.clone();
+    let holder_started = Arc::new(tokio::sync::Notify::new());
+    let holder_started_clone = holder_started.clone();
+    let holder = manager
+        .spawn(
+            background_spec(JobKind::Lint, WorkspaceAccess::Write, "holder"),
+            |_ctx| async move {
+                holder_started_clone.notify_one();
+                release_clone.notified().await;
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+    holder_started.notified().await;
+    wait_for_status(&manager, holder, JobStatus::Running).await;
+
+    let executed = Arc::new(AtomicBool::new(false));
+    let executed_clone = executed.clone();
+    let waiter = manager
+        .spawn(
+            background_spec(JobKind::Lint, WorkspaceAccess::Write, "waiter"),
+            |_ctx| async move {
+                executed_clone.store(true, Ordering::SeqCst);
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+    // No yield between spawn and cancel: cancellation strictly precedes the
+    // task's first status transition.
+    manager.cancel(waiter);
+    assert_eq!(
+        manager.get_snapshot(waiter).map(|s| s.status),
+        Some(JobStatus::Cancelling)
+    );
+    // Let the waiter task run while the gate is still held by the holder.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let status = manager.get_snapshot(waiter).map(|s| s.status);
+    assert!(
+        matches!(
+            status,
+            Some(JobStatus::Cancelling) | Some(JobStatus::Cancelled)
+        ),
+        "cancelled job regressed to {status:?}"
+    );
+    release.notify_one();
+    assert_eq!(
+        wait_for_terminal(&manager, waiter).await,
+        JobStatus::Cancelled
+    );
+    assert!(!executed.load(Ordering::SeqCst));
+    wait_for_terminal(&manager, holder).await;
+}
+
+#[tokio::test]
+async fn test_shutdown_force_abort_terminalizes_non_cooperative_job() {
+    let manager = JobManager::new();
+    // Deliberately non-cooperative: ignores the cancellation token and
+    // would outlive any grace period without the forced-abort fallback.
+    let id = manager
+        .spawn(
+            foreground_spec("stubborn", WorkspaceAccess::None),
+            |_ctx| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+    wait_for_status(&manager, id, JobStatus::Running).await;
+    let started = std::time::Instant::now();
+    manager.shutdown(Duration::from_millis(50)).await;
+    // Shutdown stays bounded: grace + fallback wait, well under the 30s body.
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // Forced abort is never reported as successful completion.
+    assert_eq!(
+        manager.get_snapshot(id).map(|s| s.status),
+        Some(JobStatus::Cancelled)
+    );
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(manager.foreground_id(), None);
+    // Exactly one terminal history record for the JobId.
+    let matches: Vec<_> = manager
+        .snapshots()
+        .into_iter()
+        .filter(|s| s.id == id)
+        .collect();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].status, JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn test_shutdown_force_abort_clears_background_and_foreground() {
+    let manager = JobManager::new();
+    // One stubborn foreground job (holds the foreground reservation) plus
+    // one stubborn background job: both ignore cancellation and must be
+    // force-terminalized together.
+    let fg = manager
+        .spawn(
+            foreground_spec("stubborn-fg", WorkspaceAccess::None),
+            |_ctx| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+    wait_for_status(&manager, fg, JobStatus::Running).await;
+    let bg = manager
+        .spawn(
+            background_spec(JobKind::Test, WorkspaceAccess::None, "stubborn-bg"),
+            |_ctx| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+    wait_for_status(&manager, bg, JobStatus::Running).await;
+    manager.shutdown(Duration::from_millis(50)).await;
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(manager.foreground_id(), None);
+    assert_eq!(
+        manager.get_snapshot(fg).map(|s| s.status),
+        Some(JobStatus::Cancelled)
+    );
+    assert_eq!(
+        manager.get_snapshot(bg).map(|s| s.status),
+        Some(JobStatus::Cancelled)
+    );
+    // No duplicate history entries across the whole manager.
+    let snapshots = manager.snapshots();
+    let mut ids: Vec<JobId> = snapshots.iter().map(|s| s.id).collect();
+    ids.sort_by_key(|id| id.0);
+    let before = ids.len();
+    ids.dedup_by_key(|id| id.0);
+    assert_eq!(before, ids.len());
+}
+
+#[tokio::test]
+async fn test_normal_completion_racing_shutdown_is_not_double_terminalized() {
+    // A job that already completed before shutdown must keep its outcome
+    // and gain no duplicate history entry.
+    let manager = JobManager::new();
+    let id = manager
+        .spawn(
+            background_spec(JobKind::Test, WorkspaceAccess::None, "quick"),
+            |_ctx| async { JobRunOutcome::Completed },
+        )
+        .unwrap();
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Completed);
+    manager.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(manager.active_count(), 0);
+    let matches: Vec<_> = manager
+        .snapshots()
+        .into_iter()
+        .filter(|s| s.id == id)
+        .collect();
+    assert_eq!(matches.len(), 1, "duplicate terminal record for {id}");
+    assert_eq!(matches[0].status, JobStatus::Completed);
+
+    // Completion racing shutdown fallback: the job finishes cooperatively
+    // right around the grace expiry, so some iterations drain and others hit
+    // the force-abort path. Either outcome is legal, but it must be
+    // terminalized exactly once and never resurrected as active.
+    for _ in 0..20 {
+        let manager = JobManager::new();
+        let id = manager
+            .spawn(
+                background_spec(JobKind::Test, WorkspaceAccess::None, "racer"),
+                |ctx| async move {
+                    tokio::select! {
+                        _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                            JobRunOutcome::Completed
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        manager.shutdown(Duration::from_millis(50)).await;
+        assert_eq!(manager.active_count(), 0);
+        let matches: Vec<_> = manager
+            .snapshots()
+            .into_iter()
+            .filter(|s| s.id == id)
+            .collect();
+        assert_eq!(matches.len(), 1, "duplicate terminal record for {id}");
+        assert!(
+            matches!(
+                matches[0].status,
+                JobStatus::Completed | JobStatus::Cancelled
+            ),
+            "unexpected status {:?} for {id}",
+            matches[0].status
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_cancel_shutdown_stress() {
+    for _ in 0..10 {
+        let manager = JobManager::new();
+        let mut ids = Vec::new();
+        for i in 0..8 {
+            let id = manager
+                .spawn(
+                    background_spec(JobKind::Test, WorkspaceAccess::None, &format!("job {i}")),
+                    |ctx| async move {
+                        tokio::select! {
+                            _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                                JobRunOutcome::Completed
+                            }
+                        }
+                    },
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        for (n, id) in ids.iter().enumerate() {
+            if n % 2 == 0 {
+                manager.cancel(*id);
+            }
+        }
+        manager.shutdown(Duration::from_millis(100)).await;
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.foreground_id(), None);
+        for id in &ids {
+            let status = manager.get_snapshot(*id).map(|s| s.status);
+            assert!(
+                matches!(
+                    status,
+                    Some(JobStatus::Completed) | Some(JobStatus::Cancelled)
+                ),
+                "unexpected status {status:?} for {id}"
+            );
+        }
+        let snapshots = manager.snapshots();
+        let mut seen: Vec<JobId> = snapshots.iter().map(|s| s.id).collect();
+        seen.sort_by_key(|id| id.0);
+        let before = seen.len();
+        seen.dedup_by_key(|id| id.0);
+        assert_eq!(before, seen.len(), "duplicate history entries");
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_spawn_during_shutdown_leaves_no_active() {
+    // Spawn racing shutdown: hammer spawn attempts while a forced shutdown
+    // is in flight. Every accepted id must end terminal exactly once, and
+    // shutdown must leave no active or foreground records. This exercises
+    // the spawn-race guard path where the fallback may have already removed
+    // the record before the spawn task stores its abort handle.
+    for _ in 0..10 {
+        let manager = JobManager::new();
+        // One stubborn job forces the fallback path.
+        let _stubborn = manager
+            .spawn(
+                background_spec(JobKind::Test, WorkspaceAccess::None, "stubborn"),
+                |_ctx| async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    JobRunOutcome::Completed
+                },
+            )
+            .unwrap();
+        let manager_clone = manager.clone();
+        let shutdown =
+            tokio::spawn(async move { manager_clone.shutdown(Duration::from_millis(20)).await });
+        let mut ids = Vec::new();
+        for i in 0..20 {
+            if let Ok(id) = manager.spawn(
+                background_spec(JobKind::Test, WorkspaceAccess::None, &format!("racer {i}")),
+                |ctx| async move {
+                    tokio::select! {
+                        _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                            JobRunOutcome::Completed
+                        }
+                    }
+                },
+            ) {
+                ids.push(id);
+            }
+        }
+        shutdown.await.unwrap();
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.foreground_id(), None);
+        for id in &ids {
+            let status = manager.get_snapshot(*id).map(|s| s.status);
+            assert!(
+                matches!(
+                    status,
+                    Some(JobStatus::Completed) | Some(JobStatus::Cancelled)
+                ),
+                "unexpected status {status:?} for {id}"
+            );
+            let matches: Vec<_> = manager
+                .snapshots()
+                .into_iter()
+                .filter(|s| s.id == *id)
+                .collect();
+            assert_eq!(matches.len(), 1, "duplicate terminal record for {id}");
+        }
+        let snapshots = manager.snapshots();
+        let mut seen: Vec<JobId> = snapshots.iter().map(|s| s.id).collect();
+        seen.sort_by_key(|id| id.0);
+        let before = seen.len();
+        seen.dedup_by_key(|id| id.0);
+        assert_eq!(before, seen.len(), "duplicate history entries");
+    }
+}
+
+#[test]
 fn test_job_id_display_and_parse() {
     assert_eq!(JobId(12).to_string(), "job-12");
     assert_eq!(JobId::parse_arg("12"), Some(JobId(12)));
