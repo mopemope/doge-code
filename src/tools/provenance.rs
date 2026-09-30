@@ -1,25 +1,31 @@
 //! Provenance integration helpers (session-backed, no repomap DB).
 //!
-//! `ChangeCommitted` is recorded only from the transactional semantic edit
-//! path; verification observations come only from real execution paths
-//! (`execute_process`, `/test`, `/lint`). No manual `record_verification`
-//! tool exists by design.
+//! `ChangeCommitted` is recorded for every tracked workspace mutation
+//! (`fs_write`, `edit`, `apply_patch`, transactional semantic edit, `undo`)
+//! as a Doge-observed `before -> after` transaction; verification
+//! observations come only from real execution paths (`execute_process`,
+//! `/test`, `/lint`). No manual `record_verification` tool exists by design.
 
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::provenance::{
-    ChangeCommittedEvent, ChangeKind, ProvenanceEvent, ProvenanceEventEnvelope, ProvenanceStore,
-    diff_hash_for,
+    ChangeCommittedEvent, ChangeKind, ChangeTarget, FileStateEvidence, ProvenanceEvent,
+    ProvenanceEventEnvelope, ProvenanceStore, diff_hash_for,
 };
 use crate::tools::FsTools;
 
-/// Record a transactional semantic edit as `ChangeCommitted`.
+/// Generic commit recorder for any [`crate::tools::mutation::MutationReceipt`].
 ///
-/// Returns `Ok(None)` when there is no current session (nothing to attach
-/// to). Append failures are returned as `Err` so the caller can mark
+/// Resolves the current plan item, computes `predecessor_change_id` from the
+/// file mutation chain, and appends a v2 `ChangeCommitted`. Returns
+/// `Ok(None)` when there is no current session (nothing to attach to) or
+/// when the path cannot relativize under the project root (outside tracked
+/// scope; the caller reports this as a scope warning, not a failure).
+/// Append failures are returned as `Err` so the caller can mark
 /// `provenance_incomplete` without rolling back the source change.
-pub fn record_semantic_change(
+pub fn record_committed_mutation(
     fs_tools: &FsTools,
-    result: &crate::features::semantic_edit::SemanticEditResult,
+    receipt: &crate::tools::mutation::MutationReceipt,
+    reverts_change_id: Option<String>,
 ) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
     let Some(ctx) = fs_tools.current_session_storage_context() else {
         tracing::warn!("provenance.record_skipped: no current session");
@@ -32,26 +38,112 @@ pub fn record_semantic_change(
             None
         }
     };
-    let file =
-        crate::analysis::normalize_relative_path(&fs_tools.config.project_root, &result.file)
-            .map_err(|e| anyhow::anyhow!("provenance file relativization failed: {e}"))?;
+    let canonical_path = crate::tools::mutation::canonicalize_for_scope(&receipt.path);
+    let canonical_root =
+        crate::tools::mutation::canonicalize_for_scope(&fs_tools.config.project_root);
+    let Ok(file) = crate::analysis::normalize_relative_path(&canonical_root, &canonical_path)
+    else {
+        // Outside-project path: durable provenance stores project-relative
+        // paths only, so skip without failing. The caller (`finalize_mutation`)
+        // reports this as a scope warning.
+        tracing::debug!("provenance.record_skipped: outside project root");
+        return Ok(None);
+    };
+
+    let before = FileStateEvidence {
+        exists: receipt.before.exists,
+        content_hash: receipt.before.content_hash.clone(),
+        byte_len: receipt.before.byte_len,
+    };
+    let after = FileStateEvidence {
+        exists: receipt.after.exists,
+        content_hash: receipt.after.content_hash.clone(),
+        byte_len: receipt.after.byte_len,
+    };
+    let target = match &receipt.target {
+        crate::tools::mutation::MutationTargetReceipt::File => ChangeTarget::File,
+        crate::tools::mutation::MutationTargetReceipt::SemanticSymbol {
+            symbol_id,
+            before_fingerprint,
+            after_fingerprint,
+        } => ChangeTarget::SemanticSymbol {
+            symbol_id: symbol_id.clone(),
+            before_fingerprint: before_fingerprint.clone(),
+            after_fingerprint: after_fingerprint.clone(),
+        },
+    };
+    // Predecessor: latest tracked event for this file whose `after` equals
+    // this receipt's `before`. Broken chains stay unlinked (never guessed).
+    let predecessor_change_id = match ProvenanceStore::new(ctx.session_dir.clone()).load_all() {
+        Ok(loaded) => ProvenanceStore::find_predecessor(&loaded.events, &file, &before),
+        Err(e) => {
+            tracing::debug!(error = %e, "provenance predecessor lookup failed");
+            None
+        }
+    };
+
+    tracing::info!(
+        kind = ?receipt.kind,
+        file = %file,
+        predecessor = predecessor_change_id.as_deref().unwrap_or("none"),
+        "provenance.change_committed"
+    );
 
     let event = ProvenanceEvent::ChangeCommitted(ChangeCommittedEvent {
         transaction_id: String::new(),
         plan_item_id,
-        change_kind: ChangeKind::SemanticEdit,
+        change_kind: receipt.kind,
         file,
-        symbol_id: result.symbol_id.as_str().to_string(),
-        before_fingerprint: result.before_fingerprint.as_str().to_string(),
-        after_fingerprint: result.after_fingerprint.as_str().to_string(),
-        diff: result.diff.clone(),
-        diff_hash: diff_hash_for(&result.diff),
-        lines_added: result.lines_added,
-        lines_removed: result.lines_removed,
+        target,
+        before,
+        after,
+        predecessor_change_id,
+        reverts_change_id,
+        diff: receipt.diff.clone(),
+        diff_hash: diff_hash_for(&receipt.diff),
+        lines_added: receipt.lines_added,
+        lines_removed: receipt.lines_removed,
     });
     let store = ProvenanceStore::new(ctx.session_dir);
     let envelope = store.append(&ctx.session_id, event)?;
     Ok(Some(envelope))
+}
+
+/// Record a transactional semantic edit as `ChangeCommitted`.
+///
+/// Takes the exact pre-write content so the receipt (and any future undo
+/// linkage) carries the real `before` state. Prefer the generic
+/// [`record_committed_mutation`] path for new mutation kinds.
+pub fn record_semantic_change(
+    fs_tools: &FsTools,
+    result: &crate::features::semantic_edit::SemanticEditResult,
+    before_content: &str,
+) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
+    let receipt = crate::tools::mutation::MutationReceipt {
+        kind: ChangeKind::SemanticEdit,
+        path: result.file.clone(),
+        before: crate::tools::mutation::MutationSnapshot {
+            exists: true,
+            content: Some(before_content.to_string()),
+            content_hash: result.before_file_hash.clone(),
+            byte_len: result.before_byte_len,
+        },
+        after: crate::tools::mutation::MutationSnapshot {
+            exists: true,
+            content: None,
+            content_hash: result.after_file_hash.clone(),
+            byte_len: result.after_byte_len,
+        },
+        target: crate::tools::mutation::MutationTargetReceipt::SemanticSymbol {
+            symbol_id: result.symbol_id.as_str().to_string(),
+            before_fingerprint: result.before_fingerprint.as_str().to_string(),
+            after_fingerprint: result.after_fingerprint.as_str().to_string(),
+        },
+        diff: result.diff.clone(),
+        lines_added: result.lines_added,
+        lines_removed: result.lines_removed,
+    };
+    record_committed_mutation(fs_tools, &receipt, None)
 }
 
 /// Load all provenance events for the current session, if any.
@@ -458,6 +550,7 @@ fn budget_coverage(
             coverage.diverged_change_ids.len(),
             coverage.unlinked_change_ids.len(),
             coverage.untracked_changed_files.len(),
+            coverage.reverted_change_ids.len(),
         ];
         let max = lens.into_iter().max().unwrap_or(0);
         if max == 0 {
@@ -474,8 +567,10 @@ fn budget_coverage(
             coverage.diverged_change_ids.pop();
         } else if coverage.unlinked_change_ids.len() == max {
             coverage.unlinked_change_ids.pop();
-        } else {
+        } else if coverage.untracked_changed_files.len() == max {
             coverage.untracked_changed_files.pop();
+        } else {
+            coverage.reverted_change_ids.pop();
         }
         truncated = true;
     }
@@ -581,8 +676,23 @@ pub fn provenance_read(
         .map(|s| s.len())
         .unwrap_or(0)
         + 256;
+    // Lifecycle states for change summaries (computed once over all events).
+    let states: std::collections::HashMap<String, String> =
+        crate::provenance::resolve_active_states(&fs_tools.config.project_root, &loaded.events)
+            .into_iter()
+            .map(|r| {
+                let s = match r.state {
+                    crate::provenance::ActiveChangeState::Active => "active",
+                    crate::provenance::ActiveChangeState::Superseded => "superseded",
+                    crate::provenance::ActiveChangeState::Diverged => "diverged",
+                    crate::provenance::ActiveChangeState::Missing => "missing",
+                    crate::provenance::ActiveChangeState::Reverted => "reverted",
+                };
+                (r.change_id, s.to_string())
+            })
+            .collect();
     for env in filtered[start..end].iter() {
-        let summary = summarize_event(env, args.include_diff);
+        let summary = summarize_event(env, args.include_diff, &states);
         let len = serde_json::to_string(&summary)
             .map(|s| s.len())
             .unwrap_or(0)
@@ -612,7 +722,11 @@ pub fn provenance_read(
     })
 }
 
-fn summarize_event(env: &ProvenanceEventEnvelope, include_diff: bool) -> serde_json::Value {
+fn summarize_event(
+    env: &ProvenanceEventEnvelope,
+    include_diff: bool,
+    states: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
     match &env.event {
         ProvenanceEvent::PlanChanged(e) => {
             serde_json::json!({
@@ -627,17 +741,45 @@ fn summarize_event(env: &ProvenanceEventEnvelope, include_diff: bool) -> serde_j
             })
         }
         ProvenanceEvent::ChangeCommitted(c) => {
+            let (target_scope, symbol_id) = match &c.target {
+                crate::provenance::ChangeTarget::File => ("file", None),
+                crate::provenance::ChangeTarget::SemanticSymbol { symbol_id, .. } => {
+                    ("semantic_symbol", Some(symbol_id.clone()))
+                }
+            };
             let mut v = serde_json::json!({
                 "event_id": env.event_id,
                 "type": "change_committed",
                 "timestamp": env.timestamp,
                 "plan_item_id": c.plan_item_id,
+                "change_kind": c.change_kind,
+                "target_scope": target_scope,
                 "file": c.file,
-                "symbol_id": c.symbol_id,
                 "lines_added": c.lines_added,
                 "lines_removed": c.lines_removed,
                 "diff_hash": c.diff_hash,
+                "before_hash": c.before.content_hash,
+                "after_hash": c.after.content_hash,
+                "predecessor_change_id": c.predecessor_change_id,
+                "reverts_change_id": c.reverts_change_id,
             });
+            if let Some(symbol_id) = symbol_id
+                && let Some(obj) = v.as_object_mut()
+            {
+                obj.insert(
+                    "symbol_id".to_string(),
+                    serde_json::Value::String(symbol_id),
+                );
+            }
+            // Attach resolved lifecycle state when the workspace is available.
+            // Best-effort: never fails the read.
+            let state = states
+                .get(&env.event_id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("state".to_string(), serde_json::Value::String(state));
+            }
             if include_diff {
                 let budgeted =
                     crate::tools::budget::head_tail_truncate(&c.diff, PROVENANCE_READ_DIFF_BUDGET)
@@ -796,9 +938,23 @@ mod tests {
                         plan_item_id: Some(format!("step-{}", i % 2 + 1)),
                         change_kind: ChangeKind::SemanticEdit,
                         file: format!("src/f{i}.rs"),
-                        symbol_id: format!("sym-{i}"),
-                        before_fingerprint: "a".into(),
-                        after_fingerprint: "b".into(),
+                        target: crate::provenance::ChangeTarget::SemanticSymbol {
+                            symbol_id: format!("sym-{i}"),
+                            before_fingerprint: "a".into(),
+                            after_fingerprint: "b".into(),
+                        },
+                        before: crate::provenance::FileStateEvidence {
+                            exists: true,
+                            content_hash: None,
+                            byte_len: None,
+                        },
+                        after: crate::provenance::FileStateEvidence {
+                            exists: true,
+                            content_hash: None,
+                            byte_len: None,
+                        },
+                        predecessor_change_id: None,
+                        reverts_change_id: None,
                         diff: "d".into(),
                         diff_hash: "blake3:x".into(),
                         lines_added: 1,
@@ -976,16 +1132,25 @@ mod provenance_extra_tests {
             &root,
         )
         .unwrap();
-        let env = record_semantic_change(&fs, &result)
+        let env = record_semantic_change(&fs, &result, &current)
             .unwrap()
             .expect("recorded");
         match &env.event {
             ProvenanceEvent::ChangeCommitted(c) => {
                 assert_eq!(c.file, "src/lib.rs");
                 assert!(!c.file.starts_with('/'));
-                assert_eq!(c.symbol_id, result.symbol_id.as_str());
-                assert_eq!(c.before_fingerprint, result.before_fingerprint.as_str());
-                assert_eq!(c.after_fingerprint, result.after_fingerprint.as_str());
+                match &c.target {
+                    crate::provenance::ChangeTarget::SemanticSymbol {
+                        symbol_id,
+                        before_fingerprint,
+                        after_fingerprint,
+                    } => {
+                        assert_eq!(symbol_id, result.symbol_id.as_str());
+                        assert_eq!(before_fingerprint, result.before_fingerprint.as_str());
+                        assert_eq!(after_fingerprint, result.after_fingerprint.as_str());
+                    }
+                    _ => panic!("expected semantic target"),
+                }
                 assert!(c.diff_hash.starts_with("blake3:"));
                 assert_eq!(c.diff_hash, crate::provenance::diff_hash_for(&result.diff));
                 assert_eq!(c.lines_added, result.lines_added);
@@ -1029,7 +1194,7 @@ mod provenance_extra_tests {
             &root,
         )
         .unwrap();
-        let env = record_semantic_change(&fs, &result)
+        let env = record_semantic_change(&fs, &result, &current)
             .unwrap()
             .expect("recorded");
         match &env.event {
@@ -1060,10 +1225,12 @@ mod provenance_extra_tests {
         assert!(after_commit.contains("2;"));
         // Break provenance writes: a file where the events dir should be.
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v1/events");
+        let events_dir = ctx.session_dir.join("provenance/v2/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
-        let err = record_semantic_change(&fs, &result).expect_err("must fail");
+        // `before_content` is irrelevant here: the append fails before any
+        // receipt content is used.
+        let err = record_semantic_change(&fs, &result, "").expect_err("must fail");
         assert!(!format!("{err}").is_empty());
         // Caller marks failure; source stays committed.
         fs.mark_current_session_provenance_failure().unwrap();
@@ -1090,7 +1257,7 @@ mod provenance_extra_tests {
             &root,
         )
         .unwrap();
-        record_semantic_change(&fs, &result).unwrap();
+        record_semantic_change(&fs, &result, &current).unwrap();
         // Simulate non-semantic edits via session changed_files.
         fs.update_session_with_changed_file(std::path::PathBuf::from("src/lib.rs"))
             .unwrap();
@@ -1228,7 +1395,9 @@ mod provenance_extra_tests {
             .unwrap();
             std::fs::write(&file, candidate).unwrap();
         }
-        let change_env = record_semantic_change(&fs, &result).unwrap().unwrap();
+        let change_env = record_semantic_change(&fs, &result, &current)
+            .unwrap()
+            .unwrap();
         // Complete without verification -> warning.
         let res = fs
             .plan_write(
@@ -1296,7 +1465,9 @@ mod provenance_extra_tests {
         )
         .unwrap();
         std::fs::write(&file, candidate).unwrap();
-        let change_env = record_semantic_change(&fs, &result).unwrap().unwrap();
+        let change_env = record_semantic_change(&fs, &result, &current)
+            .unwrap()
+            .unwrap();
         // Successful verification observing the change.
         let ctx = fs.current_session_storage_context().unwrap();
         let store = ProvenanceStore::new(ctx.session_dir);
@@ -1388,9 +1559,23 @@ mod provenance_extra_tests {
                     plan_item_id: None,
                     change_kind: crate::provenance::ChangeKind::SemanticEdit,
                     file: "src/lib.rs".into(),
-                    symbol_id: "s".into(),
-                    before_fingerprint: "a".into(),
-                    after_fingerprint: "b".into(),
+                    target: crate::provenance::ChangeTarget::SemanticSymbol {
+                        symbol_id: "s".into(),
+                        before_fingerprint: "a".into(),
+                        after_fingerprint: "b".into(),
+                    },
+                    before: crate::provenance::FileStateEvidence {
+                        exists: true,
+                        content_hash: None,
+                        byte_len: None,
+                    },
+                    after: crate::provenance::FileStateEvidence {
+                        exists: true,
+                        content_hash: None,
+                        byte_len: None,
+                    },
+                    predecessor_change_id: None,
+                    reverts_change_id: None,
                     diff: big_diff,
                     diff_hash: "blake3:x".into(),
                     lines_added: 1,
@@ -1525,7 +1710,7 @@ mod review_fix_tests {
     fn test_tui_record_returns_false_and_marks_session_on_failure() {
         let (_proj, fs) = setup();
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v1/events");
+        let events_dir = ctx.session_dir.join("provenance/v2/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         let ok = record_tui_test_verification(
@@ -1556,6 +1741,7 @@ mod review_fix_tests {
             diverged_change_ids: vec![],
             unlinked_change_ids: vec![],
             untracked_changed_files: vec![],
+            reverted_change_ids: vec![],
             provenance_incomplete: false,
         };
         let mut warnings = Vec::new();

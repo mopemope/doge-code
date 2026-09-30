@@ -289,34 +289,49 @@ async fn commit_semantic_edit_success(
     candidate_map: crate::analysis::RepoMap,
     before_content: String,
 ) {
-    // Provenance first: the source commit already succeeded, so a recording
-    // failure must never roll it back. Mark incomplete and continue.
-    match crate::tools::provenance::record_semantic_change(tools, result) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            tracing::debug!("provenance.record_skipped: no session context");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "provenance.record_failed");
-            let _ = tools.mark_current_session_provenance_failure();
-            ui_tx.send_logged(
-                "[provenance][warning] Change was committed, but provenance recording failed."
-                    .to_string(),
-            );
-        }
-    }
-
-    // Undo snapshot only on success, with the exact overwritten content.
-    tools
-        .record_undo_snapshot(prepared.file.clone(), before_content)
+    // Unified commit bookkeeping: build the observed receipt and finalize
+    // (provenance -> undo -> session -> context). Source already succeeded;
+    // failures here warn without rollback.
+    let after_content = std::fs::read_to_string(&prepared.file).unwrap_or_default();
+    let receipt = crate::tools::mutation::MutationReceipt {
+        kind: crate::provenance::ChangeKind::SemanticEdit,
+        path: prepared.file.clone(),
+        before: crate::tools::mutation::MutationSnapshot {
+            exists: true,
+            content: Some(before_content),
+            content_hash: result.before_file_hash.clone(),
+            byte_len: result.before_byte_len,
+        },
+        after: crate::tools::mutation::MutationSnapshot {
+            exists: true,
+            content: Some(after_content),
+            content_hash: result.after_file_hash.clone(),
+            byte_len: result.after_byte_len,
+        },
+        target: crate::tools::mutation::MutationTargetReceipt::SemanticSymbol {
+            symbol_id: result.symbol_id.as_str().to_string(),
+            before_fingerprint: result.before_fingerprint.as_str().to_string(),
+            after_fingerprint: result.after_fingerprint.as_str().to_string(),
+        },
+        diff: result.diff.clone(),
+        lines_added: result.lines_added,
+        lines_removed: result.lines_removed,
+    };
+    let report = tools
+        .finalize_mutation(
+            receipt,
+            crate::tools::FinalizeMutationOptions {
+                record_undo: true,
+                reverts_change_id: None,
+            },
+        )
         .await;
+    for w in &report.warnings {
+        ui_tx.send_logged(format!("[provenance][warning] {w}"));
+    }
 
     let relative =
         make_relative_path(&prepared.file, project_root).unwrap_or_else(|| prepared.file.clone());
-    let _ = tools.update_session_with_changed_file(relative.clone());
-    let _ =
-        tools.update_session_with_lines_edited((result.lines_added + result.lines_removed) as u64);
-    tools.update_context(prepared.file.clone());
 
     {
         let mut guard = repomap.write().await;
@@ -495,16 +510,13 @@ async fn run_legacy_line_edit_job(
         return JobRunOutcome::Cancelled;
     }
 
-    match apply_legacy_line_edit_response(parsed, request, &cfg).await {
+    match apply_legacy_line_edit_response_via_tools(parsed, request, &cfg, &fs_tools).await {
         Ok(changed_path) => {
             ui_tx.send_logged(format!(
                 "[edit-symbol] Patch applied to {}",
                 make_relative_display(&changed_path, &cfg.project_root)
             ));
 
-            let relative_for_session = make_relative_path(&changed_path, &cfg.project_root)
-                .unwrap_or(changed_path.clone());
-            let _ = fs_tools.update_session_with_changed_file(relative_for_session);
             ui_tx.send_logged("::status:done".to_string());
             JobRunOutcome::Completed
         }
@@ -541,8 +553,88 @@ fn truncate_for_log(raw: &str) -> String {
 
 /// Legacy line-range apply for `/fix` (diff or replacement via `apply_patch`).
 ///
-/// The transactional semantic path never uses this; it is kept so `/fix`
-/// behavior is unchanged.
+/// Routed through the unified mutation transaction
+/// (`apply_patch_with_receipt` + `finalize_mutation`) so undo, session,
+/// provenance, and verification attribution stay consistent.
+pub async fn apply_legacy_line_edit_response_via_tools(
+    response: SymbolEditResponse,
+    request: SymbolEditRequest,
+    cfg: &AppConfig,
+    fs_tools: &FsTools,
+) -> Result<PathBuf> {
+    let absolute_path = resolve_absolute_path(&request.target.file, &cfg.project_root);
+    let file_content = fs::read_to_string(&absolute_path)
+        .await
+        .with_context(|| format!("failed to read {}", absolute_path.display()))?;
+
+    let normalized_file = normalize_newlines(&file_content);
+    let normalized_original = normalize_newlines(&request.original_code);
+    let current_target = extract_target_block_from_content(
+        &normalized_file,
+        request.target.start_line,
+        request.target.end_line,
+    );
+
+    if current_target != normalized_original {
+        anyhow::bail!(
+            "Symbol content changed on disk since the request was created. Please rerun /edit-symbol."
+        );
+    }
+
+    let patch_content = if let Some(patch) = response.patch {
+        normalize_llm_patch(&patch, &absolute_path, &cfg.project_root)
+    } else if let Some(replacement) = response.replacement {
+        build_patch_from_replacement(
+            &normalized_file,
+            request.target.start_line,
+            request.target.end_line,
+            &replacement,
+        )?
+    } else {
+        anyhow::bail!("LLM response did not include a diff or replacement block.");
+    };
+
+    if patch_content.trim().is_empty() {
+        anyhow::bail!("LLM response produced an empty patch.");
+    }
+
+    let params = ApplyPatchParams {
+        file_path: absolute_path
+            .canonicalize()
+            .unwrap_or_else(|_| absolute_path.clone())
+            .to_string_lossy()
+            .to_string(),
+        patch_content,
+    };
+
+    let mut exec = crate::tools::apply_patch::apply_patch_with_recovery_and_receipt(params, cfg)
+        .await
+        .context("failed to apply patch")?;
+
+    if !exec.result.success {
+        anyhow::bail!(exec.result.message);
+    }
+    if let Some(receipt) = exec.receipt.take() {
+        let report = fs_tools
+            .finalize_mutation(
+                receipt,
+                crate::tools::FinalizeMutationOptions {
+                    record_undo: true,
+                    reverts_change_id: None,
+                },
+            )
+            .await;
+        exec.result.warnings.extend(report.warnings);
+    }
+
+    Ok(absolute_path)
+}
+
+/// Legacy line-range apply for `/fix` (diff or replacement via `apply_patch`).
+///
+/// Kept as a pure fallback without session/provenance side effects.
+/// Prefer [`apply_legacy_line_edit_response_via_tools`] for job paths.
+#[allow(dead_code)]
 pub async fn apply_legacy_line_edit_response(
     response: SymbolEditResponse,
     request: SymbolEditRequest,
@@ -551,6 +643,7 @@ pub async fn apply_legacy_line_edit_response(
     apply_symbol_edit_response(response, request, cfg).await
 }
 
+#[allow(dead_code)]
 pub async fn apply_symbol_edit_response(
     response: SymbolEditResponse,
     request: SymbolEditRequest,

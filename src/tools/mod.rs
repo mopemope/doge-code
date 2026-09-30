@@ -1,6 +1,7 @@
 pub mod apply_patch;
 pub mod budget;
 mod common;
+pub mod mutation;
 pub mod scope;
 
 #[derive(thiserror::Error, Debug)]
@@ -34,7 +35,7 @@ pub mod write;
 
 pub mod shell;
 
-pub use common::FsTools;
+pub use common::{FinalizeMutationOptions, FsTools, MutationFinalizeReport};
 
 #[cfg(test)]
 mod common_test;
