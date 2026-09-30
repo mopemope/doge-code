@@ -47,7 +47,10 @@ impl TuiApp {
                         "[SYSTEM NOTE] The user rejected the previous changes and the affected files were reverted to their pre-change state. Take this into account when proceeding.\n\n{}",
                         instruction
                     );
-                    self.dispatch(&instruction_with_note);
+                    // Keep the exact typed bytes as raw input; the system
+                    // note only augments the effective instruction so it can
+                    // never be persisted as user raw input.
+                    self.dispatch_augmented_user_prompt(&instruction, &instruction_with_note);
                 } else {
                     self.dispatch(&instruction);
                 }
@@ -202,8 +205,9 @@ impl TuiApp {
                             )
                             .text;
                             self.push_log(format!("> {}", prompt));
-                            self.last_user_input = Some(prompt.clone());
-                            self.dispatch(&prompt);
+                            // Synthetic analysis: internal turn with no user
+                            // directive (never touches last_user_input).
+                            self.dispatch_internal_followup(&prompt);
                         } else {
                             self.push_log(format!(
                                 "[lint][warn] Failed to parse lint issues: {}",
@@ -218,8 +222,7 @@ impl TuiApp {
                         self.push_log("[lint] Sending output to LLM...");
                         self.dirty = true;
                         self.push_log(format!("> {}", prompt));
-                        self.last_user_input = Some(prompt.to_string());
-                        self.dispatch(prompt);
+                        self.dispatch_internal_followup(prompt);
                         continue;
                     }
 
@@ -227,8 +230,18 @@ impl TuiApp {
                         self.push_log("[test] Sending failures to LLM...");
                         self.dirty = true;
                         self.push_log(format!("> {}", prompt));
-                        self.last_user_input = Some(prompt.to_string());
-                        self.dispatch(prompt);
+                        self.dispatch_internal_followup(prompt);
+                        continue;
+                    }
+
+                    if let Some(rest) = msg.strip_prefix("::directive_observed:") {
+                        // Paired delivery `::<seq>:<id>`; stale or malformed
+                        // ids never overwrite the currently tracked turn.
+                        if let Some((seq, id)) = rest.split_once(':')
+                            && let Ok(seq) = seq.trim().parse::<u64>()
+                        {
+                            self.note_directive_observed(seq, id.trim());
+                        }
                         continue;
                     }
 
@@ -434,7 +447,9 @@ impl TuiApp {
                         self.dirty = true;
                         if let Some(last_input) = self.last_user_input.clone() {
                             self.push_log("[AUTO] Retrying last user input.".to_string());
-                            self.dispatch(&last_input);
+                            // Replay inherits the original directive id when
+                            // known; never records a duplicate observation.
+                            self.dispatch_retry_after_compact(&last_input);
                         }
                         continue;
                     }
