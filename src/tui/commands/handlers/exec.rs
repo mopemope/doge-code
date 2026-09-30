@@ -16,8 +16,16 @@ impl TuiExecutor {
             let content = line.to_string();
             // `spawn_agent_turn` owns session creation, history updates, and
             // the foreground reservation so busy rejections stay clean.
+            // Plain user input is a freshly observed TuiPrompt directive.
             let _ = crate::tui::commands::agent_job::spawn_agent_turn(
-                self, ui, line, content, skip_plan,
+                self,
+                ui,
+                line,
+                content,
+                skip_plan,
+                crate::tui::commands::agent_job::AgentTurnProvenance::ObserveUserPrompt {
+                    raw_input: line.to_string(),
+                },
             );
         } else {
             self.handle_custom_command(line, ui);

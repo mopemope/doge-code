@@ -243,6 +243,23 @@ pub struct TuiApp {
     pub hide_plan_on_next_instruction: bool,
     // last user input for retrying after compact
     pub last_user_input: Option<String>,
+    /// Directive id of the last freshly observed user directive, delivered
+    /// asynchronously via `::directive_observed:<seq>:<id>`. Paired with
+    /// `last_observed_raw_input` so compact retry can inherit the original
+    /// event instead of recording a duplicate. Cleared when a new observed
+    /// turn spawns (until its id arrives) and never set by internal turns.
+    pub last_observed_directive_id: Option<String>,
+    /// Exact raw bytes of the last freshly observed user directive.
+    pub last_observed_raw_input: Option<String>,
+    /// Effective instruction of the last freshly observed user directive
+    /// (expanded custom-command body, or system-note augmented prompt).
+    /// Compact retry replays this content so a custom command is re-executed
+    /// as its expansion rather than as a literal slash string.
+    pub last_observed_effective_input: Option<String>,
+    /// Monotonic sequence pairing observed spawns with their async
+    /// `::directive_observed:<seq>:<id>` delivery. Guards against a stale
+    /// id from a cancelled/older turn attaching to a newer turn's raw input.
+    pub last_observed_seq: u64,
     // session list state
     pub session_list_state: Option<SessionListState>,
     // history search state
@@ -478,6 +495,10 @@ impl TuiApp {
             hide_plan_on_next_instruction: false,
             // last user input for retrying after compact
             last_user_input: None,
+            last_observed_directive_id: None,
+            last_observed_raw_input: None,
+            last_observed_effective_input: None,
+            last_observed_seq: 0,
             // session list state
             session_list_state: None,
             history_search_state: None,
@@ -873,6 +894,74 @@ impl TuiApp {
             return;
         }
         self.push_log(format!("> {}", line));
+    }
+
+    /// Synthetic follow-up with no user directive. Bypasses string routing
+    /// so generated text can never be recorded as a user observation.
+    pub fn dispatch_internal_followup(&mut self, content: &str) {
+        self.last_llm_response_content = None;
+        if self.handler.is_some() {
+            let mut handler = self.handler.take().unwrap();
+            handler.handle_internal_followup(content, self);
+            self.handler = Some(handler);
+            return;
+        }
+        self.push_log(format!("> {}", content));
+    }
+
+    /// Replay of the last user turn after compact. Inherits the original
+    /// directive id when it still matches the retried input; otherwise runs
+    /// with `none()` attribution (never a fresh duplicate observation).
+    /// The replayed agent content is the originally observed effective
+    /// instruction (so custom-command expansions survive the retry) while
+    /// `content` (the raw typed bytes) is only used for log display and id
+    /// matching.
+    pub fn dispatch_retry_after_compact(&mut self, content: &str) {
+        self.last_llm_response_content = None;
+        let (directive_id, effective) = match (
+            &self.last_observed_directive_id,
+            &self.last_observed_raw_input,
+            &self.last_observed_effective_input,
+        ) {
+            (Some(id), Some(raw), Some(eff)) if raw.as_str() == content => {
+                (Some(id.clone()), eff.clone())
+            }
+            _ => (None, content.to_string()),
+        };
+        if self.handler.is_some() {
+            let mut handler = self.handler.take().unwrap();
+            handler.handle_retry_turn(content, &effective, directive_id, self);
+            self.handler = Some(handler);
+            return;
+        }
+        self.push_log(format!("> {}", content));
+    }
+
+    /// Real user prompt augmented with a system note. Keeps the exact typed
+    /// `raw` separate from the `effective` instruction handed to the agent.
+    pub fn dispatch_augmented_user_prompt(&mut self, raw: &str, effective: &str) {
+        self.last_llm_response_content = None;
+        if self.hide_plan_on_next_instruction {
+            self.plan_list.clear();
+            self.hide_plan_on_next_instruction = false;
+        }
+        if self.handler.is_some() {
+            let mut handler = self.handler.take().unwrap();
+            handler.handle_augmented_user_prompt(raw, effective, self);
+            self.handler = Some(handler);
+            return;
+        }
+        self.push_log(format!("> {}", raw));
+    }
+
+    /// Record the directive id reported by a freshly observed AgentTurn.
+    /// Only accepted when the sequence matches the currently tracked turn
+    /// and a raw input is tracked; stale ids from cancelled/older turns and
+    /// stray ids never overwrite unrelated state.
+    pub fn note_directive_observed(&mut self, seq: u64, directive_id: &str) {
+        if self.last_observed_raw_input.is_some() && self.last_observed_seq == seq {
+            self.last_observed_directive_id = Some(directive_id.to_string());
+        }
     }
 
     pub fn run(&mut self) -> Result<()> {
