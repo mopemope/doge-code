@@ -282,6 +282,71 @@ pub fn capture_verification_context_for_fs_with_attribution(
     )
 }
 
+/// Pre-execution capture with obligation attribution frozen.
+///
+/// Must be called before the process starts. In addition to the base
+/// requirement/change snapshot, it freezes which current obligations this
+/// invocation matches (id + binding hash). Later plan edits never rewrite it.
+pub fn capture_verification_context_for_invocation(
+    fs_tools: &FsTools,
+    attribution: &ProvenanceAttribution,
+    kind: crate::provenance::VerificationKind,
+    program: &str,
+    args: &[String],
+) -> crate::provenance::VerificationContext {
+    let plan_items = match fs_tools.plan_read() {
+        Ok(plan) => plan.items,
+        Err(_) => Vec::new(),
+    };
+    let (active_ids, change_reqs, active_plan_ids) = match load_current_events(fs_tools) {
+        Ok(Some(loaded)) => {
+            let active =
+                crate::provenance::active_change_ids(&fs_tools.config.project_root, &loaded.events);
+            let active_set: std::collections::HashSet<&str> =
+                active.iter().map(String::as_str).collect();
+            let mut per_change: Vec<Vec<String>> = Vec::new();
+            let mut plan_ids: Vec<String> = Vec::new();
+            for env in &loaded.events {
+                if !active_set.contains(env.event_id.as_str()) {
+                    continue;
+                }
+                if let crate::provenance::ProvenanceEvent::ChangeCommitted(c) = &env.event {
+                    if !c.requirement_ids.is_empty() {
+                        per_change.push(c.requirement_ids.clone());
+                    }
+                    if let Some(pid) = &c.plan_item_id
+                        && !plan_ids.contains(pid)
+                    {
+                        plan_ids.push(pid.clone());
+                    }
+                }
+            }
+            (active, per_change, plan_ids)
+        }
+        _ => (Vec::new(), Vec::new(), Vec::new()),
+    };
+    let plan_links: std::collections::HashMap<String, Vec<String>> = plan_items
+        .iter()
+        .map(|i| (i.id.clone(), i.requirement_ids.clone()))
+        .collect();
+    let mut ctx = crate::provenance::verification::capture_verification_context_full(
+        &plan_items,
+        &active_ids,
+        &change_reqs,
+        attribution.directive_id.clone(),
+        &plan_links,
+    );
+    ctx.matched_obligations =
+        crate::provenance::obligations::capture_verification_context_for_invocation(
+            &plan_items,
+            &active_plan_ids,
+            kind,
+            program,
+            args,
+        );
+    ctx
+}
+
 /// Project-relative cwd evidence, or `None` for the project root default.
 ///
 /// Returns `None` when `cwd` is absent or cannot be relativized under the
@@ -443,11 +508,13 @@ fn sorted_ids(ids: &[String]) -> Vec<&str> {
 
 /// Diff two plan snapshots into per-item transitions.
 ///
-/// Only items whose status, content, parent, or requirement links changed
-/// (plus new/deleted items) are included. A no-op write produces no
-/// transitions. Requirement-link-only edits also produce a transition.
+/// Only items whose status, content, parent, requirement links, or
+/// verification obligations changed (plus new/deleted items) are included.
+/// A no-op write produces no transitions. Requirement-link-only and
+/// obligation-only edits also produce a transition.
 /// Requirement id order is insignificant: links compare as sorted sets so a
-/// pure reorder is a no-op.
+/// pure reorder is a no-op. Obligation order is insignificant (sorted by id);
+/// `args_prefix` order is significant and preserved.
 pub fn diff_plan_transitions(
     before: &[crate::tools::plan::PlanItem],
     after: &[crate::tools::plan::PlanItem],
@@ -477,6 +544,10 @@ pub fn diff_plan_transitions(
                     || b.content != a.content
                     || b.parent_id != a.parent_id
                     || sorted_ids(&b.requirement_ids) != sorted_ids(&a.requirement_ids)
+                    || !crate::tools::plan::obligations_equal(
+                        &b.verification_obligations,
+                        &a.verification_obligations,
+                    )
                 {
                     out.push(crate::provenance::PlanItemTransition {
                         plan_item_id: id.to_string(),
@@ -485,7 +556,9 @@ pub fn diff_plan_transitions(
                         before_status: Some(b.status.clone()),
                         after_status: Some(a.status.clone()),
                         before_requirement_ids: b.requirement_ids.clone(),
+                        before_verification_obligations: b.verification_obligations.clone(),
                         after_requirement_ids: a.requirement_ids.clone(),
+                        after_verification_obligations: a.verification_obligations.clone(),
                     });
                 }
             }
@@ -496,7 +569,9 @@ pub fn diff_plan_transitions(
                 before_status: None,
                 after_status: Some(a.status.clone()),
                 before_requirement_ids: Vec::new(),
+                before_verification_obligations: Vec::new(),
                 after_requirement_ids: a.requirement_ids.clone(),
+                after_verification_obligations: a.verification_obligations.clone(),
             }),
             (Some(b), None) => out.push(crate::provenance::PlanItemTransition {
                 plan_item_id: id.to_string(),
@@ -505,7 +580,9 @@ pub fn diff_plan_transitions(
                 before_status: Some(b.status.clone()),
                 after_status: None,
                 before_requirement_ids: b.requirement_ids.clone(),
+                before_verification_obligations: b.verification_obligations.clone(),
                 after_requirement_ids: Vec::new(),
+                after_verification_obligations: Vec::new(),
             }),
             (None, None) => {}
         }
@@ -545,19 +622,24 @@ pub fn record_plan_changed_with_attribution(
     Ok(Some(store.append(&ctx.session_id, event)?))
 }
 
-/// Warnings for newly completed items whose linked active changes have no
-/// successful verification observation. Never blocks completion.
+/// Warnings for newly completed items.
+///
+/// - When a completed item has verification obligations, warn for obligations
+///   not in `ObservedPassing` (pending/failing/stale/diverged/reverted/mixed).
+///   Passing items may be omitted for brevity. Research-only items with
+///   `NoLinkedChange` produce no warning. Never blocks completion.
+/// - When an item has no obligations, keep the legacy behavior: warn when
+///   linked active changes have no successful verification observation.
 pub fn plan_completion_warnings(
     fs_tools: &FsTools,
     transitions: &[crate::provenance::PlanItemTransition],
 ) -> Vec<String> {
-    let completed: Vec<&str> = transitions
+    let completed: Vec<&crate::provenance::PlanItemTransition> = transitions
         .iter()
         .filter(|t| {
             t.after_status.as_deref() == Some("completed")
                 && t.before_status.as_deref() != Some("completed")
         })
-        .map(|t| t.plan_item_id.as_str())
         .collect();
     if completed.is_empty() {
         return Vec::new();
@@ -578,8 +660,70 @@ pub fn plan_completion_warnings(
             }
         }
     }
+    // Obligation coverage (current plan + events). Best-effort: on plan-read
+    // failure fall back to transition obligations only.
+    let current_plan_items = fs_tools.plan_read().map(|p| p.items).unwrap_or_default();
+    let obligation_coverages = crate::provenance::obligations::compute_obligation_coverage(
+        &fs_tools.config.project_root,
+        &loaded.events,
+        &current_plan_items,
+    );
     let mut warnings = Vec::new();
-    for item_id in completed {
+    for t in completed {
+        // Obligations for this item: prefer current plan, fall back to transition.
+        // Check `before` as well so deleting obligations in the completion write
+        // cannot silence the warning (must not rewrite history to skip checks).
+        let item_coverages: Vec<&crate::provenance::obligations::ObligationCoverage> =
+            obligation_coverages
+                .iter()
+                .filter(|c| c.plan_item_id == t.plan_item_id)
+                .collect();
+        // If current plan has no obligations for this item (e.g. plan read
+        // failed, item deleted, or obligations removed in this write), use the
+        // transition's before/after obligations with a lightweight state note.
+        // For now, empty means legacy path.
+        let has_obligations = if !item_coverages.is_empty() {
+            true
+        } else {
+            !t.after_verification_obligations.is_empty()
+                || !t.before_verification_obligations.is_empty()
+        };
+        if has_obligations && !item_coverages.is_empty() {
+            let mut incomplete: Vec<String> = Vec::new();
+            for c in &item_coverages {
+                match c.state {
+                    crate::provenance::obligations::VerificationObligationEvidenceState::ObservedPassing => {}
+                    crate::provenance::obligations::VerificationObligationEvidenceState::NoLinkedChange => {}
+                    _ => {
+                        incomplete.push(format!(
+                            "- {}: {}",
+                            c.obligation_id,
+                            c.state.as_str()
+                        ));
+                    }
+                }
+            }
+            if !incomplete.is_empty() {
+                warnings.push(format!(
+                    "Plan item '{}' was completed with incomplete verification obligations:\n{}",
+                    t.plan_item_id,
+                    incomplete.join("\n")
+                ));
+            }
+            // Obligation path wins; skip legacy duplicate for this item.
+            continue;
+        }
+        if has_obligations {
+            // Transition has obligations but coverage missing (plan read failed).
+            // Fall back to a generic obligation warning rather than legacy.
+            warnings.push(format!(
+                "Plan item '{}' was completed with verification obligations; obligation state could not be resolved.",
+                t.plan_item_id
+            ));
+            continue;
+        }
+        // Legacy path: no obligations.
+        let item_id = t.plan_item_id.as_str();
         let linked_active: Vec<&crate::provenance::ResolvedChangeState> = resolved
             .iter()
             .filter(|r| {
@@ -644,6 +788,62 @@ pub fn plan_requirement_link_warnings(
     out
 }
 
+/// Enrich a plain diff payload with provenance evidence.
+///
+/// Git diff collection stays separate; this helper only queries provenance.
+/// Never fails the diff: missing sessions, plan-read failures, or provenance
+/// load failures become `evidence_warnings` and the original diff is kept.
+pub fn enrich_diff_review_with_evidence(
+    fs_tools: &FsTools,
+    payload: crate::diff_review::DiffReviewPayload,
+) -> crate::diff_review::DiffReviewPayload {
+    let project_root = &fs_tools.config.project_root;
+    let (events, mut warnings) = match load_current_events(fs_tools) {
+        Ok(Some(loaded)) => (loaded.events, loaded.warnings),
+        Ok(None) => (
+            Vec::new(),
+            vec!["No current session for diff evidence.".to_string()],
+        ),
+        Err(e) => {
+            let mut p = payload;
+            p.evidence_warnings.push(format!(
+                "Diff evidence unavailable: provenance load failed: {e}"
+            ));
+            return p;
+        }
+    };
+    let plan_items = match fs_tools.plan_read() {
+        Ok(plan) => plan.items,
+        Err(e) => {
+            let mut p = payload;
+            p.evidence_warnings
+                .push(format!("Diff evidence incomplete: plan read failed: {e}"));
+            // Still try with empty plan (file -> change linkage only).
+            let (evidence, mut w) = crate::diff_review::build_diff_review_evidence(
+                project_root,
+                &events,
+                &[],
+                &p.files,
+            );
+            p.evidence = evidence;
+            p.evidence_warnings.append(&mut w);
+            p.evidence_warnings.append(&mut warnings);
+            return p;
+        }
+    };
+    let (evidence, mut build_warnings) = crate::diff_review::build_diff_review_evidence(
+        project_root,
+        &events,
+        &plan_items,
+        &payload.files,
+    );
+    let mut out = payload;
+    out.evidence = evidence;
+    out.evidence_warnings.append(&mut build_warnings);
+    out.evidence_warnings.append(&mut warnings);
+    out
+}
+
 /// `provenance_read` tool: read-only inspection of plan/change/verification
 /// links plus coverage. Never writes evidence.
 pub fn tool_def() -> ToolDef {
@@ -659,6 +859,7 @@ pub fn tool_def() -> ToolDef {
                     "plan_item_id": {"type": "string", "description": "Filter to one plan item id"},
                     "directive_id": {"type": "string", "description": "Filter to one directive id"},
                     "requirement_id": {"type": "string", "description": "Filter to one requirement id"},
+                    "verification_obligation_id": {"type": "string", "description": "Filter to one verification obligation id (plan obligation transitions + matched verifications)"},
                     "event_types": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["directive_observed", "requirement_changed", "plan_changed", "change_committed", "verification_observed"]},
@@ -685,6 +886,8 @@ pub struct ProvenanceReadArgs {
     pub directive_id: Option<String>,
     #[serde(default)]
     pub requirement_id: Option<String>,
+    #[serde(default)]
+    pub verification_obligation_id: Option<String>,
     #[serde(default)]
     pub event_types: Option<Vec<crate::provenance::ProvenanceEventType>>,
     #[serde(default)]
@@ -800,7 +1003,7 @@ pub fn provenance_read(
     let loaded = store.load_all()?;
     let mut warnings = loaded.warnings.clone();
 
-    // Filter by type + plan/directive/requirement, preserving (timestamp, event_id) order.
+    // Filter by type + plan/directive/requirement/obligation, preserving (timestamp, event_id) order.
     let wanted: Option<std::collections::HashSet<crate::provenance::ProvenanceEventType>> =
         args.event_types.map(|v| v.into_iter().collect());
     let mut filtered: Vec<&ProvenanceEventEnvelope> = loaded
@@ -824,6 +1027,11 @@ pub fn provenance_read(
             }
             if let Some(req) = &args.requirement_id
                 && !event_matches_requirement(&env.event, req)
+            {
+                return false;
+            }
+            if let Some(ob) = &args.verification_obligation_id
+                && !event_matches_obligation(&env.event, ob)
             {
                 return false;
             }
@@ -936,6 +1144,25 @@ fn event_matches_requirement(event: &ProvenanceEvent, req: &str) -> bool {
     }
 }
 
+fn event_matches_obligation(event: &ProvenanceEvent, obligation_id: &str) -> bool {
+    match event {
+        ProvenanceEvent::DirectiveObserved(_)
+        | ProvenanceEvent::RequirementChanged(_)
+        | ProvenanceEvent::ChangeCommitted(_) => false,
+        ProvenanceEvent::PlanChanged(e) => e.changes.iter().any(|c| {
+            c.before_verification_obligations
+                .iter()
+                .any(|o| o.id == obligation_id)
+                || c.after_verification_obligations
+                    .iter()
+                    .any(|o| o.id == obligation_id)
+        }),
+        ProvenanceEvent::VerificationObserved(v) => {
+            v.matched_obligations.iter().any(|m| m.id == obligation_id)
+        }
+    }
+}
+
 fn summarize_event(
     env: &ProvenanceEventEnvelope,
     include_diff: bool,
@@ -1002,6 +1229,14 @@ fn summarize_event(
                     "after_status": c.after_status,
                     "before_requirement_ids": c.before_requirement_ids,
                     "after_requirement_ids": c.after_requirement_ids,
+                    "before_verification_obligations": c.before_verification_obligations.iter().map(|o| serde_json::json!({
+                        "id": o.id,
+                        "kind": o.kind,
+                    })).collect::<Vec<_>>(),
+                    "after_verification_obligations": c.after_verification_obligations.iter().map(|o| serde_json::json!({
+                        "id": o.id,
+                        "kind": o.kind,
+                    })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
             })
         }
@@ -1074,6 +1309,7 @@ fn summarize_event(
                 "exit_code": v.outcome.exit_code,
                 "timed_out": v.outcome.timed_out,
                 "observed_change_ids": v.observed_change_ids,
+                "matched_obligations": v.matched_obligations,
                 "output_digest": v.output_digest,
                 "output_truncated": v.output_truncated,
             });
@@ -1159,6 +1395,7 @@ mod tests {
             content: "a".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let t = diff_plan_transitions(&before, &after);
         assert_eq!(t.len(), 1);
@@ -1178,6 +1415,7 @@ mod tests {
                 content: "a".into(),
                 status: "completed".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -1185,6 +1423,7 @@ mod tests {
                 content: "b".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         assert_eq!(
@@ -1281,6 +1520,7 @@ mod tests {
         let ctx_a = crate::provenance::VerificationContext {
             plan_item_id: Some("step-1".into()),
             observed_change_ids: vec!["change-A".to_string()],
+            matched_obligations: Vec::new(),
             directive_id: None,
             requirement_ids: Vec::new(),
         };
@@ -1387,6 +1627,7 @@ mod provenance_extra_tests {
                     content: "a".into(),
                     status: "pending".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 },
                 crate::tools::plan::PlanItem {
                     id: "step-2".into(),
@@ -1394,6 +1635,7 @@ mod provenance_extra_tests {
                     content: "b".into(),
                     status: "in_progress".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 },
             ],
             crate::tools::plan::PlanWriteMode::Replace,
@@ -1451,6 +1693,7 @@ mod provenance_extra_tests {
                     content: "a".into(),
                     status: "pending".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 },
                 crate::tools::plan::PlanItem {
                     id: "step-2".into(),
@@ -1458,6 +1701,7 @@ mod provenance_extra_tests {
                     content: "b".into(),
                     status: "completed".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 },
             ],
             crate::tools::plan::PlanWriteMode::Replace,
@@ -1506,7 +1750,7 @@ mod provenance_extra_tests {
         assert!(after_commit.contains("2;"));
         // Break provenance writes: a file where the events dir should be.
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v3/events");
+        let events_dir = ctx.session_dir.join("provenance/v4/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         // `before_content` is irrelevant here: the append fails before any
@@ -1572,6 +1816,7 @@ mod provenance_extra_tests {
                 content: "x".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "b".into(),
@@ -1579,6 +1824,7 @@ mod provenance_extra_tests {
                 content: "y".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "gone".into(),
@@ -1586,6 +1832,7 @@ mod provenance_extra_tests {
                 content: "z".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let after = vec![
@@ -1595,6 +1842,7 @@ mod provenance_extra_tests {
                 content: "x".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "b".into(),
@@ -1602,6 +1850,7 @@ mod provenance_extra_tests {
                 content: "y".into(),
                 status: "completed".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "new".into(),
@@ -1609,6 +1858,7 @@ mod provenance_extra_tests {
                 content: "n".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let t = diff_plan_transitions(&before, &after);
@@ -1630,6 +1880,7 @@ mod provenance_extra_tests {
             content: "a".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let first = fs
             .plan_write(items.clone(), crate::tools::plan::PlanWriteMode::Replace)
@@ -1656,6 +1907,7 @@ mod provenance_extra_tests {
                 content: "work".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1696,6 +1948,7 @@ mod provenance_extra_tests {
                     content: "work".into(),
                     status: "completed".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -1715,6 +1968,7 @@ mod provenance_extra_tests {
                         content: "work".into(),
                         status: "completed".into(),
                         requirement_ids: Vec::new(),
+                        verification_obligations: Vec::new(),
                     },
                     crate::tools::plan::PlanItem {
                         id: "research".into(),
@@ -1722,6 +1976,7 @@ mod provenance_extra_tests {
                         content: "read docs".into(),
                         status: "completed".into(),
                         requirement_ids: Vec::new(),
+                        verification_obligations: Vec::new(),
                     },
                 ],
                 crate::tools::plan::PlanWriteMode::Replace,
@@ -1741,6 +1996,7 @@ mod provenance_extra_tests {
                 content: "work".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1781,6 +2037,7 @@ mod provenance_extra_tests {
                 context: crate::provenance::VerificationContext {
                     plan_item_id: Some("step-1".into()),
                     observed_change_ids: vec![change_env.event_id.clone()],
+                    matched_obligations: Vec::new(),
                     directive_id: None,
                     requirement_ids: Vec::new(),
                 },
@@ -1801,6 +2058,7 @@ mod provenance_extra_tests {
                     content: "work".into(),
                     status: "completed".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -1822,6 +2080,7 @@ mod provenance_extra_tests {
                 content: "a".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1835,6 +2094,7 @@ mod provenance_extra_tests {
                     content: "a".into(),
                     status: "completed".into(),
                     requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -2011,7 +2271,7 @@ mod review_fix_tests {
     fn test_tui_record_returns_false_and_marks_session_on_failure() {
         let (_proj, fs) = setup();
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v3/events");
+        let events_dir = ctx.session_dir.join("provenance/v4/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         let ok = record_tui_test_verification(
@@ -2055,5 +2315,537 @@ mod review_fix_tests {
         let mut w2 = Vec::new();
         budget_coverage(&mut small, 600, &mut w2);
         assert!(w2.is_empty());
+    }
+
+    fn obligation_for_test(id: &str) -> crate::tools::plan::VerificationObligation {
+        crate::tools::plan::VerificationObligation {
+            id: id.to_string(),
+            description: "desc".to_string(),
+            kind: crate::provenance::VerificationKind::Test,
+            command: Some(crate::tools::plan::VerificationCommandMatcher {
+                program: "cargo".to_string(),
+                args_prefix: vec!["test".to_string()],
+            }),
+        }
+    }
+
+    #[test]
+    fn test_diff_plan_transitions_obligation_only() {
+        use crate::tools::plan::PlanItem;
+        let before = vec![PlanItem {
+            id: "step-1".into(),
+            parent_id: None,
+            content: "a".into(),
+            status: "pending".into(),
+            requirement_ids: Vec::new(),
+            verification_obligations: vec![],
+        }];
+        let after = vec![PlanItem {
+            id: "step-1".into(),
+            parent_id: None,
+            content: "a".into(),
+            status: "pending".into(),
+            requirement_ids: Vec::new(),
+            verification_obligations: vec![obligation_for_test("vo-1")],
+        }];
+        let t = diff_plan_transitions(&before, &after);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].after_verification_obligations.len(), 1);
+        // Pure reorder is no-op.
+        let a = vec![PlanItem {
+            id: "step-1".into(),
+            parent_id: None,
+            content: "a".into(),
+            status: "pending".into(),
+            requirement_ids: Vec::new(),
+            verification_obligations: vec![
+                obligation_for_test("vo-1"),
+                obligation_for_test("vo-2"),
+            ],
+        }];
+        let b = vec![PlanItem {
+            id: "step-1".into(),
+            parent_id: None,
+            content: "a".into(),
+            status: "pending".into(),
+            requirement_ids: Vec::new(),
+            verification_obligations: vec![
+                obligation_for_test("vo-2"),
+                obligation_for_test("vo-1"),
+            ],
+        }];
+        assert!(diff_plan_transitions(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn test_completion_warning_all_passing_no_warning() {
+        // Obligation passing -> no warning. Uses file-based active change +
+        // verification with frozen binding.
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-1");
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob.clone()],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let root = fs.config.project_root.clone();
+        std::fs::write(root.join("a.txt"), "h0\n").unwrap();
+        std::fs::write(root.join("a.txt"), "h1\n").unwrap();
+        // Record change via FsTools finalize path (text edit).
+        let receipt = crate::tools::mutation::MutationReceipt {
+            kind: crate::provenance::ChangeKind::TextEdit,
+            path: root.join("a.txt"),
+            before: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h0\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h0\n")),
+                byte_len: Some(3),
+            },
+            after: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h1\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h1\n")),
+                byte_len: Some(3),
+            },
+            target: crate::tools::mutation::MutationTargetReceipt::File,
+            diff: "d".to_string(),
+            lines_added: 1,
+            lines_removed: 1,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = rt.block_on(fs.finalize_mutation(
+            receipt,
+            crate::tools::FinalizeMutationOptions {
+                record_undo: false,
+                reverts_change_id: None,
+                attribution: crate::provenance::ProvenanceAttribution::none(),
+            },
+        ));
+        let change_id = report.change_id.expect("change recorded");
+        // Verification observing the change with correct binding.
+        let binding = crate::provenance::obligations::obligation_binding_hash("step-1", &[], &ob);
+        let ctx = crate::provenance::VerificationContext {
+            directive_id: None,
+            plan_item_id: Some("step-1".to_string()),
+            requirement_ids: vec![],
+            observed_change_ids: vec![change_id.clone()],
+            matched_obligations: vec![crate::provenance::VerificationObligationRef {
+                id: "vo-1".to_string(),
+                binding_hash: binding,
+            }],
+        };
+        let event = crate::provenance::build_verification_event(
+            crate::provenance::VerificationRecordInput {
+                kind: crate::provenance::VerificationKind::Test,
+                source: crate::provenance::VerificationSource::ExecuteProcess,
+                program: "cargo",
+                args: &["test".to_string()],
+                cwd_relative: None,
+                success: true,
+                status: "completed",
+                exit_code: Some(0),
+                timed_out: false,
+                stdout: "ok",
+                stderr: "",
+                capture_truncated: false,
+                context: ctx,
+                extra_warnings: vec![],
+            },
+        );
+        let store = ProvenanceStore::new(fs.current_session_storage_context().unwrap().session_dir);
+        let sid = fs.current_session_storage_context().unwrap().session_id;
+        store
+            .append(&sid, ProvenanceEvent::VerificationObserved(event))
+            .unwrap();
+        // Complete -> no obligation warning.
+        let res = fs
+            .plan_write(
+                vec![crate::tools::plan::PlanItem {
+                    id: "step-1".into(),
+                    parent_id: None,
+                    content: "work".into(),
+                    status: "completed".into(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: vec![ob],
+                }],
+                crate::tools::plan::PlanWriteMode::Replace,
+            )
+            .unwrap();
+        assert!(
+            !res.warnings
+                .iter()
+                .any(|w| w.contains("verification obligations")),
+            "warnings: {:?}",
+            res.warnings
+        );
+    }
+
+    #[test]
+    fn test_completion_warning_pending_and_stale() {
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-pending");
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob.clone()],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let root = fs.config.project_root.clone();
+        std::fs::write(root.join("a.txt"), "h0\n").unwrap();
+        std::fs::write(root.join("a.txt"), "h1\n").unwrap();
+        let receipt = crate::tools::mutation::MutationReceipt {
+            kind: crate::provenance::ChangeKind::TextEdit,
+            path: root.join("a.txt"),
+            before: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h0\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h0\n")),
+                byte_len: Some(3),
+            },
+            after: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h1\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h1\n")),
+                byte_len: Some(3),
+            },
+            target: crate::tools::mutation::MutationTargetReceipt::File,
+            diff: "d".to_string(),
+            lines_added: 1,
+            lines_removed: 1,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(fs.finalize_mutation(
+            receipt,
+            crate::tools::FinalizeMutationOptions {
+                record_undo: false,
+                reverts_change_id: None,
+                attribution: crate::provenance::ProvenanceAttribution::none(),
+            },
+        ));
+        // Complete with pending (no verification) -> warning.
+        let res = fs
+            .plan_write(
+                vec![crate::tools::plan::PlanItem {
+                    id: "step-1".into(),
+                    parent_id: None,
+                    content: "work".into(),
+                    status: "completed".into(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: vec![ob],
+                }],
+                crate::tools::plan::PlanWriteMode::Replace,
+            )
+            .unwrap();
+        assert!(
+            res.warnings
+                .iter()
+                .any(|w| w.contains("vo-pending") && w.contains("pending"))
+        );
+    }
+
+    #[test]
+    fn test_completion_legacy_when_no_obligation() {
+        // No obligation -> legacy semantics preserved (covered by existing
+        // test_plan_completion_warnings, but assert explicitly here).
+        let (_proj, fs) = setup();
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let root = fs.config.project_root.clone();
+        std::fs::write(root.join("a.txt"), "h0\n").unwrap();
+        // No linked change -> no warning (research-only).
+        let res = fs
+            .plan_write(
+                vec![crate::tools::plan::PlanItem {
+                    id: "step-1".into(),
+                    parent_id: None,
+                    content: "work".into(),
+                    status: "completed".into(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
+                }],
+                crate::tools::plan::PlanWriteMode::Replace,
+            )
+            .unwrap();
+        assert!(!res.warnings.iter().any(|w| w.contains("step-1")));
+    }
+
+    #[test]
+    fn test_provenance_read_obligation_filter() {
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-filter");
+        // Plan with obligation.
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "pending".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let args = ProvenanceReadArgs {
+            verification_obligation_id: Some("vo-filter".to_string()),
+            ..Default::default()
+        };
+        let resp = provenance_read(&fs, args).unwrap();
+        // PlanChanged with obligation should be found.
+        assert!(!resp.events.is_empty());
+        assert!(
+            resp.events
+                .iter()
+                .any(|e| e.to_string().contains("vo-filter"))
+        );
+    }
+
+    #[test]
+    fn test_capture_invocation_includes_matched_obligations() {
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-cap");
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let ctx = capture_verification_context_for_invocation(
+            &fs,
+            &crate::provenance::ProvenanceAttribution::none(),
+            crate::provenance::VerificationKind::Test,
+            "cargo",
+            &["test".to_string()],
+        );
+        assert!(ctx.matched_obligations.iter().any(|m| m.id == "vo-cap"));
+        assert!(
+            ctx.matched_obligations[0]
+                .binding_hash
+                .starts_with("blake3:")
+        );
+    }
+
+    #[test]
+    fn test_tui_test_verification_preserves_matched_obligations() {
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-tui");
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let ctx = capture_verification_context_for_invocation(
+            &fs,
+            &crate::provenance::ProvenanceAttribution::none(),
+            crate::provenance::VerificationKind::Test,
+            "cargo",
+            &["test".to_string()],
+        );
+        assert!(!ctx.matched_obligations.is_empty());
+        let ok = record_tui_test_verification(
+            &fs,
+            "cargo",
+            &["test".to_string()],
+            true,
+            "completed",
+            Some(0),
+            false,
+            "ok",
+            "",
+            false,
+            vec![],
+            ctx,
+        );
+        assert!(ok);
+        let loaded = load_current_events(&fs).unwrap().unwrap();
+        let verif = loaded
+            .events
+            .iter()
+            .find_map(|e| match &e.event {
+                ProvenanceEvent::VerificationObserved(v) => Some(v),
+                _ => None,
+            })
+            .expect("verification recorded");
+        assert!(verif.matched_obligations.iter().any(|m| m.id == "vo-tui"));
+    }
+
+    #[test]
+    fn test_tui_lint_verification_preserves_matched_obligations() {
+        let (_proj, fs) = setup();
+        let lint_ob = crate::tools::plan::VerificationObligation {
+            id: "vo-lint".to_string(),
+            description: "lint".to_string(),
+            kind: crate::provenance::VerificationKind::Lint,
+            command: Some(crate::tools::plan::VerificationCommandMatcher {
+                program: "cargo".to_string(),
+                args_prefix: vec!["clippy".to_string()],
+            }),
+        };
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![lint_ob],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let kind = classify_lint_command("cargo", &["clippy".to_string()]).unwrap();
+        let ctx = capture_verification_context_for_invocation(
+            &fs,
+            &crate::provenance::ProvenanceAttribution::none(),
+            kind,
+            "cargo",
+            &["clippy".to_string()],
+        );
+        assert!(ctx.matched_obligations.iter().any(|m| m.id == "vo-lint"));
+        let ok = record_tui_lint_verification(
+            &fs,
+            kind,
+            "cargo",
+            &["clippy".to_string()],
+            true,
+            "completed",
+            Some(0),
+            false,
+            "ok",
+            "",
+            false,
+            vec![],
+            ctx,
+        );
+        assert!(ok);
+        let loaded = load_current_events(&fs).unwrap().unwrap();
+        let verif = loaded
+            .events
+            .iter()
+            .find_map(|e| match &e.event {
+                ProvenanceEvent::VerificationObserved(v) => Some(v),
+                _ => None,
+            })
+            .expect("verification recorded");
+        assert!(verif.matched_obligations.iter().any(|m| m.id == "vo-lint"));
+    }
+
+    #[test]
+    fn test_completion_deleting_obligations_still_warns() {
+        // Deleting obligations in the completion write must not silence the
+        // warning: before-obligations count as obligations.
+        let (_proj, fs) = setup();
+        let ob = obligation_for_test("vo-keep");
+        fs.plan_write(
+            vec![crate::tools::plan::PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: "work".into(),
+                status: "in_progress".into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: vec![ob],
+            }],
+            crate::tools::plan::PlanWriteMode::Replace,
+        )
+        .unwrap();
+        let root = fs.config.project_root.clone();
+        std::fs::write(root.join("a.txt"), "h0\n").unwrap();
+        std::fs::write(root.join("a.txt"), "h1\n").unwrap();
+        let receipt = crate::tools::mutation::MutationReceipt {
+            kind: crate::provenance::ChangeKind::TextEdit,
+            path: root.join("a.txt"),
+            before: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h0\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h0\n")),
+                byte_len: Some(3),
+            },
+            after: crate::tools::mutation::MutationSnapshot {
+                exists: true,
+                content: Some("h1\n".to_string()),
+                content_hash: Some(crate::provenance::file_content_hash("h1\n")),
+                byte_len: Some(3),
+            },
+            target: crate::tools::mutation::MutationTargetReceipt::File,
+            diff: "d".to_string(),
+            lines_added: 1,
+            lines_removed: 1,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(fs.finalize_mutation(
+            receipt,
+            crate::tools::FinalizeMutationOptions {
+                record_undo: false,
+                reverts_change_id: None,
+                attribution: crate::provenance::ProvenanceAttribution::none(),
+            },
+        ));
+        // Complete while removing the obligation: must still warn (generic
+        // obligation warning, not silent legacy pass).
+        let res = fs
+            .plan_write(
+                vec![crate::tools::plan::PlanItem {
+                    id: "step-1".into(),
+                    parent_id: None,
+                    content: "work".into(),
+                    status: "completed".into(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
+                }],
+                crate::tools::plan::PlanWriteMode::Replace,
+            )
+            .unwrap();
+        assert!(
+            res.warnings
+                .iter()
+                .any(|w| w.contains("verification obligations")),
+            "warnings: {:?}",
+            res.warnings
+        );
     }
 }

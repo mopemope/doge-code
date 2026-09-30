@@ -55,10 +55,13 @@ pub async fn execute_process(
     // Classify before execution; only structured `execute_process` is auto
     // evidence. Bash/shell strings are never inferred as verification.
     let verification_kind = crate::provenance::classify_verification(&program, &process_args);
-    let verification_context = verification_kind.map(|_| {
-        crate::tools::provenance::capture_verification_context_for_fs_with_attribution(
+    let verification_context = verification_kind.map(|kind| {
+        crate::tools::provenance::capture_verification_context_for_invocation(
             runtime.fs,
             &runtime.attribution,
+            kind,
+            &program,
+            &process_args,
         )
     });
     let cwd_relative = crate::tools::provenance::relative_cwd_for_evidence(runtime.fs, &cwd_param);

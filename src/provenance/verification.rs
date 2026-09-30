@@ -61,7 +61,12 @@ fn classify_argv(argv: &[&str]) -> Option<VerificationKind> {
 }
 
 fn basename(program: &str) -> &str {
-    program.rsplit(['/', '\\']).next().unwrap_or(program).trim()
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program).trim();
+    if base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {
+        base[..base.len() - 4].trim()
+    } else {
+        base
+    }
 }
 
 fn classify_cargo(args: &[&str]) -> Option<VerificationKind> {
@@ -258,6 +263,7 @@ pub fn capture_verification_context_full(
         plan_item_id,
         requirement_ids,
         observed_change_ids: active_change_ids.to_vec(),
+        matched_obligations: Vec::new(),
     }
 }
 
@@ -320,7 +326,8 @@ pub fn build_verification_event(input: VerificationRecordInput<'_>) -> Verificat
             exit_code: input.exit_code,
             timed_out: input.timed_out,
         },
-        observed_change_ids: input.context.observed_change_ids,
+        observed_change_ids: input.context.observed_change_ids.clone(),
+        matched_obligations: input.context.matched_obligations.clone(),
         stdout_excerpt,
         stderr_excerpt,
         output_digest,
@@ -504,6 +511,7 @@ mod tests {
             context: VerificationContext {
                 plan_item_id: Some("step-1".to_string()),
                 observed_change_ids: vec!["chg-1".to_string()],
+                matched_obligations: Vec::new(),
                 directive_id: None,
                 requirement_ids: Vec::new(),
             },
@@ -543,6 +551,7 @@ mod tests {
                 content: "a".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -550,6 +559,7 @@ mod tests {
                 content: "b".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         assert_eq!(
@@ -562,6 +572,7 @@ mod tests {
             content: "a".into(),
             status: "completed".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         // Never infer from completed items.
         assert_eq!(current_in_progress_plan_item(&completed), None);
