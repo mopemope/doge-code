@@ -108,20 +108,13 @@ pub fn fs_read_many_files(
 ) -> Result<FsReadManyResponse> {
     let mut warnings = Vec::new();
     let mut all_paths = Vec::new();
-    let project_root = &config.project_root;
 
     for path_pattern in paths {
         for entry in glob(&path_pattern)? {
             match entry {
                 Ok(path) => {
-                    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-
-                    let is_allowed_path = config
-                        .allowed_paths
-                        .iter()
-                        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-                    if canonical_path.starts_with(project_root) || is_allowed_path {
+                    // Roots and target share one canonical-path contract.
+                    if crate::tools::scope::ensure_in_project_scope(&path, config).is_ok() {
                         all_paths.push(path);
                     } else {
                         // Optionally, you can log or handle paths outside the project root
