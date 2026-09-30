@@ -142,6 +142,8 @@ impl TuiApp {
                         let payload = DiffReviewPayload {
                             diff: output.to_string(),
                             files: vec![],
+                            evidence: Vec::new(),
+                            evidence_warnings: Vec::new(),
                         };
                         let review_state = DiffReviewState::from_payload(payload);
                         self.diff_review = Some(review_state);

@@ -1030,6 +1030,7 @@ mod tests {
             context: VerificationContext {
                 plan_item_id: Some("step-2".to_string()),
                 observed_change_ids: vec![change.event_id.clone()],
+                matched_obligations: Vec::new(),
                 directive_id: None,
                 requirement_ids: Vec::new(),
             },
@@ -1082,6 +1083,7 @@ mod tests {
                 timed_out: false,
             },
             observed_change_ids: vec![change.event_id.clone()],
+            matched_obligations: Vec::new(),
             stdout_excerpt: String::new(),
             stderr_excerpt: String::new(),
             output_digest: "blake3:x".to_string(),

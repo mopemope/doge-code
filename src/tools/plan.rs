@@ -10,6 +10,20 @@ use tracing::debug;
 
 const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update item statuses."#;
 
+// Verification obligation types live in the canonical provenance model
+// (`crate::provenance::types`) so plan JSON and provenance wire share one
+// definition. Re-export here for tool-layer convenience.
+pub use crate::provenance::types::{VerificationCommandMatcher, VerificationObligation};
+
+/// Upper bound for an obligation description (chars).
+pub const MAX_OBLIGATION_DESCRIPTION_CHARS: usize = 2048;
+/// Upper bound for a matcher program (chars).
+pub const MAX_OBLIGATION_PROGRAM_CHARS: usize = 512;
+/// Upper bound for one args_prefix token (chars).
+pub const MAX_OBLIGATION_ARG_CHARS: usize = 1024;
+/// Upper bound for args_prefix length.
+pub const MAX_OBLIGATION_ARGS: usize = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanItem {
     pub id: String,
@@ -19,6 +33,8 @@ pub struct PlanItem {
     pub status: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirement_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_obligations: Vec<VerificationObligation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +95,35 @@ pub fn plan_write_tool_def() -> ToolDef {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": "Requirement ids this plan item implements (must exist in requirements state)",
+                                },
+                                "verification_obligations": {
+                                    "type": "array",
+                                    "description": "Verification obligations: what should be observed for this step (e.g. cargo test, cargo clippy). Research-only steps need none.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "description": {"type": "string"},
+                                            "kind": {
+                                                "type": "string",
+                                                "enum": ["test", "build", "lint", "type_check", "format_check", "syntax_check"],
+                                            },
+                                            "command": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "program": {"type": "string"},
+                                                    "args_prefix": {
+                                                        "type": "array",
+                                                        "items": {"type": "string"},
+                                                    },
+                                                },
+                                                "required": ["program"],
+                                                "additionalProperties": false,
+                                            },
+                                        },
+                                        "required": ["id", "description", "kind"],
+                                        "additionalProperties": false,
+                                    },
                                 },
                             },
                             "required": ["id", "content", "status"],
@@ -370,7 +415,109 @@ fn validate_plan_items(items: &[PlanItem]) -> Result<()> {
         );
     }
 
+    validate_obligation_ids(items)?;
+
     Ok(())
+}
+
+/// Validate a verification obligation id: 1..=64 chars, ASCII letters/digits/`. _ -`.
+pub fn validate_obligation_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 64 {
+        anyhow::bail!("Verification obligation id '{id}' must be 1..=64 characters");
+    }
+    let ok = id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+    if !ok {
+        anyhow::bail!(
+            "Verification obligation id '{id}' may only contain ASCII letters, digits, '.', '_' and '-'"
+        );
+    }
+    Ok(())
+}
+
+/// Validate one obligation's shape (id, description, command).
+pub fn validate_obligation(ob: &VerificationObligation) -> Result<()> {
+    validate_obligation_id(&ob.id)?;
+    if ob.description.trim().is_empty() {
+        anyhow::bail!(
+            "Verification obligation '{}' must include a non-empty description.",
+            ob.id
+        );
+    }
+    if ob.description.chars().count() > MAX_OBLIGATION_DESCRIPTION_CHARS {
+        anyhow::bail!(
+            "Verification obligation '{}' description exceeds {MAX_OBLIGATION_DESCRIPTION_CHARS} chars",
+            ob.id
+        );
+    }
+    if let Some(cmd) = &ob.command {
+        if cmd.program.trim().is_empty() {
+            anyhow::bail!(
+                "Verification obligation '{}' has an empty command program.",
+                ob.id
+            );
+        }
+        if cmd.program.chars().count() > MAX_OBLIGATION_PROGRAM_CHARS {
+            anyhow::bail!(
+                "Verification obligation '{}' program exceeds {MAX_OBLIGATION_PROGRAM_CHARS} chars",
+                ob.id
+            );
+        }
+        if cmd.args_prefix.len() > MAX_OBLIGATION_ARGS {
+            anyhow::bail!(
+                "Verification obligation '{}' has too many args_prefix entries (max {MAX_OBLIGATION_ARGS}).",
+                ob.id
+            );
+        }
+        for arg in &cmd.args_prefix {
+            if arg.is_empty() {
+                anyhow::bail!(
+                    "Verification obligation '{}' has an empty args_prefix token.",
+                    ob.id
+                );
+            }
+            if arg.chars().count() > MAX_OBLIGATION_ARG_CHARS {
+                anyhow::bail!(
+                    "Verification obligation '{}' args_prefix token exceeds {MAX_OBLIGATION_ARG_CHARS} chars",
+                    ob.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Obligation ids must be unique across the whole plan (not just one item).
+fn validate_obligation_ids(items: &[PlanItem]) -> Result<()> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for item in items {
+        for ob in &item.verification_obligations {
+            validate_obligation(ob)?;
+            if !seen.insert(ob.id.as_str()) {
+                anyhow::bail!("Duplicate verification obligation id detected: {}", ob.id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Canonical obligation ordering for semantic comparison: sort by id.
+/// Pure reorder is a no-op; `args_prefix` order is significant and preserved.
+pub fn sorted_obligations(obs: &[VerificationObligation]) -> Vec<&VerificationObligation> {
+    let mut out: Vec<&VerificationObligation> = obs.iter().collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Order-insensitive obligation equality (id-sorted canonical comparison).
+pub fn obligations_equal(a: &[VerificationObligation], b: &[VerificationObligation]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let sa = sorted_obligations(a);
+    let sb = sorted_obligations(b);
+    sa.into_iter().zip(sb).all(|(x, y)| x == y)
 }
 
 /// Validate that every `requirement_ids` link refers to a known requirement.
@@ -484,6 +631,7 @@ mod tests {
                 content: "Review requirements and clarify scope".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -491,6 +639,7 @@ mod tests {
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-3".into(),
@@ -498,6 +647,7 @@ mod tests {
                 content: "Run tests and verify results".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -522,6 +672,7 @@ mod tests {
                 content: "Review requirements and clarify scope".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -529,6 +680,7 @@ mod tests {
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
 
@@ -565,6 +717,7 @@ mod tests {
                 content: "Review requirements and clarify scope".into(),
                 status: "completed".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -572,6 +725,7 @@ mod tests {
                 content: "Implement feature across modules".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let third = plan_write_from_base_path(
@@ -598,6 +752,7 @@ mod tests {
                 content: "Do something".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-1".into(),
@@ -605,6 +760,7 @@ mod tests {
                 content: "Do another".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -629,6 +785,7 @@ mod tests {
                 content: "Work item".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -636,6 +793,7 @@ mod tests {
                 content: "Another".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -662,6 +820,7 @@ mod tests {
                 content: "Parent task".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "child".into(),
@@ -669,6 +828,7 @@ mod tests {
                 content: "Child task".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -689,6 +849,7 @@ mod tests {
             content: "Child task".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -708,6 +869,7 @@ mod tests {
             content: "Infinite loop".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -729,6 +891,7 @@ mod tests {
                 content: "Task A".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "B".into(),
@@ -736,6 +899,7 @@ mod tests {
                 content: "Task B".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let result = plan_write_from_base_path(
@@ -760,6 +924,7 @@ mod tests {
                 content: "Task 1".into(),
                 status: "pending".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
@@ -767,6 +932,7 @@ mod tests {
                 content: "Task 2".into(),
                 status: "in_progress".into(),
                 requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
             },
         ];
         let summary = format_plan_summary(&items).unwrap();
@@ -794,6 +960,7 @@ mod tests {
             content: "Update src/main.rs".into(),
             status: "completed".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -813,6 +980,7 @@ mod tests {
             content: "Update utils.rs".into(),
             status: "completed".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -833,6 +1001,7 @@ mod tests {
             content: "Think about life".into(),
             status: "completed".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -852,6 +1021,7 @@ mod tests {
             content: "Will update utils.rs".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -871,6 +1041,7 @@ mod tests {
             content: "Review this and/or that".into(),
             status: "completed".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         }];
         let result = plan_write_from_base_path(
             items,
@@ -882,5 +1053,193 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
+    }
+
+    fn obligation(id: &str) -> VerificationObligation {
+        VerificationObligation {
+            id: id.to_string(),
+            description: "desc".to_string(),
+            kind: crate::provenance::VerificationKind::Test,
+            command: Some(VerificationCommandMatcher {
+                program: "cargo".to_string(),
+                args_prefix: vec!["test".to_string()],
+            }),
+        }
+    }
+
+    fn plan_item_with_obligations(id: &str, obs: Vec<VerificationObligation>) -> PlanItem {
+        PlanItem {
+            id: id.to_string(),
+            parent_id: None,
+            content: "work".to_string(),
+            status: "pending".to_string(),
+            requirement_ids: Vec::new(),
+            verification_obligations: obs,
+        }
+    }
+
+    #[test]
+    fn test_old_plan_without_obligations_deserializes() {
+        let json = serde_json::json!({
+            "session_id": "s",
+            "items": [{
+                "id": "step-1",
+                "content": "a",
+                "status": "pending",
+                "requirement_ids": []
+            }]
+        });
+        let list: PlanList = serde_json::from_value(json).unwrap();
+        assert!(list.items[0].verification_obligations.is_empty());
+    }
+
+    #[test]
+    fn test_valid_obligation_roundtrip() {
+        let (_dir, base) = plan_dir();
+        let items = vec![plan_item_with_obligations(
+            "step-1",
+            vec![obligation("vo-1")],
+        )];
+        let res = plan_write_from_base_path(
+            items.clone(),
+            PlanWriteMode::Replace,
+            "session",
+            base.clone(),
+            &AppConfig::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(res.changed);
+        let read = plan_read_from_base_path("session", base, &AppConfig::default()).unwrap();
+        assert_eq!(read.items[0].verification_obligations.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_obligation_id_same_item_rejected() {
+        let (_dir, base) = plan_dir();
+        let items = vec![plan_item_with_obligations(
+            "step-1",
+            vec![obligation("vo-1"), obligation("vo-1")],
+        )];
+        assert!(
+            plan_write_from_base_path(
+                items,
+                PlanWriteMode::Replace,
+                "session",
+                base,
+                &AppConfig::default(),
+                None,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_duplicate_obligation_id_across_items_rejected() {
+        let (_dir, base) = plan_dir();
+        let items = vec![
+            plan_item_with_obligations("step-1", vec![obligation("vo-1")]),
+            plan_item_with_obligations("step-2", vec![obligation("vo-1")]),
+        ];
+        assert!(
+            plan_write_from_base_path(
+                items,
+                PlanWriteMode::Replace,
+                "session",
+                base,
+                &AppConfig::default(),
+                None,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_empty_and_invalid_obligation_id_rejected() {
+        let (_dir, base) = plan_dir();
+        let mut bad = obligation("");
+        bad.id = "".to_string();
+        let items = vec![plan_item_with_obligations("step-1", vec![bad])];
+        assert!(
+            plan_write_from_base_path(
+                items,
+                PlanWriteMode::Replace,
+                "session",
+                base.clone(),
+                &AppConfig::default(),
+                None,
+                None,
+            )
+            .is_err()
+        );
+        let mut bad2 = obligation("bad id");
+        bad2.id = "bad id".to_string();
+        let items2 = vec![plan_item_with_obligations("step-1", vec![bad2])];
+        assert!(
+            plan_write_from_base_path(
+                items2,
+                PlanWriteMode::Replace,
+                "session",
+                base,
+                &AppConfig::default(),
+                None,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_empty_description_rejected() {
+        let (_dir, base) = plan_dir();
+        let mut ob = obligation("vo-1");
+        ob.description = "   ".to_string();
+        let items = vec![plan_item_with_obligations("step-1", vec![ob])];
+        assert!(
+            plan_write_from_base_path(
+                items,
+                PlanWriteMode::Replace,
+                "session",
+                base,
+                &AppConfig::default(),
+                None,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_invalid_kind_rejected_by_schema() {
+        let json = serde_json::json!({
+            "id": "vo-1",
+            "description": "d",
+            "kind": "not_a_kind"
+        });
+        assert!(serde_json::from_value::<VerificationObligation>(json).is_err());
+    }
+
+    #[test]
+    fn test_pure_obligation_reorder_is_noop() {
+        let ob1 = obligation("vo-1");
+        let mut ob2 = obligation("vo-2");
+        ob2.kind = crate::provenance::VerificationKind::Lint;
+        let a = vec![ob1.clone(), ob2.clone()];
+        let b = vec![ob2, ob1];
+        assert!(obligations_equal(&a, &b));
+    }
+
+    #[test]
+    fn test_obligation_definition_change_is_not_equal() {
+        let mut ob1 = obligation("vo-1");
+        let ob2 = obligation("vo-1");
+        ob1.description = "different".to_string();
+        assert!(!obligations_equal(
+            std::slice::from_ref(&ob1),
+            std::slice::from_ref(&ob2)
+        ));
     }
 }

@@ -173,9 +173,9 @@ Verification:
 - A `RequirementChanged` event batches `before -> after` transitions for one directive. Statuses are only `Active` / `Withdrawn` — there is intentionally no `Satisfied`/`Verified` (a passing test never proves a requirement). Current state is rebuilt from history; there is no separate `requirements.json`.
 - `PlanItem.requirement_ids` links steps to requirements (unknown ids fail `plan_write`; withdrawn links warn but do not break). Requirement-only link edits still emit `PlanChanged`.
 - `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
-- `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification.
-- Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`.
-- Storage: `.doge/sessions/<id>/provenance/v3/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/` and `provenance/v2/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
+- `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification. It also freezes `matched_obligations` (id + binding hash) for structured runs.
+- Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
+- Storage: `.doge/sessions/<id>/provenance/v4/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/` and `provenance/v3/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 
@@ -197,12 +197,61 @@ step-2
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
 - A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
-- Tracked mutations (v2): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
+- Tracked mutations (v4): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
-- Storage: `.doge/sessions/<id>/provenance/v2/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/` remains readable but is never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
-- Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`).
+- Storage: `.doge/sessions/<id>/provenance/v4/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/` and `provenance/v3/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
+
+## Verification Obligations
+
+A plan item can declare what should be observed for that step:
+
+```json
+{
+  "id": "step-cache",
+  "content": "Implement authentication cache",
+  "status": "in_progress",
+  "requirement_ids": ["req-cache"],
+  "verification_obligations": [
+    {
+      "id": "vo-cache-tests",
+      "description": "Cache unit tests pass",
+      "kind": "test",
+      "command": {"program": "cargo", "args_prefix": ["test", "auth::cache"]}
+    },
+    {
+      "id": "vo-clippy",
+      "description": "Lint passes",
+      "kind": "lint",
+      "command": {"program": "cargo", "args_prefix": ["clippy"]}
+    }
+  ]
+}
+```
+
+- Kind-only obligations (no `command`) match by kind + plan scope. With `command`, matching requires kind + executable basename + argv prefix (`actual argv starts_with(args_prefix)` per-token prefix, e.g. `["test", "provenance::"]` matches `["test", "provenance::traceability_tests"]`). No regex, glob, or shell parsing.
+- Each obligation has a stable binding hash (`plan_item_id` + sorted requirement ids + definition). Later plan edits never rewrite historical attribution.
+- Evidence states: `no_linked_change` / `pending` / `observed_passing` / `observed_failing` / `stale` / `diverged` / `reverted` / `mixed`. `observed_passing` requires id + binding match, success, and current active changes ⊆ observed changes. A later mutation can make earlier evidence `stale`.
+- `observed_passing` is evidence, not a correctness proof. Failing runs never count as passing.
+- `requirements_read` shows compact obligation states per requirement; full definitions live in `plan_read`.
+
+## Evidence-aware Diff Review
+
+The Diff Review panel shows diff + evidence:
+
+```text
+Requirements: req-cache
+Plan: step-cache
+✓ vo-cache-tests  observed passing
+? vo-validation-test pending
+```
+
+- Per-file evidence comes from current active changes (superseded history excluded). Unrelated user files are never mixed in.
+- Evidence is bounded (truncated descriptions/commands, capped obligations) and never breaks the diff view; failures become warnings.
+- Status labels never say `verified`: `✓ observed passing`, `✗ observed failing`, `? pending`, `! stale`, `! diverged`, `↩ reverted`, `- no linked change`.
+- Small terminals hide the evidence pane and show a compact `Evidence 1/3 observed passing` summary instead.
 
 ## 🎯 Usage Examples
 

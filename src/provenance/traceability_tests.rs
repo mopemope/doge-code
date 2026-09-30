@@ -47,6 +47,7 @@ mod traceability_tests {
             content: format!("work {id}"),
             status: status.to_string(),
             requirement_ids: reqs,
+            verification_obligations: Vec::new(),
         }
     }
 
@@ -558,6 +559,7 @@ mod traceability_tests {
             plan_item_id: Some("step-1".to_string()),
             requirement_ids: vec!["r1".to_string()],
             observed_change_ids: vec!["change-A".to_string()],
+            matched_obligations: Vec::new(),
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
@@ -638,6 +640,7 @@ mod traceability_tests {
                 timed_out: false,
             },
             observed_change_ids: vec![change.event_id.clone()],
+            matched_obligations: Vec::new(),
             stdout_excerpt: String::new(),
             stderr_excerpt: String::new(),
             output_digest: "blake3:x".to_string(),
@@ -732,7 +735,9 @@ mod traceability_tests {
                         before_status: None,
                         after_status: Some("in_progress".to_string()),
                         before_requirement_ids: vec![],
+                        before_verification_obligations: Vec::new(),
                         after_requirement_ids: vec!["r1".to_string()],
+                        after_verification_obligations: Vec::new(),
                     }],
                 }),
             )
@@ -742,6 +747,7 @@ mod traceability_tests {
             plan_item_id: Some("p1".to_string()),
             requirement_ids: vec!["r1".to_string()],
             observed_change_ids: vec![c1.event_id.clone()],
+            matched_obligations: Vec::new(),
         };
         let v = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
@@ -918,6 +924,7 @@ mod traceability_tests {
             plan_item_id: Some("p1".to_string()),
             requirement_ids: vec!["r1".to_string()],
             observed_change_ids: vec![c1.event_id.clone()],
+            matched_obligations: Vec::new(),
         };
         let v = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {

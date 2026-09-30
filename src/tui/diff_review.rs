@@ -1,4 +1,4 @@
-use crate::diff_review::DiffReviewPayload;
+use crate::diff_review::{DiffFileEvidence, DiffReviewPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffReviewState {
@@ -8,6 +8,9 @@ pub struct DiffReviewState {
     /// from diff headers (possibly `change-N` placeholders); rejecting those
     /// cannot reliably revert files, so `r` is a no-op for them.
     pub rejectable: bool,
+    /// Provenance evidence warnings (e.g. truncated, incomplete). Never fails
+    /// the diff view.
+    pub evidence_warnings: Vec<String>,
 }
 
 impl DiffReviewState {
@@ -59,10 +62,23 @@ impl DiffReviewState {
             files.push(DiffFileState::new("workspace".to_string()));
         }
 
+        // Attach evidence by exact path match.
+        let mut evidence_by_path: std::collections::HashMap<String, DiffFileEvidence> =
+            std::collections::HashMap::new();
+        for ev in payload.evidence {
+            evidence_by_path.insert(ev.path.clone(), ev);
+        }
+        for f in files.iter_mut() {
+            if let Some(ev) = evidence_by_path.remove(&f.path) {
+                f.evidence = Some(ev);
+            }
+        }
+
         Self {
             files,
             selected: 0,
             rejectable,
+            evidence_warnings: payload.evidence_warnings,
         }
     }
 
@@ -77,6 +93,27 @@ impl DiffReviewState {
     pub fn file_paths(&self) -> Vec<String> {
         self.files.iter().map(|f| f.path.clone()).collect()
     }
+
+    /// Compact evidence summary for small terminals, e.g.
+    /// "Evidence 1/3 observed passing".
+    pub fn evidence_summary(&self) -> Option<String> {
+        let mut total = 0usize;
+        let mut passing = 0usize;
+        for f in &self.files {
+            if let Some(ev) = &f.evidence {
+                for ob in &ev.obligations {
+                    total += 1;
+                    if ob.state == "observed_passing" {
+                        passing += 1;
+                    }
+                }
+            }
+        }
+        if total == 0 {
+            return None;
+        }
+        Some(format!("Evidence {passing}/{total} observed passing"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +121,7 @@ pub struct DiffFileState {
     pub path: String,
     pub lines: Vec<DiffLine>,
     pub scroll: usize,
+    pub evidence: Option<DiffFileEvidence>,
 }
 
 impl DiffFileState {
@@ -92,6 +130,7 @@ impl DiffFileState {
             path,
             lines: Vec::new(),
             scroll: 0,
+            evidence: None,
         }
     }
 
@@ -176,6 +215,8 @@ mod tests {
                 "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1 +1 @@\n-old\n+new"
                     .to_string(),
             files: vec!["foo.rs".to_string()],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
         };
 
         let state = DiffReviewState::from_payload(payload);
@@ -192,6 +233,8 @@ mod tests {
         let payload = DiffReviewPayload {
             diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n+hello\n\ndiff --git a/bar.txt b/bar.txt\n--- a/bar.txt\n+++ b/bar.txt\n+world\n".to_string(),
             files: vec!["foo.txt".to_string(), "bar.txt".to_string()],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
         };
 
         let state = DiffReviewState::from_payload(payload);
@@ -212,6 +255,8 @@ mod tests {
             diff: "diff --git a//dev/null b/bar.txt\n--- /dev/null\n+++ b/bar.txt\n@@ -0,0 +1 @@\n+new file\n"
                 .to_string(),
             files: vec!["bar.txt".to_string()],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
         };
 
         let state = DiffReviewState::from_payload(payload);
@@ -225,6 +270,8 @@ mod tests {
         let payload = DiffReviewPayload {
             diff: String::new(),
             files: vec![],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
         };
 
         let state = DiffReviewState::from_payload(payload);
@@ -238,9 +285,117 @@ mod tests {
         let payload = DiffReviewPayload {
             diff: "diff --git a/a.txt b/a.txt\n+x\ndiff --git a/b.txt b/b.txt\n+y\n".to_string(),
             files: vec![],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
         };
 
         let state = DiffReviewState::from_payload(payload);
         assert_eq!(state.file_paths(), vec!["a.txt", "b.txt"]);
+    }
+
+    fn evidence_payload() -> DiffReviewPayload {
+        use crate::diff_review::{DiffFileEvidence, DiffObligationEvidence};
+        DiffReviewPayload {
+            diff: "diff --git a/a.txt b/a.txt\n+x\ndiff --git a/b.txt b/b.txt\n+y\n".to_string(),
+            files: vec!["a.txt".to_string(), "b.txt".to_string()],
+            evidence: vec![
+                DiffFileEvidence {
+                    path: "a.txt".to_string(),
+                    requirement_ids: vec!["req-1".to_string()],
+                    plan_item_ids: vec!["step-1".to_string()],
+                    obligations: vec![DiffObligationEvidence {
+                        id: "vo-1".to_string(),
+                        description: "desc".to_string(),
+                        kind: "test".to_string(),
+                        state: "observed_passing".to_string(),
+                        command_summary: Some("cargo test".to_string()),
+                    }],
+                },
+                DiffFileEvidence {
+                    path: "b.txt".to_string(),
+                    requirement_ids: vec![],
+                    plan_item_ids: vec!["step-2".to_string()],
+                    obligations: vec![DiffObligationEvidence {
+                        id: "vo-2".to_string(),
+                        description: "desc".to_string(),
+                        kind: "lint".to_string(),
+                        state: "pending".to_string(),
+                        command_summary: None,
+                    }],
+                },
+            ],
+            evidence_warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn test_evidence_attached_by_path() {
+        let state = DiffReviewState::from_payload(evidence_payload());
+        assert_eq!(state.files.len(), 2);
+        assert!(state.files[0].evidence.is_some());
+        assert_eq!(state.files[0].evidence.as_ref().unwrap().path, "a.txt");
+        assert_eq!(state.files[1].evidence.as_ref().unwrap().path, "b.txt");
+    }
+
+    #[test]
+    fn test_current_file_switch_changes_evidence() {
+        let mut state = DiffReviewState::from_payload(evidence_payload());
+        assert_eq!(
+            state
+                .current_file()
+                .unwrap()
+                .evidence
+                .as_ref()
+                .unwrap()
+                .obligations[0]
+                .id,
+            "vo-1"
+        );
+        state.selected = 1;
+        assert_eq!(
+            state
+                .current_file()
+                .unwrap()
+                .evidence
+                .as_ref()
+                .unwrap()
+                .obligations[0]
+                .id,
+            "vo-2"
+        );
+    }
+
+    #[test]
+    fn test_evidence_summary_counts() {
+        let state = DiffReviewState::from_payload(evidence_payload());
+        assert_eq!(
+            state.evidence_summary(),
+            Some("Evidence 1/2 observed passing".to_string())
+        );
+    }
+
+    #[test]
+    fn test_legacy_payload_without_evidence_renders() {
+        let payload = DiffReviewPayload {
+            diff: "diff --git a/a.txt b/a.txt\n+x\n".to_string(),
+            files: vec!["a.txt".to_string()],
+            evidence: Vec::new(),
+            evidence_warnings: Vec::new(),
+        };
+        let state = DiffReviewState::from_payload(payload);
+        assert!(state.current_file().unwrap().evidence.is_none());
+        assert_eq!(state.evidence_summary(), None);
+    }
+
+    #[test]
+    fn test_small_terminal_state_does_not_panic() {
+        // State construction must not panic regardless of terminal size;
+        // rendering fallback is in rendering.rs (area.height check).
+        let state = DiffReviewState::from_payload(evidence_payload());
+        assert_eq!(state.files.len(), 2);
+        // Simulate selection change on tiny terminal.
+        let mut tiny = state;
+        tiny.selected = 10; // out of bounds
+        assert!(tiny.current_file().is_none());
     }
 }

@@ -1,4 +1,4 @@
-//! Plan-to-Evidence Provenance Graph v3.
+//! Plan-to-Evidence Provenance Graph v4.
 //!
 //! Doge-observed development provenance: which user directive motivated which
 //! agent-structured requirement, which plan step was active when a workspace
@@ -6,10 +6,11 @@
 //! afterwards.
 //!
 //! Durable state lives under the session directory
-//! (`.doge/sessions/<id>/provenance/v3/events/<uuid>.json` for new writes;
-//! legacy v1/v2 under `provenance/v1/events/` and `provenance/v2/events/`
-//! remain readable but are never written or physically migrated), never in
-//! `repomap.sqlite` (rebuildable analysis cache) nor the legacy `action_log`.
+//! (`.doge/sessions/<id>/provenance/v4/events/<uuid>.json` for new writes;
+//! legacy v1/v2/v3 under `provenance/v1/events/`, `provenance/v2/events/` and
+//! `provenance/v3/events/` remain readable but are never written or physically
+//! migrated), never in `repomap.sqlite` (rebuildable analysis cache) nor the
+//! legacy `action_log`.
 //! One event is one JSON file; writes use sibling-temp + no-clobber
 //! persistence. A single corrupt event never fails the whole query.
 //!
@@ -18,6 +19,7 @@
 //! directive.
 
 pub mod context;
+pub mod obligations;
 pub mod query;
 pub mod requirements;
 pub mod store;
@@ -38,11 +40,13 @@ pub use types::{
     DirectiveOrigin, FileStateEvidence, LEGACY_PROVENANCE_SCHEMA_VERSION,
     PROVENANCE_SCHEMA_VERSION, PlanChangedEvent, PlanItemTransition, ProvenanceEvent,
     ProvenanceEventEnvelope, ProvenanceEventType, RequirementChangedEvent, RequirementSnapshot,
-    RequirementStatus, RequirementTransition, V2_PROVENANCE_SCHEMA_VERSION, VerificationContext,
-    VerificationKind, VerificationObservedEvent, VerificationOutcome, VerificationSource,
-    directive_content_hash, file_content_hash,
+    RequirementStatus, RequirementTransition, V2_PROVENANCE_SCHEMA_VERSION,
+    V3_PROVENANCE_SCHEMA_VERSION, VerificationCommandMatcher, VerificationContext,
+    VerificationKind, VerificationObligation, VerificationObligationRef, VerificationObservedEvent,
+    VerificationOutcome, VerificationSource, directive_content_hash, file_content_hash,
 };
 pub use verification::{
     VerificationRecordInput, build_verification_event, capture_verification_context,
-    classify_verification, current_in_progress_plan_item, diff_hash_for,
+    capture_verification_context_full, classify_verification, current_in_progress_plan_item,
+    diff_hash_for,
 };
