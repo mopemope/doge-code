@@ -30,6 +30,9 @@ pub struct FinalizeMutationOptions {
     /// Provenance `reverts_change_id` (set by undo to link the reverted
     /// change; `None` for ordinary mutations).
     pub reverts_change_id: Option<String>,
+    /// Per-turn provenance attribution. Agent tool paths pass
+    /// `runtime.attribution`; non-agent paths use the default (`None`).
+    pub attribution: crate::provenance::ProvenanceAttribution,
 }
 
 /// Post-commit bookkeeping outcome.
@@ -268,10 +271,11 @@ impl FsTools {
         }
 
         // Inside project: provenance -> undo -> session -> context.
-        let change_id = match crate::tools::provenance::record_committed_mutation(
+        let change_id = match crate::tools::provenance::record_committed_mutation_with_attribution(
             self,
             &receipt,
             options.reverts_change_id.clone(),
+            &options.attribution,
         ) {
             Ok(Some(envelope)) => Some(envelope.event_id.clone()),
             Ok(None) => {
@@ -409,6 +413,20 @@ impl FsTools {
     }
 
     pub async fn fs_write(&self, path: &str, content: &str) -> Result<write::FsWriteResult> {
+        self.fs_write_with_attribution(
+            path,
+            content,
+            &crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+    }
+
+    pub async fn fs_write_with_attribution(
+        &self,
+        path: &str,
+        content: &str,
+        attribution: &crate::provenance::ProvenanceAttribution,
+    ) -> Result<write::FsWriteResult> {
         let mut exec = write::fs_write_with_receipt(path, content, &self.config)?;
         if let Some(receipt) = exec.receipt.take() {
             let report = self
@@ -417,6 +435,7 @@ impl FsTools {
                     FinalizeMutationOptions {
                         record_undo: true,
                         reverts_change_id: None,
+                        attribution: attribution.clone(),
                     },
                 )
                 .await;
@@ -652,6 +671,19 @@ impl FsTools {
         items: Vec<plan::PlanItem>,
         mode: plan::PlanWriteMode,
     ) -> Result<plan::PlanWriteResult> {
+        self.plan_write_with_attribution(
+            items,
+            mode,
+            &crate::provenance::ProvenanceAttribution::none(),
+        )
+    }
+
+    pub fn plan_write_with_attribution(
+        &self,
+        items: Vec<plan::PlanItem>,
+        mode: plan::PlanWriteMode,
+        attribution: &crate::provenance::ProvenanceAttribution,
+    ) -> Result<plan::PlanWriteResult> {
         let session_id = self.ensure_current_session_id()?;
         let changed_files = self
             .get_current_session()
@@ -660,8 +692,36 @@ impl FsTools {
         let before_items = plan::plan_read(&session_id, &self.config)
             .map(|p| p.items)
             .unwrap_or_default();
-        let mut result =
-            plan::plan_write(items, mode, &session_id, &self.config, Some(&changed_files))?;
+        // Current requirement ids for validation (event history is source).
+        // Single snapshot reused for validation + warnings (avoids duplicate I/O).
+        let loaded_requirements = match crate::tools::provenance::load_current_events(self) {
+            Ok(Some(loaded)) => Some(loaded),
+            _ => None,
+        };
+        let (valid_requirement_ids, withdrawn_ids) = match &loaded_requirements {
+            Some(loaded) => {
+                let state = crate::provenance::requirements::current_requirements(&loaded.events);
+                let valid = state.items.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+                let withdrawn = state
+                    .items
+                    .iter()
+                    .filter(|r| r.status == crate::provenance::types::RequirementStatus::Withdrawn)
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>();
+                (valid, withdrawn)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        // Core validates requirement links before persisting (unknown ids fail).
+        let mut result = plan::plan_write_from_base_path(
+            items,
+            mode,
+            &session_id,
+            &self.config.project_root,
+            &self.config,
+            Some(&changed_files),
+            Some(&valid_requirement_ids),
+        )?;
 
         let mut warnings = Vec::new();
         if self
@@ -674,11 +734,21 @@ impl FsTools {
             );
         }
 
+        // Soft warning for withdrawn links (never blocks).
+        warnings.extend(plan::withdrawn_requirement_warnings(
+            &result.plan.items,
+            &withdrawn_ids,
+        ));
+
         if result.changed {
             let transitions =
                 crate::tools::provenance::diff_plan_transitions(&before_items, &result.plan.items);
             if !transitions.is_empty() {
-                match crate::tools::provenance::record_plan_changed(self, transitions.clone()) {
+                match crate::tools::provenance::record_plan_changed_with_attribution(
+                    self,
+                    transitions.clone(),
+                    attribution,
+                ) {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "provenance.record_failed");
@@ -695,6 +765,11 @@ impl FsTools {
             // blocks completion; research-only items with no linked changes
             // produce no warning.
             warnings.extend(crate::tools::provenance::plan_completion_warnings(
+                self,
+                &transitions,
+            ));
+            // Soft warning: committed changes without a requirement link.
+            warnings.extend(crate::tools::provenance::plan_requirement_link_warnings(
                 self,
                 &transitions,
             ));

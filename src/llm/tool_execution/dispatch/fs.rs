@@ -171,7 +171,11 @@ pub async fn search_text(
 pub async fn fs_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    match runtime.fs.fs_write(path, content).await {
+    match runtime
+        .fs
+        .fs_write_with_attribution(path, content, &runtime.attribution)
+        .await
+    {
         Ok(res) => {
             let value = json!({
                 "ok": true,

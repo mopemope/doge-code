@@ -161,6 +161,25 @@ async fn run_semantic_edit_job(
         };
     };
 
+    // Record the observed directive after the job is accepted, the target
+    // prepared, and the client confirmed — matching TUI agent-turn semantics
+    // (busy/missing-key records nothing). Even when the text matches an
+    // earlier agent directive, this is a new activity. A recording failure
+    // never aborts the edit: continue with None.
+    let attribution = match crate::tools::provenance::record_directive_observed(
+        &tools,
+        crate::provenance::DirectiveOrigin::SemanticEdit,
+        &instruction,
+        &instruction,
+    ) {
+        Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "provenance.directive_record_failed");
+            let _ = tools.mark_current_session_provenance_failure();
+            crate::provenance::ProvenanceAttribution::none()
+        }
+    };
+
     let req = SymbolEditRequest {
         model: model.clone(),
         target: EditTarget {
@@ -254,6 +273,7 @@ async fn run_semantic_edit_job(
                 &result,
                 candidate_map,
                 before_content,
+                &attribution,
             )
             .await;
             JobRunOutcome::Completed
@@ -288,6 +308,7 @@ async fn commit_semantic_edit_success(
     result: &crate::features::semantic_edit::SemanticEditResult,
     candidate_map: crate::analysis::RepoMap,
     before_content: String,
+    attribution: &crate::provenance::ProvenanceAttribution,
 ) {
     // Unified commit bookkeeping: build the observed receipt and finalize
     // (provenance -> undo -> session -> context). Source already succeeded;
@@ -323,6 +344,7 @@ async fn commit_semantic_edit_success(
             crate::tools::FinalizeMutationOptions {
                 record_undo: true,
                 reverts_change_id: None,
+                attribution: attribution.clone(),
             },
         )
         .await;
@@ -621,6 +643,7 @@ pub async fn apply_legacy_line_edit_response_via_tools(
                 crate::tools::FinalizeMutationOptions {
                     record_undo: true,
                     reverts_change_id: None,
+                    attribution: Default::default(),
                 },
             )
             .await;

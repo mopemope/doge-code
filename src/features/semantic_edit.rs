@@ -735,6 +735,7 @@ mod receipt_tests {
                 crate::tools::FinalizeMutationOptions {
                     record_undo: true,
                     reverts_change_id: None,
+                    attribution: Default::default(),
                 },
             )
             .await;

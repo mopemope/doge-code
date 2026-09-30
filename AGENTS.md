@@ -35,7 +35,8 @@ Run the narrowest check first, then broaden:
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
 | `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
 | `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v2 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` current), `store.rs` (v1+v2 merged reads, v2 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier) |
+| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v3 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` current), `store.rs` (v1+v2+v3 merged reads, v3 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
+| `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
 | `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
 | `src/session/` | SQLite session persistence (SeaORM) |
@@ -140,6 +141,11 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - The README tool list must stay in sync with `default_tools_def` (`src/llm/tool_def.rs`); new tools require a README entry (checklist step 6).
 - `.doge/repomap.sqlite` is rebuildable analysis/cache state and may be recreated during database recovery. Never store durable session/provenance state there.
 - Legacy `action_log` is not the provenance store. Do not build new durable features on legacy `action_log`/repomap DB.
+
+## Provenance rule
+
+Never treat an inferred requirement as a verbatim user directive.
+Observed directives and interpreted requirements are distinct provenance nodes.
 
 ## Commit & Pull Request Guidelines
 
