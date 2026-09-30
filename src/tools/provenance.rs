@@ -1770,11 +1770,13 @@ mod provenance_extra_tests {
         let (_proj, fs, _sid) = setup_project_with_session();
         let root = fs.config.project_root.clone();
         std::fs::write(root.join("src/b.rs"), "fn b() {}\n").unwrap();
-        // Tracked: semantic change for src/lib.rs (record only, no write needed).
+        // Tracked: semantic change for src/lib.rs, written then recorded
+        // (production write-then-record order, so the recorded `after`
+        // state matches the workspace).
         let file = root.join("src/lib.rs");
         let prepared = crate::features::semantic_edit::prepare_edit(&root, &file, 2).unwrap();
         let current = std::fs::read_to_string(&file).unwrap();
-        let (_c, result, _) = crate::features::semantic_edit::apply_with_snapshots(
+        let (candidate, result, _) = crate::features::semantic_edit::apply_with_snapshots(
             &prepared,
             "fn foo() {\n    2;\n}\n",
             &current,
@@ -1782,6 +1784,7 @@ mod provenance_extra_tests {
             &root,
         )
         .unwrap();
+        std::fs::write(&file, &candidate).unwrap();
         record_semantic_change(&fs, &result, &current).unwrap();
         // Simulate non-semantic edits via session changed_files.
         fs.update_session_with_changed_file(std::path::PathBuf::from("src/lib.rs"))
