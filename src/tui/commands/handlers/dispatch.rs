@@ -137,6 +137,35 @@ impl CommandHandler for TuiExecutor {
             .collect()
     }
 
+    fn handle_internal_followup(&mut self, content: &str, ui: &mut TuiApp) {
+        // Synthetic analysis turns bypass slash routing entirely so they can
+        // never be mistaken for typed user input.
+        if self.ui_tx.is_none() {
+            self.ui_tx = ui.sender();
+        }
+        let _ = self.spawn_internal_followup(ui, content, content.to_string());
+    }
+
+    fn handle_retry_turn(
+        &mut self,
+        display: &str,
+        content: &str,
+        directive_id: Option<String>,
+        ui: &mut TuiApp,
+    ) {
+        if self.ui_tx.is_none() {
+            self.ui_tx = ui.sender();
+        }
+        let _ = self.spawn_retry_turn(ui, display, content.to_string(), directive_id);
+    }
+
+    fn handle_augmented_user_prompt(&mut self, raw: &str, effective: &str, ui: &mut TuiApp) {
+        if self.ui_tx.is_none() {
+            self.ui_tx = ui.sender();
+        }
+        let _ = self.spawn_augmented_user_prompt(ui, raw, effective.to_string(), false);
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
