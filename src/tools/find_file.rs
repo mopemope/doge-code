@@ -105,14 +105,31 @@ pub struct FindFileResult {
 /// - `Ok(FindFileResult)`: A struct with a list of matching file paths.
 /// - `Err(anyhow::Error)`: An error if the search could not be completed.
 pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFileResult> {
-    // If the filename is an absolute path and it's a file, return it directly.
+    // If the filename is an absolute non-glob path and it's a file, return
+    // it directly, but only when it is in scope. Outside-scope hits yield
+    // no matches rather than leaking file existence. Scope is checked
+    // before touching the filesystem so out-of-scope paths are denied
+    // first (fail closed). Glob patterns are NOT checked here: they
+    // contain wildcards, so the pattern spelling itself is not a real
+    // path — each expanded hit is scope-checked in the glob branch below.
     let path = Path::new(&args.filename);
-    if path.is_absolute() && path.is_file() {
-        return Ok(FindFileResult {
-            files: vec![args.filename],
-            total_matches: 1,
-            truncated: false,
-        });
+    let looks_like_glob =
+        args.filename.contains('*') || args.filename.contains('?') || args.filename.contains('[');
+    if path.is_absolute() && !looks_like_glob {
+        if crate::tools::scope::ensure_in_project_scope(path, config).is_err() {
+            return Ok(FindFileResult {
+                files: Vec::new(),
+                total_matches: 0,
+                truncated: false,
+            });
+        }
+        if path.is_file() {
+            return Ok(FindFileResult {
+                files: vec![args.filename],
+                total_matches: 1,
+                truncated: false,
+            });
+        }
     }
 
     let project_root = &config.project_root;
@@ -148,8 +165,12 @@ pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFil
         for entry in glob(&glob_pattern)? {
             match entry {
                 Ok(path) => {
-                    // Ensure the path is within the project root
-                    if path.starts_with(project_root) && path.is_file() {
+                    // Shared canonical-path contract: alias spellings of
+                    // project/allowed roots authorize, while outside paths
+                    // and symlink escapes are skipped.
+                    if crate::tools::scope::ensure_in_project_scope(&path, config).is_ok()
+                        && path.is_file()
+                    {
                         files.push(path.to_string_lossy().to_string());
                     }
                 }
@@ -208,11 +229,9 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_temp_dir() -> TempDir {
-        let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("temp");
-        std::fs::create_dir_all(&temp_dir).unwrap();
         tempfile::Builder::new()
             .prefix("test_find_file_")
-            .tempdir_in(&temp_dir)
+            .tempdir()
             .unwrap()
     }
 
@@ -326,5 +345,111 @@ mod tests {
         assert_eq!(result.files.len(), MAX_RESULTS);
         assert_eq!(result.total_matches, MAX_RESULTS + 50);
         assert!(result.truncated);
+    }
+
+    #[tokio::test]
+    async fn test_find_file_absolute_path_outside_scope_yields_no_matches() {
+        let temp_dir = create_temp_dir();
+        let project = temp_dir.path().join("project");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        fs::write(&secret, "TOP-SECRET").unwrap();
+        let inside = project.join("inside.txt");
+        fs::write(&inside, "hello").unwrap();
+
+        let config = AppConfig {
+            project_root: project.clone(),
+            ..Default::default()
+        };
+
+        // Outside absolute file must not be returned (no existence leak).
+        let result = find_file(
+            FindFileArgs {
+                filename: secret.to_string_lossy().to_string(),
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(result.files.is_empty());
+        assert_eq!(result.total_matches, 0);
+
+        // Inside absolute file is still returned directly.
+        let result = find_file(
+            FindFileArgs {
+                filename: inside.to_string_lossy().to_string(),
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_file_glob_outside_scope_excluded_but_allowed_paths_honored() {
+        let temp_dir = create_temp_dir();
+        let project = temp_dir.path().join("project");
+        let allowed = temp_dir.path().join("allowed");
+        let outside = temp_dir.path().join("outside");
+        for dir in [&project, &allowed, &outside] {
+            fs::create_dir_all(dir.join("src")).unwrap();
+        }
+        // Name files deterministically per directory.
+        fs::write(project.join("src/p_hit.txt"), "").unwrap();
+        fs::write(allowed.join("src/a_hit.txt"), "").unwrap();
+        fs::write(outside.join("src/o_hit.txt"), "").unwrap();
+
+        let mut config = AppConfig {
+            project_root: project.clone(),
+            ..Default::default()
+        };
+        config.allowed_paths.push(allowed.clone());
+
+        // Absolute glob spanning the temp dir: project + allowed hits
+        // included, outside hits excluded.
+        let pattern = format!("{}/**/*_hit.txt", temp_dir.path().to_string_lossy());
+        let result = find_file(FindFileArgs { filename: pattern }, &config)
+            .await
+            .unwrap();
+        let joined = result.files.join("\n");
+        assert!(
+            joined.contains("p_hit.txt"),
+            "project hit missing: {joined}"
+        );
+        assert!(
+            joined.contains("a_hit.txt"),
+            "allowed-path hit missing: {joined}"
+        );
+        assert!(
+            !joined.contains("o_hit.txt"),
+            "outside hit leaked: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_find_file_glob_alias_root_spelling_allowed() {
+        use std::os::unix::fs::symlink;
+        let temp_dir = create_temp_dir();
+        let real = temp_dir.path().join("real_project");
+        fs::create_dir_all(real.join("src")).unwrap();
+        fs::write(real.join("src/aliased.txt"), "").unwrap();
+        let alias = temp_dir.path().join("alias_project");
+        symlink(&real, &alias).unwrap();
+
+        // Config keeps the lexical (aliased) spelling; glob uses the real one.
+        let config = AppConfig {
+            project_root: alias,
+            ..Default::default()
+        };
+        let pattern = format!("{}/src/*.txt", real.to_string_lossy());
+        let result = find_file(FindFileArgs { filename: pattern }, &config)
+            .await
+            .unwrap();
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].ends_with("aliased.txt"));
     }
 }

@@ -107,6 +107,16 @@ pub fn fs_list(
         anyhow::bail!("Path must be absolute: {}", path);
     }
 
+    // Scope check first (fail closed), even for missing paths: the shared
+    // helper resolves a trusted existing ancestor for not-yet-created
+    // targets and rejects traversal/symlink escapes.
+    crate::tools::scope::ensure_in_project_scope(p, config).map_err(|e| {
+        anyhow::anyhow!(
+            "Access to files outside the project root is not allowed: {} ({e})",
+            path
+        )
+    })?;
+
     // Check if the path exists
     if !p.exists() {
         // If the path doesn't exist, return an empty list instead of an error
@@ -116,21 +126,6 @@ pub fn fs_list(
             next_cursor: None,
             warnings: Vec::new(),
         });
-    }
-
-    // Check if the path is within the project root or in allowed paths
-    let project_root = &config.project_root;
-    let canonical_path = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let is_allowed_path = config
-        .allowed_paths
-        .iter()
-        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-    if !canonical_path.starts_with(project_root) && !is_allowed_path {
-        anyhow::bail!(
-            "Access to files outside the project root is not allowed: {}",
-            path
-        );
     }
 
     let git_root = get_git_repository_root(path).unwrap_or(PathBuf::from(path));
