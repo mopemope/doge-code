@@ -1,6 +1,7 @@
 pub mod apply_patch;
 pub mod budget;
 mod common;
+pub mod scope;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ToolError {

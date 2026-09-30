@@ -334,36 +334,25 @@ async fn validate_file_path_and_access(file_path: &str, config: &AppConfig) -> R
         anyhow::bail!("File path must be absolute: {}", file_path);
     }
 
-    // プロジェクトルート内または許可されたパス内のチェック
-    let project_root = &config.project_root;
-    let canonical_path = match path.canonicalize() {
-        Ok(path) => path,
-        Err(_) => {
-            // 正規化できない場合はパストラバーサルをチェック
-            if path
-                .components()
-                .any(|comp| matches!(comp, Component::ParentDir))
-            {
-                anyhow::bail!(
-                    "Path contains parent directory references which are not allowed: {}",
-                    file_path
-                );
-            }
-            path.to_path_buf()
+    // プロジェクトルート内または許可されたパス内のチェック。
+    // ルートとターゲットは同一の正規化契約で比較する。
+    // 存在しないパスは信頼できる既存祖先で解決し、 traversal/escape は拒否する。
+    crate::tools::scope::ensure_in_project_scope(path, config).map_err(|e| {
+        if path
+            .components()
+            .any(|comp| matches!(comp, Component::ParentDir))
+        {
+            anyhow::anyhow!(
+                "Path contains parent directory references which are not allowed: {} ({e})",
+                file_path
+            )
+        } else {
+            anyhow::anyhow!(
+                "Access to files outside the project root is not allowed: {} ({e})",
+                file_path
+            )
         }
-    };
-
-    let is_allowed_path = config
-        .allowed_paths
-        .iter()
-        .any(|allowed_path| canonical_path.starts_with(allowed_path));
-
-    if !canonical_path.starts_with(project_root) && !is_allowed_path {
-        anyhow::bail!(
-            "Access to files outside the project root is not allowed: {}",
-            file_path
-        );
-    }
+    })?;
 
     Ok(())
 }
