@@ -21,6 +21,26 @@ use tokio::sync::RwLock;
 use crate::tools::memory::MemoryTools;
 // ... imports ...
 
+/// Options for [`FsTools::finalize_mutation`].
+#[derive(Debug, Clone, Default)]
+pub struct FinalizeMutationOptions {
+    /// Push an undo entry for the committed receipt. Normal mutations use
+    /// `true`; undo itself uses `false` so undo never re-pushes.
+    pub record_undo: bool,
+    /// Provenance `reverts_change_id` (set by undo to link the reverted
+    /// change; `None` for ordinary mutations).
+    pub reverts_change_id: Option<String>,
+}
+
+/// Post-commit bookkeeping outcome.
+///
+/// Source mutation already succeeded; failures here are warnings only.
+#[derive(Debug, Clone, Default)]
+pub struct MutationFinalizeReport {
+    pub change_id: Option<String>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FsTools {
     search_repomap_tools: search_repomap::RepomapSearchTools,
@@ -200,34 +220,132 @@ impl FsTools {
         });
     }
 
-    /// Backup file content to undo stack
-    pub async fn backup_file(&self, path: &std::path::Path) -> Result<()> {
-        if path.exists() {
-            let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
-            self.undo_stack
-                .write()
-                .await
-                .push(path.to_path_buf(), content);
-        } else {
-            // If file doesn't exist, we push an empty content entry for it,
-            // or handle "creation" undo separately. For now, empty string implies "was empty/new".
-            // But actually, if it didn't exist, we might want to delete it on undo.
-            // Currently undo() just writes content. Writing empty string is close enough for text files.
-            self.undo_stack
-                .write()
-                .await
-                .push(path.to_path_buf(), String::new());
+    /// Shared post-commit bookkeeping for every workspace text mutation.
+    ///
+    /// Must only be called after the source file mutation already succeeded.
+    /// Never rolls back the source change: provenance/session/context
+    /// failures are collected as warnings. Outside-project allowed paths
+    /// skip session + provenance (tracking scope, not a failure) but still
+    /// push undo entries.
+    pub async fn finalize_mutation(
+        &self,
+        receipt: crate::tools::mutation::MutationReceipt,
+        options: FinalizeMutationOptions,
+    ) -> MutationFinalizeReport {
+        let mut warnings: Vec<String> = Vec::new();
+        let absolute = receipt.path.clone();
+
+        tracing::info!(
+            kind = ?receipt.kind,
+            file = %absolute.display(),
+            before_hash = receipt.before.content_hash.as_deref().unwrap_or("missing"),
+            after_hash = receipt.after.content_hash.as_deref().unwrap_or("missing"),
+            "mutation.commit"
+        );
+
+        // Outside-project scope check on canonical paths: receipts carry
+        // the raw user-supplied path, which may contain `..` or symlinked
+        // components that a lexical comparison would misclassify.
+        let project_root = &self.config.project_root;
+        let canonical_absolute = crate::tools::mutation::canonicalize_for_scope(&absolute);
+        let canonical_root = crate::tools::mutation::canonicalize_for_scope(project_root);
+        let outside_tracked_scope = !canonical_absolute.starts_with(&canonical_root);
+
+        if outside_tracked_scope {
+            // Allowed outside paths are a supported scope gap, not a failure.
+            if options.record_undo {
+                self.push_undo_for_receipt(&receipt, None).await;
+            }
+            warnings.push(
+                "Mutation succeeded outside project root; provenance not recorded.".to_string(),
+            );
+            // Session + context stay project-scoped.
+            self.update_context(absolute);
+            return MutationFinalizeReport {
+                change_id: None,
+                warnings,
+            };
         }
-        Ok(())
+
+        // Inside project: provenance -> undo -> session -> context.
+        let change_id = match crate::tools::provenance::record_committed_mutation(
+            self,
+            &receipt,
+            options.reverts_change_id.clone(),
+        ) {
+            Ok(Some(envelope)) => Some(envelope.event_id.clone()),
+            Ok(None) => {
+                // Relativization failed despite the canonical scope check
+                // (e.g. an unresolvable path). Warn instead of silently
+                // skipping so the gap stays visible.
+                warnings.push(
+                    "Source change committed but provenance was skipped: path could not be relativized under the project root.".to_string(),
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.record_failed");
+                let _ = self.mark_current_session_provenance_failure();
+                warnings
+                    .push("Source change committed but provenance recording failed.".to_string());
+                None
+            }
+        };
+
+        if options.record_undo {
+            self.push_undo_for_receipt(&receipt, change_id.clone())
+                .await;
+        }
+
+        // Session bookkeeping (project-relative only).
+        if let Ok(rel) =
+            crate::analysis::normalize_relative_path(&canonical_root, &canonical_absolute)
+        {
+            if let Err(e) = self.update_session_with_changed_file(std::path::PathBuf::from(&rel)) {
+                warnings.push(format!("Session changed-file update failed: {e}"));
+            }
+            let lines = (receipt.lines_added + receipt.lines_removed) as u64;
+            if lines > 0
+                && let Err(e) = self.update_session_with_lines_edited(lines)
+            {
+                warnings.push(format!("Session lines-edited update failed: {e}"));
+            }
+        }
+        self.update_context(absolute);
+
+        MutationFinalizeReport {
+            change_id,
+            warnings,
+        }
     }
 
-    /// Record an undo snapshot with explicit content.
-    ///
-    /// Used by transactional edits where the pre-write content is already
-    /// known and the write has succeeded. Must only be called on success so
-    /// failed transactions never pollute the undo stack.
-    pub async fn record_undo_snapshot(&self, path: PathBuf, content: String) {
-        self.undo_stack.write().await.push(path, content);
+    async fn push_undo_for_receipt(
+        &self,
+        receipt: &crate::tools::mutation::MutationReceipt,
+        change_id: Option<String>,
+    ) {
+        let before_state = match (&receipt.before.exists, &receipt.before.content) {
+            (false, _) => crate::tools::undo::UndoFileState::Missing,
+            (true, Some(content)) => crate::tools::undo::UndoFileState::Text {
+                content: content.clone(),
+            },
+            (true, None) => crate::tools::undo::UndoFileState::Text {
+                content: String::new(),
+            },
+        };
+        let expected_after = crate::provenance::FileStateEvidence {
+            exists: receipt.after.exists,
+            content_hash: receipt.after.content_hash.clone(),
+            byte_len: receipt.after.byte_len,
+        };
+        let entry = crate::tools::undo::BackupEntry {
+            entry_id: uuid::Uuid::now_v7().to_string(),
+            path: receipt.path.clone(),
+            before: before_state,
+            expected_after,
+            change_id,
+        };
+        self.undo_stack.write().await.push_entry(entry);
     }
 
     pub fn fs_list(
@@ -290,21 +408,21 @@ impl FsTools {
         search_text::search_text_with_options(search_pattern, file_glob, options, &self.config)
     }
 
-    pub async fn fs_write(&self, path: &str, content: &str) -> Result<()> {
-        // Backup existing file before overwriting
-        if let Err(e) = self.backup_file(std::path::Path::new(path)).await {
-            tracing::warn!("Failed to backup file {}: {}", path, e);
+    pub async fn fs_write(&self, path: &str, content: &str) -> Result<write::FsWriteResult> {
+        let mut exec = write::fs_write_with_receipt(path, content, &self.config)?;
+        if let Some(receipt) = exec.receipt.take() {
+            let report = self
+                .finalize_mutation(
+                    receipt,
+                    FinalizeMutationOptions {
+                        record_undo: true,
+                        reverts_change_id: None,
+                    },
+                )
+                .await;
+            exec.result.warnings.extend(report.warnings);
         }
-
-        match write::fs_write(path, content, &self.config) {
-            Ok(result) => {
-                let p = PathBuf::from(path);
-                self.update_context(p.clone());
-                let _ = self.update_session_if_changed(&p);
-                Ok(result)
-            }
-            Err(e) => Err(e),
-        }
+        Ok(exec.result)
     }
 
     /// Structured process execution (no shell). Returns the serialized
