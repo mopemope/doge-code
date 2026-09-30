@@ -129,6 +129,53 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
 - `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
+- `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
+
+## Directive-to-Evidence Traceability
+
+Doge-Code connects observed work as:
+
+```text
+User Directive
+      ↓
+Requirement
+      ↓
+Plan
+      ↓
+Mutation
+      ↓
+Verification
+```
+
+```text
+D1 "Add cache, keep token validation"
+ ├─ R1 "cache authentication" (derived from D1)
+ │   └─ P1 "Optimize TokenCache lookup" -> [R1]
+ │       ├─ change C8 src/auth.rs
+ │       └─ verification V3 cargo test [passed]
+ └─ R2 "preserve token validation" (derived from D1)
+```
+
+Terminology (none of these imply formal correctness proof):
+
+```text
+Directive:
+  observed instruction (raw user input + effective instruction handed to the agent)
+
+Requirement:
+  structured agent interpretation derived from a directive
+
+Verification:
+  observed command result against a workspace snapshot
+```
+
+- A `DirectiveObserved` event stores `raw_input` (what the user typed) and `effective_instruction` (what the agent received) with BLAKE3 hashes. The envelope `event_id` is the canonical directive id. Directive text is never logged; only ids, origin, and hashes appear in logs. `provenance_read` returns a preview + hashes by default and full text only with `include_content=true`.
+- A `RequirementChanged` event batches `before -> after` transitions for one directive. Statuses are only `Active` / `Withdrawn` — there is intentionally no `Satisfied`/`Verified` (a passing test never proves a requirement). Current state is rebuilt from history; there is no separate `requirements.json`.
+- `PlanItem.requirement_ids` links steps to requirements (unknown ids fail `plan_write`; withdrawn links warn but do not break). Requirement-only link edits still emit `PlanChanged`.
+- `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
+- `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification.
+- Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`.
+- Storage: `.doge/sessions/<id>/provenance/v3/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/` and `provenance/v2/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 

@@ -8,34 +8,100 @@
 
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::provenance::{
-    ChangeCommittedEvent, ChangeKind, ChangeTarget, FileStateEvidence, ProvenanceEvent,
-    ProvenanceEventEnvelope, ProvenanceStore, diff_hash_for,
+    ChangeCommittedEvent, ChangeKind, ChangeTarget, DirectiveObservedEvent, DirectiveOrigin,
+    FileStateEvidence, ProvenanceAttribution, ProvenanceEvent, ProvenanceEventEnvelope,
+    ProvenanceStore, diff_hash_for, directive_content_hash,
 };
 use crate::tools::FsTools;
 
+/// Record an observed user directive. Never logs content — only ids, origin,
+/// and hashes.
+///
+/// Returns the directive id (envelope event id) on success. On failure,
+/// returns an error so the caller can mark `provenance_incomplete` and
+/// continue with `directive_id = None` (a directive failure never aborts the
+/// agent turn itself).
+pub fn record_directive_observed(
+    fs_tools: &FsTools,
+    origin: DirectiveOrigin,
+    raw_input: &str,
+    effective_instruction: &str,
+) -> anyhow::Result<ProvenanceEventEnvelope> {
+    let Some(ctx) = fs_tools.current_session_storage_context() else {
+        anyhow::bail!("no current session for directive recording");
+    };
+    let event = ProvenanceEvent::DirectiveObserved(DirectiveObservedEvent {
+        origin,
+        raw_input: raw_input.to_string(),
+        raw_input_hash: directive_content_hash(raw_input),
+        effective_instruction: effective_instruction.to_string(),
+        effective_instruction_hash: directive_content_hash(effective_instruction),
+    });
+    let store = ProvenanceStore::new(ctx.session_dir);
+    let envelope = store.append(&ctx.session_id, event)?;
+    tracing::info!(
+        directive_id = %envelope.event_id,
+        origin = origin.as_str(),
+        "provenance.directive_observed"
+    );
+    Ok(envelope)
+}
+
 /// Generic commit recorder for any [`crate::tools::mutation::MutationReceipt`].
 ///
-/// Resolves the current plan item, computes `predecessor_change_id` from the
-/// file mutation chain, and appends a v2 `ChangeCommitted`. Returns
-/// `Ok(None)` when there is no current session (nothing to attach to) or
-/// when the path cannot relativize under the project root (outside tracked
-/// scope; the caller reports this as a scope warning, not a failure).
-/// Append failures are returned as `Err` so the caller can mark
-/// `provenance_incomplete` without rolling back the source change.
+/// Resolves the current plan item, freezes its requirement links, computes
+/// `predecessor_change_id` from the file mutation chain, and appends a v3
+/// `ChangeCommitted`. Returns `Ok(None)` when there is no current session
+/// (nothing to attach to) or when the path cannot relativize under the
+/// project root (outside tracked scope; the caller reports this as a scope
+/// warning, not a failure). Append failures are returned as `Err` so the
+/// caller can mark `provenance_incomplete` without rolling back the source
+/// change.
+///
+/// `attribution` carries the current directive id. Planned mutations freeze
+/// `plan_item_id` + its requirement ids; unplanned mutations still carry the
+/// directive id with empty requirement ids (never fully orphaned when a turn
+/// context exists).
 pub fn record_committed_mutation(
     fs_tools: &FsTools,
     receipt: &crate::tools::mutation::MutationReceipt,
     reverts_change_id: Option<String>,
 ) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
+    record_committed_mutation_with_attribution(
+        fs_tools,
+        receipt,
+        reverts_change_id,
+        &ProvenanceAttribution::none(),
+    )
+}
+
+/// Attribution-aware commit recorder. Tool handlers must pass
+/// `runtime.attribution`; non-agent paths use `ProvenanceAttribution::none()`.
+pub fn record_committed_mutation_with_attribution(
+    fs_tools: &FsTools,
+    receipt: &crate::tools::mutation::MutationReceipt,
+    reverts_change_id: Option<String>,
+    attribution: &ProvenanceAttribution,
+) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
     let Some(ctx) = fs_tools.current_session_storage_context() else {
         tracing::warn!("provenance.record_skipped: no current session");
         return Ok(None);
     };
-    let plan_item_id = match fs_tools.plan_read() {
-        Ok(plan) => crate::provenance::current_in_progress_plan_item(&plan.items),
+    // Single snapshot: read plan once, derive both plan item and requirement
+    // links (avoids duplicate I/O per spec §149).
+    let (plan_item_id, requirement_ids) = match fs_tools.plan_read() {
+        Ok(plan) => {
+            let current = crate::provenance::current_in_progress_plan_item(&plan.items);
+            let reqs = current
+                .as_deref()
+                .and_then(|id| plan.items.iter().find(|i| i.id == id))
+                .map(|item| item.requirement_ids.clone())
+                .unwrap_or_default();
+            (current, reqs)
+        }
         Err(e) => {
             tracing::debug!(error = %e, "provenance plan read failed; recording unlinked change");
-            None
+            (None, Vec::new())
         }
     };
     let canonical_path = crate::tools::mutation::canonicalize_for_scope(&receipt.path);
@@ -91,7 +157,9 @@ pub fn record_committed_mutation(
 
     let event = ProvenanceEvent::ChangeCommitted(ChangeCommittedEvent {
         transaction_id: String::new(),
+        directive_id: attribution.directive_id.clone(),
         plan_item_id,
+        requirement_ids,
         change_kind: receipt.kind,
         file,
         target,
@@ -158,24 +226,60 @@ pub fn load_current_events(
 }
 
 /// Capture the pre-execution verification context: current plan item plus the
-/// ids of currently active semantic changes.
+/// ids of currently active changes, with frozen requirement ids.
 ///
 /// Must be called before the process starts so mid-run changes are never
-/// attributed to the running command.
+/// attributed to the running command. Requirement ids are the union of active
+/// change requirement ids, falling back to current plan item links.
 pub fn capture_verification_context_for_fs(
     fs_tools: &FsTools,
+) -> crate::provenance::VerificationContext {
+    capture_verification_context_for_fs_with_attribution(fs_tools, &ProvenanceAttribution::none())
+}
+
+/// Attribution-aware capture. Agent paths pass `runtime.attribution`;
+/// manual `/test` / `/lint` use `None` (plan/requirement links still saved).
+pub fn capture_verification_context_for_fs_with_attribution(
+    fs_tools: &FsTools,
+    attribution: &ProvenanceAttribution,
 ) -> crate::provenance::VerificationContext {
     let plan_items = match fs_tools.plan_read() {
         Ok(plan) => plan.items,
         Err(_) => Vec::new(),
     };
-    let active_ids = match load_current_events(fs_tools) {
+    let (active_ids, change_reqs) = match load_current_events(fs_tools) {
         Ok(Some(loaded)) => {
-            crate::provenance::active_change_ids(&fs_tools.config.project_root, &loaded.events)
+            let active =
+                crate::provenance::active_change_ids(&fs_tools.config.project_root, &loaded.events);
+            let active_set: std::collections::HashSet<&str> =
+                active.iter().map(String::as_str).collect();
+            // change_id -> requirement_ids for active changes only.
+            let mut per_change: Vec<Vec<String>> = Vec::new();
+            for env in &loaded.events {
+                if !active_set.contains(env.event_id.as_str()) {
+                    continue;
+                }
+                if let crate::provenance::ProvenanceEvent::ChangeCommitted(c) = &env.event
+                    && !c.requirement_ids.is_empty()
+                {
+                    per_change.push(c.requirement_ids.clone());
+                }
+            }
+            (active, per_change)
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), Vec::new()),
     };
-    crate::provenance::capture_verification_context(&plan_items, &active_ids)
+    let plan_links: std::collections::HashMap<String, Vec<String>> = plan_items
+        .iter()
+        .map(|i| (i.id.clone(), i.requirement_ids.clone()))
+        .collect();
+    crate::provenance::verification::capture_verification_context_full(
+        &plan_items,
+        &active_ids,
+        &change_reqs,
+        attribution.directive_id.clone(),
+        &plan_links,
+    )
 }
 
 /// Project-relative cwd evidence, or `None` for the project root default.
@@ -330,10 +434,20 @@ pub fn classify_lint_command(
     }
 }
 
+/// Requirement ids as a sorted set for order-insensitive comparison.
+fn sorted_ids(ids: &[String]) -> Vec<&str> {
+    let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted
+}
+
 /// Diff two plan snapshots into per-item transitions.
 ///
-/// Only items whose status, content, or parent changed (plus new/deleted
-/// items) are included. A no-op write produces no transitions.
+/// Only items whose status, content, parent, or requirement links changed
+/// (plus new/deleted items) are included. A no-op write produces no
+/// transitions. Requirement-link-only edits also produce a transition.
+/// Requirement id order is insignificant: links compare as sorted sets so a
+/// pure reorder is a no-op.
 pub fn diff_plan_transitions(
     before: &[crate::tools::plan::PlanItem],
     after: &[crate::tools::plan::PlanItem],
@@ -359,13 +473,19 @@ pub fn diff_plan_transitions(
         let a = after_map.get(id);
         match (b, a) {
             (Some(b), Some(a)) => {
-                if b.status != a.status || b.content != a.content || b.parent_id != a.parent_id {
+                if b.status != a.status
+                    || b.content != a.content
+                    || b.parent_id != a.parent_id
+                    || sorted_ids(&b.requirement_ids) != sorted_ids(&a.requirement_ids)
+                {
                     out.push(crate::provenance::PlanItemTransition {
                         plan_item_id: id.to_string(),
                         parent_id: a.parent_id.clone(),
                         content: a.content.clone(),
                         before_status: Some(b.status.clone()),
                         after_status: Some(a.status.clone()),
+                        before_requirement_ids: b.requirement_ids.clone(),
+                        after_requirement_ids: a.requirement_ids.clone(),
                     });
                 }
             }
@@ -375,6 +495,8 @@ pub fn diff_plan_transitions(
                 content: a.content.clone(),
                 before_status: None,
                 after_status: Some(a.status.clone()),
+                before_requirement_ids: Vec::new(),
+                after_requirement_ids: a.requirement_ids.clone(),
             }),
             (Some(b), None) => out.push(crate::provenance::PlanItemTransition {
                 plan_item_id: id.to_string(),
@@ -382,6 +504,8 @@ pub fn diff_plan_transitions(
                 content: b.content.clone(),
                 before_status: Some(b.status.clone()),
                 after_status: None,
+                before_requirement_ids: b.requirement_ids.clone(),
+                after_requirement_ids: Vec::new(),
             }),
             (None, None) => {}
         }
@@ -397,6 +521,16 @@ pub fn record_plan_changed(
     fs_tools: &FsTools,
     transitions: Vec<crate::provenance::PlanItemTransition>,
 ) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
+    record_plan_changed_with_attribution(fs_tools, transitions, &ProvenanceAttribution::none())
+}
+
+/// Attribution-aware plan recorder. Agent tool paths pass
+/// `runtime.attribution`; direct UI operations use `None`.
+pub fn record_plan_changed_with_attribution(
+    fs_tools: &FsTools,
+    transitions: Vec<crate::provenance::PlanItemTransition>,
+    attribution: &ProvenanceAttribution,
+) -> anyhow::Result<Option<ProvenanceEventEnvelope>> {
     if transitions.is_empty() {
         return Ok(None);
     }
@@ -404,6 +538,7 @@ pub fn record_plan_changed(
         return Ok(None);
     };
     let event = ProvenanceEvent::PlanChanged(crate::provenance::PlanChangedEvent {
+        directive_id: attribution.directive_id.clone(),
         changes: transitions,
     });
     let store = ProvenanceStore::new(ctx.session_dir);
@@ -467,6 +602,48 @@ pub fn plan_completion_warnings(
     warnings
 }
 
+/// Soft warning for completed items with committed changes but no requirement
+/// link. Never blocks. Research-only items (no linked changes) produce no
+/// warning.
+pub fn plan_requirement_link_warnings(
+    fs_tools: &FsTools,
+    transitions: &[crate::provenance::PlanItemTransition],
+) -> Vec<String> {
+    let completed: Vec<&crate::provenance::PlanItemTransition> = transitions
+        .iter()
+        .filter(|t| {
+            t.after_status.as_deref() == Some("completed")
+                && t.before_status.as_deref() != Some("completed")
+        })
+        .collect();
+    if completed.is_empty() {
+        return Vec::new();
+    }
+    let loaded = match load_current_events(fs_tools) {
+        Ok(Some(loaded)) => loaded,
+        _ => return Vec::new(),
+    };
+    let resolved =
+        crate::provenance::resolve_active_states(&fs_tools.config.project_root, &loaded.events);
+    let mut out = Vec::new();
+    for t in completed {
+        if !t.after_requirement_ids.is_empty() {
+            continue;
+        }
+        let has_changes = resolved.iter().any(|r| {
+            r.state == crate::provenance::ActiveChangeState::Active
+                && r.plan_item_id.as_deref() == Some(t.plan_item_id.as_str())
+        });
+        if has_changes {
+            out.push(format!(
+                "Plan item '{}' has committed changes but no requirement link.",
+                t.plan_item_id
+            ));
+        }
+    }
+    out
+}
+
 /// `provenance_read` tool: read-only inspection of plan/change/verification
 /// links plus coverage. Never writes evidence.
 pub fn tool_def() -> ToolDef {
@@ -474,18 +651,21 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "provenance_read".to_string(),
-            description: "Read provenance linking plan steps, committed semantic changes, and observed verification commands. Use this to inspect what changed, which checks ran afterward, and where evidence is incomplete.".to_string(),
+            description: "Read provenance linking directives, requirements, plan steps, committed changes, and observed verification commands. Use this to inspect what changed, which checks ran afterward, and where evidence is incomplete.".to_string(),
             strict: Some(true),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "plan_item_id": {"type": "string", "description": "Filter to one plan item id"},
+                    "directive_id": {"type": "string", "description": "Filter to one directive id"},
+                    "requirement_id": {"type": "string", "description": "Filter to one requirement id"},
                     "event_types": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["plan_changed", "change_committed", "verification_observed"]},
+                        "items": {"type": "string", "enum": ["directive_observed", "requirement_changed", "plan_changed", "change_committed", "verification_observed"]},
                         "description": "Filter to these event types"
                     },
                     "include_diff": {"type": "boolean", "default": false, "description": "Include diffs/excerpts (still budgeted)"},
+                    "include_content": {"type": "boolean", "default": false, "description": "Include full directive text (default returns preview + hashes only)"},
                     "cursor": {"type": "integer", "minimum": 0, "description": "0-based next position"},
                     "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Events per page (default 20)"},
                     "response_budget_chars": {"type": "integer", "minimum": 1, "description": "Total response budget in chars (default 6000)"}
@@ -502,9 +682,15 @@ pub struct ProvenanceReadArgs {
     #[serde(default)]
     pub plan_item_id: Option<String>,
     #[serde(default)]
+    pub directive_id: Option<String>,
+    #[serde(default)]
+    pub requirement_id: Option<String>,
+    #[serde(default)]
     pub event_types: Option<Vec<crate::provenance::ProvenanceEventType>>,
     #[serde(default)]
     pub include_diff: bool,
+    #[serde(default)]
+    pub include_content: bool,
     #[serde(default)]
     pub cursor: Option<usize>,
     #[serde(default)]
@@ -576,7 +762,7 @@ fn budget_coverage(
     }
     if truncated {
         warnings.push(
-            "Provenance coverage ID lists truncated to stay within response_budget_chars; use plan_item_id/event_types filters for a narrower view."
+            "Provenance coverage ID lists truncated to stay within response_budget_chars; use plan_item_id/directive_id/requirement_id/event_types filters for a narrower view."
                 .to_string(),
         );
     }
@@ -614,7 +800,7 @@ pub fn provenance_read(
     let loaded = store.load_all()?;
     let mut warnings = loaded.warnings.clone();
 
-    // Filter by type + plan item, preserving (timestamp, event_id) order.
+    // Filter by type + plan/directive/requirement, preserving (timestamp, event_id) order.
     let wanted: Option<std::collections::HashSet<crate::provenance::ProvenanceEventType>> =
         args.event_types.map(|v| v.into_iter().collect());
     let mut filtered: Vec<&ProvenanceEventEnvelope> = loaded
@@ -626,24 +812,20 @@ pub fn provenance_read(
             {
                 return false;
             }
-            if let Some(item) = &args.plan_item_id {
-                match &env.event {
-                    ProvenanceEvent::PlanChanged(e) => {
-                        if !e.changes.iter().any(|c| &c.plan_item_id == item) {
-                            return false;
-                        }
-                    }
-                    ProvenanceEvent::ChangeCommitted(c) => {
-                        if c.plan_item_id.as_deref() != Some(item.as_str()) {
-                            return false;
-                        }
-                    }
-                    ProvenanceEvent::VerificationObserved(v) => {
-                        if v.plan_item_id.as_deref() != Some(item.as_str()) {
-                            return false;
-                        }
-                    }
-                }
+            if let Some(item) = &args.plan_item_id
+                && !event_matches_plan_item(&env.event, item)
+            {
+                return false;
+            }
+            if let Some(directive) = &args.directive_id
+                && !event_matches_directive(env, directive)
+            {
+                return false;
+            }
+            if let Some(req) = &args.requirement_id
+                && !event_matches_requirement(&env.event, req)
+            {
+                return false;
             }
             true
         })
@@ -692,7 +874,7 @@ pub fn provenance_read(
             })
             .collect();
     for env in filtered[start..end].iter() {
-        let summary = summarize_event(env, args.include_diff, &states);
+        let summary = summarize_event(env, args.include_diff, args.include_content, &states);
         let len = serde_json::to_string(&summary)
             .map(|s| s.len())
             .unwrap_or(0)
@@ -722,21 +904,104 @@ pub fn provenance_read(
     })
 }
 
+fn event_matches_plan_item(event: &ProvenanceEvent, item: &str) -> bool {
+    match event {
+        ProvenanceEvent::DirectiveObserved(_) | ProvenanceEvent::RequirementChanged(_) => false,
+        ProvenanceEvent::PlanChanged(e) => e.changes.iter().any(|c| c.plan_item_id == item),
+        ProvenanceEvent::ChangeCommitted(c) => c.plan_item_id.as_deref() == Some(item),
+        ProvenanceEvent::VerificationObserved(v) => v.plan_item_id.as_deref() == Some(item),
+    }
+}
+
+fn event_matches_directive(env: &ProvenanceEventEnvelope, directive: &str) -> bool {
+    match &env.event {
+        ProvenanceEvent::DirectiveObserved(_) => env.event_id == directive,
+        ProvenanceEvent::RequirementChanged(e) => e.directive_id == directive,
+        ProvenanceEvent::PlanChanged(e) => e.directive_id.as_deref() == Some(directive),
+        ProvenanceEvent::ChangeCommitted(c) => c.directive_id.as_deref() == Some(directive),
+        ProvenanceEvent::VerificationObserved(v) => v.directive_id.as_deref() == Some(directive),
+    }
+}
+
+fn event_matches_requirement(event: &ProvenanceEvent, req: &str) -> bool {
+    match event {
+        ProvenanceEvent::DirectiveObserved(_) => false,
+        ProvenanceEvent::RequirementChanged(e) => e.changes.iter().any(|c| c.requirement_id == req),
+        ProvenanceEvent::PlanChanged(e) => e.changes.iter().any(|c| {
+            c.before_requirement_ids.iter().any(|r| r == req)
+                || c.after_requirement_ids.iter().any(|r| r == req)
+        }),
+        ProvenanceEvent::ChangeCommitted(c) => c.requirement_ids.iter().any(|r| r == req),
+        ProvenanceEvent::VerificationObserved(v) => v.requirement_ids.iter().any(|r| r == req),
+    }
+}
+
 fn summarize_event(
     env: &ProvenanceEventEnvelope,
     include_diff: bool,
+    include_content: bool,
     states: &std::collections::HashMap<String, String>,
 ) -> serde_json::Value {
     match &env.event {
+        ProvenanceEvent::DirectiveObserved(d) => {
+            let mut v = serde_json::json!({
+                "event_id": env.event_id,
+                "type": "directive_observed",
+                "timestamp": env.timestamp,
+                "directive_id": env.event_id,
+                "origin": d.origin,
+                "raw_input_hash": d.raw_input_hash,
+                "effective_instruction_hash": d.effective_instruction_hash,
+                "preview": d.preview(),
+            });
+            if include_content && let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "raw_input".to_string(),
+                    serde_json::Value::String(d.raw_input.clone()),
+                );
+                obj.insert(
+                    "effective_instruction".to_string(),
+                    serde_json::Value::String(d.effective_instruction.clone()),
+                );
+            }
+            // Budget directive text even when explicitly requested.
+            if include_content && let Some(obj) = v.as_object_mut() {
+                for key in ["raw_input", "effective_instruction"] {
+                    if let Some(s) = obj.get(key).and_then(|v| v.as_str()).map(str::to_string) {
+                        let budgeted = crate::tools::budget::head_tail_truncate(
+                            &s,
+                            PROVENANCE_READ_DIFF_BUDGET,
+                        )
+                        .text;
+                        obj.insert(key.to_string(), serde_json::Value::String(budgeted));
+                    }
+                }
+            }
+            v
+        }
+        ProvenanceEvent::RequirementChanged(e) => serde_json::json!({
+            "event_id": env.event_id,
+            "type": "requirement_changed",
+            "timestamp": env.timestamp,
+            "directive_id": e.directive_id,
+            "changes": e.changes.iter().map(|c| serde_json::json!({
+                "requirement_id": c.requirement_id,
+                "before": c.before,
+                "after": c.after,
+            })).collect::<Vec<_>>(),
+        }),
         ProvenanceEvent::PlanChanged(e) => {
             serde_json::json!({
                 "event_id": env.event_id,
                 "type": "plan_changed",
                 "timestamp": env.timestamp,
+                "directive_id": e.directive_id,
                 "changes": e.changes.iter().map(|c| serde_json::json!({
                     "plan_item_id": c.plan_item_id,
                     "before_status": c.before_status,
                     "after_status": c.after_status,
+                    "before_requirement_ids": c.before_requirement_ids,
+                    "after_requirement_ids": c.after_requirement_ids,
                 })).collect::<Vec<_>>(),
             })
         }
@@ -751,7 +1016,9 @@ fn summarize_event(
                 "event_id": env.event_id,
                 "type": "change_committed",
                 "timestamp": env.timestamp,
+                "directive_id": c.directive_id,
                 "plan_item_id": c.plan_item_id,
+                "requirement_ids": c.requirement_ids,
                 "change_kind": c.change_kind,
                 "target_scope": target_scope,
                 "file": c.file,
@@ -795,7 +1062,9 @@ fn summarize_event(
                 "event_id": env.event_id,
                 "type": "verification_observed",
                 "timestamp": env.timestamp,
+                "directive_id": v.directive_id,
                 "plan_item_id": v.plan_item_id,
+                "requirement_ids": v.requirement_ids,
                 "verification_kind": v.verification_kind,
                 "source": v.source,
                 "program": v.command.program,
@@ -889,6 +1158,7 @@ mod tests {
             parent_id: None,
             content: "a".into(),
             status: "pending".into(),
+            requirement_ids: Vec::new(),
         }];
         let t = diff_plan_transitions(&before, &after);
         assert_eq!(t.len(), 1);
@@ -907,12 +1177,14 @@ mod tests {
                 parent_id: None,
                 content: "a".into(),
                 status: "completed".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "step-2".into(),
                 parent_id: None,
                 content: "b".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         assert_eq!(
@@ -959,6 +1231,8 @@ mod tests {
                         diff_hash: "blake3:x".into(),
                         lines_added: 1,
                         lines_removed: 0,
+                        directive_id: None,
+                        requirement_ids: Vec::new(),
                     }),
                 )
                 .unwrap();
@@ -1007,6 +1281,8 @@ mod tests {
         let ctx_a = crate::provenance::VerificationContext {
             plan_item_id: Some("step-1".into()),
             observed_change_ids: vec!["change-A".to_string()],
+            directive_id: None,
+            requirement_ids: Vec::new(),
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
@@ -1087,6 +1363,7 @@ mod provenance_extra_tests {
                 &sid,
                 ProvenanceEvent::PlanChanged(crate::provenance::PlanChangedEvent {
                     changes: vec![],
+                    directive_id: None,
                 }),
             )
             .unwrap();
@@ -1109,12 +1386,14 @@ mod provenance_extra_tests {
                     parent_id: None,
                     content: "a".into(),
                     status: "pending".into(),
+                    requirement_ids: Vec::new(),
                 },
                 crate::tools::plan::PlanItem {
                     id: "step-2".into(),
                     parent_id: None,
                     content: "b".into(),
                     status: "in_progress".into(),
+                    requirement_ids: Vec::new(),
                 },
             ],
             crate::tools::plan::PlanWriteMode::Replace,
@@ -1171,12 +1450,14 @@ mod provenance_extra_tests {
                     parent_id: None,
                     content: "a".into(),
                     status: "pending".into(),
+                    requirement_ids: Vec::new(),
                 },
                 crate::tools::plan::PlanItem {
                     id: "step-2".into(),
                     parent_id: None,
                     content: "b".into(),
                     status: "completed".into(),
+                    requirement_ids: Vec::new(),
                 },
             ],
             crate::tools::plan::PlanWriteMode::Replace,
@@ -1225,7 +1506,7 @@ mod provenance_extra_tests {
         assert!(after_commit.contains("2;"));
         // Break provenance writes: a file where the events dir should be.
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v2/events");
+        let events_dir = ctx.session_dir.join("provenance/v3/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         // `before_content` is irrelevant here: the append fails before any
@@ -1290,18 +1571,21 @@ mod provenance_extra_tests {
                 parent_id: None,
                 content: "x".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "b".into(),
                 parent_id: None,
                 content: "y".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "gone".into(),
                 parent_id: None,
                 content: "z".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let after = vec![
@@ -1310,18 +1594,21 @@ mod provenance_extra_tests {
                 parent_id: None,
                 content: "x".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "b".into(),
                 parent_id: None,
                 content: "y".into(),
                 status: "completed".into(),
+                requirement_ids: Vec::new(),
             },
             PlanItem {
                 id: "new".into(),
                 parent_id: None,
                 content: "n".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             },
         ];
         let t = diff_plan_transitions(&before, &after);
@@ -1342,6 +1629,7 @@ mod provenance_extra_tests {
             parent_id: None,
             content: "a".into(),
             status: "pending".into(),
+            requirement_ids: Vec::new(),
         }];
         let first = fs
             .plan_write(items.clone(), crate::tools::plan::PlanWriteMode::Replace)
@@ -1367,6 +1655,7 @@ mod provenance_extra_tests {
                 parent_id: None,
                 content: "work".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1406,6 +1695,7 @@ mod provenance_extra_tests {
                     parent_id: None,
                     content: "work".into(),
                     status: "completed".into(),
+                    requirement_ids: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -1424,12 +1714,14 @@ mod provenance_extra_tests {
                         parent_id: None,
                         content: "work".into(),
                         status: "completed".into(),
+                        requirement_ids: Vec::new(),
                     },
                     crate::tools::plan::PlanItem {
                         id: "research".into(),
                         parent_id: None,
                         content: "read docs".into(),
                         status: "completed".into(),
+                        requirement_ids: Vec::new(),
                     },
                 ],
                 crate::tools::plan::PlanWriteMode::Replace,
@@ -1448,6 +1740,7 @@ mod provenance_extra_tests {
                 parent_id: None,
                 content: "work".into(),
                 status: "in_progress".into(),
+                requirement_ids: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1488,6 +1781,8 @@ mod provenance_extra_tests {
                 context: crate::provenance::VerificationContext {
                     plan_item_id: Some("step-1".into()),
                     observed_change_ids: vec![change_env.event_id.clone()],
+                    directive_id: None,
+                    requirement_ids: Vec::new(),
                 },
                 extra_warnings: vec![],
             },
@@ -1505,6 +1800,7 @@ mod provenance_extra_tests {
                     parent_id: None,
                     content: "work".into(),
                     status: "completed".into(),
+                    requirement_ids: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -1525,6 +1821,7 @@ mod provenance_extra_tests {
                 parent_id: None,
                 content: "a".into(),
                 status: "pending".into(),
+                requirement_ids: Vec::new(),
             }],
             crate::tools::plan::PlanWriteMode::Replace,
         )
@@ -1537,6 +1834,7 @@ mod provenance_extra_tests {
                     parent_id: None,
                     content: "a".into(),
                     status: "completed".into(),
+                    requirement_ids: Vec::new(),
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
@@ -1580,6 +1878,8 @@ mod provenance_extra_tests {
                     diff_hash: "blake3:x".into(),
                     lines_added: 1,
                     lines_removed: 0,
+                    directive_id: None,
+                    requirement_ids: Vec::new(),
                 }),
             )
             .unwrap();
@@ -1682,6 +1982,7 @@ mod review_fix_tests {
                 &ctx.session_id,
                 ProvenanceEvent::PlanChanged(crate::provenance::PlanChangedEvent {
                     changes: vec![],
+                    directive_id: None,
                 }),
             )
             .unwrap();
@@ -1710,7 +2011,7 @@ mod review_fix_tests {
     fn test_tui_record_returns_false_and_marks_session_on_failure() {
         let (_proj, fs) = setup();
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v2/events");
+        let events_dir = ctx.session_dir.join("provenance/v3/events");
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         let ok = record_tui_test_verification(

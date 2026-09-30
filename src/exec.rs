@@ -202,11 +202,33 @@ impl Executor {
         history_guard.append_user(instruction);
         drop(history_guard); // Free lock before loop
 
+        // Missing client means the agent never starts: record no directive
+        // (matches TUI busy/missing-key semantics).
+        let client_ref = match self.client.as_ref() {
+            Some(client) => client,
+            None => anyhow::bail!("OpenAI client not initialized"),
+        };
+
+        // Record the observed user directive (exec run). A recording failure
+        // never aborts the turn: mark provenance_incomplete and continue
+        // with directive_id = None.
+        let attribution = match crate::tools::provenance::record_directive_observed(
+            &self.tools,
+            crate::provenance::DirectiveOrigin::ExecRun,
+            instruction,
+            instruction,
+        ) {
+            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.directive_record_failed");
+                let _ = self.tools.mark_current_session_provenance_failure();
+                crate::provenance::ProvenanceAttribution::none()
+            }
+        };
+
         // Call run_agent_loop
         let res = llm::run_agent_loop(
-            self.client
-                .as_ref()
-                .context("OpenAI client not initialized")?,
+            client_ref,
             &self.cfg.model,
             &self.tools,
             msgs,
@@ -214,6 +236,7 @@ impl Executor {
             None, // No cancellation token for now
             &self.cfg,
             None, // No TuiExecutor for exec mode
+            attribution,
         )
         .await;
 
@@ -430,9 +453,36 @@ impl Executor {
             tool_call_id: None,
         });
 
+        // Rewrite: raw_input is the user-supplied prompt; effective is the
+        // generated rewrite request. Never store the generated request alone
+        // as the user input.
+        let attribution = match crate::tools::provenance::record_directive_observed(
+            &self.tools,
+            crate::provenance::DirectiveOrigin::ExecRewrite,
+            prompt,
+            &request,
+        ) {
+            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.directive_record_failed");
+                let _ = self.tools.mark_current_session_provenance_failure();
+                crate::provenance::ProvenanceAttribution::none()
+            }
+        };
+
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(self.cfg.rewrite_timeout_sec),
-            llm::run_agent_loop(client, &model, &fs_tools, msgs, None, None, &self.cfg, None),
+            llm::run_agent_loop(
+                client,
+                &model,
+                &fs_tools,
+                msgs,
+                None,
+                None,
+                &self.cfg,
+                None,
+                attribution,
+            ),
         )
         .await;
 
@@ -634,6 +684,20 @@ impl Executor {
             history_guard.append_user(instruction);
         }
 
+        let attribution = match crate::tools::provenance::record_directive_observed(
+            &self.tools,
+            crate::provenance::DirectiveOrigin::ExecAsk,
+            instruction,
+            instruction,
+        ) {
+            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.directive_record_failed");
+                let _ = self.tools.mark_current_session_provenance_failure();
+                crate::provenance::ProvenanceAttribution::none()
+            }
+        };
+
         let (updated_messages, final_msg) = llm::run_agent_loop(
             self.client.as_ref().expect("LLM client is not initialized"),
             &self.cfg.model,
@@ -643,6 +707,7 @@ impl Executor {
             None,
             &self.cfg,
             None,
+            attribution,
         )
         .await?;
 
@@ -1118,6 +1183,51 @@ mod tests {
             .expect("Failed to open store");
         let summaries = store.list_with_stats().expect("Failed to list sessions");
         assert_eq!(summaries.len(), 1, "a fresh session should be created");
+    }
+
+    #[tokio::test]
+    async fn test_exec_directive_origins_and_hashes() {
+        // Exec run/ask: raw == effective. Rewrite: raw (user prompt) !=
+        // effective (generated request). Hashes are exact-byte BLAKE3.
+        let run_raw = "Add cache";
+        let run_effective = "Add cache";
+        assert_eq!(
+            crate::provenance::directive_content_hash(run_raw),
+            crate::provenance::directive_content_hash(run_effective)
+        );
+        let rewrite_raw = "Optimize this";
+        let rewrite_effective = build_rewrite_prompt(rewrite_raw, "fn f() {}", Some("src/lib.rs"));
+        assert_ne!(rewrite_raw, rewrite_effective);
+        assert_ne!(
+            crate::provenance::directive_content_hash(rewrite_raw),
+            crate::provenance::directive_content_hash(&rewrite_effective)
+        );
+        // Record helper works for exec origins without network.
+        let temp_dir = TempDir::new().unwrap();
+        let cfg = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.unwrap();
+        for origin in [
+            crate::provenance::DirectiveOrigin::ExecRun,
+            crate::provenance::DirectiveOrigin::ExecAsk,
+            crate::provenance::DirectiveOrigin::ExecRewrite,
+        ] {
+            let env = crate::tools::provenance::record_directive_observed(
+                executor.tools(),
+                origin,
+                "raw",
+                "effective",
+            )
+            .unwrap();
+            match &env.event {
+                crate::provenance::ProvenanceEvent::DirectiveObserved(d) => {
+                    assert_eq!(d.origin, origin);
+                }
+                _ => panic!("expected directive"),
+            }
+        }
     }
 
     // Additional tests could be added here, such as:
