@@ -1,6 +1,6 @@
 use crate::jobs::types::{
-    CancelJobResult, JobContext, JobId, JobKind, JobRunOutcome, JobScope, JobSnapshot, JobSpec,
-    JobStartError, JobStatus, WorkspaceAccess, bound_error, format_elapsed,
+    CancelJobResult, JobCompletion, JobContext, JobId, JobKind, JobRunOutcome, JobScope,
+    JobSnapshot, JobSpec, JobStartError, JobStatus, WorkspaceAccess, bound_error, format_elapsed,
 };
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -11,6 +11,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 const SHUTDOWN_FALLBACK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Post-terminal completion hook. Invoked exactly once per terminalized
+/// job, strictly after foreground ownership is released and terminal
+/// history is recorded. Never carries domain payloads: subscribers key
+/// their own deferred work by `JobCompletion.id`.
+pub type JobCompletionHook = Arc<dyn Fn(JobCompletion) + Send + Sync>;
 
 struct JobRecord {
     id: JobId,
@@ -63,6 +69,7 @@ struct JobManagerInner {
     workspace_gate: Arc<tokio::sync::RwLock<()>>,
     next_id: AtomicU64,
     accepting: AtomicBool,
+    completion_hook: std::sync::Mutex<Option<JobCompletionHook>>,
 }
 
 /// Central ownership for user-visible long-running work.
@@ -89,8 +96,20 @@ impl JobManager {
                 workspace_gate: Arc::new(tokio::sync::RwLock::new(())),
                 next_id: AtomicU64::new(1),
                 accepting: AtomicBool::new(true),
+                completion_hook: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Install the post-terminal completion hook. The hook fires exactly
+    /// once per terminalized job, after foreground release. Replaces any
+    /// previously installed hook.
+    pub fn set_completion_hook(&self, hook: JobCompletionHook) {
+        *self
+            .inner
+            .completion_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// Spawn a job. Reservation (foreground check, id allocation, record
@@ -343,16 +362,16 @@ impl JobManager {
     }
 
     fn finish_job(&self, id: JobId, outcome: JobRunOutcome) {
-        let snapshot = {
+        let (snapshot, completion) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(mut record) = state.active.remove(&id) else {
                 return;
             };
-            let (status, error) = match outcome {
+            let (status, error) = match &outcome {
                 JobRunOutcome::Completed => (JobStatus::Completed, None),
                 JobRunOutcome::Cancelled => (JobStatus::Cancelled, None),
                 JobRunOutcome::Failed { message } => {
-                    (JobStatus::Failed, Some(bound_error(&message)))
+                    (JobStatus::Failed, Some(bound_error(message)))
                 }
             };
             record.status = status;
@@ -369,7 +388,13 @@ impl JobManager {
             while state.recent.len() > crate::jobs::types::MAX_RECENT_JOBS {
                 state.recent.pop_back();
             }
-            terminal
+            let completion = JobCompletion {
+                id: terminal.id,
+                kind: terminal.kind,
+                scope: terminal.scope,
+                outcome,
+            };
+            (terminal, completion)
         };
         tracing::info!(
             job_id = %id,
@@ -378,6 +403,19 @@ impl JobManager {
             elapsed = %format_elapsed(snapshot.elapsed_ms),
             "job finished"
         );
+        // Eligibility signal for deferred successors. Fires strictly after
+        // foreground release above, outside the state lock. `finish_job`
+        // removes the active record first, so a completion racing shutdown
+        // terminalization delivers exactly one hook call per JobId.
+        let hook = self
+            .inner
+            .completion_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(completion);
+        }
     }
 
     /// Graceful shutdown: stop accepting, cancel the root token (all child

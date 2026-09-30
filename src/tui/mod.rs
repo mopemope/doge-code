@@ -2,6 +2,7 @@ pub mod channel;
 pub mod commands;
 pub mod commands_sessions;
 pub mod diff_review;
+pub mod followup;
 
 pub mod event_handlers;
 pub mod event_loop;

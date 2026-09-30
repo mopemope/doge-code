@@ -137,6 +137,7 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
     let tools = executor.tools.clone();
+    let deferred = executor.deferred_followups.clone();
 
     let spec = JobSpec::new(
         JobKind::Lint,
@@ -145,7 +146,10 @@ pub fn handle_lint(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         "Run project lint",
     );
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        let producer = ctx.id;
         lint_job_async(
+            producer,
+            deferred,
             project_root,
             tools,
             ui_tx,
@@ -377,6 +381,8 @@ fn typescript_lint_commands(project_root: &Path) -> Vec<LintCommand> {
 }
 
 async fn lint_job_async(
+    producer: crate::jobs::JobId,
+    deferred: crate::tui::followup::DeferredFollowupStore,
     project_root: PathBuf,
     tools: crate::tools::FsTools,
     ui_tx: Sender<String>,
@@ -621,8 +627,24 @@ async fn lint_job_async(
         }
     }
 
-    // If there are issues, send a bounded subset to LLM for fixing.
+    // Stage at most one bounded follow-up payload for the post-terminal
+    // handoff. Parsed issues and raw command diagnostics are coalesced
+    // into a single prompt so one Lint run can never request two successor
+    // AgentTurns. Nothing is dispatched from inside the producer: the
+    // successor starts only after this job terminalizes and releases
+    // foreground ownership.
     let (lint_issues, lint_issues_truncated) = budget_lint_issues(all_issues);
+    let raw_outputs = budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
+    // Cancellation suppresses the follow-up and must not leave a staged
+    // payload behind: the completion hook only signals `Completed`, and a
+    // parked entry would otherwise leak in the consume-once store. Check
+    // before any "Sending to LLM" UI promise so a cancelled run never
+    // implies a successor will start.
+    if cancellation.is_cancelled() {
+        ui_tx.send_logged("::shell_output:Lint run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
+    }
     if !lint_issues.is_empty() {
         ui_tx.send_logged(format!(
             "::shell_output:\nFound {} issues. Sending to LLM for analysis and fixes...",
@@ -634,12 +656,6 @@ async fn lint_job_async(
                     .to_string(),
             );
         }
-
-        // Send a message to trigger LLM processing
-        ui_tx.send_logged(format!(
-            "::lint_issues:{:}",
-            serde_json::to_string(&lint_issues).unwrap_or_default()
-        ));
     } else if lint_issues_truncated {
         ui_tx.send_logged(
             "::shell_output:Lint issues omitted because they exceeded the diagnostic budget."
@@ -647,29 +663,31 @@ async fn lint_job_async(
         );
     }
 
-    // If there are any warnings or errors in the output (regardless of parsed issues),
-    // send all command outputs to the LLM for analysis and fixes
     if has_any_warnings_or_errors {
-        let all_outputs = budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
-
-        // Create a specific prompt for the LLM to analyze all outputs and fix issues
-        let mut prompt = String::from(
-            "Analyze the following lint command outputs and fix any warnings or errors detected:\n\n",
-        );
-        prompt.push_str(&all_outputs);
-        prompt.push_str("\n\nPlease analyze the outputs above. Identify any warnings, errors, or issues in the codebase. For each issue detected, provide specific fixes with clear explanations. If you need to see the current content of any file, use the appropriate tool to read it first, then provide the corrected code.");
-
-        let prompt = budget_diagnostic_output(&prompt);
         ui_tx.send_logged(
             "::shell_output:\nSending full lint output to LLM for analysis and fixes..."
                 .to_string(),
         );
-        // Use the existing dispatch pattern by sending the prompt via the user input mechanism
-        // This will trigger the LLM to process the bounded output.
-        ui_tx.send_logged(format!("::lint_command_output_analysis:{}", prompt));
     }
 
-    if cancellation.is_cancelled() {
+    if let Some(prompt) = crate::tui::followup::build_lint_followup_prompt(
+        &lint_issues,
+        lint_issues_truncated,
+        &raw_outputs,
+        has_any_warnings_or_errors,
+    ) {
+        deferred.stage(crate::tui::followup::DeferredFollowup {
+            producer,
+            kind: JobKind::Lint,
+            display: crate::tui::followup::LINT_FOLLOWUP_DISPLAY.to_string(),
+            prompt,
+        });
+    }
+
+    // Close the stage-then-cancel race: a cancellation landing between the
+    // pre-stage check and this return must discard the just-staged payload
+    // and report cancellation instead of handing off a successor.
+    if deferred.discard_staged_on_cancel(producer, cancellation.is_cancelled()) {
         ui_tx.send_logged("::shell_output:Lint run cancelled.");
         ui_tx.send_logged("::status:cancelled");
         return JobRunOutcome::Cancelled;
@@ -1230,7 +1248,17 @@ mod tests {
                 ..crate::config::AppConfig::default()
             }),
         );
-        let outcome = lint_job_async(dir.path().to_path_buf(), tools, ui_tx, 10_000, token).await;
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
+        let outcome = lint_job_async(
+            crate::jobs::JobId(1),
+            deferred.clone(),
+            dir.path().to_path_buf(),
+            tools,
+            ui_tx,
+            10_000,
+            token,
+        )
+        .await;
         assert!(matches!(outcome, crate::jobs::JobRunOutcome::Cancelled));
         let messages: Vec<String> = rx.try_iter().collect();
         assert!(!messages.iter().any(|m| m.starts_with("::lint_issues:")));
@@ -1240,5 +1268,6 @@ mod tests {
                 .any(|m| m.starts_with("::lint_command_output_analysis:"))
         );
         assert!(messages.iter().any(|m| m == "::status:cancelled"));
+        assert_eq!(deferred.len(), 0);
     }
 }

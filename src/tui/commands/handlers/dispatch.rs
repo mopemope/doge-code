@@ -33,7 +33,7 @@ impl CommandHandler for TuiExecutor {
     fn handle(&mut self, line: &str, ui: &mut TuiApp) {
         // This function was extracted from the big handlers.rs for readability.
         if self.ui_tx.is_none() {
-            self.ui_tx = ui.sender();
+            self.set_ui_tx(ui.sender());
         }
         let line = line.trim();
         if line.is_empty() {
@@ -139,6 +139,10 @@ impl CommandHandler for TuiExecutor {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
+        self.handle_deferred_followup(producer, ui);
     }
 }
 

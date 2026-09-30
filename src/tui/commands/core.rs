@@ -19,6 +19,10 @@ pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
     fn get_custom_commands(&self) -> Vec<String>;
     fn as_any(&self) -> &dyn Any;
+    /// Post-terminal `JobManager` completion signal (`::job_completed:<id>`).
+    /// Default is a no-op; the TUI executor consumes one staged Test/Lint
+    /// follow-up here, strictly after foreground release.
+    fn handle_job_completed(&mut self, _producer: &str, _ui: &mut TuiApp) {}
 }
 
 pub struct TuiExecutor {
@@ -31,6 +35,10 @@ pub struct TuiExecutor {
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) jobs: JobManager,
     pub(crate) last_user_prompt: Option<String>,
+    /// Consume-once store for post-terminal Test/Lint follow-up payloads,
+    /// keyed by producing `JobId`. Staged by producers, consumed by
+    /// `handle_deferred_followup` after the completion hook fires.
+    pub(crate) deferred_followups: crate::tui::followup::DeferredFollowupStore,
     // Message vector for holding conversation history
     pub(crate) conversation_history: Arc<Mutex<crate::llm::ChatHistory>>,
     // Session management
@@ -61,7 +69,27 @@ impl TuiExecutor {
 
     /// Set the UI sender for sending messages to the TUI
     pub fn set_ui_tx(&mut self, ui_tx: Option<std::sync::mpsc::Sender<String>>) {
-        self.ui_tx = ui_tx;
+        self.ui_tx = ui_tx.clone();
+        // Post-terminal follow-up eligibility signal. The hook fires inside
+        // `JobManager::finish_job` strictly after foreground release, so a
+        // successor spawned from the resulting `::job_completed:<id>`
+        // message can never race the still-running producer. Only
+        // normally-completed Test/Lint runs are signalled; cancellation,
+        // shutdown, and infrastructure failure stay silent.
+        if let Some(tx) = ui_tx {
+            let hook: crate::jobs::manager::JobCompletionHook =
+                std::sync::Arc::new(move |completion: crate::jobs::JobCompletion| {
+                    if completion.outcome == crate::jobs::JobRunOutcome::Completed
+                        && matches!(
+                            completion.kind,
+                            crate::jobs::JobKind::Test | crate::jobs::JobKind::Lint
+                        )
+                    {
+                        let _ = tx.send(format!("::job_completed:{}", completion.id));
+                    }
+                });
+            self.jobs.set_completion_hook(hook);
+        }
     }
 
     /// Add a hook to be executed after each instruction
