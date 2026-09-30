@@ -90,6 +90,7 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
             last_user_prompt: None,
+            deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),
             conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
                 cfg.get_context_window_size().unwrap_or(100_000) as usize,
                 None,
@@ -156,6 +157,7 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
             last_user_prompt: None,
+            deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),
             conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
                 cfg.get_context_window_size().unwrap_or(100_000) as usize,
                 None,

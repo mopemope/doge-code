@@ -31,6 +31,36 @@ pub(crate) fn spawn_agent_turn(
     content: String,
     skip_plan: bool,
 ) -> Result<JobId, JobStartError> {
+    spawn_agent_turn_inner(executor, ui, display, content, skip_plan, false)
+}
+
+/// Post-terminal Test/Lint follow-up spawn path.
+///
+/// Unlike [`spawn_agent_turn`], this records no fresh `DirectiveObserved`:
+/// the follow-up is internal agent work attributed to no user directive
+/// (`ProvenanceAttribution::none()`), so it has no independent
+/// requirement-writing authority. It also leaves `last_user_prompt`
+/// untouched so compact-retry keeps replaying the real user input.
+pub(crate) fn spawn_synthetic_followup(
+    executor: &mut TuiExecutor,
+    ui: &mut TuiApp,
+    display: &str,
+    content: String,
+) -> Result<JobId, JobStartError> {
+    // Parity with the historical analysis dispatch: follow-ups run with
+    // plan context enforced, exactly like a default user dispatch.
+    spawn_agent_turn_inner(executor, ui, display, content, false, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn spawn_agent_turn_inner(
+    executor: &mut TuiExecutor,
+    ui: &mut TuiApp,
+    display: &str,
+    content: String,
+    skip_plan: bool,
+    synthetic: bool,
+) -> Result<JobId, JobStartError> {
     // Fast pre-check to avoid UI/history side effects on the common busy
     // path. The authoritative check remains the atomic reservation inside
     // `JobManager::spawn`.
@@ -128,23 +158,28 @@ pub(crate) fn spawn_agent_turn(
         // LLM call. `display` is the raw user input, `content` is the
         // effective instruction handed to the agent. A recording failure
         // never aborts the turn: mark provenance_incomplete and continue
-        // with directive_id = None.
-        let origin = if display_for_job == content_for_job {
-            crate::provenance::DirectiveOrigin::TuiPrompt
+        // with directive_id = None. Synthetic follow-ups skip this
+        // entirely: they are internal turns with no new user directive.
+        let attribution = if synthetic {
+            crate::provenance::ProvenanceAttribution::none()
         } else {
-            crate::provenance::DirectiveOrigin::TuiCustomCommand
-        };
-        let attribution = match crate::tools::provenance::record_directive_observed(
-            &fs,
-            origin,
-            &display_for_job,
-            &content_for_job,
-        ) {
-            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
-            Err(e) => {
-                tracing::warn!(error = %e, "provenance.directive_record_failed");
-                let _ = fs.mark_current_session_provenance_failure();
-                crate::provenance::ProvenanceAttribution::none()
+            let origin = if display_for_job == content_for_job {
+                crate::provenance::DirectiveOrigin::TuiPrompt
+            } else {
+                crate::provenance::DirectiveOrigin::TuiCustomCommand
+            };
+            match crate::tools::provenance::record_directive_observed(
+                &fs,
+                origin,
+                &display_for_job,
+                &content_for_job,
+            ) {
+                Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "provenance.directive_record_failed");
+                    let _ = fs.mark_current_session_provenance_failure();
+                    crate::provenance::ProvenanceAttribution::none()
+                }
             }
         };
         let res = crate::llm::run_agent_loop(
@@ -260,8 +295,13 @@ pub(crate) fn spawn_agent_turn(
 
     match spawn_result {
         Ok(id) => {
-            executor.last_user_prompt = Some(content.clone());
-            ui.push_log(format!("> {display}"));
+            // Synthetic follow-ups must not become the retried user input:
+            // compact-retry keeps replaying the real user instruction, and
+            // the follow-up prompt is already echoed by its handoff caller.
+            if !synthetic {
+                executor.last_user_prompt = Some(content.clone());
+                ui.push_log(format!("> {display}"));
+            }
             ui.push_log(String::new());
             ui.processing_start_time = Some(std::time::Instant::now());
             ui.last_elapsed_time = None;

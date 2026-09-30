@@ -27,6 +27,7 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     let project_root = executor.cfg.project_root.clone();
     let command_timeout_ms = executor.cfg.command_timeout_ms;
     let tools = executor.tools.clone();
+    let deferred = executor.deferred_followups.clone();
 
     let spec = JobSpec::new(
         JobKind::Test,
@@ -35,7 +36,10 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
         "Run project tests",
     );
     let spawn = executor.jobs.spawn(spec, move |ctx| async move {
+        let producer = ctx.id;
         run_test_job(
+            producer,
+            deferred,
             project_root,
             tools,
             ui_tx,
@@ -62,6 +66,8 @@ pub fn handle_test(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 }
 
 async fn run_test_job(
+    producer: crate::jobs::JobId,
+    deferred: crate::tui::followup::DeferredFollowupStore,
     project_root: PathBuf,
     tools: crate::tools::FsTools,
     ui_tx: Sender<String>,
@@ -254,45 +260,36 @@ async fn run_test_job(
         return JobRunOutcome::Cancelled;
     }
 
-    // If there are failed tests, send them to LLM for analysis.
-    // Cancellation is never treated as a failure.
+    // If there are failed tests, stage one bounded follow-up payload for
+    // the post-terminal handoff. The successor AgentTurn starts only after
+    // this job terminalizes and releases foreground ownership; nothing is
+    // dispatched from inside the producer. Cancellation is never treated
+    // as a failure.
     if has_any_failures {
         let all_outputs =
             testing::budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
 
-        let mut prompt = String::from(
-            "The following test(s) have failed. Please analyze the failures and provide fixes:\n\n",
-        );
-        prompt.push_str(&all_outputs);
-
-        if !all_failed_tests.is_empty() {
-            prompt.push_str("\n\n--- Parsed Failed Tests ---\n");
-            for (i, test) in all_failed_tests.iter().enumerate() {
-                prompt.push_str(&format!("\n{}. Test: {}\n", i + 1, test.name));
-                if let Some(file) = &test.file_path {
-                    prompt.push_str(&format!("   File: {}\n", file));
-                }
-                if let Some(line) = test.line_number {
-                    prompt.push_str(&format!("   Line: {}\n", line));
-                }
-                prompt.push_str(&format!("   Message: {}\n", test.message));
-                if let Some(expected) = &test.expected {
-                    prompt.push_str(&format!("   Expected: {}\n", expected));
-                }
-                if let Some(actual) = &test.actual {
-                    prompt.push_str(&format!("   Actual: {}\n", actual));
-                }
-            }
-        }
-
-        prompt.push_str("\n\nPlease analyze the test failures above. For each failure:\n1. Identify the root cause\n2. Read the relevant source files if needed\n3. Provide specific code fixes\n\nFocus on fixing the actual code bugs, not modifying the tests (unless the tests themselves are incorrect).");
-
-        let prompt = testing::budget_diagnostic_output(&prompt);
+        let prompt =
+            crate::tui::followup::build_test_followup_prompt(&all_outputs, &all_failed_tests);
         ui_tx
             .send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
-        ui_tx.send_logged(format!("::test_failures_analysis:{}", prompt));
+        deferred.stage(crate::tui::followup::DeferredFollowup {
+            producer,
+            kind: JobKind::Test,
+            display: crate::tui::followup::TEST_FOLLOWUP_DISPLAY.to_string(),
+            prompt,
+        });
     } else {
         ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
+    }
+
+    // Close the stage-then-cancel race: a cancellation landing between the
+    // pre-stage check and this return must discard the just-staged payload
+    // and report cancellation instead of handing off a successor.
+    if deferred.discard_staged_on_cancel(producer, cancellation.is_cancelled()) {
+        ui_tx.send_logged("::shell_output:Test run cancelled.");
+        ui_tx.send_logged("::status:cancelled");
+        return JobRunOutcome::Cancelled;
     }
 
     ui_tx.send_logged("::shell_output:Test run completed.");
@@ -320,7 +317,10 @@ mod tests {
         // A project with no supported languages completes immediately.
         let (ui_tx, _rx) = std::sync::mpsc::channel::<String>();
         let tools = test_tools_for(dir.path());
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
         let outcome = run_test_job(
+            crate::jobs::JobId(1),
+            deferred.clone(),
             dir.path().to_path_buf(),
             tools,
             ui_tx,
@@ -329,6 +329,7 @@ mod tests {
         )
         .await;
         assert!(matches!(outcome, JobRunOutcome::Completed));
+        assert_eq!(deferred.len(), 0);
     }
 
     #[tokio::test]
@@ -356,12 +357,16 @@ mod tests {
         assert!(!result.timed_out);
         assert!(!result.success);
 
-        // Job-level check: pre-cancelled token short-circuits without LLM analysis.
+        // Job-level check: pre-cancelled token short-circuits without staging
+        // a follow-up or requesting analysis.
         let (ui_tx2, rx2) = std::sync::mpsc::channel::<String>();
         let cancelled_token = CancellationToken::new();
         cancelled_token.cancel();
         let tools2 = test_tools_for(dir.path());
+        let deferred2 = crate::tui::followup::DeferredFollowupStore::default();
         let outcome = run_test_job(
+            crate::jobs::JobId(2),
+            deferred2.clone(),
             dir.path().to_path_buf(),
             tools2,
             ui_tx2,
@@ -376,6 +381,7 @@ mod tests {
                 .iter()
                 .any(|m| m.starts_with("::test_failures_analysis:"))
         );
+        assert_eq!(deferred2.len(), 0);
         let _ = ui_tx;
     }
 
