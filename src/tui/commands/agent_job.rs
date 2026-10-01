@@ -369,6 +369,34 @@ pub(crate) fn spawn_agent_turn(
     }
 }
 
+/// Post-terminal Test/Lint follow-up spawn path (deferred handoff).
+///
+/// Unlike [`spawn_agent_turn`], this records no fresh `DirectiveObserved`:
+/// the follow-up is internal agent work attributed to no user directive
+/// (`ProvenanceAttribution::none()`), so it has no independent
+/// requirement-writing authority. It also leaves `last_user_prompt`
+/// untouched so compact-retry keeps replaying the real user input.
+///
+/// Parity with the historical analysis dispatch: follow-ups run with
+/// plan context enforced (`skip_plan = false`), exactly like a default
+/// user dispatch. This differs from [`TuiExecutor::spawn_internal_followup`]
+/// (which skips plan context) used by the immediate synthetic path.
+pub(crate) fn spawn_synthetic_followup(
+    executor: &mut TuiExecutor,
+    ui: &mut TuiApp,
+    display: &str,
+    content: String,
+) -> Result<JobId, JobStartError> {
+    spawn_agent_turn(
+        executor,
+        ui,
+        display,
+        content,
+        false,
+        AgentTurnProvenance::Internal,
+    )
+}
+
 impl TuiExecutor {
     /// Synthetic follow-up (test/lint analysis) with no user directive.
     /// Never records `DirectiveObserved`; runs with `none()` attribution so

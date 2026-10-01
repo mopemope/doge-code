@@ -14,8 +14,6 @@ use crate::tui::event_handlers::{
 };
 use crate::tui::state::{InputMode, Status, TuiApp};
 
-const LINT_ISSUE_PROMPT_BUDGET_CHARS: usize = 32_000;
-
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -159,78 +157,19 @@ impl TuiApp {
                         continue;
                     }
 
-                    // Lint issues handling
-                    if let Some(payload) = msg.strip_prefix("::lint_issues:") {
-                        // Assuming payload is JSON array of issues
-                        // For simplicity, just log that we got issues and dispatch similar to before
-                        // but without complex struct parsing if we can avoid it, or just use regex/string manip?
-                        // The original code parsed it into `LintIssue`. We need that struct definition which is in another module.
-                        // I'll keep the parsing logic if possible, or simplify.
-                        // The original used `crate::tui::commands::handlers::slash_commands::lint::LintIssue`.
-                        // It is safe to import or refer to it.
-
-                        if let Ok(issues) = serde_json::from_str::<
-                            Vec<crate::tui::commands::handlers::slash_commands::lint::LintIssue>,
-                        >(payload)
-                        {
-                            self.push_log(format!(
-                                "[lint] Found {} issues. Sending to LLM for analysis...",
-                                issues.len()
-                            ));
-                            self.dirty = true;
-
-                            let mut prompt = String::from(
-                                "Please analyze and fix the following lint issues in the codebase:\n\n",
-                            );
-
-                            for (i, issue) in issues.iter().enumerate() {
-                                prompt.push_str(&format!("Issue {}: {}\n", i + 1, issue.message));
-                                if !issue.file_path.is_empty() {
-                                    prompt.push_str(&format!("File: {}\n", issue.file_path));
-                                }
-                                if let Some(line) = issue.line_number {
-                                    prompt.push_str(&format!("Line: {}\n", line));
-                                }
-                                prompt.push_str(&format!("Severity: {}\n", issue.severity));
-                                if let Some(code) = &issue.code {
-                                    prompt.push_str(&format!("Code: {}\n", code));
-                                }
-                                prompt.push('\n');
-                            }
-                            prompt.push_str("Please provide specific code fixes for each issue.");
-
-                            let prompt = crate::tools::budget::head_tail_truncate(
-                                &prompt,
-                                LINT_ISSUE_PROMPT_BUDGET_CHARS,
-                            )
-                            .text;
-                            self.push_log(format!("> {}", prompt));
-                            // Synthetic analysis: internal turn with no user
-                            // directive (never touches last_user_input).
-                            self.dispatch_internal_followup(&prompt);
-                        } else {
-                            self.push_log(format!(
-                                "[lint][warn] Failed to parse lint issues: {}",
-                                payload
-                            ));
-                            self.dirty = true;
+                    // Post-terminal Test/Lint follow-up handoff. The
+                    // `JobManager` completion hook emits this only after the
+                    // producer terminalized and released foreground
+                    // ownership, so the single staged successor (if any)
+                    // starts strictly after the predecessor. UI status
+                    // messages never authorize this path.
+                    if let Some(producer) = msg.strip_prefix("::job_completed:") {
+                        if self.handler.is_some() {
+                            let mut handler = self.handler.take().unwrap();
+                            handler.handle_job_completed(producer, self);
+                            self.handler = Some(handler);
                         }
-                        continue;
-                    }
-
-                    if let Some(prompt) = msg.strip_prefix("::lint_command_output_analysis:") {
-                        self.push_log("[lint] Sending output to LLM...");
                         self.dirty = true;
-                        self.push_log(format!("> {}", prompt));
-                        self.dispatch_internal_followup(prompt);
-                        continue;
-                    }
-
-                    if let Some(prompt) = msg.strip_prefix("::test_failures_analysis:") {
-                        self.push_log("[test] Sending failures to LLM...");
-                        self.dirty = true;
-                        self.push_log(format!("> {}", prompt));
-                        self.dispatch_internal_followup(prompt);
                         continue;
                     }
 

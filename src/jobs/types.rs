@@ -148,6 +148,20 @@ pub enum JobRunOutcome {
     Failed { message: String },
 }
 
+/// Post-terminal completion notice delivered after `finish_job` has
+/// released foreground ownership and recorded terminal history.
+///
+/// Protocol-agnostic: carries only job identity, classification, and the
+/// body outcome. Payload semantics (prompts, diagnostics) stay with the
+/// owner of the deferred work, never in the generic job manager.
+#[derive(Debug, Clone)]
+pub struct JobCompletion {
+    pub id: JobId,
+    pub kind: JobKind,
+    pub scope: JobScope,
+    pub outcome: JobRunOutcome,
+}
+
 /// Spawn-time specification (UI label is display-only).
 #[derive(Debug, Clone)]
 pub struct JobSpec {

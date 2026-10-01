@@ -1010,3 +1010,97 @@ async fn test_semantic_edit_cancellation_leaves_file_unchanged() {
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(before, after);
 }
+
+#[tokio::test]
+async fn test_completion_hook_fires_after_foreground_release() {
+    use std::sync::Mutex;
+    /// What the hook observed: producer id, foreground slot at fire time,
+    /// and the terminal outcome.
+    type HookObservation = Option<(JobId, Option<JobId>, JobRunOutcome)>;
+    let manager = JobManager::new();
+    let seen: Arc<Mutex<HookObservation>> = Arc::new(Mutex::new(None));
+    let seen_clone = seen.clone();
+    let fired = Arc::new(tokio::sync::Notify::new());
+    let fired_clone = fired.clone();
+    let manager_clone = manager.clone();
+    manager.set_completion_hook(Arc::new(move |completion: crate::jobs::JobCompletion| {
+        // The hook must observe the foreground slot already released.
+        let foreground = manager_clone.foreground_id();
+        *seen_clone.lock().unwrap() = Some((completion.id, foreground, completion.outcome));
+        fired_clone.notify_one();
+    }));
+    let id = manager
+        .spawn(
+            foreground_spec("producer", WorkspaceAccess::None),
+            |_ctx| async { JobRunOutcome::Completed },
+        )
+        .unwrap();
+    // Bounded wait for the hook notification (channel-style
+    // synchronization, not a timing workaround: the hook fires
+    // synchronously inside finish_job on the task thread).
+    tokio::time::timeout(Duration::from_secs(5), fired.notified())
+        .await
+        .expect("completion hook must fire");
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Completed);
+    let (hook_id, foreground_at_hook, outcome) = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(hook_id, id);
+    assert_eq!(
+        foreground_at_hook, None,
+        "hook must fire only after foreground ownership is released"
+    );
+    assert_eq!(outcome, JobRunOutcome::Completed);
+}
+
+#[tokio::test]
+async fn test_completion_hook_fires_once_per_job() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_clone = count.clone();
+    let manager = JobManager::new();
+    manager.set_completion_hook(Arc::new(move |_completion: crate::jobs::JobCompletion| {
+        count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+    let id = manager
+        .spawn(
+            foreground_spec("once", WorkspaceAccess::None),
+            |_ctx| async { JobRunOutcome::Completed },
+        )
+        .unwrap();
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Completed);
+    // Shutdown terminalization must not double-fire: the record is already
+    // gone, so finish_job is a no-op.
+    manager.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_completion_hook_reports_cancellation_outcome() {
+    use std::sync::Mutex;
+    let manager = JobManager::new();
+    let seen: Arc<Mutex<Option<JobRunOutcome>>> = Arc::new(Mutex::new(None));
+    let seen_clone = seen.clone();
+    manager.set_completion_hook(Arc::new(move |completion: crate::jobs::JobCompletion| {
+        *seen_clone.lock().unwrap() = Some(completion.outcome);
+    }));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_clone = started.clone();
+    let id = manager
+        .spawn(
+            foreground_spec("cancellable", WorkspaceAccess::None),
+            move |ctx| async move {
+                started_clone.notify_one();
+                tokio::select! {
+                    _ = ctx.cancellation.cancelled() => JobRunOutcome::Cancelled,
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => JobRunOutcome::Completed,
+                }
+            },
+        )
+        .unwrap();
+    started.notified().await;
+    manager.cancel(id);
+    assert_eq!(wait_for_terminal(&manager, id).await, JobStatus::Cancelled);
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some(JobRunOutcome::Cancelled),
+        "cancellation must be visible to the hook so subscribers can suppress follow-ups"
+    );
+}
