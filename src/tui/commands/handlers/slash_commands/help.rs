@@ -26,7 +26,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /map - Show repository analysis summary");
     ui.push_log("  /edit-symbol - Invoke symbol-scoped LLM edit and preview via the diff review");
     ui.push_log("  /rebuild-repomap - Rebuild repository analysis");
-    ui.push_log("  /git-worktree - Create a new git worktree for independent task execution");
+    ui.push_log("  /git-worktree - Create an isolated linked worktree and branch. It does not switch the current Doge session into it.");
     ui.push_log("");
 
     ui.push_log("Session Management:");

@@ -97,10 +97,10 @@ impl CommandHandler for TuiExecutor {
                 let args = line.strip_prefix("/fix").unwrap_or("").trim();
                 handle_fix(self, ui, args);
             }
-            "/git-worktree" => match handle_git_worktree() {
-                Ok(message) => ui.push_log(message),
-                Err(e) => ui.push_log(format!("Error: {}", e)),
-            },
+            "/git-worktree" => handle_git_worktree(self, ui),
+            line if line.starts_with("/git-worktree ") => {
+                ui.push_log("Usage: /git-worktree (takes no arguments)");
+            }
             line if line.starts_with("/open ") => handle_open(self, line, ui),
             line if line.starts_with("/theme ") => handle_theme(line, ui),
             line if line.starts_with("/plan") => {
