@@ -7,21 +7,22 @@ use uuid::Uuid;
 
 use super::types::{
     LEGACY_PROVENANCE_SCHEMA_VERSION, PROVENANCE_SCHEMA_VERSION, PlanChangedEvent, ProvenanceEvent,
-    ProvenanceEventEnvelope, V2_PROVENANCE_SCHEMA_VERSION, from_v1_wire, from_v2_wire,
-    from_v3_wire, to_v3_wire,
+    ProvenanceEventEnvelope, V2_PROVENANCE_SCHEMA_VERSION, V3_PROVENANCE_SCHEMA_VERSION,
+    from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire, to_v4_wire,
 };
-use super::wire::{EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3};
+use super::wire::{EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 as wire_v4};
 
 /// Durable provenance store for one session.
 ///
 /// Layout:
 /// - legacy v1 (read-only): `<session_dir>/provenance/v1/events/<event-id>.json`
 /// - legacy v2 (read-only): `<session_dir>/provenance/v2/events/<event-id>.json`
-/// - current v3 (read + write): `<session_dir>/provenance/v3/events/<event-id>.json`
+/// - legacy v3 (read-only): `<session_dir>/provenance/v3/events/<event-id>.json`
+/// - current v4 (read + write): `<session_dir>/provenance/v4/events/<event-id>.json`
 ///
-/// v1/v2 files are never copied, rewritten, or migrated on disk; they are
-/// converted into the canonical v3 representation on read. New events are
-/// always written as v3.
+/// v1/v2/v3 files are never copied, rewritten, or migrated on disk; they are
+/// converted into the canonical v4 representation on read. New events are
+/// always written as v4.
 #[derive(Debug, Clone)]
 pub struct ProvenanceStore {
     provenance_root: PathBuf,
@@ -31,7 +32,7 @@ pub struct ProvenanceStore {
 impl ProvenanceStore {
     pub fn new(session_dir: PathBuf) -> Self {
         let provenance_root = session_dir.join("provenance");
-        let current_dir = provenance_root.join("v3").join("events");
+        let current_dir = provenance_root.join("v4").join("events");
         Self {
             provenance_root,
             current_dir,
@@ -67,19 +68,23 @@ impl ProvenanceStore {
         self.provenance_root.join("v2").join("events")
     }
 
+    fn v3_events_dir(&self) -> PathBuf {
+        self.provenance_root.join("v3").join("events")
+    }
+
     fn current_events_dir(&self) -> PathBuf {
         self.current_dir.clone()
     }
 
-    /// Current v3 write directory.
+    /// Current v4 write directory.
     ///
     /// This is the only directory new events are written to. Reads cover
-    /// v1 (legacy), v2 (legacy), and v3; see [`ProvenanceStore::load_all`].
+    /// v1/v2/v3 (legacy) and v4; see [`ProvenanceStore::load_all`].
     pub fn events_dir(&self) -> &Path {
         &self.current_dir
     }
 
-    /// Owned path of the current v3 events directory.
+    /// Owned path of the current v4 events directory.
     pub fn current_events_path(&self) -> PathBuf {
         self.current_events_dir()
     }
@@ -94,9 +99,14 @@ impl ProvenanceStore {
         self.v2_events_dir()
     }
 
+    /// Owned path of the legacy v3 events directory (read-only).
+    pub fn v3_events_path(&self) -> PathBuf {
+        self.v3_events_dir()
+    }
+
     /// Atomically persist one event and return its envelope.
     ///
-    /// The payload is written to a sibling temp file in the v3 events
+    /// The payload is written to a sibling temp file in the v4 events
     /// directory and persisted with `persist_noclobber` (fail if the
     /// destination already exists). Never check-then-write.
     pub fn append(
@@ -130,7 +140,7 @@ impl ProvenanceStore {
             timestamp: Utc::now().to_rfc3339(),
             event,
         };
-        let wire = to_v3_wire(&canonical);
+        let wire = to_v4_wire(&canonical);
         let payload =
             serde_json::to_string_pretty(&wire).context("failed to serialize provenance event")?;
         let dest = current_dir.join(format!("{event_id}.json"));
@@ -162,13 +172,13 @@ impl ProvenanceStore {
         Ok(canonical)
     }
 
-    /// Load all events from v1 + v2 (legacy) and v3 (current), merged and
+    /// Load all events from v1 + v2 + v3 (legacy) and v4 (current), merged and
     /// sorted by `(timestamp, event_id)`.
     ///
     /// One corrupt or future-schema file never fails the whole query; it is
     /// skipped with a warning entry. When the same event id exists in
     /// multiple versions (manual copy/migration mistake, not expected UUID
-    /// collision), the highest version wins deterministically (v3 > v2 > v1)
+    /// collision), the highest version wins deterministically (v4 > v3 > v2 > v1)
     /// and a warning explains why.
     pub fn load_all(&self) -> Result<ProvenanceLoadResult> {
         let mut warnings = Vec::new();
@@ -180,7 +190,8 @@ impl ProvenanceStore {
         for (dir, rank, label) in [
             (self.v1_events_dir(), 1u32, "v1"),
             (self.v2_events_dir(), 2u32, "v2"),
-            (self.current_events_dir(), 3u32, "v3"),
+            (self.v3_events_dir(), 3u32, "v3"),
+            (self.current_events_dir(), 4u32, "v4"),
         ] {
             let loaded = load_events_dir(&dir, &mut warnings);
             for env in loaded {
@@ -329,9 +340,17 @@ fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEven
                     path.display()
                 )),
             }
-        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+        } else if header.schema_version == V3_PROVENANCE_SCHEMA_VERSION {
             match serde_json::from_str::<wire_v3::V3Envelope>(&raw) {
                 Ok(env) => events.push(from_v3_wire(env)),
+                Err(e) => warnings.push(format!(
+                    "Skipping malformed provenance event {}: {e}",
+                    path.display()
+                )),
+            }
+        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+            match serde_json::from_str::<wire_v4::V4Envelope>(&raw) {
+                Ok(env) => events.push(from_v4_wire(env)),
                 Err(e) => warnings.push(format!(
                     "Skipping malformed provenance event {}: {e}",
                     path.display()
@@ -445,7 +464,7 @@ mod tests {
             store
                 .events_dir()
                 .to_string_lossy()
-                .ends_with("provenance/v3/events")
+                .ends_with("provenance/v4/events")
         );
     }
 
@@ -796,7 +815,7 @@ mod tests {
         let store = ProvenanceStore::from_events_dir(dir.path().to_path_buf());
         std::fs::create_dir_all(store.current_events_path()).unwrap();
         let payload = serde_json::json!({
-            "schema_version": 4,
+            "schema_version": 99,
             "event_id": "future",
             "session_id": "s",
             "timestamp": "2026-01-01T00:00:00+00:00",
@@ -810,7 +829,7 @@ mod tests {
         let loaded = store.load_all().unwrap();
         assert!(loaded.events.is_empty());
         assert_eq!(loaded.warnings.len(), 1);
-        assert!(loaded.warnings[0].contains("Unsupported provenance schema version 4"));
+        assert!(loaded.warnings[0].contains("Unsupported provenance schema version 99"));
     }
 
     #[test]
@@ -864,13 +883,386 @@ mod tests {
                 before_status: None,
                 after_status: Some("pending".to_string()),
                 before_requirement_ids: Vec::new(),
+                before_verification_obligations: Vec::new(),
                 after_requirement_ids: vec!["r1".to_string()],
+                after_verification_obligations: Vec::new(),
             }],
         });
         let env = store.append("s", event).unwrap();
         assert_eq!(env.schema_version, PROVENANCE_SCHEMA_VERSION);
         let loaded = store.load_all().unwrap();
         assert_eq!(loaded.events.len(), 1);
+    }
+
+    #[test]
+    fn test_v3_event_reads_with_empty_obligations() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s");
+        let v3_dir = session_dir.join("provenance/v3/events");
+        std::fs::create_dir_all(&v3_dir).unwrap();
+        // v3 plan_changed without obligation fields.
+        let payload = serde_json::json!({
+            "schema_version": 3,
+            "event_id": "evt-v3-1",
+            "session_id": "s",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": {
+                "type": "plan_changed",
+                "changes": [{
+                    "plan_item_id": "step-1",
+                    "content": "a",
+                    "before_requirement_ids": [],
+                    "after_requirement_ids": []
+                }]
+            }
+        });
+        std::fs::write(
+            v3_dir.join("evt-v3-1.json"),
+            serde_json::to_string_pretty(&payload).unwrap(),
+        )
+        .unwrap();
+        // v3 verification without matched_obligations.
+        let vpayload = serde_json::json!({
+            "schema_version": 3,
+            "event_id": "evt-v3-2",
+            "session_id": "s",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+            "event": {
+                "type": "verification_observed",
+                "verification_kind": "test",
+                "source": "execute_process",
+                "command": {"program": "cargo", "args": ["test"]},
+                "outcome": {"success": true, "status": "completed"},
+                "observed_change_ids": []
+            }
+        });
+        std::fs::write(
+            v3_dir.join("evt-v3-2.json"),
+            serde_json::to_string_pretty(&vpayload).unwrap(),
+        )
+        .unwrap();
+        let store = ProvenanceStore::new(session_dir);
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 2);
+        for e in &loaded.events {
+            match &e.event {
+                ProvenanceEvent::PlanChanged(p) => {
+                    for t in &p.changes {
+                        assert!(t.before_verification_obligations.is_empty());
+                        assert!(t.after_verification_obligations.is_empty());
+                    }
+                }
+                ProvenanceEvent::VerificationObserved(v) => {
+                    assert!(v.matched_obligations.is_empty());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_v4_plan_changed_roundtrip() {
+        use crate::provenance::types::{
+            VerificationCommandMatcher, VerificationKind, VerificationObligation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(dir.path().join("s"));
+        let ob = VerificationObligation {
+            id: "vo-1".to_string(),
+            description: "desc".to_string(),
+            kind: VerificationKind::Test,
+            command: Some(VerificationCommandMatcher {
+                program: "cargo".to_string(),
+                args_prefix: vec!["test".to_string()],
+            }),
+        };
+        let event = ProvenanceEvent::PlanChanged(PlanChangedEvent {
+            directive_id: None,
+            changes: vec![PlanItemTransition {
+                plan_item_id: "step-1".to_string(),
+                parent_id: None,
+                content: "a".to_string(),
+                before_status: None,
+                after_status: Some("pending".to_string()),
+                before_requirement_ids: Vec::new(),
+                before_verification_obligations: Vec::new(),
+                after_requirement_ids: Vec::new(),
+                after_verification_obligations: vec![ob.clone()],
+            }],
+        });
+        let env = store.append("s", event).unwrap();
+        assert_eq!(env.schema_version, 4);
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 1);
+        match &loaded.events[0].event {
+            ProvenanceEvent::PlanChanged(p) => {
+                assert_eq!(p.changes[0].after_verification_obligations, vec![ob]);
+            }
+            _ => panic!("expected plan"),
+        }
+        // Raw file is under v4.
+        let v4_dir = store.current_events_path();
+        assert!(v4_dir.to_string_lossy().ends_with("provenance/v4/events"));
+        let raw = std::fs::read_to_string(v4_dir.join(format!("{}.json", env.event_id))).unwrap();
+        assert!(raw.contains("\"schema_version\": 4") || raw.contains("\"schema_version\":4"));
+    }
+
+    #[test]
+    fn test_v4_verification_roundtrip() {
+        use crate::provenance::types::VerificationObligationRef;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(dir.path().join("s"));
+        let event = ProvenanceEvent::VerificationObserved(
+            crate::provenance::types::VerificationObservedEvent {
+                directive_id: None,
+                plan_item_id: Some("step-1".to_string()),
+                requirement_ids: vec![],
+                verification_kind: crate::provenance::types::VerificationKind::Test,
+                source: crate::provenance::types::VerificationSource::ExecuteProcess,
+                command: crate::provenance::types::CommandEvidence {
+                    program: "cargo".to_string(),
+                    args: vec!["test".to_string()],
+                    cwd: None,
+                },
+                outcome: crate::provenance::types::VerificationOutcome {
+                    success: true,
+                    status: "completed".to_string(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                },
+                observed_change_ids: vec!["c1".to_string()],
+                matched_obligations: vec![VerificationObligationRef {
+                    id: "vo-1".to_string(),
+                    binding_hash: "blake3:abc".to_string(),
+                }],
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
+                output_digest: String::new(),
+                output_truncated: false,
+                warnings: vec![],
+            },
+        );
+        let env = store.append("s", event).unwrap();
+        let loaded = store.load_all().unwrap();
+        match &loaded.events[0].event {
+            ProvenanceEvent::VerificationObserved(v) => {
+                assert_eq!(v.matched_obligations.len(), 1);
+                assert_eq!(v.matched_obligations[0].id, "vo-1");
+            }
+            _ => panic!("expected verification"),
+        }
+        let _ = env;
+    }
+
+    #[test]
+    fn test_mixed_v1_v2_v3_v4_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s");
+        // v1
+        let v1_dir = session_dir.join("provenance/v1/events");
+        std::fs::create_dir_all(&v1_dir).unwrap();
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "event_id": "a-id",
+            "session_id": "s",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": {
+                "type": "change_committed",
+                "transaction_id": "",
+                "change_kind": "semantic_edit",
+                "file": "src/lib.rs",
+                "symbol_id": "sym",
+                "before_fingerprint": "a",
+                "after_fingerprint": "b",
+                "diff": "d",
+                "diff_hash": "blake3:x",
+                "lines_added": 1,
+                "lines_removed": 0
+            }
+        });
+        std::fs::write(
+            v1_dir.join("a-id.json"),
+            serde_json::to_string_pretty(&payload).unwrap(),
+        )
+        .unwrap();
+        // v2
+        let v2_dir = session_dir.join("provenance/v2/events");
+        std::fs::create_dir_all(&v2_dir).unwrap();
+        let v2_payload = serde_json::json!({
+            "schema_version": 2,
+            "event_id": "m-id",
+            "session_id": "s",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+            "event": {"type": "plan_changed", "changes": []}
+        });
+        std::fs::write(
+            v2_dir.join("m-id.json"),
+            serde_json::to_string_pretty(&v2_payload).unwrap(),
+        )
+        .unwrap();
+        // v3
+        let v3_dir = session_dir.join("provenance/v3/events");
+        std::fs::create_dir_all(&v3_dir).unwrap();
+        let v3_payload = serde_json::json!({
+            "schema_version": 3,
+            "event_id": "v3-id",
+            "session_id": "s",
+            "timestamp": "2026-01-03T00:00:00+00:00",
+            "event": {"type": "plan_changed", "changes": []}
+        });
+        std::fs::write(
+            v3_dir.join("v3-id.json"),
+            serde_json::to_string_pretty(&v3_payload).unwrap(),
+        )
+        .unwrap();
+        let store = ProvenanceStore::new(session_dir.clone());
+        store.append("s", change_event(None)).unwrap();
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 4);
+        assert_eq!(loaded.events[0].event_id, "a-id");
+        assert_eq!(loaded.events[1].event_id, "m-id");
+        assert_eq!(loaded.events[2].event_id, "v3-id");
+    }
+
+    #[test]
+    fn test_store_writes_only_under_v4() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s");
+        let store = ProvenanceStore::new(session_dir.clone());
+        store.append("s", change_event(None)).unwrap();
+        assert!(
+            !session_dir.join("provenance/v1/events").exists()
+                || std::fs::read_dir(session_dir.join("provenance/v1/events"))
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
+        );
+        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v4/events"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(v4_files.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_id_v4_wins_over_v3_v2_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s");
+        let store = ProvenanceStore::new(session_dir.clone());
+        let env = store.append("s", change_event(None)).unwrap();
+        // Copy same id into v1/v2/v3.
+        for (subdir, version) in [("v1", 1), ("v2", 2), ("v3", 3)] {
+            let legacy_dir = session_dir.join(format!("provenance/{subdir}/events"));
+            std::fs::create_dir_all(&legacy_dir).unwrap();
+            let payload = if version == 1 {
+                serde_json::json!({
+                    "schema_version": 1,
+                    "event_id": env.event_id,
+                    "session_id": "s",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "event": {
+                        "type": "change_committed",
+                        "transaction_id": "",
+                        "change_kind": "semantic_edit",
+                        "file": "src/lib.rs",
+                        "symbol_id": "sym",
+                        "before_fingerprint": "a",
+                        "after_fingerprint": "b",
+                        "diff": "d",
+                        "diff_hash": "blake3:x",
+                        "lines_added": 1,
+                        "lines_removed": 0
+                    }
+                })
+            } else if version == 2 {
+                serde_json::json!({
+                    "schema_version": 2,
+                    "event_id": env.event_id,
+                    "session_id": "s",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "event": {
+                        "type": "change_committed",
+                        "transaction_id": "",
+                        "plan_item_id": "step-1",
+                        "change_kind": "text_edit",
+                        "file": "a.txt",
+                        "target": {"scope": "file"},
+                        "before": {"exists": true},
+                        "after": {"exists": true},
+                        "diff": "d",
+                        "diff_hash": "blake3:x",
+                        "lines_added": 1,
+                        "lines_removed": 0
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "schema_version": 3,
+                    "event_id": env.event_id,
+                    "session_id": "s",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "event": {
+                        "type": "change_committed",
+                        "transaction_id": "",
+                        "plan_item_id": "step-1",
+                        "change_kind": "text_edit",
+                        "file": "a.txt",
+                        "target": {"scope": "file"},
+                        "before": {"exists": true},
+                        "after": {"exists": true},
+                        "diff": "d",
+                        "diff_hash": "blake3:x",
+                        "lines_added": 1,
+                        "lines_removed": 0
+                    }
+                })
+            };
+            std::fs::write(
+                legacy_dir.join(format!("{}.json", env.event_id)),
+                serde_json::to_string_pretty(&payload).unwrap(),
+            )
+            .unwrap();
+        }
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 1);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("v4 wins") || w.contains("wins"))
+        );
+    }
+
+    #[test]
+    fn test_malformed_v4_skipped_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(dir.path().join("s"));
+        store.append("s", change_event(None)).unwrap();
+        std::fs::write(current_dir(&store).join("bad-v4.json"), "{not json").unwrap();
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 1);
+        assert!(loaded.warnings.iter().any(|w| w.contains("malformed")));
+    }
+
+    #[test]
+    fn test_unsupported_future_schema_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::from_events_dir(dir.path().to_path_buf());
+        std::fs::create_dir_all(store.current_events_path()).unwrap();
+        let payload = serde_json::json!({
+            "schema_version": 99,
+            "event_id": "future2",
+            "session_id": "s",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": {"type": "plan_changed", "changes": []}
+        });
+        std::fs::write(
+            store.current_events_path().join("future2.json"),
+            serde_json::to_string_pretty(&payload).unwrap(),
+        )
+        .unwrap();
+        let loaded = store.load_all().unwrap();
+        assert!(loaded.events.is_empty());
+        assert!(loaded.warnings[0].contains("Unsupported provenance schema version 99"));
     }
 
     #[test]

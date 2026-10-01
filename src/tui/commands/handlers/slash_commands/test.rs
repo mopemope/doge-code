@@ -140,8 +140,15 @@ async fn run_test_job(
             }
             // Snapshot verification context before the command starts so a
             // change landing mid-run is never attributed to this run.
+            // Obligation attribution is frozen here via the shared matcher.
             let verification_context =
-                crate::tools::provenance::capture_verification_context_for_fs(&tools);
+                crate::tools::provenance::capture_verification_context_for_invocation(
+                    &tools,
+                    &crate::provenance::ProvenanceAttribution::none(),
+                    crate::provenance::VerificationKind::Test,
+                    &test_cmd.command,
+                    &test_cmd.args,
+                );
             // Per-command child token so parent cancel stops all commands.
             let child = cancellation.child_token();
             let mut result = testing::run_test_command_with_cancel(

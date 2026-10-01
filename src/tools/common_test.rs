@@ -356,6 +356,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
             content: "Write the plan".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         },
         plan::PlanItem {
             id: "step-2".into(),
@@ -363,6 +364,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
             content: "Implement changes".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         },
         plan::PlanItem {
             id: "step-3".into(),
@@ -370,6 +372,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
             content: "Run validators".into(),
             status: "pending".into(),
             requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
         },
     ];
 
