@@ -285,20 +285,41 @@ impl TuiApp {
             return;
         };
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                // Show as many changed files as fit (capped), not just one
-                Constraint::Length((review.files.len() as u16 + 2).min(10)),
-                Constraint::Min(5),
-                Constraint::Length(3),
-            ])
-            .split(area);
+        // Small-terminal fallback: omit evidence pane when height is tight so
+        // the diff stays visible. Compact summary goes into the diff title.
+        // Never panic on tiny areas.
+        let show_evidence = area.height >= 22 && area.width >= 40;
+        let evidence_summary = review.evidence_summary();
+
+        let layout = if show_evidence {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    // Show as many changed files as fit (capped), not just one
+                    Constraint::Length((review.files.len() as u16 + 2).min(8)),
+                    Constraint::Min(4),
+                    Constraint::Length(8),
+                    Constraint::Length(3),
+                ])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length((review.files.len() as u16 + 2).min(10)),
+                    Constraint::Min(5),
+                    Constraint::Length(3),
+                ])
+                .split(area)
+        };
+
+        let diff_idx = 1usize;
+        let footer_idx = if show_evidence { 3 } else { 2 };
 
         // Record the inner height of the diff viewport so scroll clamping in
         // the event loop can account for the visible window.
         self.diff_viewport_height
-            .set(layout[1].height.saturating_sub(2) as usize);
+            .set(layout[diff_idx].height.saturating_sub(2) as usize);
 
         // file list
         let items: Vec<ListItem> = review
@@ -330,11 +351,18 @@ impl TuiApp {
         let files_list = List::new(items).block(files_block);
         f.render_widget(files_list, layout[0]);
 
-        // diff content
+        // diff content (with compact evidence summary when pane hidden)
+        let diff_title = if show_evidence {
+            "Diff Preview (↑/↓ scroll)".to_string()
+        } else if let Some(summary) = evidence_summary {
+            format!("Diff Preview | {summary}")
+        } else {
+            "Diff Preview (↑/↓ scroll)".to_string()
+        };
         let diff_block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style)
-            .title("Diff Preview (↑/↓ scroll)");
+            .title(diff_title);
 
         if let Some(file) = review.files.get(review.selected) {
             let diff_lines: Vec<Line> = file
@@ -358,12 +386,36 @@ impl TuiApp {
             let paragraph = Paragraph::new(diff_lines)
                 .block(diff_block)
                 .scroll((scroll, 0));
-            f.render_widget(paragraph, layout[1]);
+            f.render_widget(paragraph, layout[diff_idx]);
         } else {
             let paragraph = Paragraph::new("No diff available")
                 .block(diff_block)
                 .style(theme.log_style);
-            f.render_widget(paragraph, layout[1]);
+            f.render_widget(paragraph, layout[diff_idx]);
+        }
+
+        // evidence pane
+        if show_evidence {
+            let evidence_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.border_style)
+                .title("Evidence");
+            let inner = evidence_block.inner(layout[2]);
+            f.render_widget(evidence_block, layout[2]);
+            let lines = Self::evidence_lines(review);
+            // Clamp to visible height; never panic.
+            let max_lines = inner.height as usize;
+            let truncated = lines.len() > max_lines;
+            let visible: Vec<Line> = lines.into_iter().take(max_lines.max(1)).collect();
+            let mut with_warning = visible;
+            if truncated {
+                with_warning.push(Line::from(Span::styled(
+                    "… evidence truncated",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            let para = Paragraph::new(with_warning).style(theme.log_style);
+            f.render_widget(para, inner);
         }
 
         // instructions footer for diff
@@ -372,7 +424,89 @@ impl TuiApp {
         )
         .style(theme.footer_style)
         .block(Block::default().borders(Borders::ALL));
-        f.render_widget(instructions, layout[2]);
+        f.render_widget(instructions, layout[footer_idx]);
+    }
+
+    fn evidence_lines(review: &crate::tui::diff_review::DiffReviewState) -> Vec<Line<'static>> {
+        let Some(file) = review.files.get(review.selected) else {
+            return vec![Line::from("No file selected")];
+        };
+        let Some(ev) = &file.evidence else {
+            if review.evidence_warnings.is_empty() {
+                return vec![Line::from("No linked provenance evidence.")];
+            }
+            return review
+                .evidence_warnings
+                .iter()
+                .take(4)
+                .map(|w| Line::from(Span::styled(w.clone(), Style::default().fg(Color::Yellow))))
+                .collect();
+        };
+        let mut lines = Vec::new();
+        if ev.requirement_ids.is_empty() {
+            lines.push(Line::from("Requirements: -"));
+        } else {
+            lines.push(Line::from(format!(
+                "Requirements: {}",
+                ev.requirement_ids.join(", ")
+            )));
+        }
+        if ev.plan_item_ids.is_empty() {
+            lines.push(Line::from("Plan: -"));
+        } else {
+            lines.push(Line::from(format!("Plan: {}", ev.plan_item_ids.join(", "))));
+        }
+        if ev.obligations.is_empty() {
+            lines.push(Line::from("Obligations: none"));
+        } else {
+            for ob in ev.obligations.iter().take(8) {
+                let (icon, label) = match ob.state.as_str() {
+                    "observed_passing" => ("✓", "observed passing"),
+                    "observed_failing" => ("✗", "observed failing"),
+                    "pending" => ("?", "pending"),
+                    "stale" => ("!", "stale"),
+                    "diverged" => ("!", "diverged"),
+                    "reverted" => ("↩", "reverted"),
+                    "no_linked_change" => ("-", "no linked change"),
+                    "mixed" => ("~", "mixed"),
+                    other => ("?", other),
+                };
+                let cmd = ob
+                    .command_summary
+                    .as_deref()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                let text = if cmd.is_empty() {
+                    format!("{icon} {}  {label}", ob.id)
+                } else {
+                    format!("{icon} {}  {label}  ({cmd})", ob.id)
+                };
+                let style = match ob.state.as_str() {
+                    "observed_passing" => Style::default().fg(Color::Green),
+                    "observed_failing" => Style::default().fg(Color::Red),
+                    "pending" => Style::default().fg(Color::Yellow),
+                    "stale" | "diverged" => Style::default().fg(Color::Yellow),
+                    "reverted" => Style::default().fg(Color::Magenta),
+                    _ => Style::default(),
+                };
+                lines.push(Line::from(Span::styled(text, style)));
+            }
+            if ev.obligations.len() > 8 {
+                lines.push(Line::from(format!(
+                    "… {} more obligations",
+                    ev.obligations.len() - 8
+                )));
+            }
+        }
+        for w in review.evidence_warnings.iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                format!("! {w}"),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        lines
     }
 
     fn render_input_area(&mut self, f: &mut Frame, area: Rect) {

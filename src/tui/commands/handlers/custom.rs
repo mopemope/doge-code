@@ -116,13 +116,18 @@ impl TuiExecutor {
             // Process command content with arguments
             let processed_content = process_command_content(&command.content, args);
 
-            // Shared AgentTurn path (no pre-append to history).
+            // Shared AgentTurn path (no pre-append to history). The typed
+            // slash command is the raw user input; the expanded body is the
+            // effective instruction.
             let _ = crate::tui::commands::agent_job::spawn_agent_turn(
                 self,
                 ui,
                 line,
                 processed_content,
                 false,
+                crate::tui::commands::agent_job::AgentTurnProvenance::ObserveUserCustomCommand {
+                    raw_input: line.to_string(),
+                },
             );
         } else {
             ui.push_log(format!("Unknown command: /{}", command_name));

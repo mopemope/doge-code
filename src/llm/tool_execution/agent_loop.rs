@@ -368,21 +368,25 @@ pub async fn run_agent_loop(
                 )
                 .await
                 {
-                    Ok(Some(payload)) => match serde_json::to_string(&payload) {
-                        Ok(json) => {
-                            let _ = tx.send(format!("::diff_review:{}", json));
-                        }
-                        Err(e) => {
-                            let agent_error = AgentLoopError::Serialization(e.to_string());
-                            handle_agent_error(&agent_error, &ui_tx);
-                            let _ = tx.send(format!(
+                    Ok(Some(payload)) => {
+                        let enriched =
+                            crate::tools::provenance::enrich_diff_review_with_evidence(fs, payload);
+                        match serde_json::to_string(&enriched) {
+                            Ok(json) => {
+                                let _ = tx.send(format!("::diff_review:{}", json));
+                            }
+                            Err(e) => {
+                                let agent_error = AgentLoopError::Serialization(e.to_string());
+                                handle_agent_error(&agent_error, &ui_tx);
+                                let _ = tx.send(format!(
                                     "::diff_review:{}",
                                     serde_json::json!({
                                         "error": format!("Failed to serialize diff review payload: {}", e)
                                     })
                                 ));
+                            }
                         }
-                    },
+                    }
                     Ok(None) => {
                         debug!("No diff detected after tool execution");
                     }

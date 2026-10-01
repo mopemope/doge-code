@@ -52,10 +52,14 @@ fn is_v1_semantic(committed: &super::types::ChangeCommittedEvent) -> bool {
 /// v2 events use the file mutation chain: the current exact file state is
 /// read once per file, the latest matching event is found, and its
 /// `predecessor_change_id` chain is walked. Chain members are Active
-/// candidates; same-file events off the chain are Superseded; when nothing
-/// matches the workspace the file's events are Diverged (or Missing when the
-/// file is gone). v2 semantic targets get secondary symbol validation, and
-/// Undo events mark their `reverts_change_id` target as Reverted.
+/// candidates; same-file events off the chain are Superseded; when a chain
+/// tip matches the workspace the file's semantic targets get secondary symbol
+/// validation. When nothing matches the workspace (e.g. an unrepresented
+/// same-file edit changed the whole-file hash), v2 semantic targets fall back
+/// to per-symbol fingerprint validation so an unchanged symbol stays Active
+/// instead of being falsely marked Diverged; file targets stay Diverged
+/// because exact-state chains remain authoritative for them. Undo events mark
+/// their `reverts_change_id` target as Reverted.
 ///
 /// Files are read once per file group; event order is the caller-provided
 /// order (load with `ProvenanceStore::load_all` for `(timestamp, event_id)`
@@ -195,6 +199,18 @@ pub fn resolve_active_states(
                 }
             }
 
+            // Latest event per semantic symbol in caller order, for the
+            // no-chain-tip fallback below: only the latest record for a
+            // symbol can stay Active, older ones are Superseded.
+            let mut latest_for_symbol: HashMap<String, String> = HashMap::new();
+            for env in envs.iter() {
+                if let ProvenanceEvent::ChangeCommitted(committed) = &env.event
+                    && let ChangeTarget::SemanticSymbol { symbol_id, .. } = &committed.target
+                {
+                    latest_for_symbol.insert(symbol_id.clone(), env.event_id.clone());
+                }
+            }
+
             // Collect Undo -> reverted links on this file's chain for later.
             for env in envs.iter() {
                 let committed = match &env.event {
@@ -203,11 +219,47 @@ pub fn resolve_active_states(
                 };
                 let in_chain = chain_ids.contains(&env.event_id);
                 let state = if chain_ids.is_empty() {
-                    // Nothing explains the workspace.
+                    // Nothing explains the whole-file workspace state (e.g.
+                    // an unrepresented same-file edit changed the file hash).
+                    // Semantic targets still get per-symbol validation so an
+                    // unchanged symbol is not falsely marked Diverged; this
+                    // preserves target validity only and never claims the
+                    // file-level activity is represented (see
+                    // `compute_coverage`). File targets stay Diverged: exact
+                    // chains are authoritative for them.
                     if !current.exists {
                         ActiveChangeState::Missing
                     } else {
-                        ActiveChangeState::Diverged
+                        match &committed.target {
+                            ChangeTarget::File => ActiveChangeState::Diverged,
+                            ChangeTarget::SemanticSymbol {
+                                symbol_id,
+                                after_fingerprint,
+                                ..
+                            } => {
+                                let parsed = parsed_cache
+                                    .entry(file.clone())
+                                    .or_insert_with(|| parse_symbols(project_root, file));
+                                match parsed {
+                                    Some(p) => match p.fingerprints.get(symbol_id) {
+                                        None => ActiveChangeState::Missing,
+                                        Some(cur)
+                                            if cur == after_fingerprint
+                                                && latest_for_symbol
+                                                    .get(symbol_id)
+                                                    .is_some_and(|id| *id == env.event_id) =>
+                                        {
+                                            ActiveChangeState::Active
+                                        }
+                                        Some(cur) if cur == after_fingerprint => {
+                                            ActiveChangeState::Superseded
+                                        }
+                                        Some(_) => ActiveChangeState::Diverged,
+                                    },
+                                    None => ActiveChangeState::Diverged,
+                                }
+                            }
+                        }
                     }
                 } else if !in_chain {
                     ActiveChangeState::Superseded
@@ -496,17 +548,31 @@ pub fn compute_coverage(
         .collect();
     unlinked.sort();
 
-    // Files touched by any tracked ChangeCommitted (active or historical).
-    let mut tracked_files: BTreeSet<String> = BTreeSet::new();
+    // A session path is represented only when its current bytes match a
+    // recorded `after` state for the same path. Historical path membership
+    // alone never hides a file: later same-path activity that no record
+    // explains stays visible in `untracked_changed_files` even when an older
+    // semantic record for that path remains valid (see the no-chain-tip
+    // fallback in `resolve_active_states`).
+    let mut afters_by_file: HashMap<String, Vec<super::types::FileStateEvidence>> = HashMap::new();
     for env in events {
         if let ProvenanceEvent::ChangeCommitted(c) = &env.event {
-            tracked_files.insert(normalize_changed_file(&c.file));
+            afters_by_file
+                .entry(normalize_changed_file(&c.file))
+                .or_default()
+                .push(c.after.clone());
         }
     }
     let mut untracked: Vec<String> = session_changed_files
         .iter()
         .map(|f| normalize_changed_file(f))
-        .filter(|f| !tracked_files.contains(f))
+        .filter(|f| match afters_by_file.get(f) {
+            // Never tracked: unrepresented by definition.
+            None => true,
+            // Tracked before: visible unless the current bytes are exactly a
+            // recorded `after` state for this path.
+            Some(afters) => !current_file_matches_recorded(project_root, f, afters),
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -530,6 +596,29 @@ fn normalize_changed_file(path: &str) -> String {
     // they escape relativization (they will then show as untracked, which is
     // honest: we cannot prove they match a tracked relative file).
     trimmed.replace('\\', "/")
+}
+
+/// Whether the workspace file's current bytes are exactly a recorded `after`
+/// state for the same path (i.e. no unrepresented same-file activity).
+///
+/// Conservative: exact byte identity only, never path equality. A missing
+/// file is represented only by a recorded deletion; an unhashable file
+/// (binary/non-UTF8, `content_hash: None`) can never be proven represented.
+fn current_file_matches_recorded(
+    project_root: &Path,
+    relative_file: &str,
+    afters: &[super::types::FileStateEvidence],
+) -> bool {
+    let current = read_exact_file(project_root, relative_file);
+    if !current.exists {
+        return afters.iter().any(|a| !a.exists);
+    }
+    let Some(cur_hash) = current.content_hash else {
+        return false;
+    };
+    afters
+        .iter()
+        .any(|a| a.exists && a.content_hash.as_deref() == Some(cur_hash.as_str()))
 }
 
 #[cfg(test)]
@@ -1030,6 +1119,7 @@ mod tests {
             context: VerificationContext {
                 plan_item_id: Some("step-2".to_string()),
                 observed_change_ids: vec![change.event_id.clone()],
+                matched_obligations: Vec::new(),
                 directive_id: None,
                 requirement_ids: Vec::new(),
             },
@@ -1082,6 +1172,7 @@ mod tests {
                 timed_out: false,
             },
             observed_change_ids: vec![change.event_id.clone()],
+            matched_obligations: Vec::new(),
             stdout_excerpt: String::new(),
             stderr_excerpt: String::new(),
             output_digest: "blake3:x".to_string(),
@@ -1126,5 +1217,257 @@ mod tests {
         // Fingerprint mismatch despite file-chain match -> Diverged.
         assert_eq!(resolved[0].state, ActiveChangeState::Diverged);
         let _ = fp;
+    }
+
+    fn commit_tracked_foo_edit(
+        proj_path: &Path,
+        store: &ProvenanceStore,
+    ) -> (ProvenanceEventEnvelope, String) {
+        // Tracked semantic edit to `foo` (`1;` -> `2;`), written then recorded
+        // (production write-then-record order). Returns the envelope and the
+        // symbol id.
+        let before_content = std::fs::read_to_string(proj_path.join("src/lib.rs")).unwrap();
+        let (sym_id, fp_before) = current_fp(proj_path, "src/lib.rs", "foo");
+        let after_content =
+            before_content.replacen("fn foo() {\n    1;\n}", "fn foo() {\n    2;\n}", 1);
+        std::fs::write(proj_path.join("src/lib.rs"), &after_content).unwrap();
+        let (_, fp_after) = current_fp(proj_path, "src/lib.rs", "foo");
+        let env = v2_semantic_commit(
+            store,
+            "s",
+            "src/lib.rs",
+            &sym_id,
+            &before_content,
+            &after_content,
+            &fp_before,
+            &fp_after,
+        );
+        (env, sym_id)
+    }
+
+    #[test]
+    fn test_v2_semantic_unrelated_same_file_edit_stays_active_with_visible_coverage() {
+        // Mixed same-file mutation: a tracked semantic edit to `foo`, then an
+        // unrepresented edit to `other`. The unchanged symbol must stay Active
+        // while the file-level unrepresented activity stays visible.
+        let proj = write_rust_project();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let (env, _) = commit_tracked_foo_edit(proj.path(), &store);
+        // Unrepresented same-file edit to a different symbol.
+        let path = proj.path().join("src/lib.rs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        let updated = src.replacen("fn other() {\n    1;\n}", "fn other() {\n    99;\n}", 1);
+        std::fs::write(&path, updated).unwrap();
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].change_id, env.event_id);
+        assert_eq!(resolved[0].state, ActiveChangeState::Active);
+        // The same path's later activity is not represented by the older
+        // record, so it must remain visible to coverage.
+        let cov = compute_coverage(
+            proj.path(),
+            &loaded.events,
+            &["src/lib.rs".to_string()],
+            false,
+        );
+        assert_eq!(cov.tracked_active_change_ids, vec![env.event_id.clone()]);
+        assert!(cov.diverged_change_ids.is_empty());
+        assert!(
+            cov.untracked_changed_files
+                .contains(&"src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_v2_semantic_same_symbol_edit_diverges_with_visible_coverage() {
+        // Complementary case: the later unrepresented edit changes the same
+        // semantic symbol, so the target must stay Diverged.
+        let proj = write_rust_project();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let (env, _) = commit_tracked_foo_edit(proj.path(), &store);
+        // Unrepresented edit to the SAME symbol body.
+        let path = proj.path().join("src/lib.rs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        let updated = src.replacen("fn foo() {\n    2;\n}", "fn foo() {\n    99;\n}", 1);
+        std::fs::write(&path, updated).unwrap();
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].state, ActiveChangeState::Diverged);
+        let cov = compute_coverage(
+            proj.path(),
+            &loaded.events,
+            &["src/lib.rs".to_string()],
+            false,
+        );
+        assert!(cov.tracked_active_change_ids.is_empty());
+        assert!(cov.diverged_change_ids.contains(&env.event_id));
+        assert!(
+            cov.untracked_changed_files
+                .contains(&"src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_v2_tracked_sequential_same_file_edits_not_hidden_or_double_counted() {
+        // Two tracked sequential edits: both stay Active, each counted once,
+        // and a session entry for the represented path creates no noise.
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        std::fs::write(proj.path().join("a.txt"), "h1\n").unwrap();
+        let a = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "h0\n",
+            "h1\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        std::fs::write(proj.path().join("a.txt"), "h2\n").unwrap();
+        let b = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "h1\n",
+            "h2\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        let by_id: HashMap<_, _> = resolved
+            .into_iter()
+            .map(|r| (r.change_id.clone(), r))
+            .collect();
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(by_id[&a.event_id].state, ActiveChangeState::Active);
+        assert_eq!(by_id[&b.event_id].state, ActiveChangeState::Active);
+        let cov = compute_coverage(proj.path(), &loaded.events, &["a.txt".to_string()], false);
+        assert_eq!(cov.tracked_active_change_ids.len(), 2);
+        assert!(cov.untracked_changed_files.is_empty());
+    }
+
+    #[test]
+    fn test_v2_file_target_external_edit_diverges_and_reports_untracked() {
+        // Tracked file change followed by an unrepresented external edit: the
+        // record diverges and the path stays visible to coverage.
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::write(proj.path().join("a.txt"), "h0\n").unwrap();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        std::fs::write(proj.path().join("a.txt"), "h1\n").unwrap();
+        let a = v2_file_commit(
+            &store,
+            "s",
+            "a.txt",
+            "h0\n",
+            "h1\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        // External/manual edit with no provenance record.
+        std::fs::write(proj.path().join("a.txt"), "hx\n").unwrap();
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].state, ActiveChangeState::Diverged);
+        let cov = compute_coverage(proj.path(), &loaded.events, &["a.txt".to_string()], false);
+        assert!(cov.tracked_active_change_ids.is_empty());
+        assert!(cov.diverged_change_ids.contains(&a.event_id));
+        assert!(cov.untracked_changed_files.contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn test_v1_and_v2_events_coexist() {
+        // Legacy v1 readability alongside current-schema events: a v1 semantic
+        // record and a v2 file record for different files both resolve.
+        let proj = write_rust_project();
+        std::fs::write(proj.path().join("other.txt"), "x\n").unwrap();
+        let (sym_id, fp) = current_fp(proj.path(), "src/lib.rs", "foo");
+        let sess_dir = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess_dir.path().join("s"));
+        let v1 = commit_for(&store, "s", "src/lib.rs", &sym_id, &fp);
+        std::fs::write(proj.path().join("other.txt"), "y\n").unwrap();
+        let v2 = v2_file_commit(
+            &store,
+            "s",
+            "other.txt",
+            "x\n",
+            "y\n",
+            ChangeKind::TextEdit,
+            None,
+        );
+        // Reload from disk (session-reload path) merges both schema versions.
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.events.len(), 2);
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        let by_id: HashMap<_, _> = resolved
+            .into_iter()
+            .map(|r| (r.change_id.clone(), r))
+            .collect();
+        assert_eq!(by_id[&v1.event_id].state, ActiveChangeState::Active);
+        assert_eq!(by_id[&v2.event_id].state, ActiveChangeState::Active);
+    }
+
+    #[test]
+    fn test_v2_noop_rewrite_creates_no_false_coverage() {
+        // No-op write (same bytes, no new event) with a session entry for the
+        // represented path: the tracked target stays Active and no false
+        // untracked coverage appears.
+        let proj = write_rust_project();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let (env, _) = commit_tracked_foo_edit(proj.path(), &store);
+        // No-op rewrite: byte-identical content.
+        let path = proj.path().join("src/lib.rs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &src).unwrap();
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].change_id, env.event_id);
+        assert_eq!(resolved[0].state, ActiveChangeState::Active);
+        let cov = compute_coverage(
+            proj.path(),
+            &loaded.events,
+            &["src/lib.rs".to_string()],
+            false,
+        );
+        assert_eq!(cov.tracked_active_change_ids, vec![env.event_id]);
+        assert!(cov.untracked_changed_files.is_empty());
+    }
+
+    #[test]
+    fn test_v2_semantic_unrecorded_delete_is_missing_with_visible_coverage() {
+        // Unrecorded external deletion: the semantic target is Missing (never
+        // Active), and the path stays visible to coverage because no recorded
+        // deletion explains the current state.
+        let proj = write_rust_project();
+        let sess = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(sess.path().join("s"));
+        let (env, _) = commit_tracked_foo_edit(proj.path(), &store);
+        std::fs::remove_file(proj.path().join("src/lib.rs")).unwrap();
+        let loaded = store.load_all().unwrap();
+        let resolved = resolve_active_states(proj.path(), &loaded.events);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].change_id, env.event_id);
+        assert_eq!(resolved[0].state, ActiveChangeState::Missing);
+        let cov = compute_coverage(
+            proj.path(),
+            &loaded.events,
+            &["src/lib.rs".to_string()],
+            false,
+        );
+        assert!(cov.tracked_active_change_ids.is_empty());
+        assert!(
+            cov.untracked_changed_files
+                .contains(&"src/lib.rs".to_string())
+        );
     }
 }

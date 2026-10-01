@@ -23,6 +23,24 @@ pub trait CommandHandler {
     /// Default is a no-op; the TUI executor consumes one staged Test/Lint
     /// follow-up here, strictly after foreground release.
     fn handle_job_completed(&mut self, _producer: &str, _ui: &mut TuiApp) {}
+    /// Synthetic follow-up with no user directive (test/lint analysis).
+    /// Default is a no-op so mocks stay source-compatible.
+    fn handle_internal_followup(&mut self, _content: &str, _ui: &mut TuiApp) {}
+    /// Replay of an already observed user turn. `display` is the raw typed
+    /// bytes for the log; `content` is the effective instruction to hand the
+    /// agent (e.g. the expanded custom-command body). `directive_id` reuses
+    /// the original event when known; `None` runs with `none()` attribution.
+    fn handle_retry_turn(
+        &mut self,
+        _display: &str,
+        _content: &str,
+        _directive_id: Option<String>,
+        _ui: &mut TuiApp,
+    ) {
+    }
+    /// Real user prompt with system-note augmentation (diff rejection).
+    /// `raw` is the exact typed bytes; `effective` is note + raw.
+    fn handle_augmented_user_prompt(&mut self, _raw: &str, _effective: &str, _ui: &mut TuiApp) {}
 }
 
 pub struct TuiExecutor {

@@ -3,15 +3,19 @@ use serde::{Deserialize, Serialize};
 use super::wire::v1 as wire_v1;
 use super::wire::v2 as wire_v2;
 use super::wire::v3 as wire_v3;
+use super::wire::v4 as wire_v4;
 
 /// Current on-disk schema version for newly written provenance events.
-pub const PROVENANCE_SCHEMA_VERSION: u32 = 3;
+pub const PROVENANCE_SCHEMA_VERSION: u32 = 4;
 /// Legacy read-only schema version. v1 files are converted on read and are
 /// never physically migrated.
 pub const LEGACY_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 /// Previous read-only schema version. v2 files are converted on read and are
 /// never physically migrated or rewritten.
 pub const V2_PROVENANCE_SCHEMA_VERSION: u32 = 2;
+/// Previous read-only schema version. v3 files are converted on read and are
+/// never physically migrated or rewritten.
+pub const V3_PROVENANCE_SCHEMA_VERSION: u32 = 3;
 
 /// Versioned envelope wrapping every provenance event.
 ///
@@ -236,8 +240,43 @@ pub struct RequirementChangedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Plan / Change / Verification (v3 attribution)
+// Plan / Change / Verification (v4 attribution with obligations)
 // ---------------------------------------------------------------------------
+
+/// Structured command matcher for a verification obligation.
+///
+/// Evidence attribution only (not a security boundary): exact-token prefix
+/// match on `program` basename + `args_prefix`. No regex, glob, or shell
+/// parsing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationCommandMatcher {
+    pub program: String,
+    #[serde(default)]
+    pub args_prefix: Vec<String>,
+}
+
+/// What a plan step intends to observe (not a proof).
+///
+/// `command` is optional: when absent, `kind` + plan scope match; when
+/// present, `kind` + basename + argv prefix must match.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationObligation {
+    pub id: String,
+    pub description: String,
+    pub kind: VerificationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<VerificationCommandMatcher>,
+}
+
+/// Frozen reference to a matched obligation.
+///
+/// `binding_hash` freezes the obligation definition + requirement scope at
+/// capture time so later plan edits never rewrite historical attribution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationObligationRef {
+    pub id: String,
+    pub binding_hash: String,
+}
 
 /// One plan write expressed as per-item transitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,7 +289,7 @@ pub struct PlanChangedEvent {
 /// Transition of a single plan item.
 ///
 /// New item: `before_status = None`. Deleted item: `after_status = None`.
-/// Requirement-link-only edits also produce a transition.
+/// Requirement-link-only and obligation-only edits also produce a transition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanItemTransition {
     pub plan_item_id: String,
@@ -266,6 +305,10 @@ pub struct PlanItemTransition {
     pub before_requirement_ids: Vec<String>,
     #[serde(default)]
     pub after_requirement_ids: Vec<String>,
+    #[serde(default)]
+    pub before_verification_obligations: Vec<VerificationObligation>,
+    #[serde(default)]
+    pub after_verification_obligations: Vec<VerificationObligation>,
 }
 
 /// A committed workspace mutation (v3 canonical).
@@ -383,6 +426,8 @@ pub fn file_content_hash(content: &str) -> String {
 /// snapshot; it never claims the implementation is proven or guaranteed
 /// correct. `requirement_ids` are frozen at capture time (union of active
 /// change requirement ids, falling back to the current plan item links).
+/// `matched_obligations` freezes which obligations this run was attributed
+/// to (id + binding hash), including for failed runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationObservedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +442,8 @@ pub struct VerificationObservedEvent {
     pub outcome: VerificationOutcome,
     #[serde(default)]
     pub observed_change_ids: Vec<String>,
+    #[serde(default)]
+    pub matched_obligations: Vec<VerificationObligationRef>,
     #[serde(default)]
     pub stdout_excerpt: String,
     #[serde(default)]
@@ -452,13 +499,15 @@ pub struct VerificationOutcome {
 /// Later changes must never be attributed to an already-running command.
 /// `requirement_ids` are computed at capture: union of active change
 /// requirement ids, falling back to current plan item links when no active
-/// change carries requirements.
+/// change carries requirements. `matched_obligations` freezes obligation
+/// attribution at the same pre-execution instant.
 #[derive(Debug, Clone, Default)]
 pub struct VerificationContext {
     pub directive_id: Option<String>,
     pub plan_item_id: Option<String>,
     pub requirement_ids: Vec<String>,
     pub observed_change_ids: Vec<String>,
+    pub matched_obligations: Vec<VerificationObligationRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +535,8 @@ pub fn from_v1_wire(env: wire_v1::V1Envelope) -> ProvenanceEventEnvelope {
                     after_status: c.after_status,
                     before_requirement_ids: Vec::new(),
                     after_requirement_ids: Vec::new(),
+                    before_verification_obligations: Vec::new(),
+                    after_verification_obligations: Vec::new(),
                 })
                 .collect(),
         }),
@@ -552,6 +603,7 @@ pub fn from_v1_wire(env: wire_v1::V1Envelope) -> ProvenanceEventEnvelope {
                     timed_out: v.outcome.timed_out,
                 },
                 observed_change_ids: v.observed_change_ids,
+                matched_obligations: Vec::new(),
                 stdout_excerpt: v.stdout_excerpt,
                 stderr_excerpt: v.stderr_excerpt,
                 output_digest: v.output_digest,
@@ -588,6 +640,8 @@ pub fn from_v2_wire(env: wire_v2::V2Envelope) -> ProvenanceEventEnvelope {
                     after_status: c.after_status,
                     before_requirement_ids: Vec::new(),
                     after_requirement_ids: Vec::new(),
+                    before_verification_obligations: Vec::new(),
+                    after_verification_obligations: Vec::new(),
                 })
                 .collect(),
         }),
@@ -667,6 +721,7 @@ pub fn from_v2_wire(env: wire_v2::V2Envelope) -> ProvenanceEventEnvelope {
                     timed_out: v.outcome.timed_out,
                 },
                 observed_change_ids: v.observed_change_ids,
+                matched_obligations: Vec::new(),
                 stdout_excerpt: v.stdout_excerpt,
                 stderr_excerpt: v.stderr_excerpt,
                 output_digest: v.output_digest,
@@ -750,6 +805,8 @@ pub fn from_v3_wire(env: wire_v3::V3Envelope) -> ProvenanceEventEnvelope {
                     after_status: c.after_status,
                     before_requirement_ids: c.before_requirement_ids,
                     after_requirement_ids: c.after_requirement_ids,
+                    before_verification_obligations: Vec::new(),
+                    after_verification_obligations: Vec::new(),
                 })
                 .collect(),
         }),
@@ -829,6 +886,7 @@ pub fn from_v3_wire(env: wire_v3::V3Envelope) -> ProvenanceEventEnvelope {
                     timed_out: v.outcome.timed_out,
                 },
                 observed_change_ids: v.observed_change_ids,
+                matched_obligations: Vec::new(),
                 stdout_excerpt: v.stdout_excerpt,
                 stderr_excerpt: v.stderr_excerpt,
                 output_digest: v.output_digest,
@@ -1002,6 +1060,399 @@ pub fn to_v3_wire(env: &ProvenanceEventEnvelope) -> wire_v3::V3Envelope {
         }
     };
     wire_v3::V3Envelope {
+        schema_version: V3_PROVENANCE_SCHEMA_VERSION,
+        event_id: env.event_id.clone(),
+        session_id: env.session_id.clone(),
+        timestamp: env.timestamp.clone(),
+        event,
+    }
+}
+
+/// Convert a v4 wire envelope into the canonical representation.
+pub fn from_v4_wire(env: wire_v4::V4Envelope) -> ProvenanceEventEnvelope {
+    fn kind_from_v4(k: wire_v4::V4VerificationKind) -> VerificationKind {
+        match k {
+            wire_v4::V4VerificationKind::Test => VerificationKind::Test,
+            wire_v4::V4VerificationKind::Build => VerificationKind::Build,
+            wire_v4::V4VerificationKind::Lint => VerificationKind::Lint,
+            wire_v4::V4VerificationKind::TypeCheck => VerificationKind::TypeCheck,
+            wire_v4::V4VerificationKind::FormatCheck => VerificationKind::FormatCheck,
+            wire_v4::V4VerificationKind::SyntaxCheck => VerificationKind::SyntaxCheck,
+        }
+    }
+    fn obligation_from_v4(o: wire_v4::V4VerificationObligation) -> VerificationObligation {
+        VerificationObligation {
+            id: o.id,
+            description: o.description,
+            kind: kind_from_v4(o.kind),
+            command: o.command.map(|c| VerificationCommandMatcher {
+                program: c.program,
+                args_prefix: c.args_prefix,
+            }),
+        }
+    }
+    let event = match env.event {
+        wire_v4::V4Event::DirectiveObserved(d) => {
+            ProvenanceEvent::DirectiveObserved(DirectiveObservedEvent {
+                origin: match d.origin {
+                    wire_v4::V4DirectiveOrigin::TuiPrompt => DirectiveOrigin::TuiPrompt,
+                    wire_v4::V4DirectiveOrigin::TuiCustomCommand => {
+                        DirectiveOrigin::TuiCustomCommand
+                    }
+                    wire_v4::V4DirectiveOrigin::ExecRun => DirectiveOrigin::ExecRun,
+                    wire_v4::V4DirectiveOrigin::ExecAsk => DirectiveOrigin::ExecAsk,
+                    wire_v4::V4DirectiveOrigin::ExecRewrite => DirectiveOrigin::ExecRewrite,
+                    wire_v4::V4DirectiveOrigin::SemanticEdit => DirectiveOrigin::SemanticEdit,
+                },
+                raw_input: d.raw_input,
+                raw_input_hash: d.raw_input_hash,
+                effective_instruction: d.effective_instruction,
+                effective_instruction_hash: d.effective_instruction_hash,
+            })
+        }
+        wire_v4::V4Event::RequirementChanged(r) => {
+            ProvenanceEvent::RequirementChanged(RequirementChangedEvent {
+                directive_id: r.directive_id,
+                changes: r
+                    .changes
+                    .into_iter()
+                    .map(|t| RequirementTransition {
+                        requirement_id: t.requirement_id,
+                        before: t.before.map(|s| RequirementSnapshot {
+                            id: s.id,
+                            statement: s.statement,
+                            status: match s.status {
+                                wire_v4::V4RequirementStatus::Active => RequirementStatus::Active,
+                                wire_v4::V4RequirementStatus::Withdrawn => {
+                                    RequirementStatus::Withdrawn
+                                }
+                            },
+                        }),
+                        after: t.after.map(|s| RequirementSnapshot {
+                            id: s.id,
+                            statement: s.statement,
+                            status: match s.status {
+                                wire_v4::V4RequirementStatus::Active => RequirementStatus::Active,
+                                wire_v4::V4RequirementStatus::Withdrawn => {
+                                    RequirementStatus::Withdrawn
+                                }
+                            },
+                        }),
+                    })
+                    .collect(),
+            })
+        }
+        wire_v4::V4Event::PlanChanged(p) => ProvenanceEvent::PlanChanged(PlanChangedEvent {
+            directive_id: p.directive_id,
+            changes: p
+                .changes
+                .into_iter()
+                .map(|c| PlanItemTransition {
+                    plan_item_id: c.plan_item_id,
+                    parent_id: c.parent_id,
+                    content: c.content,
+                    before_status: c.before_status,
+                    after_status: c.after_status,
+                    before_requirement_ids: c.before_requirement_ids,
+                    after_requirement_ids: c.after_requirement_ids,
+                    before_verification_obligations: c
+                        .before_verification_obligations
+                        .into_iter()
+                        .map(obligation_from_v4)
+                        .collect(),
+                    after_verification_obligations: c
+                        .after_verification_obligations
+                        .into_iter()
+                        .map(obligation_from_v4)
+                        .collect(),
+                })
+                .collect(),
+        }),
+        wire_v4::V4Event::ChangeCommitted(c) => {
+            ProvenanceEvent::ChangeCommitted(ChangeCommittedEvent {
+                transaction_id: c.transaction_id,
+                directive_id: c.directive_id,
+                plan_item_id: c.plan_item_id,
+                requirement_ids: c.requirement_ids,
+                change_kind: match c.change_kind {
+                    wire_v4::V4ChangeKind::SemanticEdit => ChangeKind::SemanticEdit,
+                    wire_v4::V4ChangeKind::TextEdit => ChangeKind::TextEdit,
+                    wire_v4::V4ChangeKind::ApplyPatch => ChangeKind::ApplyPatch,
+                    wire_v4::V4ChangeKind::FileWrite => ChangeKind::FileWrite,
+                    wire_v4::V4ChangeKind::Undo => ChangeKind::Undo,
+                },
+                file: c.file,
+                target: match c.target {
+                    wire_v4::V4ChangeTarget::File => ChangeTarget::File,
+                    wire_v4::V4ChangeTarget::SemanticSymbol {
+                        symbol_id,
+                        before_fingerprint,
+                        after_fingerprint,
+                    } => ChangeTarget::SemanticSymbol {
+                        symbol_id,
+                        before_fingerprint,
+                        after_fingerprint,
+                    },
+                },
+                before: FileStateEvidence {
+                    exists: c.before.exists,
+                    content_hash: c.before.content_hash,
+                    byte_len: c.before.byte_len,
+                },
+                after: FileStateEvidence {
+                    exists: c.after.exists,
+                    content_hash: c.after.content_hash,
+                    byte_len: c.after.byte_len,
+                },
+                predecessor_change_id: c.predecessor_change_id,
+                reverts_change_id: c.reverts_change_id,
+                diff: c.diff,
+                diff_hash: c.diff_hash,
+                lines_added: c.lines_added,
+                lines_removed: c.lines_removed,
+            })
+        }
+        wire_v4::V4Event::VerificationObserved(v) => {
+            ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                directive_id: v.directive_id,
+                plan_item_id: v.plan_item_id,
+                requirement_ids: v.requirement_ids,
+                verification_kind: kind_from_v4(v.verification_kind),
+                source: match v.source {
+                    wire_v4::V4VerificationSource::ExecuteProcess => {
+                        VerificationSource::ExecuteProcess
+                    }
+                    wire_v4::V4VerificationSource::TuiTest => VerificationSource::TuiTest,
+                    wire_v4::V4VerificationSource::TuiLint => VerificationSource::TuiLint,
+                },
+                command: CommandEvidence {
+                    program: v.command.program,
+                    args: v.command.args,
+                    cwd: v.command.cwd,
+                },
+                outcome: VerificationOutcome {
+                    success: v.outcome.success,
+                    status: v.outcome.status,
+                    exit_code: v.outcome.exit_code,
+                    timed_out: v.outcome.timed_out,
+                },
+                observed_change_ids: v.observed_change_ids,
+                matched_obligations: v
+                    .matched_obligations
+                    .into_iter()
+                    .map(|r| VerificationObligationRef {
+                        id: r.id,
+                        binding_hash: r.binding_hash,
+                    })
+                    .collect(),
+                stdout_excerpt: v.stdout_excerpt,
+                stderr_excerpt: v.stderr_excerpt,
+                output_digest: v.output_digest,
+                output_truncated: v.output_truncated,
+                warnings: v.warnings,
+            })
+        }
+    };
+    ProvenanceEventEnvelope {
+        schema_version: PROVENANCE_SCHEMA_VERSION,
+        event_id: env.event_id,
+        session_id: env.session_id,
+        timestamp: env.timestamp,
+        event,
+    }
+}
+
+/// Convert a canonical envelope into its v4 wire form for persistence.
+///
+/// All new events are written as v4; v1/v2/v3 are never written.
+pub fn to_v4_wire(env: &ProvenanceEventEnvelope) -> wire_v4::V4Envelope {
+    fn kind_to_v4(k: VerificationKind) -> wire_v4::V4VerificationKind {
+        match k {
+            VerificationKind::Test => wire_v4::V4VerificationKind::Test,
+            VerificationKind::Build => wire_v4::V4VerificationKind::Build,
+            VerificationKind::Lint => wire_v4::V4VerificationKind::Lint,
+            VerificationKind::TypeCheck => wire_v4::V4VerificationKind::TypeCheck,
+            VerificationKind::FormatCheck => wire_v4::V4VerificationKind::FormatCheck,
+            VerificationKind::SyntaxCheck => wire_v4::V4VerificationKind::SyntaxCheck,
+        }
+    }
+    fn obligation_to_v4(o: &VerificationObligation) -> wire_v4::V4VerificationObligation {
+        wire_v4::V4VerificationObligation {
+            id: o.id.clone(),
+            description: o.description.clone(),
+            kind: kind_to_v4(o.kind),
+            command: o
+                .command
+                .as_ref()
+                .map(|c| wire_v4::V4VerificationCommandMatcher {
+                    program: c.program.clone(),
+                    args_prefix: c.args_prefix.clone(),
+                }),
+        }
+    }
+    let event = match &env.event {
+        ProvenanceEvent::DirectiveObserved(d) => {
+            wire_v4::V4Event::DirectiveObserved(wire_v4::V4DirectiveObserved {
+                origin: match d.origin {
+                    DirectiveOrigin::TuiPrompt => wire_v4::V4DirectiveOrigin::TuiPrompt,
+                    DirectiveOrigin::TuiCustomCommand => {
+                        wire_v4::V4DirectiveOrigin::TuiCustomCommand
+                    }
+                    DirectiveOrigin::ExecRun => wire_v4::V4DirectiveOrigin::ExecRun,
+                    DirectiveOrigin::ExecAsk => wire_v4::V4DirectiveOrigin::ExecAsk,
+                    DirectiveOrigin::ExecRewrite => wire_v4::V4DirectiveOrigin::ExecRewrite,
+                    DirectiveOrigin::SemanticEdit => wire_v4::V4DirectiveOrigin::SemanticEdit,
+                },
+                raw_input: d.raw_input.clone(),
+                raw_input_hash: d.raw_input_hash.clone(),
+                effective_instruction: d.effective_instruction.clone(),
+                effective_instruction_hash: d.effective_instruction_hash.clone(),
+            })
+        }
+        ProvenanceEvent::RequirementChanged(r) => {
+            wire_v4::V4Event::RequirementChanged(wire_v4::V4RequirementChanged {
+                directive_id: r.directive_id.clone(),
+                changes: r
+                    .changes
+                    .iter()
+                    .map(|t| wire_v4::V4RequirementTransition {
+                        requirement_id: t.requirement_id.clone(),
+                        before: t.before.as_ref().map(|s| wire_v4::V4RequirementSnapshot {
+                            id: s.id.clone(),
+                            statement: s.statement.clone(),
+                            status: match s.status {
+                                RequirementStatus::Active => wire_v4::V4RequirementStatus::Active,
+                                RequirementStatus::Withdrawn => {
+                                    wire_v4::V4RequirementStatus::Withdrawn
+                                }
+                            },
+                        }),
+                        after: t.after.as_ref().map(|s| wire_v4::V4RequirementSnapshot {
+                            id: s.id.clone(),
+                            statement: s.statement.clone(),
+                            status: match s.status {
+                                RequirementStatus::Active => wire_v4::V4RequirementStatus::Active,
+                                RequirementStatus::Withdrawn => {
+                                    wire_v4::V4RequirementStatus::Withdrawn
+                                }
+                            },
+                        }),
+                    })
+                    .collect(),
+            })
+        }
+        ProvenanceEvent::PlanChanged(p) => wire_v4::V4Event::PlanChanged(wire_v4::V4PlanChanged {
+            directive_id: p.directive_id.clone(),
+            changes: p
+                .changes
+                .iter()
+                .map(|c| wire_v4::V4PlanItemTransition {
+                    plan_item_id: c.plan_item_id.clone(),
+                    parent_id: c.parent_id.clone(),
+                    content: c.content.clone(),
+                    before_status: c.before_status.clone(),
+                    after_status: c.after_status.clone(),
+                    before_requirement_ids: c.before_requirement_ids.clone(),
+                    after_requirement_ids: c.after_requirement_ids.clone(),
+                    before_verification_obligations: c
+                        .before_verification_obligations
+                        .iter()
+                        .map(obligation_to_v4)
+                        .collect(),
+                    after_verification_obligations: c
+                        .after_verification_obligations
+                        .iter()
+                        .map(obligation_to_v4)
+                        .collect(),
+                })
+                .collect(),
+        }),
+        ProvenanceEvent::ChangeCommitted(c) => {
+            wire_v4::V4Event::ChangeCommitted(wire_v4::V4ChangeCommitted {
+                transaction_id: c.transaction_id.clone(),
+                directive_id: c.directive_id.clone(),
+                plan_item_id: c.plan_item_id.clone(),
+                requirement_ids: c.requirement_ids.clone(),
+                change_kind: match c.change_kind {
+                    ChangeKind::SemanticEdit => wire_v4::V4ChangeKind::SemanticEdit,
+                    ChangeKind::TextEdit => wire_v4::V4ChangeKind::TextEdit,
+                    ChangeKind::ApplyPatch => wire_v4::V4ChangeKind::ApplyPatch,
+                    ChangeKind::FileWrite => wire_v4::V4ChangeKind::FileWrite,
+                    ChangeKind::Undo => wire_v4::V4ChangeKind::Undo,
+                },
+                file: c.file.clone(),
+                target: match &c.target {
+                    ChangeTarget::File => wire_v4::V4ChangeTarget::File,
+                    ChangeTarget::SemanticSymbol {
+                        symbol_id,
+                        before_fingerprint,
+                        after_fingerprint,
+                    } => wire_v4::V4ChangeTarget::SemanticSymbol {
+                        symbol_id: symbol_id.clone(),
+                        before_fingerprint: before_fingerprint.clone(),
+                        after_fingerprint: after_fingerprint.clone(),
+                    },
+                },
+                before: wire_v4::V4FileStateEvidence {
+                    exists: c.before.exists,
+                    content_hash: c.before.content_hash.clone(),
+                    byte_len: c.before.byte_len,
+                },
+                after: wire_v4::V4FileStateEvidence {
+                    exists: c.after.exists,
+                    content_hash: c.after.content_hash.clone(),
+                    byte_len: c.after.byte_len,
+                },
+                predecessor_change_id: c.predecessor_change_id.clone(),
+                reverts_change_id: c.reverts_change_id.clone(),
+                diff: c.diff.clone(),
+                diff_hash: c.diff_hash.clone(),
+                lines_added: c.lines_added,
+                lines_removed: c.lines_removed,
+            })
+        }
+        ProvenanceEvent::VerificationObserved(v) => {
+            wire_v4::V4Event::VerificationObserved(wire_v4::V4VerificationObserved {
+                directive_id: v.directive_id.clone(),
+                plan_item_id: v.plan_item_id.clone(),
+                requirement_ids: v.requirement_ids.clone(),
+                verification_kind: kind_to_v4(v.verification_kind),
+                source: match v.source {
+                    VerificationSource::ExecuteProcess => {
+                        wire_v4::V4VerificationSource::ExecuteProcess
+                    }
+                    VerificationSource::TuiTest => wire_v4::V4VerificationSource::TuiTest,
+                    VerificationSource::TuiLint => wire_v4::V4VerificationSource::TuiLint,
+                },
+                command: wire_v4::V4CommandEvidence {
+                    program: v.command.program.clone(),
+                    args: v.command.args.clone(),
+                    cwd: v.command.cwd.clone(),
+                },
+                outcome: wire_v4::V4VerificationOutcome {
+                    success: v.outcome.success,
+                    status: v.outcome.status.clone(),
+                    exit_code: v.outcome.exit_code,
+                    timed_out: v.outcome.timed_out,
+                },
+                observed_change_ids: v.observed_change_ids.clone(),
+                matched_obligations: v
+                    .matched_obligations
+                    .iter()
+                    .map(|r| wire_v4::V4VerificationObligationRef {
+                        id: r.id.clone(),
+                        binding_hash: r.binding_hash.clone(),
+                    })
+                    .collect(),
+                stdout_excerpt: v.stdout_excerpt.clone(),
+                stderr_excerpt: v.stderr_excerpt.clone(),
+                output_digest: v.output_digest.clone(),
+                output_truncated: v.output_truncated,
+                warnings: v.warnings.clone(),
+            })
+        }
+    };
+    wire_v4::V4Envelope {
         schema_version: PROVENANCE_SCHEMA_VERSION,
         event_id: env.event_id.clone(),
         session_id: env.session_id.clone(),

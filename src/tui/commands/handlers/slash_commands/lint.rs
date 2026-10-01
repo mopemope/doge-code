@@ -448,8 +448,21 @@ async fn lint_job_async(
                     ui_tx.send_logged("::status:cancelled");
                     return JobRunOutcome::Cancelled;
                 }
-                let verification_context =
-                    crate::tools::provenance::capture_verification_context_for_fs(&tools);
+                let lint_kind = crate::tools::provenance::classify_lint_command(
+                    &lint_cmd.command,
+                    &lint_cmd.args,
+                );
+                // Freeze verification context (including obligation attribution)
+                // before the command starts; later changes never leak in.
+                let verification_context = lint_kind.map(|kind| {
+                    crate::tools::provenance::capture_verification_context_for_invocation(
+                        &tools,
+                        &crate::provenance::ProvenanceAttribution::none(),
+                        kind,
+                        &lint_cmd.command,
+                        &lint_cmd.args,
+                    )
+                });
                 let result = run_command_with_output(
                     &project_root,
                     lint_cmd,
@@ -467,10 +480,8 @@ async fn lint_job_async(
                 // One command = one observed verification event. Kind comes
                 // from the structured program + argv; unrecognized lint
                 // commands are not forced into evidence.
-                if let Some(kind) = crate::tools::provenance::classify_lint_command(
-                    &lint_cmd.command,
-                    &lint_cmd.args,
-                ) {
+                if let (Some(kind), Some(verification_context)) = (lint_kind, verification_context)
+                {
                     // A recording failure never fails the lint run itself;
                     // the session is marked incomplete and the UI is told.
                     if !crate::tools::provenance::record_tui_lint_verification(
