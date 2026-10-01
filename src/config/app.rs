@@ -8,6 +8,7 @@ use super::mcp::{
     LocalMcpServerConfig, McpServerConfig, McpTransport, PartialLocalMcpServerConfig,
     validate_mcp_server_names,
 };
+use super::reasoning::{ReasoningConfig, merge_reasoning};
 use super::tool_routing::{ToolRoutingConfig, merge_tool_routing};
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
@@ -61,6 +62,9 @@ pub struct AppConfig {
     /// Tool routing policy (`[tool_routing]`). Token-efficiency layer only;
     /// never a substitute for execution/filesystem policy.
     pub tool_routing: ToolRoutingConfig,
+    /// Adaptive reasoning policy (`[reasoning]`). Controls per-iteration
+    /// `reasoning_effort` without changing tool routing or loop detection.
+    pub reasoning: ReasoningConfig,
 }
 
 impl Default for AppConfig {
@@ -90,6 +94,7 @@ impl Default for AppConfig {
             local_mcp_server: LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
             tool_routing: ToolRoutingConfig::default(),
+            reasoning: ReasoningConfig::default(),
         }
     }
 }
@@ -261,6 +266,9 @@ impl AppConfig {
             project_cfg.tool_routing.as_ref(),
         );
 
+        let reasoning =
+            merge_reasoning(file_cfg.reasoning.as_ref(), project_cfg.reasoning.as_ref());
+
         Ok(Self {
             base_url,
             model,
@@ -310,6 +318,7 @@ impl AppConfig {
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
             tool_routing,
+            reasoning,
         })
     }
 }

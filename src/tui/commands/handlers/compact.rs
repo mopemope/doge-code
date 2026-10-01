@@ -41,10 +41,11 @@ impl TuiExecutor {
         }
 
         // Prepare parameters and clones for the async task
-        let mut client = self.client.as_ref().unwrap().clone();
+        let client = self.client.as_ref().unwrap().clone();
         let model = self.cfg.model.clone();
         let fs_tools = self.tools.clone();
-        client.reason_enable = false;
+        // Compaction requests use the plain `chat_once` path with no reasoning
+        // hint; no client mutation is needed.
         let cfg = self.cfg.clone();
         let params = crate::llm::CompactParams {
             client,

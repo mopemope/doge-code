@@ -393,6 +393,43 @@ fn test_tool_routing_limit_clamped_on_resolve() {
 }
 
 #[test]
+fn test_reasoning_merge_project_wins() {
+    let file = PartialReasoningConfig {
+        mode: Some("fixed".to_string()),
+        routine_effort: Some("low".to_string()),
+        fixed_effort: Some("high".to_string()),
+        ..Default::default()
+    };
+    let project = PartialReasoningConfig {
+        mode: Some("off".to_string()),
+        ..Default::default()
+    };
+    let merged = merge_reasoning(Some(&file), Some(&project));
+    assert_eq!(merged.mode, ReasoningMode::Off);
+    // Untouched fields keep the global value.
+    assert_eq!(merged.routine_effort, ReasoningEffort::Low);
+    assert_eq!(merged.fixed_effort, ReasoningEffort::High);
+}
+
+#[test]
+fn test_reasoning_config_parses_toml() {
+    let toml_str = r#"
+        [reasoning]
+        mode = "fixed"
+        fixed_effort = "high"
+        routine_effort = "low"
+    "#;
+    let cfg: FileConfig = toml::from_str(toml_str).expect("parse reasoning config");
+    let reasoning = cfg.reasoning.expect("reasoning section");
+    assert_eq!(reasoning.mode.as_deref(), Some("fixed"));
+    assert_eq!(reasoning.fixed_effort.as_deref(), Some("high"));
+    let resolved = merge_reasoning(None, Some(&reasoning));
+    assert_eq!(resolved.mode, ReasoningMode::Fixed);
+    assert_eq!(resolved.fixed_effort, ReasoningEffort::High);
+    assert_eq!(resolved.routine_effort, ReasoningEffort::Low);
+}
+
+#[test]
 fn test_file_config_ignores_unknown_fields() {
     let toml_str = r#"
         [llm]

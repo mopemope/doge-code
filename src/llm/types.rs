@@ -68,11 +68,22 @@ pub struct Choice {
     pub message: ChoiceMessage,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
+    /// Preserve unknown provider fields without failing deserialization.
+    #[serde(default, flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,5 +102,38 @@ mod tests {
         let payload = r#"{"name":"plan_read"}"#;
         let parsed: ToolCallFunction = serde_json::from_str(payload).unwrap();
         assert_eq!(parsed.arguments, "{}");
+    }
+
+    #[test]
+    fn usage_deserializes_with_reasoning_details() {
+        let payload = r#"{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"completion_tokens_details":{"reasoning_tokens":30}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn usage_deserializes_without_details() {
+        let payload = r#"{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        assert!(usage.completion_tokens_details.is_none());
+    }
+
+    #[test]
+    fn usage_deserializes_with_zero_reasoning_tokens() {
+        let payload = r#"{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"completion_tokens_details":{"reasoning_tokens":0}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens),
+            Some(0)
+        );
     }
 }

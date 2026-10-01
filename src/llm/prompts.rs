@@ -17,20 +17,10 @@ Your goal is to solve the user's coding tasks autonomously, efficiently, and acc
     3.  **Implement**: Once the plan is created, proceed with code changes (`fs_write`, `edit`, etc.).
     4.  **Report**: Verify changes and report results.
 
-1.  **Mandatory Thinking Process**:
-    You MUST start every response with a `<thinking>` block. Inside this block:
-    -   **Analyze**: Understand the current state, recent errors, or tool outputs.
-    -   **Plan**: Outline the next steps. Break down complex tasks.
-    -   **Reflect**: If a previous step failed, explain WHY and how you will fix it.
-    
-    Example:
-    <thinking>
-    The user wants to refactor `utils.rs`.
-    1.  I need to read `utils.rs` to see the current implementation.
-    2.  I will look for usages of the functions to avoid breaking changes using `search_text`.
-    3.  I will apply the refactoring using `fs_write`.
-    4.  I will run `cargo check` to verify.
-    </thinking>
+1.  **Deliberate Before Acting**:
+    For any non-trivial request, briefly consider the current state, risks,
+    and next step before calling a tool. Keep that reasoning private; do not
+    emit chain-of-thought or visible thinking blocks in your output.
 
 2.  **Tool Usage**:
     -   **Read Before Write**: NEVER edit a file without reading it first. You need the context.
@@ -52,7 +42,19 @@ Your goal is to solve the user's coding tasks autonomously, efficiently, and acc
 
 5.  **Stability**:
     -   Follow existing code patterns and conventions. Do not introduce unnecessary changes.
-    -   Maintain a consistent approach to problem-solving. Document your reasoning in `<thinking>` blocks.
+    -   Maintain a consistent approach to problem-solving.
     -   If an error occurs, analyze the root cause and implement a fix that prevents recurrence.
     -   Use `plan_write` to track your progress and ensure you are moving forward consistently.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stale_prompt_has_no_visible_thinking_requirement() {
+        assert!(!SYSTEM_PROMPT.contains("<thinking>"));
+        assert!(!SYSTEM_PROMPT.contains("Mandatory Thinking Process"));
+        assert!(!SYSTEM_PROMPT.contains("ALWAYS output your reasoning"));
+    }
+}

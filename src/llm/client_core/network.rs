@@ -176,11 +176,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                     Ok(body) => {
                         // Track token usage if available
                         if let Some(usage) = &body.usage {
-                            client.set_tokens(usage.total_tokens);
-                            // Also track prompt tokens for non-streaming path so UI can display header info
-                            client.set_prompt_tokens(usage.prompt_tokens);
-                            // Accumulate into the session totals.
-                            client.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
+                            client.record_usage(usage);
                         }
 
                         if let Some(msg) = body.choices.into_iter().next().map(|c| c.message) {

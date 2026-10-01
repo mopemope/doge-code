@@ -6,6 +6,9 @@ pub use llm::*;
 pub mod tool_routing;
 pub use tool_routing::*;
 
+pub mod reasoning;
+pub use reasoning::*;
+
 pub mod watch;
 pub use watch::*;
 pub mod mcp;

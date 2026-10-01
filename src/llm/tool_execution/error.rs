@@ -106,7 +106,7 @@ pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
         || err_lower.contains("invalid request")
     {
         Some(
-            "Hint: JSON serialization/parsing failed.\n1. Check if you are using unescaped quotes inside strings.\n2. Ensure the arguments match the tool schema exactly.\n3. Wrap your step-by-step thinking in <thinking> tags to calm down and format correct JSON.",
+            "Hint: JSON serialization/parsing failed.\n1. Check unescaped quotes.\n2. Ensure arguments exactly match the tool schema.\n3. Simplify the next tool call and send only valid JSON arguments.",
         )
     } else if err_lower.contains("syntax") {
         Some(
@@ -180,5 +180,14 @@ mod tests {
                 .unwrap()
                 .contains("edit target no longer matches")
         );
+    }
+
+    #[test]
+    fn test_json_error_hint_does_not_require_thinking_tags() {
+        let hint = get_error_hint("invalid json").expect("json hint");
+        assert!(!hint.contains("<thinking>"));
+        assert!(!hint.contains("thinking"));
+        assert!(!hint.to_lowercase().contains("chain-of-thought"));
+        assert!(hint.contains("Check unescaped quotes"));
     }
 }
