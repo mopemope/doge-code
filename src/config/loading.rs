@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
 use super::mcp::{PartialLocalMcpServerConfig, PartialMcpServerConfig};
+use super::reasoning::PartialReasoningConfig;
 use super::tool_routing::PartialToolRoutingConfig;
 
 use super::watch::PartialWatchConfig;
@@ -37,6 +38,7 @@ pub struct FileConfig {
     pub command_timeout_ms: Option<u64>,
     pub execution: Option<PartialExecutionConfig>,
     pub tool_routing: Option<PartialToolRoutingConfig>,
+    pub reasoning: Option<PartialReasoningConfig>,
 }
 
 pub fn get_default_config_content() -> String {
@@ -111,6 +113,15 @@ command_timeout_ms = 300000
 # [tool_routing]
 # mode = "auto"  # auto / eager / deferred
 # search_result_limit = 5  # 1-10
+
+# Adaptive reasoning policy: control provider reasoning budget per iteration.
+# [reasoning]
+# mode = "auto"  # auto / fixed / off
+# initial_effort = "medium"  # low / medium / high
+# routine_effort = "low"
+# deliberative_effort = "medium"
+# recovery_effort = "high"
+# fixed_effort = "medium"
 
 # Allowed paths for file access
 # allowed_paths = ["/tmp", "/home/user/project"]

@@ -67,6 +67,7 @@ pub async fn run_subagent(
     // (Session totals accumulate independently via `add_total_tokens`.)
     let saved_tokens = client.get_tokens_used();
     let saved_prompt_tokens = client.get_prompt_tokens_used();
+    let saved_reasoning_tokens = client.get_reasoning_tokens_used();
 
     let result = run_subagent_inner(
         client,
@@ -83,6 +84,7 @@ pub async fn run_subagent(
 
     client.set_tokens(saved_tokens);
     client.set_prompt_tokens(saved_prompt_tokens);
+    client.set_reasoning_tokens(saved_reasoning_tokens);
     result
 }
 
@@ -98,6 +100,12 @@ async fn run_subagent_inner(
     tool_calls_count: &mut usize,
     iterations: &mut usize,
 ) -> Result<SubagentRun> {
+    // Independent controller: same config as the main agent, but isolated
+    // state. A sub-agent failure never changes the main loop's phase
+    // directly; only the `task` ToolOutput failure does (as Recovery).
+    let mut reasoning_controller =
+        crate::llm::reasoning::ReasoningController::new(runtime.fs.config.reasoning.clone());
+    let reasoning_mode = runtime.fs.config.reasoning.mode;
     loop {
         *iterations += 1;
         if *iterations > SUBAGENT_MAX_ITERS {
@@ -119,7 +127,14 @@ async fn run_subagent_inner(
                 return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
             }
             res = crate::llm::tool_execution::requests::chat_tools_once(
-                client, model, &messages, &tools, Some(cancel_token.clone()), None,
+                client,
+                model,
+                &messages,
+                &tools,
+                reasoning_controller.current_effort(),
+                reasoning_mode,
+                Some(cancel_token.clone()),
+                None,
             ) => res,
         };
 
@@ -146,6 +161,7 @@ async fn run_subagent_inner(
             tool_call_id: None,
         });
 
+        let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
         for tc in msg.tool_calls {
             let tool_name = tc.function.name.as_str();
             if !SUBAGENT_ALLOWED_TOOLS.contains(&tool_name) {
@@ -164,6 +180,10 @@ async fn run_subagent_inner(
                     tool_calls: vec![],
                     tool_call_id: tc.id.clone(),
                 });
+                batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                    tool_name.to_string(),
+                    false,
+                ));
                 continue;
             }
 
@@ -181,6 +201,10 @@ async fn run_subagent_inner(
 
             let tool_message_content = match &res {
                 Ok(output) => {
+                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                        tool_name.to_string(),
+                        output.is_success,
+                    ));
                     record_examined_files(tool_name, output, files_examined);
                     let json_str = serde_json::to_string(&output.value).unwrap_or_else(|_e| {
                         "{\"error\":\"failed to serialize tool result\"}".to_string()
@@ -188,6 +212,10 @@ async fn run_subagent_inner(
                     truncate_tool_output(json_str, tool_name)
                 }
                 Err(e) => {
+                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                        tool_name.to_string(),
+                        false,
+                    ));
                     warn!(tool = tool_name, error = %e, "subagent tool failed");
                     let err_json = serde_json::json!({ "error": e.to_string() });
                     truncate_tool_output(err_json.to_string(), tool_name)
@@ -201,6 +229,11 @@ async fn run_subagent_inner(
                 tool_call_id: tc.id.clone(),
             });
         }
+        reasoning_controller.observe_tool_batch(crate::llm::reasoning::ToolBatchObservation::new(
+            batch_observations,
+            false,
+            false,
+        ));
     }
 }
 
