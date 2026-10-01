@@ -4,6 +4,7 @@ mod compact_history;
 mod history;
 mod message_utils;
 mod prompts;
+pub mod reasoning;
 mod stream;
 mod stream_tools;
 mod symbol_edit;

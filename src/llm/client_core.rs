@@ -1,13 +1,13 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::LlmConfig;
 use crate::llm::LlmErrorKind;
-use crate::llm::types::{ChatMessage, ChoiceMessage};
+use crate::llm::types::{ChatMessage, ChoiceMessage, Usage};
 
 mod network;
 
@@ -26,17 +26,19 @@ pub struct OpenAIClient {
     pub total_tokens_used: Arc<AtomicU64>,
     /// Cumulative prompt tokens across the whole session.
     pub total_prompt_tokens_used: Arc<AtomicU64>,
-    pub reason_enable: bool,
+    /// Last request's reasoning tokens (from `completion_tokens_details`).
+    pub reasoning_tokens_used: Arc<AtomicU32>,
+    /// Cumulative reasoning tokens across the session.
+    pub total_reasoning_tokens_used: Arc<AtomicU64>,
+    /// True once any response carried `completion_tokens_details.reasoning_tokens`
+    /// (including an explicit `0`). False means the provider does not report
+    /// reasoning usage and callers must not display `0 tokens`.
+    pub reasoning_usage_seen: Arc<AtomicBool>,
 }
 
 impl OpenAIClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
         let url = base_url.into();
-        let mut reason_enable = false;
-        // openai
-        if url.contains("api.openai.com") {
-            reason_enable = true;
-        }
         let inner = reqwest::Client::builder().build()?;
         Ok(Self {
             base_url: url,
@@ -47,7 +49,9 @@ impl OpenAIClient {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
-            reason_enable,
+            reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
+            reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -124,6 +128,49 @@ impl OpenAIClient {
     pub fn clear_totals(&self) {
         self.total_tokens_used.store(0, Ordering::Relaxed);
         self.total_prompt_tokens_used.store(0, Ordering::Relaxed);
+        self.total_reasoning_tokens_used.store(0, Ordering::Relaxed);
+        self.reasoning_usage_seen.store(false, Ordering::Relaxed);
+    }
+
+    /// Get the last request's reasoning tokens.
+    pub fn get_reasoning_tokens_used(&self) -> u32 {
+        self.reasoning_tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Get the cumulative reasoning tokens across the session.
+    pub fn get_total_reasoning_tokens_used(&self) -> u64 {
+        self.total_reasoning_tokens_used.load(Ordering::Relaxed)
+    }
+
+    /// Whether any response has carried reasoning token details yet.
+    /// `false` means the provider does not report them; do not display `0`.
+    pub fn has_reasoning_usage(&self) -> bool {
+        self.reasoning_usage_seen.load(Ordering::Relaxed)
+    }
+
+    pub fn set_reasoning_tokens(&self, tokens: u32) {
+        self.reasoning_tokens_used.store(tokens, Ordering::Relaxed);
+    }
+
+    pub fn add_total_reasoning_tokens(&self, tokens: u32) {
+        self.total_reasoning_tokens_used
+            .fetch_add(tokens as u64, Ordering::Relaxed);
+    }
+
+    /// Record one response's [`Usage`], including optional reasoning details.
+    /// A present `reasoning_tokens` field (even `0`) marks usage as seen;
+    /// an absent field leaves `reasoning_usage_seen` untouched.
+    pub fn record_usage(&self, usage: &Usage) {
+        self.set_tokens(usage.total_tokens);
+        self.set_prompt_tokens(usage.prompt_tokens);
+        self.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
+        if let Some(details) = &usage.completion_tokens_details
+            && let Some(reasoning) = details.reasoning_tokens
+        {
+            self.set_reasoning_tokens(reasoning);
+            self.add_total_reasoning_tokens(reasoning);
+            self.reasoning_usage_seen.store(true, Ordering::Relaxed);
+        }
     }
 
     #[allow(dead_code)]
@@ -431,7 +478,9 @@ mod tests {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
-            reason_enable: false,
+            reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
+            reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -443,7 +492,9 @@ mod tests {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
-            reason_enable: false,
+            reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
+            total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
+            reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }
@@ -473,5 +524,52 @@ mod tests {
         client.clear_totals();
         assert_eq!(client.get_total_tokens_used(), 0);
         assert_eq!(client.get_total_prompt_tokens_used(), 0);
+    }
+
+    #[test]
+    fn reasoning_token_tracking_marks_seen_only_when_present() {
+        use crate::llm::types::{CompletionTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        assert!(!client.has_reasoning_usage());
+        client.record_usage(&Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            completion_tokens_details: None,
+        });
+        assert!(!client.has_reasoning_usage());
+        assert_eq!(client.get_reasoning_tokens_used(), 0);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 0);
+
+        client.record_usage(&Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(30),
+                extra: Default::default(),
+            }),
+        });
+        assert!(client.has_reasoning_usage());
+        assert_eq!(client.get_reasoning_tokens_used(), 30);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 30);
+
+        // Explicit zero still counts as seen.
+        client.record_usage(&Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(0),
+                extra: Default::default(),
+            }),
+        });
+        assert!(client.has_reasoning_usage());
+        assert_eq!(client.get_reasoning_tokens_used(), 0);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 30);
+
+        client.clear_totals();
+        assert!(!client.has_reasoning_usage());
+        assert_eq!(client.get_total_reasoning_tokens_used(), 0);
     }
 }

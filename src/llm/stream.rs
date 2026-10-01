@@ -228,11 +228,7 @@ impl OpenAIClient {
 
                             if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
                                 if let Some(usage) = &json.usage {
-                                    client.set_tokens(usage.total_tokens);
-                                    // accumulate prompt tokens separately for header display
-                                    client.set_prompt_tokens(usage.prompt_tokens);
-                                    // Accumulate into the session totals.
-                                    client.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
+                                    client.record_usage(usage);
                                 }
 
                                 for ch in json.choices {

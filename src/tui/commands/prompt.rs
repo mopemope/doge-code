@@ -99,3 +99,23 @@ pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
         base_sys_prompt
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_authoritative_prompt_has_no_visible_thinking_requirement() {
+        // Use an empty temp project root so AGENTS.md contents cannot affect
+        // the result; only the embedded authoritative prompt is checked.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..crate::config::AppConfig::default()
+        };
+        let prompt = build_system_prompt(&cfg);
+        assert!(!prompt.contains("<thinking>"));
+        assert!(!prompt.contains("ALWAYS output your reasoning"));
+        assert!(!prompt.contains("Mandatory Thinking Process"));
+    }
+}

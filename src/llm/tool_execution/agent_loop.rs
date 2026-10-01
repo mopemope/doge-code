@@ -268,6 +268,8 @@ pub async fn run_agent_loop(
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
+    let mut reasoning_controller =
+        crate::llm::reasoning::ReasoningController::new(cfg.reasoning.clone());
     let mut last_plan_write_args_hash: Option<u64> = None;
     let mut repeated_plan_write_count = 0usize;
     let mut consecutive_plan_write_no_change_count = 0usize;
@@ -285,9 +287,17 @@ pub async fn run_agent_loop(
         }
 
         // --- Proactive Compaction Check ---
-        if let Err(e) = history.check_and_compact_proactive().await {
-            error!("Proactive compaction error: {}", e);
-            // Continue even if compaction failed, hoping context length isn't fatal yet
+        match history.check_and_compact_proactive().await {
+            Ok(true) => {
+                // Compaction summarizes history without needing reasoning
+                // budget; notify the controller for bookkeeping (v1: no-op).
+                reasoning_controller.observe_compaction();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                error!("Proactive compaction error: {}", e);
+                // Continue even if compaction failed, hoping context length isn't fatal yet
+            }
         }
         // ----------------------------------
 
@@ -295,6 +305,14 @@ pub async fn run_agent_loop(
         // activations appear in the very next request. Activation is
         // sticky: tools are only added, never evicted mid-run.
         let active_tools = runtime.active_tool_defs().await;
+        let reasoning_effort = reasoning_controller.current_effort();
+        let reasoning_mode = cfg.reasoning.mode;
+        debug!(
+            reasoning_phase = reasoning_controller.current_phase().as_str(),
+            reasoning_effort = reasoning_effort.map(|e| e.as_api_str()),
+            reasoning_mode = reasoning_mode.as_str(),
+            "reasoning decision for next request",
+        );
         let msg = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
@@ -306,6 +324,8 @@ pub async fn run_agent_loop(
                 model,
                 history.as_slice(),
                 &active_tools,
+                reasoning_effort,
+                reasoning_mode,
                 Some(cancel_token.clone()),
                 ui_tx.clone(),
             ) => {
@@ -317,6 +337,7 @@ pub async fn run_agent_loop(
                             match history.compact_reactive().await {
                                 Ok(true) => {
                                     info!("History compaction successful (reactive). Resuming.");
+                                    reasoning_controller.observe_compaction();
                                     continue;
                                 }
                                 Ok(false) => {
@@ -330,6 +351,7 @@ pub async fn run_agent_loop(
 
                         if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
                             warn!("JSON parse error from LLM: {}", e);
+                            reasoning_controller.observe_json_recovery();
                             let feedback = format!("Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.", e);
                             history.push(ChatMessage {
                                 role: "user".into(),
@@ -446,6 +468,8 @@ pub async fn run_agent_loop(
         });
 
         let mut loop_detected = false;
+        let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
+        let mut batch_stall_detected = false;
         for tc in msg.tool_calls {
             if loop_detected {
                 // Skip remaining tool calls in the batch
@@ -477,6 +501,10 @@ pub async fn run_agent_loop(
                         PlanWriteBlockReason::RepeatedUnchanged,
                         consecutive_plan_write_no_change_count,
                     );
+                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                        PLAN_WRITE_TOOL_NAME,
+                        false,
+                    ));
                     continue;
                 }
 
@@ -501,6 +529,10 @@ pub async fn run_agent_loop(
                         PlanWriteBlockReason::RepeatedIdenticalArgs,
                         repeated_plan_write_count,
                     );
+                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                        PLAN_WRITE_TOOL_NAME,
+                        false,
+                    ));
                     continue;
                 }
             } else {
@@ -531,6 +563,9 @@ pub async fn run_agent_loop(
                     None,
                 ),
             };
+            batch_observations.push(crate::llm::reasoning::ToolObservation::new(
+                tool_name, success,
+            ));
             let plan_write_changed = if tool_name == "plan_write" {
                 output_value.and_then(|value| value.get("changed").and_then(|v| v.as_bool()))
             } else {
@@ -872,6 +907,7 @@ File modification detected. You MUST now verify your changes:
                 );
             }
             if let Some(stall_warning) = task_sentinel.check_stalled() {
+                batch_stall_detected = true;
                 warn!("Stalled progress detected: {}", stall_warning);
                 if let Some(tx) = &ui_tx {
                     let _ =
@@ -906,6 +942,14 @@ File modification detected. You MUST now verify your changes:
                 }
             }
         }
+        // Aggregate the finished batch once (order-independent): the heaviest
+        // phase wins, so a single failure escalates the next request to
+        // Recovery while a clean batch decays back to Routine/Deliberative.
+        reasoning_controller.observe_tool_batch(crate::llm::reasoning::ToolBatchObservation::new(
+            batch_observations,
+            loop_detected,
+            batch_stall_detected,
+        ));
     }
 }
 
