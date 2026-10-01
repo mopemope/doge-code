@@ -181,6 +181,38 @@ Remote MCP arguments, full results, environment values, and credentials are
 never logged verbatim. Structured stdio passes `command` and `args` directly
 to the child process; it never invokes a shell or parses a new command line.
 
+## `tool_search` result contract
+
+`tool_search` discovers deferred tools without ever echoing full schemas:
+
+```json
+{
+  "ok": true,
+  "query": "github pull request review",
+  "activated": [
+    {"name": "mcp_github_get_pull_request", "source": "mcp", "server": "github", "description": "..."}
+  ],
+  "already_active": [],
+  "remaining_deferred": 42,
+  "warnings": []
+}
+```
+
+- The result is structured JSON (`ok`, `query`, `activated`,
+  `already_active`, `remaining_deferred`, `warnings`).
+- Full tool schemas are never echoed; schemas ship only in the next LLM
+  request's `tools` array.
+- Default result limit = configured `search_result_limit` (default 5);
+  hard max = 10 (`limit == 0` or omitted falls back to the default).
+- Per-hit descriptions are bounded (~250 chars); the whole response is
+  budgeted (<= 4,000 chars, far below the default 8,000-char tier).
+- Activated tools become available on the next LLM iteration; activation
+  is sticky for the current `ToolRuntime` / agent run.
+- A guessed deferred tool name never executes: dispatch fails closed with
+  `error.kind == "tool_not_active"` (`is_success: false`) before any side
+  effect, including remote MCP calls. Unknown tools remain "unknown tool"
+  errors.
+
 ## Tool registration checklist
 
 Every tool must be consistent at all sites; a missing site silently breaks the
@@ -192,3 +224,8 @@ tool:
 4. `src/llm/tool_execution/dispatch/tools.rs` — handler
 5. Tests next to the implementation (and dispatch-level if relevant)
 6. `README.md` — tool list entry
+
+`tool_search` is the deliberate exception to step 2: its schema is
+catalog-managed (`src/llm/tool_catalog.rs`) and only advertised while
+deferred tools remain, so eager mode stays byte-identical to the legacy
+inventory. All other steps apply to it.

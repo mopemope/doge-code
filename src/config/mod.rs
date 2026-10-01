@@ -3,6 +3,9 @@ pub const IGNORE_FILE: &str = ".dogeignore";
 pub mod llm;
 pub use llm::*;
 
+pub mod tool_routing;
+pub use tool_routing::*;
+
 pub mod watch;
 pub use watch::*;
 pub mod mcp;

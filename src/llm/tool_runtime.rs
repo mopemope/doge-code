@@ -1,8 +1,8 @@
+use crate::llm::tool_catalog::ToolCatalog;
 use crate::llm::tool_def::default_tools_def;
-use crate::llm::types::{ToolDef, ToolFunctionDef};
+use crate::llm::types::ToolDef;
 use crate::provenance::ProvenanceAttribution;
 use crate::tools::FsTools;
-use crate::tools::remote_tools::RemoteToolInfo;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -10,7 +10,7 @@ use tracing::debug;
 const MAX_ITERS: usize = 256;
 
 pub struct ToolRuntime<'a> {
-    pub tools: Vec<ToolDef>,
+    pub tool_catalog: ToolCatalog,
     pub fs: &'a FsTools,
     // repomap is delegated to FsTools, removed here
     pub max_iters: usize,
@@ -63,16 +63,22 @@ impl<'a> ToolRuntime<'a> {
         }
         let remote_tools = fs.get_remote_tool_manager().remote_tools_snapshot().await;
 
-        let mut tools = default_tools_def();
-        append_remote_tools(&mut tools, &remote_tools);
+        // MCP discovery timing is unchanged; the catalog only controls when
+        // discovered schemas become LLM-visible.
+        let tool_catalog =
+            ToolCatalog::from_parts(default_tools_def(), &remote_tools, &fs.config.tool_routing);
 
+        let active_count = tool_catalog.active_count().await;
+        let deferred = tool_catalog.is_deferred();
         debug!(
             count = remote_tools.len(),
+            active = active_count,
+            deferred,
             "ToolRuntime registered remote MCP tools"
         );
 
         Ok(Self {
-            tools,
+            tool_catalog,
             fs,
             max_iters: MAX_ITERS,
             subagent_client,
@@ -81,25 +87,36 @@ impl<'a> ToolRuntime<'a> {
             attribution,
         })
     }
-}
 
-fn append_remote_tools(tools: &mut Vec<ToolDef>, remote: &[RemoteToolInfo]) {
-    for info in remote {
-        let description = info.description.clone().unwrap_or_else(|| {
-            format!(
-                "Remote MCP tool '{}' from server '{}'",
-                info.remote_name, info.server_name
-            )
-        });
+    /// Test-only constructor from an explicit catalog (no MCP discovery).
+    #[cfg(test)]
+    pub fn from_catalog_for_test(fs: &'a FsTools, tool_catalog: ToolCatalog) -> Self {
+        Self {
+            tool_catalog,
+            fs,
+            max_iters: MAX_ITERS,
+            subagent_client: None,
+            subagent_model: "test-model".to_string(),
+            cancel_token: None,
+            attribution: ProvenanceAttribution::none(),
+        }
+    }
 
-        tools.push(ToolDef {
-            kind: "function".into(),
-            function: ToolFunctionDef {
-                name: info.alias.clone(),
-                description,
-                parameters: info.parameters.clone(),
-                strict: info.strict,
-            },
-        });
+    /// Currently LLM-visible tool schemas, in stable name order.
+    /// Must be re-fetched every agent-loop iteration so `tool_search`
+    /// activations appear in the next request.
+    pub async fn active_tool_defs(&self) -> Vec<ToolDef> {
+        self.tool_catalog.active_tool_defs().await
+    }
+
+    /// Fail-closed gate: only active tools may execute. `tool_search`
+    /// itself is active exactly when deferred routing has something to find.
+    pub async fn is_tool_active(&self, name: &str) -> bool {
+        self.tool_catalog.is_active(name).await
+    }
+
+    /// Whether the catalog knows a tool at all (active or deferred).
+    pub fn knows_tool(&self, name: &str) -> bool {
+        self.tool_catalog.contains(name)
     }
 }

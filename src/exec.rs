@@ -886,6 +886,7 @@ mod tests {
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             local_mcp_server: crate::config::LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
+            tool_routing: crate::config::ToolRoutingConfig::default(),
         };
 
         let executor = Executor::new(cfg).await;
@@ -927,6 +928,7 @@ mod tests {
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             local_mcp_server: crate::config::LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
+            tool_routing: crate::config::ToolRoutingConfig::default(),
         };
 
         let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
