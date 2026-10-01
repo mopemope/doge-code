@@ -348,7 +348,7 @@ The TUI provides various slash commands for quick operations:
 | `/map` | Display RepoMap |
 | `/rebuild-repomap` | Rebuild the RepoMap |
 | `/open` | Open a file |
-| `/git-worktree` | Git worktree operations |
+| `/git-worktree` | Create an isolated linked worktree and branch (does not switch the current session into it) |
 | `/theme` | Change color theme |
 | `/tokens` | Display token usage |
 | `/tools` | List available tools |

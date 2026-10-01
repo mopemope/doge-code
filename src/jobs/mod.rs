@@ -5,7 +5,7 @@ pub use manager::{JobCompletionHook, JobManager};
 pub use types::{
     CancelJobResult, JobCompletion, JobContext, JobId, JobKind, JobRunOutcome, JobScope,
     JobSnapshot, JobSpec, JobStartError, JobStatus, MAX_ERROR_CHARS, MAX_LABEL_CHARS,
-    MAX_RECENT_JOBS, WorkspaceAccess,
+    MAX_RECENT_JOBS, WorkspaceAccess, bound_error,
 };
 
 /// Grace period for TUI shutdown: cancel, close the tracker, and wait.
