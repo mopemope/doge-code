@@ -251,3 +251,255 @@ async fn chat_tools_once_inner(
     debug!("llm response message {:?}", msg);
     Ok(msg.message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ToolRoutingConfig, ToolRoutingMode};
+    use crate::llm::tool_catalog::{
+        ToolCatalog, ToolCatalogEntry, ToolSource, build_searchable_text,
+    };
+    use crate::llm::tool_def::default_tools_def;
+    use crate::llm::types::{ToolDef, ToolFunctionDef};
+    use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+
+    fn remote_fixture_entry(
+        alias: &str,
+        server: &str,
+        remote: &str,
+        desc: &str,
+    ) -> ToolCatalogEntry {
+        let def = ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: alias.to_string(),
+                description: desc.to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "resource id"}
+                    }
+                }),
+                strict: None,
+            },
+        };
+        let source = ToolSource::RemoteMcp {
+            server_name: server.to_string(),
+            remote_name: remote.to_string(),
+        };
+        let searchable_text = build_searchable_text(&def, &source);
+        ToolCatalogEntry {
+            definition: def,
+            source,
+            searchable_text,
+        }
+    }
+
+    /// Shared deferred fixture: builtins plus GitHub/Slack/Linear remotes.
+    fn deferred_fixture_catalog() -> ToolCatalog {
+        let builtin_entries: Vec<ToolCatalogEntry> = default_tools_def()
+            .into_iter()
+            .map(|def| {
+                let text = build_searchable_text(&def, &ToolSource::Builtin);
+                ToolCatalogEntry {
+                    definition: def,
+                    source: ToolSource::Builtin,
+                    searchable_text: text,
+                }
+            })
+            .collect();
+        let mut entries = builtin_entries;
+        entries.push(remote_fixture_entry(
+            "mcp_github_get_pull_request",
+            "github",
+            "get_pull_request",
+            "Get a GitHub pull request by number",
+        ));
+        entries.push(remote_fixture_entry(
+            "mcp_github_create_issue",
+            "github",
+            "create_issue",
+            "Create a GitHub issue in a repository",
+        ));
+        entries.push(remote_fixture_entry(
+            "mcp_slack_post_message",
+            "slack",
+            "post_message",
+            "Send a message to a Slack channel",
+        ));
+        entries.push(remote_fixture_entry(
+            "mcp_linear_create_issue",
+            "linear",
+            "create_issue",
+            "Create a Linear task issue for the team",
+        ));
+        ToolCatalog::from_entries(
+            entries,
+            &ToolRoutingConfig {
+                mode: ToolRoutingMode::Deferred,
+                search_result_limit: 5,
+            },
+        )
+    }
+
+    fn assistant_done_response() -> serde_json::Value {
+        serde_json::json!({
+            "id": "test",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "done"}}
+            ]
+        })
+    }
+
+    fn user_message() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".into(),
+            content: Some("do the thing".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }]
+    }
+
+    fn start_server() -> Option<httptest::Server> {
+        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
+            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
+            return None;
+        }
+        match ServerBuilder::new().run() {
+            Ok(server) => Some(server),
+            Err(err) => {
+                eprintln!("Skipping httptest-based test (server start failed: {err})");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_first_payload_defers_remote_and_builtin_schemas() {
+        let Some(server) = start_server() else { return };
+        let catalog = deferred_fixture_catalog();
+        // Sanity: remotes and non-core builtins really are deferred here.
+        assert!(!catalog.is_active("mcp_github_get_pull_request").await);
+        assert!(!catalog.is_active("edit").await);
+        assert!(catalog.is_active("tool_search").await);
+
+        // The final HTTP payload carries core + tool_search schemas only.
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("tool_search")),
+                request::body(not(matches("mcp_github_get_pull_request"))),
+                request::body(not(matches("mcp_slack_post_message"))),
+                request::body(not(matches("mcp_linear_create_issue"))),
+            ])
+            .times(1)
+            .respond_with(json_encoded(assistant_done_response())),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "test-key").unwrap();
+        let active = catalog.active_tool_defs().await;
+        // Structural check on the exact snapshot being sent: only the core
+        // set plus `tool_search` (a substring matcher for short names like
+        // "edit" would be brittle against future description edits).
+        let mut names: Vec<String> = active.iter().map(|d| d.function.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "execute_process",
+                "fs_read",
+                "search_repomap",
+                "search_text",
+                "task",
+                "tool_search",
+            ]
+        );
+        let msg = chat_tools_once_inner(&client, "gpt-test", &user_message(), &active, None)
+            .await
+            .expect("first deferred request");
+        assert_eq!(msg.content.as_deref(), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn test_post_activation_payload_advertises_remote_schema() {
+        let Some(server) = start_server() else { return };
+        let catalog = deferred_fixture_catalog();
+        let newly = catalog
+            .activate(&["mcp_github_get_pull_request".to_string()])
+            .await;
+        assert_eq!(newly, vec!["mcp_github_get_pull_request".to_string()]);
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("mcp_github_get_pull_request")),
+            ])
+            .times(1)
+            .respond_with(json_encoded(assistant_done_response())),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "test-key").unwrap();
+        let active = catalog.active_tool_defs().await;
+        assert!(
+            active
+                .iter()
+                .any(|d| d.function.name == "mcp_github_get_pull_request")
+        );
+        let msg = chat_tools_once_inner(&client, "gpt-test", &user_message(), &active, None)
+            .await
+            .expect("post-activation request");
+        assert_eq!(msg.content.as_deref(), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_payload_size_is_independent_of_remote_count() {
+        // Deferred routing keeps the initial schema payload flat as MCP
+        // servers are added: 5 vs 50 remote tools, same initial bytes.
+        async fn initial_active_json(remote_count: usize) -> String {
+            let mut entries: Vec<ToolCatalogEntry> = default_tools_def()
+                .into_iter()
+                .map(|def| {
+                    let text = build_searchable_text(&def, &ToolSource::Builtin);
+                    ToolCatalogEntry {
+                        definition: def,
+                        source: ToolSource::Builtin,
+                        searchable_text: text,
+                    }
+                })
+                .collect();
+            for i in 0..remote_count {
+                entries.push(remote_fixture_entry(
+                    &format!("mcp_srv{i}_tool"),
+                    &format!("srv{i}"),
+                    "tool",
+                    "A remote MCP helper tool for testing",
+                ));
+            }
+            let catalog = ToolCatalog::from_entries(
+                entries,
+                &ToolRoutingConfig {
+                    mode: ToolRoutingMode::Deferred,
+                    search_result_limit: 5,
+                },
+            );
+            let active = catalog.active_tool_defs().await;
+            let all = catalog.all_tool_defs();
+            let active_json = serde_json::to_string(&active).expect("serialize active");
+            let all_json = serde_json::to_string(&all).expect("serialize all");
+            assert!(
+                active_json.len() < all_json.len(),
+                "deferred payload must be smaller than the full catalog"
+            );
+            assert!(
+                !active_json.contains("mcp_srv"),
+                "no remote schema may leak into the initial payload"
+            );
+            active_json
+        }
+
+        let five = initial_active_json(5).await;
+        let fifty = initial_active_json(50).await;
+        assert_eq!(
+            five, fifty,
+            "initial active schema must not grow with remote tool count"
+        );
+    }
+}

@@ -7,6 +7,7 @@ mod prompts;
 mod stream;
 mod stream_tools;
 mod symbol_edit;
+mod tool_catalog;
 mod tool_def;
 pub mod tool_execution;
 mod tool_runtime;
@@ -20,6 +21,7 @@ pub use history::*;
 pub use message_utils::*;
 pub use prompts::*;
 pub use symbol_edit::*;
+pub use tool_catalog::*;
 pub use tool_def::*;
 pub use types::*;
 

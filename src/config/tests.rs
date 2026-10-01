@@ -351,6 +351,48 @@ fn test_execution_config_parses_toml() {
 }
 
 #[test]
+fn test_tool_routing_merge_project_wins() {
+    let file = PartialToolRoutingConfig {
+        mode: Some("deferred".to_string()),
+        search_result_limit: Some(3),
+    };
+    let project = PartialToolRoutingConfig {
+        mode: Some("eager".to_string()),
+        search_result_limit: None,
+    };
+    let merged = merge_tool_routing(Some(&file), Some(&project));
+    assert_eq!(merged.mode, ToolRoutingMode::Eager);
+    assert_eq!(merged.search_result_limit, 3);
+}
+
+#[test]
+fn test_tool_routing_config_parses_toml() {
+    let toml_str = r#"
+        [tool_routing]
+        mode = "deferred"
+        search_result_limit = 7
+    "#;
+    let cfg: FileConfig = toml::from_str(toml_str).expect("parse tool_routing config");
+    let routing = cfg.tool_routing.expect("tool_routing section");
+    assert_eq!(routing.mode.as_deref(), Some("deferred"));
+    assert_eq!(routing.search_result_limit, Some(7));
+    let resolved = merge_tool_routing(None, Some(&routing));
+    assert_eq!(resolved.mode, ToolRoutingMode::Deferred);
+    assert_eq!(resolved.search_result_limit, 7);
+}
+
+#[test]
+fn test_tool_routing_limit_clamped_on_resolve() {
+    let project = PartialToolRoutingConfig {
+        mode: None,
+        search_result_limit: Some(99),
+    };
+    let resolved = merge_tool_routing(None, Some(&project));
+    assert_eq!(resolved.mode, ToolRoutingMode::Auto);
+    assert_eq!(resolved.search_result_limit, MAX_TOOL_SEARCH_RESULT_LIMIT);
+}
+
+#[test]
 fn test_file_config_ignores_unknown_fields() {
     let toml_str = r#"
         [llm]

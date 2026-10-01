@@ -1,6 +1,8 @@
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::ToolCall;
+use crate::tools::tool_search::TOOL_SEARCH_TOOL_NAME;
 use anyhow::{Result, anyhow};
+use serde_json::json;
 use tracing::debug;
 
 mod analysis;
@@ -23,47 +25,97 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
     let args_val: serde_json::Value = serde_json::from_str(&call.function.arguments)
         .map_err(|e| anyhow!("invalid tool args: {e}"))?;
 
+    // Fail closed: a deferred tool must never execute from a guessed name.
+    // The model has to discover and activate it via `tool_search` first, so
+    // the capability becomes schema-visible before any side effect can run.
+    if name != TOOL_SEARCH_TOOL_NAME
+        && runtime.knows_tool(name)
+        && !runtime.is_tool_active(name).await
+    {
+        let value = json!({
+            "ok": false,
+            "error": {
+                "kind": "tool_not_active",
+                "tool": name,
+                "message": "This tool is deferred. Search for and activate the required capability with tool_search first.",
+            },
+            "warnings": [],
+        });
+        return Ok(ToolOutput {
+            value: value.clone(),
+            is_success: false,
+            result_summary: format!("Tool '{name}' is deferred; use tool_search first"),
+        });
+    }
+
+    dispatch_inner(runtime, name, &args_val).await
+}
+
+/// Sub-agent dispatch: the read-only allowlist is enforced by the sub-agent
+/// loop itself, so the main-run deferred gate does not apply here. This keeps
+/// sub-agent research working without leaking its tools into the main agent's
+/// active set.
+pub async fn dispatch_subagent_tool_call(
+    runtime: &ToolRuntime<'_>,
+    call: &ToolCall,
+) -> Result<ToolOutput> {
+    debug!("dispatching sub-agent tool call");
+    if call.r#type != "function" {
+        return Err(anyhow!("unsupported tool type: {}", call.r#type));
+    }
+    let name = call.function.name.as_str();
+    let args_val: serde_json::Value = serde_json::from_str(&call.function.arguments)
+        .map_err(|e| anyhow!("invalid tool args: {e}"))?;
+    dispatch_inner(runtime, name, &args_val).await
+}
+
+async fn dispatch_inner(
+    runtime: &ToolRuntime<'_>,
+    name: &str,
+    args_val: &serde_json::Value,
+) -> Result<ToolOutput> {
     // Each subsystem owns its own timeout. In particular, do not wrap every
     // tool in a command-derived global timeout: command_timeout_ms = 0 means
     // unlimited for managed finite commands and must not become a hidden
     // 125-second dispatcher limit here.
     match name {
         // FS-related
-        "fs_list" => fs::fs_list(runtime, &args_val).await,
-        "fs_read" => fs::fs_read(runtime, &args_val).await,
-        "search_text" => fs::search_text(runtime, &args_val).await,
-        "fs_write" => fs::fs_write(runtime, &args_val).await,
-        "find_file" => fs::find_file(runtime, &args_val).await,
-        "fs_read_many_files" => fs::fs_read_many_files(runtime, &args_val).await,
+        "fs_list" => fs::fs_list(runtime, args_val).await,
+        "fs_read" => fs::fs_read(runtime, args_val).await,
+        "search_text" => fs::search_text(runtime, args_val).await,
+        "fs_write" => fs::fs_write(runtime, args_val).await,
+        "find_file" => fs::find_file(runtime, args_val).await,
+        "fs_read_many_files" => fs::fs_read_many_files(runtime, args_val).await,
 
         // Analysis / repomap
-        "search_repomap" => analysis::search_repomap(runtime, &args_val).await,
+        "search_repomap" => analysis::search_repomap(runtime, args_val).await,
 
         // Tools and helpers
-        "execute_process" => tools::execute_process(runtime, &args_val).await,
-        "execute_bash" => tools::execute_bash(runtime, &args_val).await,
-        "execute_shell" => tools::execute_shell(runtime, &args_val).await,
-        "edit" => tools::edit(runtime, &args_val).await,
-        "apply_patch" => tools::apply_patch(runtime, &args_val).await,
-        "task" => tools::task(runtime, &args_val).await,
-        "plan_write" => tools::plan_write(runtime, &args_val).await,
-        "plan_read" => tools::plan_read(runtime, &args_val).await,
-        "provenance_read" => tools::provenance_read(runtime, &args_val).await,
-        "requirements_write" => tools::requirements_write(runtime, &args_val).await,
-        "requirements_read" => tools::requirements_read(runtime, &args_val).await,
-        "undo" => tools::undo(runtime, &args_val).await,
-        "read_memory" => tools::read_memory(runtime, &args_val).await,
-        "write_memory" => tools::write_memory(runtime, &args_val).await,
-        "list_memories" => tools::list_memories(runtime, &args_val).await,
-        "search_memory" => tools::search_memory(runtime, &args_val).await,
-        "run_workflow" => tools::run_workflow(runtime, &args_val).await,
-        "doc_generate" => tools::doc_generate(runtime, &args_val).await,
-        "search_history" => tools::search_history(runtime, &args_val).await,
+        "execute_process" => tools::execute_process(runtime, args_val).await,
+        "execute_bash" => tools::execute_bash(runtime, args_val).await,
+        "execute_shell" => tools::execute_shell(runtime, args_val).await,
+        "edit" => tools::edit(runtime, args_val).await,
+        "apply_patch" => tools::apply_patch(runtime, args_val).await,
+        "task" => tools::task(runtime, args_val).await,
+        "plan_write" => tools::plan_write(runtime, args_val).await,
+        "plan_read" => tools::plan_read(runtime, args_val).await,
+        "provenance_read" => tools::provenance_read(runtime, args_val).await,
+        "requirements_write" => tools::requirements_write(runtime, args_val).await,
+        "requirements_read" => tools::requirements_read(runtime, args_val).await,
+        "undo" => tools::undo(runtime, args_val).await,
+        "read_memory" => tools::read_memory(runtime, args_val).await,
+        "write_memory" => tools::write_memory(runtime, args_val).await,
+        "list_memories" => tools::list_memories(runtime, args_val).await,
+        "search_memory" => tools::search_memory(runtime, args_val).await,
+        "run_workflow" => tools::run_workflow(runtime, args_val).await,
+        "doc_generate" => tools::doc_generate(runtime, args_val).await,
+        "search_history" => tools::search_history(runtime, args_val).await,
+        "tool_search" => tools::tool_search(runtime, args_val).await,
 
         other => {
             if let Some(outcome) = runtime
                 .fs
-                .call_remote_tool(other, &args_val, runtime.cancel_token.clone())
+                .call_remote_tool(other, args_val, runtime.cancel_token.clone())
                 .await?
             {
                 Ok(ToolOutput {
@@ -92,6 +144,13 @@ mod tests {
     use tokio::sync::RwLock;
     use tokio_util::sync::CancellationToken;
 
+    /// Behavior tests target tool semantics, not routing: activate the named
+    /// deferred tools first (mirrors a prior `tool_search` call).
+    async fn activate_test_tools(runtime: &ToolRuntime<'_>, names: &[&str]) {
+        let owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+        runtime.tool_catalog.activate(&owned).await;
+    }
+
     #[tokio::test]
     async fn test_remote_tool_error_preserves_failure_flag() -> Result<()> {
         let dir = tempdir()?;
@@ -115,6 +174,7 @@ mod tests {
         }];
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(config));
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["mcp_local_fs_read"]).await;
         let call = ToolCall {
             id: Some("remote_error".to_string()),
             r#type: "function".to_string(),
@@ -144,6 +204,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_bash"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_1".to_string()),
@@ -175,6 +236,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_bash"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_2".to_string()),
@@ -262,6 +324,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", Some(token)).await?;
+        activate_test_tools(&runtime, &["execute_bash"]).await;
         let tool_call = ToolCall {
             id: Some("call_cancelled".to_string()),
             r#type: "function".to_string(),
@@ -287,6 +350,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_shell"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_3".to_string()),
@@ -318,6 +382,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_shell"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_4".to_string()),
@@ -450,6 +515,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_bash"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_bash_ok".to_string()),
@@ -485,6 +551,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_bash", "execute_shell"]).await;
 
         for name in ["execute_bash", "execute_shell"] {
             let args = json!({ "command": "echo hi" }).to_string();
@@ -628,6 +695,7 @@ mod tests {
             FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
         // No directive attribution: must fail without creating requirements.
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["requirements_write", "requirements_read"]).await;
         let tool_call = ToolCall {
             id: Some("call_req".to_string()),
             r#type: "function".to_string(),
@@ -665,6 +733,7 @@ mod tests {
             crate::provenance::ProvenanceAttribution::with_directive(directive.event_id),
         )
         .await?;
+        activate_test_tools(&runtime2, &["requirements_write", "requirements_read"]).await;
         let output2 = dispatch_tool_call(&runtime2, &tool_call).await?;
         assert!(output2.is_success, "value: {}", output2.value);
         // requirements_read via dispatch returns coverage.
@@ -702,6 +771,7 @@ mod tests {
         let fs_tools =
             FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["provenance_read"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_prov".to_string()),
@@ -743,6 +813,7 @@ mod tests {
         let fs_tools =
             FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["edit", "undo"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_edit".to_string()),
@@ -933,6 +1004,258 @@ mod tests {
         let store = crate::provenance::ProvenanceStore::new(session_dir);
         let loaded = store.load_all()?;
         assert!(loaded.events.is_empty());
+        Ok(())
+    }
+
+    fn deferred_test_runtime(fs_tools: &FsTools) -> ToolRuntime<'_> {
+        let catalog = crate::llm::tool_catalog::ToolCatalog::from_parts(
+            crate::llm::tool_def::default_tools_def(),
+            &[],
+            &crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Deferred,
+                search_result_limit: 5,
+            },
+        );
+        ToolRuntime::from_catalog_for_test(fs_tools, catalog)
+    }
+
+    fn deferred_test_fs() -> (tempfile::TempDir, FsTools) {
+        // Keep the TempDir alive by returning it alongside FsTools.
+        let dir = tempdir().expect("tempdir");
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        (dir, fs_tools)
+    }
+
+    #[tokio::test]
+    async fn test_deferred_inactive_builtin_fails_closed() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_test_runtime(&fs_tools);
+        assert!(!runtime.is_tool_active("apply_patch").await);
+        assert!(runtime.knows_tool("apply_patch"));
+
+        let before = "original\n";
+        let target = fs_tools.config.project_root.join("deferred.txt");
+        std::fs::write(&target, before)?;
+        let tool_call = ToolCall {
+            id: Some("call_deferred_edit".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "apply_patch".to_string(),
+                arguments: json!({
+                    "file_path": target.to_str().unwrap(),
+                    "patch": "--- a\n+++ b\n",
+                })
+                .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["error"]["kind"], "tool_not_active");
+        assert_eq!(output.value["error"]["tool"], "apply_patch");
+        // Fail-closed: no side effect happened.
+        assert_eq!(std::fs::read_to_string(&target)?, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_activates_then_dispatch_succeeds() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_test_runtime(&fs_tools);
+        assert!(!runtime.is_tool_active("edit").await);
+
+        let search_call = ToolCall {
+            id: Some("call_search".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "tool_search".to_string(),
+                arguments: json!({"query": "surgical text edit file block"}).to_string(),
+            },
+        };
+        let search_out = dispatch_tool_call(&runtime, &search_call).await?;
+        assert!(search_out.is_success, "value: {}", search_out.value);
+        assert_eq!(search_out.value["ok"], true);
+        // Full schemas are never echoed in search results.
+        let rendered = search_out.value.to_string();
+        assert!(!rendered.contains("\"parameters\""));
+        assert!(runtime.is_tool_active("edit").await);
+
+        // Activation is sticky and dispatch now executes the tool.
+        let target = fs_tools.config.project_root.join("activated.txt");
+        std::fs::write(&target, "hello\n")?;
+        let edit_call = ToolCall {
+            id: Some("call_edit_after_search".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "edit".to_string(),
+                arguments: json!({
+                    "file_path": target.to_str().unwrap(),
+                    "target_block": "hello",
+                    "new_block": "goodbye",
+                })
+                .to_string(),
+            },
+        };
+        let edit_out = dispatch_tool_call(&runtime, &edit_call).await?;
+        assert!(edit_out.is_success, "value: {}", edit_out.value);
+        assert_eq!(std::fs::read_to_string(&target)?, "goodbye\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_reports_already_active() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_test_runtime(&fs_tools);
+        let search_call = ToolCall {
+            id: Some("call_search_twice".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "tool_search".to_string(),
+                arguments: json!({"query": "surgical text edit file block"}).to_string(),
+            },
+        };
+        let first = dispatch_tool_call(&runtime, &search_call).await?;
+        assert!(first.is_success);
+        assert!(
+            first.value["activated"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "first search should activate, value: {}",
+            first.value
+        );
+        // Second identical search: nothing new to activate; matches surface
+        // as already_active instead of duplicating the active set.
+        let before = runtime.tool_catalog.active_count().await;
+        let second = dispatch_tool_call(&runtime, &search_call).await?;
+        assert!(second.is_success);
+        assert_eq!(second.value["activated"].as_array().map(Vec::len), Some(0));
+        assert!(
+            second.value["already_active"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "value: {}",
+            second.value
+        );
+        assert_eq!(runtime.tool_catalog.active_count().await, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_empty_query_is_invalid() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_test_runtime(&fs_tools);
+        let search_call = ToolCall {
+            id: Some("call_empty_search".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "tool_search".to_string(),
+                arguments: json!({"query": "   "}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &search_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["error"]["kind"], "invalid_query");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inactive_remote_tool_never_reaches_mcp() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        // A catalog-only remote entry with no backing MCP server: the
+        // fail-closed gate must reject before any transport is touched.
+        let remote_def = crate::llm::types::ToolDef {
+            kind: "function".into(),
+            function: crate::llm::types::ToolFunctionDef {
+                name: "mcp_github_create_issue".to_string(),
+                description: "Create a GitHub issue".to_string(),
+                parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
+            },
+        };
+        let entry = crate::llm::tool_catalog::ToolCatalogEntry {
+            definition: remote_def,
+            source: crate::llm::tool_catalog::ToolSource::RemoteMcp {
+                server_name: "github".to_string(),
+                remote_name: "create_issue".to_string(),
+            },
+            searchable_text: "mcp_github_create_issue create a github issue github create_issue"
+                .to_string(),
+        };
+        let catalog = crate::llm::tool_catalog::ToolCatalog::from_entries(
+            vec![entry],
+            &crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Deferred,
+                search_result_limit: 5,
+            },
+        );
+        let runtime = ToolRuntime::from_catalog_for_test(&fs_tools, catalog);
+        assert!(runtime.knows_tool("mcp_github_create_issue"));
+        assert!(!runtime.is_tool_active("mcp_github_create_issue").await);
+
+        let tool_call = ToolCall {
+            id: Some("call_remote_guessed".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "mcp_github_create_issue".to_string(),
+                arguments: json!({"title": "hi"}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &tool_call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["error"]["kind"], "tool_not_active");
+        // The MCP normalizer always sets these fields; their absence proves
+        // the remote path was never invoked (no side effect possible).
+        assert!(output.value.get("is_error").is_none());
+        assert!(output.value.get("server").is_none());
+
+        // Unknown tools stay unknown (not deferred).
+        let unknown_call = ToolCall {
+            id: Some("call_unknown".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "no_such_tool_xyz".to_string(),
+                arguments: json!({}).to_string(),
+            },
+        };
+        let err = dispatch_tool_call(&runtime, &unknown_call)
+            .await
+            .expect_err("unknown tool should error");
+        assert!(err.to_string().contains("unknown tool"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_eager_mode_matches_legacy_inventory() -> Result<()> {
+        // Eager mode is the escape hatch: every built-in plus every remote
+        // tool is visible, and `tool_search` adds no extra schema.
+        let all_builtin = crate::llm::tool_def::default_tools_def();
+        let catalog = crate::llm::tool_catalog::ToolCatalog::from_parts(
+            all_builtin.clone(),
+            &[],
+            &crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Eager,
+                search_result_limit: 5,
+            },
+        );
+        assert!(!catalog.is_deferred());
+        let active = catalog.active_tool_defs().await;
+        let mut active_names: Vec<String> =
+            active.iter().map(|d| d.function.name.clone()).collect();
+        active_names.sort();
+        let mut legacy_names: Vec<String> = all_builtin
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        legacy_names.sort();
+        assert_eq!(active_names, legacy_names);
+        assert!(
+            !catalog.is_active("tool_search").await,
+            "eager mode must not advertise tool_search"
+        );
         Ok(())
     }
 }

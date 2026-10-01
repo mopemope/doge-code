@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
 use super::mcp::{PartialLocalMcpServerConfig, PartialMcpServerConfig};
+use super::tool_routing::PartialToolRoutingConfig;
 
 use super::watch::PartialWatchConfig;
 
@@ -35,6 +36,7 @@ pub struct FileConfig {
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub execution: Option<PartialExecutionConfig>,
+    pub tool_routing: Option<PartialToolRoutingConfig>,
 }
 
 pub fn get_default_config_content() -> String {
@@ -102,6 +104,13 @@ command_timeout_ms = 300000
 # allowed_programs = ["cargo", "rustc", "git", "rg"]
 # allow_shell = false
 # allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
+
+# Tool routing: keep large tool catalogs out of the initial LLM context.
+# Core tools load eagerly; other built-in and MCP tools activate on demand
+# via `tool_search`.
+# [tool_routing]
+# mode = "auto"  # auto / eager / deferred
+# search_result_limit = 5  # 1-10
 
 # Allowed paths for file access
 # allowed_paths = ["/tmp", "/home/user/project"]
