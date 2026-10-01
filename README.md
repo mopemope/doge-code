@@ -128,6 +128,7 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
 - `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
+- `tool_search`: Discover and activate deferred built-in/MCP tools on demand (see Tool Search below)
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
 - `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
 
@@ -464,6 +465,29 @@ Verification failures are returned to LLM for automatic correction.
 - Structured MCP content and `structuredContent` are retained in a bounded
   JSON result. Input-required and MCP Task responses are surfaced as explicit
   unsupported results until their UI/lifecycle integrations exist.
+
+### Tool Search / Deferred Tools
+- Doge-Code can keep large tool catalogs out of the initial LLM context.
+  Core tools (`search_repomap`, `fs_read`, `search_text`, `task`,
+  `execute_process`) are loaded eagerly; other built-in and MCP tools are
+  found and activated on demand via `tool_search`.
+- Activated tools appear in the next LLM request and stay active for the run.
+- Guessing a deferred tool name never executes it: dispatch fails closed
+  with `tool_not_active` until `tool_search` activates it.
+- Provider-independent (works with OpenAI / Anthropic / OpenRouter / any
+  OpenAI-compatible provider) and deterministic: lexical ranking only, no
+  embeddings.
+- Config:
+
+```toml
+[tool_routing]
+mode = "auto"  # auto / eager / deferred
+search_result_limit = 5  # 1-10
+```
+
+- `auto` defers when the catalog holds 10+ tools, otherwise exposes
+  everything. `eager` is legacy compatibility (all tools exposed,
+  `tool_search` hidden). `deferred` always uses deferred routing.
 
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded

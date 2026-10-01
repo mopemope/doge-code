@@ -8,6 +8,7 @@ use super::mcp::{
     LocalMcpServerConfig, McpServerConfig, McpTransport, PartialLocalMcpServerConfig,
     validate_mcp_server_names,
 };
+use super::tool_routing::{ToolRoutingConfig, merge_tool_routing};
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
 // Re-import from mod or loading
@@ -57,6 +58,9 @@ pub struct AppConfig {
     /// Local MCP HTTP listener config (`[mcp_server]`).
     pub local_mcp_server: LocalMcpServerConfig,
     pub rewrite_timeout_sec: u64,
+    /// Tool routing policy (`[tool_routing]`). Token-efficiency layer only;
+    /// never a substitute for execution/filesystem policy.
+    pub tool_routing: ToolRoutingConfig,
 }
 
 impl Default for AppConfig {
@@ -85,6 +89,7 @@ impl Default for AppConfig {
             mcp_servers: vec![McpServerConfig::default()],
             local_mcp_server: LocalMcpServerConfig::default(),
             rewrite_timeout_sec: 30,
+            tool_routing: ToolRoutingConfig::default(),
         }
     }
 }
@@ -251,6 +256,11 @@ impl AppConfig {
             execution.apply_partial(partial);
         }
 
+        let tool_routing = merge_tool_routing(
+            file_cfg.tool_routing.as_ref(),
+            project_cfg.tool_routing.as_ref(),
+        );
+
         Ok(Self {
             base_url,
             model,
@@ -299,6 +309,7 @@ impl AppConfig {
                 .rewrite_timeout_sec
                 .or(file_cfg.rewrite_timeout_sec)
                 .unwrap_or(30),
+            tool_routing,
         })
     }
 }

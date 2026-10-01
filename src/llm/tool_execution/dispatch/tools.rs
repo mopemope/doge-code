@@ -619,6 +619,131 @@ pub async fn doc_generate(
     }
 }
 
+/// Handler for the `tool_search` deferred-tool discovery tool.
+///
+/// Ranks catalog tools lexically, activates the matches, and returns a
+/// compact summary. Full JSON schemas are never echoed here; they appear
+/// only in the next LLM request's `tools` array.
+pub async fn tool_search(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    use crate::config::tool_routing::MAX_TOOL_SEARCH_RESULT_LIMIT;
+    use crate::llm::tool_execution::ui_rendering::truncate_string_with_graphemes;
+    use crate::tools::tool_search::{TOOL_SEARCH_RESULT_BUDGET_CHARS, ToolSearchParams};
+
+    // Per-field lenient parsing: a wrongly typed `limit`/`server` falls back
+    // to defaults instead of rejecting an otherwise valid query.
+    let parsed = match ToolSearchParams::parse(args) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let value = json!({
+                "ok": false,
+                "error": {
+                    "kind": "invalid_query",
+                    "message": "tool_search query must not be empty. Describe the capability, resource, or service you need.",
+                },
+                "warnings": [],
+            });
+            return Ok(ToolOutput {
+                value: value.clone(),
+                is_success: false,
+                result_summary: "tool_search rejected: empty query".to_string(),
+            });
+        }
+    };
+    let query = parsed.query;
+    let limit = parsed
+        .limit
+        .map(|v| v.clamp(1, MAX_TOOL_SEARCH_RESULT_LIMIT))
+        .unwrap_or_else(|| runtime.fs.config.tool_routing.effective_limit());
+    let server = parsed
+        .server
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let result = runtime.tool_catalog.search(&query, limit, server).await;
+
+    let mut to_activate = Vec::new();
+    let mut already_active = Vec::new();
+    for hit in &result.hits {
+        if runtime.tool_catalog.is_active(&hit.name).await {
+            already_active.push(hit.clone());
+        } else {
+            to_activate.push(hit.clone());
+        }
+    }
+    let names: Vec<String> = to_activate.iter().map(|h| h.name.clone()).collect();
+    let newly = runtime.tool_catalog.activate(&names).await;
+    let newly_set: std::collections::HashSet<&str> = newly.iter().map(String::as_str).collect();
+
+    let activated: Vec<serde_json::Value> = to_activate
+        .iter()
+        .filter(|h| newly_set.contains(h.name.as_str()))
+        .map(|h| {
+            let mut item = json!({
+                "name": h.name,
+                "source": h.source.label(),
+                "description": h.description,
+            });
+            if let Some(server) = &h.server {
+                item["server"] = json!(server);
+            }
+            item
+        })
+        .collect();
+    let already: Vec<serde_json::Value> = already_active
+        .iter()
+        .map(|h| {
+            let mut item = json!({
+                "name": h.name,
+                "source": h.source.label(),
+                "description": h.description,
+            });
+            if let Some(server) = &h.server {
+                item["server"] = json!(server);
+            }
+            item
+        })
+        .collect();
+    let remaining_deferred = runtime.tool_catalog.deferred_count().await;
+    let mut warnings = Vec::new();
+    if result.hits.is_empty() {
+        warnings.push(
+            "No matching tools found. Try different keywords (capability, resource, or service name).".to_string(),
+        );
+    }
+
+    let value = json!({
+        "ok": true,
+        "query": result.query,
+        "activated": activated,
+        "already_active": already,
+        "remaining_deferred": remaining_deferred,
+        "warnings": warnings,
+    });
+    // Self-budget: descriptions are pre-truncated and hits are capped, so
+    // the envelope stays far below the global default tier.
+    debug_assert!(
+        serde_json::to_string(&value)
+            .map(|s| s.chars().count() <= TOOL_SEARCH_RESULT_BUDGET_CHARS)
+            .unwrap_or(false),
+        "tool_search result exceeded its budget"
+    );
+    Ok(ToolOutput {
+        value: value.clone(),
+        is_success: true,
+        result_summary: format!(
+            "tool_search '{}': activated {} tool(s), {} already active",
+            // The query is model-controlled: bound it before logging.
+            truncate_string_with_graphemes(query.trim(), 200),
+            activated.len(),
+            already.len()
+        ),
+    })
+}
+
 pub async fn search_history(
     _runtime: &ToolRuntime<'_>,
     args: &serde_json::Value,

@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::llm::message_utils::truncate_tool_output;
-use crate::llm::tool_execution::dispatch::dispatch_tool_call;
+use crate::llm::tool_execution::dispatch::dispatch_subagent_tool_call;
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::ChatMessage;
 use crate::tools::budget::head_truncate;
@@ -170,7 +170,7 @@ async fn run_subagent_inner(
             *tool_calls_count += 1;
             // Boxed to break the async-recursion cycle:
             // dispatch_tool_call -> task handler -> run_subagent -> dispatch_tool_call.
-            let dispatch_fut = Box::pin(dispatch_tool_call(runtime, &tc));
+            let dispatch_fut = Box::pin(dispatch_subagent_tool_call(runtime, &tc));
             let res = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
@@ -204,14 +204,16 @@ async fn run_subagent_inner(
     }
 }
 
-/// Build the read-only tool subset for the sub-agent from the runtime's tool
-/// definitions.
+/// Build the read-only tool subset for the sub-agent from the runtime's
+/// full catalog definitions. The `SUBAGENT_ALLOWED_TOOLS` contract is
+/// enforced here and again at dispatch; deferred main-run state never leaks
+/// extra tools into the sub-agent.
 fn subagent_tool_defs(runtime: &ToolRuntime<'_>) -> Vec<crate::llm::types::ToolDef> {
     runtime
-        .tools
-        .iter()
+        .tool_catalog
+        .all_tool_defs()
+        .into_iter()
         .filter(|def| SUBAGENT_ALLOWED_TOOLS.contains(&def.function.name.as_str()))
-        .cloned()
         .collect()
 }
 

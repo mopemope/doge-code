@@ -251,6 +251,19 @@ pub async fn run_agent_loop(
         attribution,
     )
     .await?;
+    // Session resume compatibility: re-activate catalog tools referenced by
+    // prior assistant tool calls so resumed history stays coherent even when
+    // those tools would otherwise start deferred.
+    let reactivated = runtime
+        .tool_catalog
+        .activate_known_from_history(history.as_slice())
+        .await;
+    if !reactivated.is_empty() {
+        debug!(
+            reactivated = reactivated.len(),
+            "reactivated tools from resumed history"
+        );
+    }
     let mut iters = 0usize;
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
@@ -278,6 +291,10 @@ pub async fn run_agent_loop(
         }
         // ----------------------------------
 
+        // Fresh active-tool snapshot every iteration so `tool_search`
+        // activations appear in the very next request. Activation is
+        // sticky: tools are only added, never evicted mid-run.
+        let active_tools = runtime.active_tool_defs().await;
         let msg = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
@@ -288,7 +305,7 @@ pub async fn run_agent_loop(
                 client,
                 model,
                 history.as_slice(),
-                &runtime.tools,
+                &active_tools,
                 Some(cancel_token.clone()),
                 ui_tx.clone(),
             ) => {
