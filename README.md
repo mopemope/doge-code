@@ -493,6 +493,7 @@ search_result_limit = 5  # 1-10
 - Automatic compaction when token threshold is exceeded
 - Stale tool results are cleared first ("context editing") before full compaction
 - LLM-based summarization preserves essential context
+- Recent-file / automatic memory hints are injected only as bootstrap context for the first request; they are never stored in durable conversation history
 - Recent conversation tail is retained across compaction (tool-call pairs kept intact)
 - Structured format for files accessed, actions taken, and outcomes
 

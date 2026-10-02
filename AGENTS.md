@@ -26,7 +26,8 @@ Run the narrowest check first, then broaden:
 | `src/llm/tool_execution/agent_loop.rs` | Main agent loop: iteration, loop detection, compaction triggers |
 | `src/llm/tool_execution/dispatch.rs` | Tool call dispatch (one arm per tool) |
 | `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
-| `src/llm/tool_execution/history.rs` | Conversation compaction (proactive + reactive), stale tool-result clearing |
+| `src/llm/tool_execution/history.rs` | Conversation state only (proactive + reactive compaction, stale tool-result clearing) |
+| `src/llm/runtime_context.rs` | Request-scoped bootstrap hints (Recent Files / automatic memory), first-request-only overlay |
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
 | `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
 | `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
@@ -123,6 +124,11 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 - Do not create new ad-hoc `Command::output()` / `wait_with_output()` paths for finite background commands. Use `src/execution/runner.rs` unless the process is intentionally long-lived or interactive (PTY, MCP transport, daemon/service, or another documented exception).
 - Do not infer remote MCP tool success from transport success. For a completed call, `CallToolResult.is_error` is authoritative: `Some(true)` maps to `ToolOutput.is_success = false`; `Some(false)` and `None` map to success. Protocol/transport errors remain typed errors.
 - Never log remote MCP arguments, full results, environment values, or credentials. Structured stdio uses `command` + argv and never a shell parser.
+
+## Runtime Context
+
+Runtime hints are request-scoped context, not conversation state.
+Do not push recent-file/memory hints into durable HistoryManager messages.
 
 ## Testing Guidelines
 
