@@ -125,6 +125,18 @@ impl SessionManager {
         &mut self,
         history: &[crate::llm::types::ChatMessage],
     ) -> Result<()> {
+        self.update_current_session_with_history_and_observations(history, None, None)
+    }
+
+    /// Update history plus the conversation-owned Observation Store snapshot.
+    /// `None` leaves the stored observations/unseen state untouched (used by
+    /// callers that only persist messages).
+    pub fn update_current_session_with_history_and_observations(
+        &mut self,
+        history: &[crate::llm::types::ChatMessage],
+        observations: Option<crate::llm::observation::ObservationStore>,
+        unseen: Option<std::collections::BTreeSet<String>>,
+    ) -> Result<()> {
         debug!(
             history_len = history.len(),
             has_current_session = self.current_session.is_some(),
@@ -161,6 +173,12 @@ impl SessionManager {
                     "Overrode default session title with first user prompt (truncated to 30 chars)"
                 );
             }
+            if let Some(obs) = observations {
+                session.observations = obs;
+            }
+            if let Some(unseen_set) = unseen {
+                session.unseen_tool_results = unseen_set;
+            }
 
             if let Err(e) = self.store.save(session) {
                 tracing_error!(?e, "Failed to save session data");
@@ -168,6 +186,35 @@ impl SessionManager {
             }
         }
         Ok(())
+    }
+
+    /// Persist only the Observation Store snapshot (history untouched).
+    pub fn update_current_session_with_observations(
+        &mut self,
+        observations: crate::llm::observation::ObservationStore,
+        unseen: std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(ref mut session) = self.current_session {
+            session.observations = observations;
+            session.unseen_tool_results = unseen;
+            if let Err(e) = self.store.save(session) {
+                tracing_error!(?e, "Failed to save session observations");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Load the persisted Observation Store snapshot, if any.
+    pub fn load_current_observations(
+        &self,
+    ) -> Option<(
+        crate::llm::observation::ObservationStore,
+        std::collections::BTreeSet<String>,
+    )> {
+        self.current_session
+            .as_ref()
+            .map(|s| (s.observations.clone(), s.unseen_tool_results.clone()))
     }
 
     /// Update the current session with token count

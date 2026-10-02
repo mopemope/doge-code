@@ -28,6 +28,7 @@ pub const CORE_EAGER_TOOLS: &[&str] = &[
     "search_text",
     "task",
     "execute_process",
+    "observation_read",
 ];
 
 /// Where a catalog entry came from.
@@ -666,6 +667,10 @@ mod tests {
             entry("task", "Delegate research to an isolated sub-agent"),
             entry("execute_process", "Run a program directly without a shell"),
             entry(
+                "observation_read",
+                "Retrieve an offloaded tool result without rerunning the tool",
+            ),
+            entry(
                 "edit",
                 "Replaces a single unique text block in a file for surgical edits",
             ),
@@ -706,6 +711,7 @@ mod tests {
             "search_text",
             "task",
             "execute_process",
+            "observation_read",
             "edit",
             "apply_patch",
             "fs_write",

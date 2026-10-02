@@ -131,6 +131,7 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `tool_search`: Discover and activate deferred built-in/MCP tools on demand (see Tool Search below)
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
 - `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
+- `observation_read`: Retrieve an offloaded historical tool result (`obs-*`) without re-running the original tool
 
 ## Directive-to-Evidence Traceability
 

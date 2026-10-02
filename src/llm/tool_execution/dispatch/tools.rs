@@ -761,3 +761,40 @@ pub async fn search_history(
         result_summary: "Search history disabled".to_string(),
     })
 }
+
+/// Read-only retrieval from the conversation-owned Observation Store.
+/// Never re-runs the original tool; unknown ids error without fallback.
+pub async fn observation_read(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::tools::observation::ObservationReadArgs =
+        serde_json::from_value(args.clone())
+            .map_err(|e| anyhow!("invalid observation_read args: {e}"))?;
+    // Narrow conversation state only; never global or filesystem.
+    let store_guard = runtime
+        .observation_store
+        .read()
+        .map_err(|_| anyhow!("observation store unavailable"))?;
+    match crate::tools::observation::observation_read(&store_guard, params) {
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!(
+                    "Read observation {} (bytes {}-{} of {})",
+                    res.id, res.start_byte, res.end_byte, res.total_bytes
+                ),
+            })
+        }
+        Err(e) => {
+            let value = json!({ "ok": false, "error": e.to_string() });
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: false,
+                result_summary: e.to_string(),
+            })
+        }
+    }
+}

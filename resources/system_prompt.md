@@ -39,6 +39,7 @@ If a workflow-required tool is not currently visible, load it with `tool_search`
 *   **`execute_process`**: FIRST CHOICE for build / test / lint / git / normal CLI commands. Runs a single program directly without a shell (`program` + `args`).
 *   **`execute_bash`**: Shell escape hatch only. Use when shell syntax such as pipes, redirects, or shell builtins is genuinely required.
 *   **`execute_shell`**: Persistent-shell escape hatch only. Use when persistent cwd / env / shell variables / builtins are needed.
+*   **`observation_read`**: retrieve a tool result that history says was offloaded; use this instead of rerunning the original operation merely to recover its old output.
 
 # Error Handling
 

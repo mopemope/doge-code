@@ -442,6 +442,7 @@ mod tests {
             vec![
                 "execute_process",
                 "fs_read",
+                "observation_read",
                 "search_repomap",
                 "search_text",
                 "task",

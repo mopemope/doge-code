@@ -1,6 +1,12 @@
+use crate::llm::observation::{
+    MIN_OBSERVABLE_TOOL_CHARS, OBSERVATION_READ_TOOL_NAME, OBSERVATION_STUB_PREFIX,
+    ObservationFootprint, ObservationStore, SharedObservationStore, fallback_stub,
+    is_observation_stub, new_shared_store, observation_stub, stub_observation_id,
+};
 use crate::llm::types::ChatMessage;
 use crate::llm::{OpenAIClient, compact_conversation_history};
 use anyhow::{Result, anyhow};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::{error, info, warn};
 
 pub struct HistoryManager {
@@ -9,6 +15,42 @@ pub struct HistoryManager {
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     fs_tools: crate::tools::FsTools,
     config: crate::config::AppConfig,
+    observations: SharedObservationStore,
+    unseen_tool_results: BTreeSet<String>,
+}
+
+/// Structured compaction report: overall reclaimed bytes plus how much is
+/// recoverable, fallback, or protected because unseen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionReport {
+    pub reclaimed_bytes: usize,
+    pub recoverable_offloads: usize,
+    pub recoverable_original_bytes: usize,
+    pub fallback_elisions: usize,
+    pub skipped_unseen: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationReason {
+    Superseded,
+    Historical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OffloadOutcome {
+    Offloaded {
+        reclaimed_bytes: usize,
+        original_bytes: usize,
+    },
+    Fallback {
+        reclaimed_bytes: usize,
+    },
+    SkippedUnseen,
+    SkippedAlreadyStub,
+    SkippedTooSmall,
+    SkippedNoId,
+    SkippedNotTool,
+    SkippedNoSaving,
 }
 
 impl HistoryManager {
@@ -25,12 +67,96 @@ impl HistoryManager {
             ui_tx,
             fs_tools,
             config,
+            observations: new_shared_store(),
+            unseen_tool_results: BTreeSet::new(),
+        }
+    }
+
+    /// Restore a manager with a previously persisted observation store.
+    pub fn with_observations(
+        client: OpenAIClient,
+        messages: Vec<ChatMessage>,
+        ui_tx: Option<std::sync::mpsc::Sender<String>>,
+        fs_tools: crate::tools::FsTools,
+        config: crate::config::AppConfig,
+        observations: ObservationStore,
+        unseen_tool_results: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            messages,
+            client,
+            ui_tx,
+            fs_tools,
+            config,
+            observations: std::sync::Arc::new(std::sync::RwLock::new(observations)),
+            unseen_tool_results,
         }
     }
 
     /// Add a message to the history
     pub fn push(&mut self, message: ChatMessage) {
         self.messages.push(message);
+    }
+
+    /// Canonical tool-result insertion: appends the provider-compatible
+    /// `role=tool` message and marks it unseen until a provider request
+    /// successfully contains it. Preserves the existing message shape.
+    pub fn push_tool_result(&mut self, tool_call_id: Option<String>, content: String) {
+        let id_clone = tool_call_id.clone();
+        self.messages.push(ChatMessage {
+            role: "tool".into(),
+            content: Some(content),
+            tool_calls: vec![],
+            tool_call_id,
+        });
+        if let Some(id) = id_clone {
+            self.unseen_tool_results.insert(id);
+        }
+    }
+
+    /// Mark every pending tool result as seen after a successful provider
+    /// request. Ordering invariant: call immediately after receiving the
+    /// response to the request built from this manager's current state,
+    /// before pushing that response's new assistant/tool messages. At that
+    /// point every tool result in the request was consumed successfully.
+    /// Network errors, timeouts, disconnects, or cancellations must not call
+    /// this; those results stay inline.
+    pub fn mark_sent_tool_results_seen(&mut self) {
+        self.unseen_tool_results.clear();
+    }
+
+    pub fn unseen_count(&self) -> usize {
+        self.unseen_tool_results.len()
+    }
+
+    /// Shared handle for the conversation-owned Observation Store. Cloned
+    /// into the `ToolRuntime` for this run so `observation_read` sees only
+    /// this conversation's offloads. Never global.
+    pub fn observation_handle(&self) -> SharedObservationStore {
+        self.observations.clone()
+    }
+
+    pub fn observations_snapshot(&self) -> ObservationStore {
+        self.observations
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn unseen_snapshot(&self) -> BTreeSet<String> {
+        self.unseen_tool_results.clone()
+    }
+
+    pub fn restore_observations(&mut self, store: ObservationStore, unseen: BTreeSet<String>) {
+        match self.observations.write() {
+            Ok(mut guard) => {
+                *guard = store;
+                self.unseen_tool_results = unseen;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to restore observation store; keeping existing state");
+            }
+        }
     }
 
     /// Insert a message at a specific index
@@ -60,6 +186,342 @@ impl HistoryManager {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    /// Resolve the logical tool name for a `tool_call_id` by scanning prior
+    /// assistant `tool_calls`. Falls back to `"tool"` when unknown.
+    fn tool_name_for_call_id(&self, tool_call_id: &str) -> String {
+        for msg in &self.messages {
+            if msg.role == "assistant" {
+                for tc in &msg.tool_calls {
+                    if tc.id.as_deref() == Some(tool_call_id) {
+                        return tc.function.name.clone();
+                    }
+                }
+            }
+        }
+        "tool".to_string()
+    }
+
+    fn tool_signature_for_call_id(&self, tool_call_id: &str) -> Option<(String, String)> {
+        for msg in &self.messages {
+            if msg.role == "assistant" {
+                for tc in &msg.tool_calls {
+                    if tc.id.as_deref() == Some(tool_call_id) {
+                        return Some((tc.function.name.clone(), tc.function.arguments.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn serialized_message_bytes(msg: &ChatMessage) -> usize {
+        serde_json::to_string(msg).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Single helper for all deterministic offload paths. Verifies the
+    /// message is `role=tool`, refuses unseen or already-offloaded results,
+    /// resolves the logical tool name, checks minimum useful size, attempts
+    /// bounded store insertion, and replaces content with a deterministic
+    /// reference stub. Returns exact reclaimed serialized bytes.
+    fn offload_tool_result(&mut self, index: usize, _reason: ObservationReason) -> OffloadOutcome {
+        if index >= self.messages.len() {
+            return OffloadOutcome::SkippedNotTool;
+        }
+        if self.messages[index].role != "tool" {
+            return OffloadOutcome::SkippedNotTool;
+        }
+        let tool_call_id = match self.messages[index].tool_call_id.clone() {
+            Some(id) => id,
+            None => return OffloadOutcome::SkippedNoId,
+        };
+        let content = match self.messages[index].content.clone() {
+            Some(c) => c,
+            None => return OffloadOutcome::SkippedTooSmall,
+        };
+        if self.unseen_tool_results.contains(&tool_call_id) {
+            return OffloadOutcome::SkippedUnseen;
+        }
+        if is_observation_stub(&content)
+            || content.starts_with("[cleared tool result")
+            || content.starts_with(crate::llm::observation::CLEARED_STUB_PREFIX)
+        {
+            return OffloadOutcome::SkippedAlreadyStub;
+        }
+        let tool_name = self.tool_name_for_call_id(&tool_call_id);
+        // `observation_read` output must never create another observation.
+        let is_self_read = tool_name == OBSERVATION_READ_TOOL_NAME;
+        if content.chars().count() < MIN_OBSERVABLE_TOOL_CHARS {
+            return OffloadOutcome::SkippedTooSmall;
+        }
+        let original_msg_bytes = Self::serialized_message_bytes(&self.messages[index]);
+        let original_content_bytes = content.len();
+
+        if is_self_read {
+            // Fall back to the ordinary non-recoverable stub; the original
+            // `obs-*` remains the retrieval authority.
+            let stub = fallback_stub(&tool_name, original_content_bytes);
+            let candidate = ChatMessage {
+                role: "tool".into(),
+                content: Some(stub),
+                tool_calls: vec![],
+                tool_call_id: Some(tool_call_id),
+            };
+            let replacement_bytes = Self::serialized_message_bytes(&candidate);
+            if replacement_bytes >= original_msg_bytes {
+                return OffloadOutcome::SkippedNoSaving;
+            }
+            let reclaimed = original_msg_bytes.saturating_sub(replacement_bytes);
+            self.messages[index] = candidate;
+            return OffloadOutcome::Fallback {
+                reclaimed_bytes: reclaimed,
+            };
+        }
+
+        // Attempt bounded insertion of the exact model-visible content.
+        // Pre-check: never perform an "optimization" that grows the prompt.
+        // Estimate the stub size with the peeked next id before allocating.
+        {
+            let peeked = self
+                .observations
+                .read()
+                .map(|s| s.peek_next_id())
+                .unwrap_or_else(|_| "obs-000001".to_string());
+            let probe_stub = observation_stub(&tool_name, original_content_bytes, &peeked);
+            let probe = ChatMessage {
+                role: "tool".into(),
+                content: Some(probe_stub),
+                tool_calls: vec![],
+                tool_call_id: Some(tool_call_id.clone()),
+            };
+            if Self::serialized_message_bytes(&probe) >= original_msg_bytes {
+                return OffloadOutcome::SkippedNoSaving;
+            }
+        }
+        let inserted_id = {
+            let mut store = match self.observations.write() {
+                Ok(g) => g,
+                Err(_) => return OffloadOutcome::SkippedNoSaving,
+            };
+            store.insert(
+                tool_call_id.clone(),
+                tool_name.clone(),
+                content,
+                original_msg_bytes,
+            )
+        };
+        match inserted_id {
+            Some(obs_id) => {
+                let stub = observation_stub(&tool_name, original_content_bytes, &obs_id);
+                let candidate = ChatMessage {
+                    role: "tool".into(),
+                    content: Some(stub),
+                    tool_calls: vec![],
+                    tool_call_id: Some(tool_call_id),
+                };
+                let replacement_bytes = Self::serialized_message_bytes(&candidate);
+                // Pre-check guarantees saving; this re-check is defensive
+                // only (e.g. id-width rollover). Roll the insert back so no
+                // orphan entry consumes store budget without a stub.
+                if replacement_bytes >= original_msg_bytes {
+                    if let Ok(mut store) = self.observations.write() {
+                        store.remove(&obs_id);
+                    }
+                    return OffloadOutcome::SkippedNoSaving;
+                }
+                let reclaimed = original_msg_bytes.saturating_sub(replacement_bytes);
+                self.messages[index] = candidate;
+                OffloadOutcome::Offloaded {
+                    reclaimed_bytes: reclaimed,
+                    original_bytes: original_content_bytes,
+                }
+            }
+            None => {
+                // Store full: safe non-recoverable fallback, never evicting.
+                let stub = fallback_stub(&tool_name, original_content_bytes);
+                let candidate = ChatMessage {
+                    role: "tool".into(),
+                    content: Some(stub),
+                    tool_calls: vec![],
+                    tool_call_id: Some(tool_call_id),
+                };
+                let replacement_bytes = Self::serialized_message_bytes(&candidate);
+                if replacement_bytes >= original_msg_bytes {
+                    return OffloadOutcome::SkippedNoSaving;
+                }
+                let reclaimed = original_msg_bytes.saturating_sub(replacement_bytes);
+                self.messages[index] = candidate;
+                OffloadOutcome::Fallback {
+                    reclaimed_bytes: reclaimed,
+                }
+            }
+        }
+    }
+
+    /// Recoverable offload pass over stale tool results. Never offloads
+    /// unseen results, and routes `observation_read` outputs to the fallback
+    /// stub. Includes a superseded pass (older duplicates of the same tool
+    /// name+args, which is safe to rewrite even inside the recent window
+    /// because the newer copy stays inline) plus the historical pass over
+    /// everything older than the recent `keep_recent` window, both through
+    /// `offload_tool_result`.
+    pub fn offload_stale_tool_results(
+        &mut self,
+        prompt_tokens: u32,
+        threshold: u32,
+        ratio: f32,
+        keep_recent: usize,
+    ) -> CompactionReport {
+        let mut report = CompactionReport::default();
+        if threshold == 0 || (prompt_tokens as f32) < threshold as f32 * ratio {
+            return report;
+        }
+        // Collect tool message indices in order.
+        let tool_indices: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == "tool" && m.content.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        if tool_indices.is_empty() {
+            return report;
+        }
+
+        // Pass 1 (superseded): older duplicates of identical name+args.
+        let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        for &idx in &tool_indices {
+            let call_id = match &self.messages[idx].tool_call_id {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            if let Some(sig) = self.tool_signature_for_call_id(&call_id) {
+                groups.entry(sig).or_default().push(idx);
+            }
+        }
+        for (_, indices) in groups {
+            if indices.len() < 2 {
+                continue;
+            }
+            // All but the last are superseded.
+            for &idx in &indices[..indices.len() - 1] {
+                match self.offload_tool_result(idx, ObservationReason::Superseded) {
+                    OffloadOutcome::Offloaded {
+                        reclaimed_bytes,
+                        original_bytes,
+                    } => {
+                        report.reclaimed_bytes += reclaimed_bytes;
+                        report.recoverable_offloads += 1;
+                        report.recoverable_original_bytes += original_bytes;
+                    }
+                    OffloadOutcome::Fallback { reclaimed_bytes } => {
+                        report.reclaimed_bytes += reclaimed_bytes;
+                        report.fallback_elisions += 1;
+                    }
+                    OffloadOutcome::SkippedUnseen => {
+                        report.skipped_unseen += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Pass 2 (historical): everything older than the recent window.
+        // Recompute indices (messages mutated in place, indices stable).
+        let tool_indices: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.role == "tool"
+                    && m.content.is_some()
+                    && !m.content.as_deref().is_some_and(|c| {
+                        is_observation_stub(c) || c.starts_with("[cleared tool result")
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if tool_indices.len() <= keep_recent {
+            return report;
+        }
+        let cutoff = tool_indices.len() - keep_recent;
+        for &idx in &tool_indices[..cutoff] {
+            match self.offload_tool_result(idx, ObservationReason::Historical) {
+                OffloadOutcome::Offloaded {
+                    reclaimed_bytes,
+                    original_bytes,
+                } => {
+                    report.reclaimed_bytes += reclaimed_bytes;
+                    report.recoverable_offloads += 1;
+                    report.recoverable_original_bytes += original_bytes;
+                }
+                OffloadOutcome::Fallback { reclaimed_bytes } => {
+                    report.reclaimed_bytes += reclaimed_bytes;
+                    report.fallback_elisions += 1;
+                }
+                OffloadOutcome::SkippedUnseen => {
+                    report.skipped_unseen += 1;
+                }
+                _ => {}
+            }
+        }
+        report
+    }
+
+    /// Observation footprint: lifetime storage vs active prompt savings.
+    pub fn observation_footprint(&self) -> ObservationFootprint {
+        let store = self
+            .observations
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let mut active_references = 0usize;
+        let mut active_original = 0usize;
+        let mut active_stubs = 0usize;
+        for msg in &self.messages {
+            if msg.role != "tool" {
+                continue;
+            }
+            let content = match &msg.content {
+                Some(c) => c,
+                None => continue,
+            };
+            if !is_observation_stub(content) {
+                continue;
+            }
+            let Some(id) = stub_observation_id(content) else {
+                continue;
+            };
+            let Some(obs) = store.get(&id) else {
+                continue;
+            };
+            active_references += 1;
+            active_original += obs.original_message_json_bytes;
+            active_stubs += Self::serialized_message_bytes(msg);
+        }
+        ObservationFootprint {
+            version: crate::llm::observation::OBSERVATION_FOOTPRINT_VERSION,
+            stored_entries: store.len(),
+            stored_content_bytes: store.stored_content_bytes(),
+            active_references,
+            active_original_message_bytes: active_original,
+            active_stub_message_bytes: active_stubs,
+            active_reclaimed_json_bytes: active_original.saturating_sub(active_stubs),
+        }
+    }
+
+    /// Total serialized JSON bytes of provider-bound messages.
+    pub fn messages_json_bytes(&self) -> usize {
+        serde_json::to_string(&self.messages)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// Serialized bytes of tool messages only.
+    pub fn tool_result_json_bytes(&self) -> usize {
+        let tools: Vec<&ChatMessage> = self.messages.iter().filter(|m| m.role == "tool").collect();
+        serde_json::to_string(&tools).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Clear stale tool results to free context space before compaction is
@@ -95,10 +557,9 @@ impl HistoryManager {
         let mut cleared = 0usize;
         for &idx in &tool_indices[..cutoff] {
             let msg = &mut messages[idx];
-            let already_cleared = msg
-                .content
-                .as_deref()
-                .is_some_and(|c| c.starts_with("[cleared tool result"));
+            let already_cleared = msg.content.as_deref().is_some_and(|c| {
+                c.starts_with("[cleared tool result") || c.starts_with(OBSERVATION_STUB_PREFIX)
+            });
             if already_cleared {
                 continue;
             }
@@ -110,22 +571,37 @@ impl HistoryManager {
 
     /// Check if proactive compaction is needed and perform it if so
     pub async fn check_and_compact_proactive(&mut self) -> Result<bool> {
-        // Free stale tool results first (context editing) before considering
-        // a full compaction.
-        let cleared = Self::clear_stale_tool_results(
-            self.messages.as_mut_slice(),
+        // Free stale tool results first (recoverable offload) before
+        // considering a full paid compaction.
+        let report = self.offload_stale_tool_results(
             self.client.get_prompt_tokens_used(),
             self.config.get_effective_compaction_limit(),
             0.6,
             3,
         );
-        if cleared > 0 {
-            info!(cleared, "Cleared stale tool results to free context");
+        if report.reclaimed_bytes > 0 {
+            info!(
+                reclaimed_bytes = report.reclaimed_bytes,
+                observation_offloads = report.recoverable_offloads,
+                observation_original_bytes = report.recoverable_original_bytes,
+                fallback_elisions = report.fallback_elisions,
+                skipped_unseen = report.skipped_unseen,
+                "Offloaded stale tool results to Observation Store"
+            );
             if let Some(tx) = &self.ui_tx {
                 let _ = tx.send(format!(
-                    "::status:waiting:Cleared {cleared} stale tool result(s) to free context..."
+                    "::status:waiting:Offloaded {} tool result(s) ({} recoverable) to free context...",
+                    report.recoverable_offloads + report.fallback_elisions,
+                    report.recoverable_offloads
                 ));
             }
+        } else if report.skipped_unseen > 0 {
+            // Nothing reclaimed (all candidates still unseen): debug-level
+            // diagnostics only, never a user-facing "Offloaded 0" status.
+            tracing::debug!(
+                skipped_unseen = report.skipped_unseen,
+                "offload pass skipped unseen tool results"
+            );
         }
 
         let last_prompt_tokens = self.client.get_prompt_tokens_used();
@@ -167,6 +643,15 @@ impl HistoryManager {
 
     pub fn into_messages(self) -> Vec<ChatMessage> {
         self.messages
+    }
+
+    /// Borrow messages plus the observation snapshot for persistence.
+    pub fn persistable(&self) -> (Vec<ChatMessage>, ObservationStore, BTreeSet<String>) {
+        (
+            self.messages.clone(),
+            self.observations_snapshot(),
+            self.unseen_snapshot(),
+        )
     }
 
     async fn perform_compaction(&mut self) -> Result<bool> {
@@ -387,6 +872,21 @@ mod tests {
         }
     }
 
+    fn test_manager(messages: Vec<ChatMessage>) -> HistoryManager {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        HistoryManager::new(client, messages, None, fs, config)
+    }
+
     #[test]
     fn test_merge_compacted_history_keeps_system_summary_and_tail() {
         let original = vec![
@@ -567,5 +1067,390 @@ mod tests {
         let second = HistoryManager::clear_stale_tool_results(&mut messages, 900, 1_000, 0.6, 1);
         assert_eq!(first, 3);
         assert_eq!(second, 0, "already-cleared messages are not double-counted");
+    }
+
+    // --- Observation Store tests ---
+
+    fn large_tool_history() -> Vec<ChatMessage> {
+        let big_a = "a".repeat(3000);
+        let big_b = "b".repeat(3000);
+        vec![
+            make_msg("system", "sys"),
+            make_msg("user", "task"),
+            make_assistant_with_tool_calls("call-a", "read a"),
+            make_tool_msg("call-a", &big_a),
+            make_assistant_with_tool_calls("call-b", "read b"),
+            make_tool_msg("call-b", &big_b),
+            make_msg("assistant", "recent answer"),
+            make_msg("user", "follow up"),
+        ]
+    }
+
+    #[test]
+    fn test_unseen_result_never_offloaded_until_seen() {
+        let mut mgr = test_manager(large_tool_history());
+        // Simulate canonical insertion: both tool results are unseen.
+        mgr.unseen_tool_results.insert("call-a".into());
+        mgr.unseen_tool_results.insert("call-b".into());
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert_eq!(report.recoverable_offloads, 0);
+        assert_eq!(report.fallback_elisions, 0);
+        assert!(
+            report.skipped_unseen >= 2,
+            "all unseen candidates protected: {report:?}"
+        );
+        // Both remain inline.
+        assert!(
+            mgr.as_slice()
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call-a")
+                    && m.content.as_deref().is_some_and(|c| c.contains('a')))
+        );
+        // After the model sees them, offload becomes possible.
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert!(report.recoverable_offloads >= 1);
+        assert!(report.reclaimed_bytes > 0);
+    }
+
+    #[test]
+    fn test_parallel_batch_never_loses_unseen_early_result() {
+        // 10+ parallel tool results before any successful provider response.
+        let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "batch")];
+        let mut call_ids = Vec::new();
+        // One assistant message with many tool calls.
+        let tcs: Vec<crate::llm::types::ToolCall> = (0..12)
+            .map(|i| crate::llm::types::ToolCall {
+                id: Some(format!("call-{i}")),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: format!("{{\"n\":{i}}}"),
+                },
+            })
+            .collect();
+        msgs.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("batch".into()),
+            tool_calls: tcs,
+            tool_call_id: None,
+        });
+        for i in 0..12 {
+            let id = format!("call-{i}");
+            call_ids.push(id.clone());
+            msgs.push(make_tool_msg(&id, &"x".repeat(2000)));
+        }
+        let mut mgr = test_manager(msgs);
+        for id in &call_ids {
+            mgr.unseen_tool_results.insert(id.clone());
+        }
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 3);
+        assert_eq!(
+            report.recoverable_offloads, 0,
+            "unseen batch must not offload"
+        );
+        assert_eq!(report.fallback_elisions, 0);
+        // 12 unseen, 3 protected by keep_recent window: 9 attempted + skipped.
+        assert_eq!(report.skipped_unseen, 9, "report: {report:?}");
+        // None lost merely for falling outside the recent window.
+        for id in &call_ids {
+            let content = mgr
+                .as_slice()
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some(id.as_str()))
+                .and_then(|m| m.content.clone())
+                .expect("result stays inline");
+            assert!(!crate::llm::observation::is_observation_stub(&content));
+        }
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 3);
+        assert!(report.recoverable_offloads > 0);
+    }
+
+    #[test]
+    fn test_superseded_result_becomes_recoverable() {
+        // Same exact call twice: first result superseded, second stays.
+        let big_a = "A".repeat(2500);
+        let big_b = "B".repeat(2500);
+        let mk_assistant = |id: &str| ChatMessage {
+            role: "assistant".into(),
+            content: Some("read".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some(id.to_string()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: "{\"path\":\"/x\"}".into(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let mut mgr = test_manager(vec![
+            make_msg("system", "sys"),
+            make_msg("user", "u"),
+            mk_assistant("call-a"),
+            make_tool_msg("call-a", &big_a),
+            mk_assistant("call-b"),
+            make_tool_msg("call-b", &big_b),
+            make_msg("assistant", "done"),
+        ]);
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 10);
+        // Superseded pass should offload call-a even though it is "recent".
+        assert!(report.recoverable_offloads >= 1);
+        let stub = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-a"))
+            .and_then(|m| m.content.clone())
+            .expect("call-a stub");
+        assert!(is_observation_stub(&stub));
+        let id = stub_observation_id(&stub).expect("obs id");
+        let stored = mgr.observations_snapshot();
+        assert_eq!(stored.get(&id).unwrap().content, big_a);
+        // call-b keeps its own content (not pointed at A).
+        let b = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-b"))
+            .and_then(|m| m.content.clone())
+            .unwrap();
+        assert!(b.contains('B'));
+    }
+
+    #[test]
+    fn test_observation_read_result_does_not_recurse() {
+        let mk_obs_assistant = |id: &str| ChatMessage {
+            role: "assistant".into(),
+            content: Some("r".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some(id.to_string()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: OBSERVATION_READ_TOOL_NAME.into(),
+                    arguments: "{\"id\":\"obs-000001\"}".into(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let mut mgr = test_manager(vec![
+            make_msg("system", "sys"),
+            make_msg("user", "u"),
+            mk_obs_assistant("call-obs"),
+            make_tool_msg("call-obs", &"y".repeat(3000)),
+            make_msg("assistant", "done"),
+        ]);
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        // observation_read output uses fallback, never a new observation.
+        assert_eq!(report.recoverable_offloads, 0);
+        assert_eq!(mgr.observations_snapshot().len(), 0);
+    }
+
+    #[test]
+    fn test_store_capacity_fallback_without_eviction() {
+        let mut mgr = test_manager(vec![make_msg("system", "sys")]);
+        // Fill the store to its entry limit with tiny direct inserts.
+        {
+            let mut store = mgr.observations.write().unwrap();
+            for i in 0..crate::llm::observation::MAX_OBSERVATION_ENTRIES {
+                let id = store.insert(format!("fill-{i}"), "fs_read".into(), "z".repeat(500), 600);
+                assert!(id.is_some());
+            }
+        }
+        let before_ids = mgr.observations_snapshot().ids();
+        // Now offload one more large result: must fall back, not evict.
+        let big = "Q".repeat(3000);
+        mgr.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("r".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("call-new".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        });
+        mgr.push_tool_result(Some("call-new".into()), big.clone());
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert_eq!(report.fallback_elisions, 1);
+        assert_eq!(mgr.observations_snapshot().ids(), before_ids);
+    }
+
+    #[test]
+    fn test_footprint_context_reduction() {
+        let mut mgr = test_manager(large_tool_history());
+        mgr.mark_sent_tool_results_seen();
+        let before_tools = mgr.tool_result_json_bytes();
+        let before_all = mgr.messages_json_bytes();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert!(report.reclaimed_bytes > 0);
+        let after_tools = mgr.tool_result_json_bytes();
+        let after_all = mgr.messages_json_bytes();
+        assert!(after_tools < before_tools);
+        assert!(after_all < before_all);
+        let fp = mgr.observation_footprint();
+        assert!(fp.active_references > 0);
+        assert!(fp.active_reclaimed_json_bytes > 0);
+        // Deterministic: reclaimed equals measured message-byte delta
+        // attributable to stubs (within envelope overhead of the JSON array).
+        assert_eq!(
+            fp.active_reclaimed_json_bytes,
+            fp.active_original_message_bytes
+                .saturating_sub(fp.active_stub_message_bytes)
+        );
+        // Never claim tokens.
+        assert_eq!(before_all.saturating_sub(after_all), report.reclaimed_bytes);
+    }
+
+    #[test]
+    fn test_failed_provider_request_keeps_unseen_inline() {
+        // push_tool_result marks unseen; a failed request never calls
+        // mark_sent_tool_results_seen, so compaction must skip it.
+        let mut mgr = test_manager(vec![make_msg("system", "sys"), make_msg("user", "u")]);
+        mgr.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("read".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("call-fail".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        });
+        mgr.push_tool_result(Some("call-fail".into()), "x".repeat(3000));
+        assert_eq!(mgr.unseen_count(), 1);
+        // Simulate failed provider request: no mark_seen call.
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert_eq!(report.recoverable_offloads, 0);
+        let content = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-fail"))
+            .and_then(|m| m.content.clone())
+            .unwrap();
+        assert!(content.contains('x'), "failed request keeps full result");
+        // Retry succeeds: now it may offload.
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert!(report.recoverable_offloads >= 1);
+    }
+
+    #[test]
+    fn test_push_tool_result_marks_unseen_and_preserves_shape() {
+        let mut mgr = test_manager(vec![]);
+        mgr.push_tool_result(Some("call-1".into()), "hello".into());
+        assert_eq!(mgr.unseen_count(), 1);
+        let msg = mgr.as_slice().last().expect("tool msg");
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(msg.content.as_deref(), Some("hello"));
+        mgr.mark_sent_tool_results_seen();
+        assert_eq!(mgr.unseen_count(), 0);
+    }
+
+    #[test]
+    fn test_rewind_keeps_old_observation_retrievable() {
+        // Old completed history offloaded, then a new turn is rewound
+        // (new messages removed). The observation must survive.
+        let mut mgr = test_manager(large_tool_history());
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert!(report.recoverable_offloads > 0);
+        let before = mgr.messages_json_bytes();
+        // Mark turn start: record current len, append new turn messages.
+        let turn_start = mgr.len();
+        mgr.push(make_msg("user", "new turn question"));
+        mgr.push(make_msg("assistant", "new turn answer"));
+        assert!(mgr.len() > turn_start);
+        // Rewind: remove new turn messages only (never restores old content).
+        let mut msgs: Vec<ChatMessage> = mgr.as_slice().to_vec();
+        msgs.truncate(turn_start);
+        let stored = mgr.observations_snapshot();
+        let unseen = mgr.unseen_snapshot();
+        let mut rewound = test_manager(msgs);
+        rewound.restore_observations(stored, unseen);
+        // Old observation remains retrievable with exact content.
+        let fp = rewound.observation_footprint();
+        assert!(fp.active_references > 0);
+        assert!(rewound.messages_json_bytes() <= before + 1000);
+        for msg in rewound.as_slice() {
+            if msg.role == "tool"
+                && let Some(c) = &msg.content
+                && crate::llm::observation::is_observation_stub(c)
+            {
+                let id = crate::llm::observation::stub_observation_id(c).unwrap();
+                let obs = rewound.observations_snapshot();
+                assert!(obs.contains(&id));
+            }
+        }
+    }
+
+    #[test]
+    fn test_session_round_trip_preserves_observations() {
+        let mut mgr = test_manager(large_tool_history());
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
+        assert!(report.recoverable_offloads > 0);
+        let (messages, store, unseen) = mgr.persistable();
+        // Serialize manager through the same value path used by session save
+        // (SessionData serde), then restore and verify retrieval.
+        let mut session = crate::session::SessionData::new();
+        session.conversation = messages
+            .iter()
+            .map(|m| {
+                serde_json::to_value(m)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
+        session.observations = store.clone();
+        session.unseen_tool_results = unseen.clone();
+        let raw = serde_json::to_value(&session).expect("serialize session");
+        let restored: crate::session::SessionData =
+            serde_json::from_value(raw).expect("deserialize session");
+        // New observation ids must not collide after restore.
+        let mut restored_store = restored.observations.clone();
+        let before_next = restored_store.next_id();
+        let new_id = restored_store
+            .insert("call-new".into(), "fs_read".into(), "z".repeat(500), 600)
+            .expect("new id after restore");
+        assert_ne!(new_id, "");
+        assert!(restored_store.next_id() > before_next);
+        // Old observation still retrievable.
+        let first_id = store.ids().into_iter().next().expect("one obs");
+        let original = store.get(&first_id).unwrap().content.clone();
+        assert_eq!(
+            restored.observations.get(&first_id).unwrap().content,
+            original
+        );
+        // Legacy fixture without observation fields loads empty.
+        let legacy = serde_json::json!({
+            "meta": {"id": "sess-1", "created_at": "2026-01-01T00:00:00+00:00", "title": "t", "title_is_default": true},
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "conversation": [],
+            "token_count": 0,
+            "requests": 0,
+            "tool_calls": 0,
+            "lines_edited": 0,
+            "tool_call_successes": {},
+            "tool_call_failures": {},
+            "changed_files": []
+        });
+        let legacy_data: crate::session::SessionData =
+            serde_json::from_value(legacy).expect("legacy loads");
+        assert!(legacy_data.observations.is_empty());
+        assert!(legacy_data.unseen_tool_results.is_empty());
     }
 }

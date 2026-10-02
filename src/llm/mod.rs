@@ -3,6 +3,7 @@ pub mod client_core;
 mod compact_history;
 mod history;
 mod message_utils;
+pub mod observation;
 mod prompts;
 pub mod reasoning;
 pub mod runtime_context;
