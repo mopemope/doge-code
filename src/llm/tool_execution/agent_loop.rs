@@ -334,6 +334,10 @@ pub async fn run_agent_loop(
     let mut consecutive_plan_write_no_change_count = 0usize;
     let mut budget_governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
     let mut reactive_guard = ReactiveRetryGuard::new();
+    // Client-side prefix-stability diagnostics (observational only).
+    // Session-local; no persistence needed.
+    let mut previous_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
+        None;
 
     loop {
         iters += 1;
@@ -676,6 +680,24 @@ pub async fn run_agent_loop(
             }
         }
 
+        // Prefix-stability diagnostics: fingerprint the exact cache-relevant
+        // components about to be sent (final active tools + canonical
+        // history + effort + model). Computed only when DEBUG is enabled;
+        // cache token counters themselves are always recorded via
+        // `record_usage`. The leading-system hash excludes the one-shot
+        // `<RuntimeContext>` overlay by construction.
+        let current_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                Some(crate::llm::prompt_cache::compute_prefix_signature(
+                    model,
+                    history.as_slice(),
+                    &active_tools,
+                    reasoning_effort,
+                ))
+            } else {
+                None
+            };
+
         // J. Send (best-effort; provider is the final authority).
         // First logical request carries the runtime overlay; the pending flag
         // was consumed during preflight so retries, reactive compaction, and
@@ -775,6 +797,51 @@ pub async fn run_agent_loop(
         // assistant/tool messages; network errors above never reach here so
         // failed requests keep their results inline.
         history.mark_sent_tool_results_seen();
+
+        // Prompt-cache telemetry + prefix-stability diagnostics (DEBUG only).
+        // Token counters were already recorded via `record_usage` on every
+        // path; this only logs content-free fingerprints, counts, flags,
+        // and ratios. Never log raw prompt / tool / user content here.
+        // Causation is never asserted: a schema/effort change alongside a
+        // cache miss is correlation for investigation, not proof.
+        if let Some(current) = current_prefix_signature.as_ref() {
+            let change = current.diff(previous_prefix_signature.as_ref());
+            let last_cache = client.last_prompt_cache_usage();
+            let last_ratio = client.last_prompt_cache_hit_ratio();
+            let session_ratio = client.prompt_cache_hit_ratio();
+            if last_cache.cached_tokens.is_some() || last_cache.cache_write_tokens.is_some() {
+                debug!(
+                    prompt_tokens = client.get_prompt_tokens_used(),
+                    cached_tokens = last_cache.cached_tokens.unwrap_or(0),
+                    cached_reported = last_cache.cached_tokens.is_some(),
+                    cache_write_tokens = last_cache.cache_write_tokens.unwrap_or(0),
+                    cache_write_reported = last_cache.cache_write_tokens.is_some(),
+                    last_cache_hit_ratio = ?last_ratio,
+                    session_cache_hit_ratio = ?session_ratio,
+                    tool_count = current.tool_count,
+                    tool_schema_hash = %current.short_tool_hash(),
+                    system_prefix_hash = %current.short_system_hash(),
+                    tool_schema_changed = change.tool_schema_changed,
+                    leading_system_changed = change.leading_system_changed,
+                    reasoning_effort_changed = change.reasoning_effort_changed,
+                    model_changed = change.model_changed,
+                    "prompt cache telemetry with prefix diagnostics",
+                );
+            } else {
+                debug!(
+                    prompt_tokens = client.get_prompt_tokens_used(),
+                    tool_count = current.tool_count,
+                    tool_schema_hash = %current.short_tool_hash(),
+                    system_prefix_hash = %current.short_system_hash(),
+                    tool_schema_changed = change.tool_schema_changed,
+                    leading_system_changed = change.leading_system_changed,
+                    reasoning_effort_changed = change.reasoning_effort_changed,
+                    model_changed = change.model_changed,
+                    "prompt cache telemetry: no cached tokens reported for this request; client-side cache-relevant prefix components changed",
+                );
+            }
+            previous_prefix_signature = Some(current.clone());
+        }
 
         // If assistant returned final content without tool calls, we are done.
         if msg.tool_calls.is_empty() {

@@ -139,6 +139,15 @@ Seen historical results should be offloaded through the Observation Store
 before conversation compaction. Never replace an unseen tool result with a
 non-recoverable clearing stub merely to satisfy a local token estimate.
 
+## Prompt Cache Telemetry
+
+Prompt-cache metrics are observational only.
+Cached prompt tokens still count toward context-window pressure.
+Do not subtract cached tokens from context-budget calculations.
+
+Keep tool definition ordering deterministic; tool/schema changes are
+cache-relevant request-prefix changes.
+
 ## Testing Guidelines
 
 - Unit tests go beside the code under `#[cfg(test)]`; larger fixtures may use `<name>_test.rs` files (both styles exist).
