@@ -119,4 +119,29 @@ impl SessionManagerWrapper {
         }
         Ok(())
     }
+
+    /// Persist the conversation-owned Observation Store snapshot.
+    pub fn update_session_with_observations(
+        &self,
+        observations: crate::llm::observation::ObservationStore,
+        unseen: std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(session_manager) = &self.session_manager {
+            let mut mgr = session_manager.lock().unwrap();
+            mgr.update_current_session_with_observations(observations, unseen)?;
+        }
+        Ok(())
+    }
+
+    /// Load the persisted Observation Store snapshot, if any.
+    pub fn load_current_observations(
+        &self,
+    ) -> Option<(
+        crate::llm::observation::ObservationStore,
+        std::collections::BTreeSet<String>,
+    )> {
+        let session_manager = self.session_manager.as_ref()?;
+        let mgr = session_manager.lock().unwrap();
+        mgr.load_current_observations()
+    }
 }

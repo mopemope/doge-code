@@ -18,6 +18,23 @@ use crate::tui::commands::prompt::build_system_prompt;
 const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
 const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
 
+/// Snapshot observations into the session before returning messages.
+/// History messages flow back to the TUI/session via the return value;
+/// observations persist via the session store so restarts and resumes keep
+/// `obs-*` retrieval working. Failures are warnings only.
+fn persist_history_and_observations(
+    history: &crate::llm::tool_execution::history::HistoryManager,
+    fs: &FsTools,
+) -> Vec<ChatMessage> {
+    let (messages, store, unseen) = history.persistable();
+    if (!store.is_empty() || !unseen.is_empty())
+        && let Err(e) = fs.update_session_with_observations(store, unseen)
+    {
+        warn!(error = %e, "failed to persist observation store");
+    }
+    messages
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanWriteBlockReason {
     RepeatedUnchanged,
@@ -108,12 +125,7 @@ fn block_plan_write_call(
 
     let blocked = build_plan_write_blocked_value(reason, count);
     let blocked_content = truncate_tool_output(blocked.to_string(), PLAN_WRITE_TOOL_NAME);
-    history.push(ChatMessage {
-        role: "tool".into(),
-        content: Some(blocked_content),
-        tool_calls: vec![],
-        tool_call_id: tc.id.clone(),
-    });
+    history.push_tool_result(tc.id.clone(), blocked_content);
     history.push(ChatMessage {
         role: "system".into(),
         content: Some(plan_write_block_system_message(reason).to_string()),
@@ -231,6 +243,13 @@ pub async fn run_agent_loop(
         fs.clone(),
         cfg.clone(),
     );
+    // Restore the conversation-owned Observation Store so offloaded results
+    // survive shell restarts and agent resume within the same session.
+    if let Some((stored, unseen)) = fs.load_current_observations()
+        && (!stored.is_empty() || !unseen.is_empty())
+    {
+        history.restore_observations(stored, unseen);
+    }
 
     // Inject System Prompt if not already present
     {
@@ -274,7 +293,7 @@ pub async fn run_agent_loop(
     }
 
     let cancel_token = cancel.unwrap_or_default();
-    let runtime = ToolRuntime::build_with_attribution(
+    let mut runtime = ToolRuntime::build_with_attribution(
         fs,
         Some(client.clone()),
         model.to_string(),
@@ -282,6 +301,9 @@ pub async fn run_agent_loop(
         attribution,
     )
     .await?;
+    // Share the conversation-owned Observation Store handle so
+    // `observation_read` retrieves only this run's offloads.
+    runtime.set_observation_store(history.observation_handle());
     // Session resume compatibility: re-activate catalog tools referenced by
     // prior assistant tool calls so resumed history stays coherent even when
     // those tools would otherwise start deferred.
@@ -423,6 +445,11 @@ pub async fn run_agent_loop(
                 return Err(agent_error.into());
             }
         };
+        // A complete model response means every tool result in the request
+        // was successfully consumed. Mark them seen before pushing the new
+        // assistant/tool messages; network errors above never reach here so
+        // failed requests keep their results inline.
+        history.mark_sent_tool_results_seen();
 
         // If assistant returned final content without tool calls, we are done.
         if msg.tool_calls.is_empty() {
@@ -494,7 +521,7 @@ pub async fn run_agent_loop(
             }
 
             return Ok((
-                history.into_messages(),
+                persist_history_and_observations(&history, fs),
                 ChoiceMessage {
                     role: "assistant".into(),
                     content: msg.content.clone().unwrap_or_default(),
@@ -525,12 +552,10 @@ pub async fn run_agent_loop(
             if loop_detected {
                 // Skip remaining tool calls in the batch
                 debug!(tool = %tc.function.name, "Skipping tool call due to loop detection in same batch");
-                history.push(ChatMessage {
-                    role: "tool".into(),
-                    content: Some("{\"error\":\"Loop detected in current tool batch. Execution skipped to allow for immediate reassessment.\"}".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: tc.id.clone(),
-                });
+                history.push_tool_result(
+                    tc.id.clone(),
+                    "{\"error\":\"Loop detected in current tool batch. Execution skipped to allow for immediate reassessment.\"}".to_string(),
+                );
                 continue;
             }
 
@@ -906,12 +931,7 @@ File modification detected. You MUST now verify your changes:
             }
 
             // tool message to feed back to the LLM
-            history.push(ChatMessage {
-                role: "tool".into(),
-                content: Some(tool_message_content),
-                tool_calls: vec![],
-                tool_call_id: tc.id.clone(),
-            });
+            history.push_tool_result(tc.id.clone(), tool_message_content);
 
             // Loop Detection
             if tool_name == "plan_write" && success && plan_write_changed == Some(false) {

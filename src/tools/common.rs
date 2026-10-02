@@ -194,6 +194,26 @@ impl FsTools {
             .mark_current_session_provenance_failure()
     }
 
+    /// Persist the conversation-owned Observation Store snapshot.
+    pub fn update_session_with_observations(
+        &self,
+        observations: crate::llm::observation::ObservationStore,
+        unseen: std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        self.session_manager_wrapper
+            .update_session_with_observations(observations, unseen)
+    }
+
+    /// Load the persisted Observation Store snapshot, if any.
+    pub fn load_current_observations(
+        &self,
+    ) -> Option<(
+        crate::llm::observation::ObservationStore,
+        std::collections::BTreeSet<String>,
+    )> {
+        self.session_manager_wrapper.load_current_observations()
+    }
+
     /// Legacy shell-gate compatibility shim (used by tests).
     ///
     /// Backed by `ExecutionPolicy`: under the deprecated `allowed_commands`
