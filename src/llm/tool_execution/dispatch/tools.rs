@@ -351,7 +351,10 @@ pub async fn plan_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> 
         Ok(res) => {
             // Remove redundant recording
 
-            let value = serde_json::to_value(&res)?;
+            // LLM boundary: compact acknowledgement only. The full canonical
+            // plan stays in the store; use plan_read for full state.
+            let tool_result = crate::tools::plan::PlanWriteToolResult::from_internal(&res);
+            let value = serde_json::to_value(&tool_result)?;
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: true,

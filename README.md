@@ -111,7 +111,7 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `edit_symbol`: TUI slash command (`/edit-symbol`) to edit entire symbols (functions, structs, etc.)
 
 ### Session Management
-- `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions)
+- `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions). `plan_write` returns compact update metadata; `plan_read` retrieves full state
 - `session`: Automatic session persistence and resume
 - `dgc session list|show|delete`: CLI session management (ID prefixes supported)
 - `--resume` / `--resume=<SESSION_ID>`: Resume the latest or a specific session (TUI and `exec`)
