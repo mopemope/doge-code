@@ -5,6 +5,7 @@ mod history;
 mod message_utils;
 mod prompts;
 pub mod reasoning;
+pub mod runtime_context;
 mod stream;
 mod stream_tools;
 mod symbol_edit;
