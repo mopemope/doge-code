@@ -28,23 +28,33 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
     // Fail closed: a deferred tool must never execute from a guessed name.
     // The model has to discover and activate it via `tool_search` first, so
     // the capability becomes schema-visible before any side effect can run.
-    if name != TOOL_SEARCH_TOOL_NAME
-        && runtime.knows_tool(name)
-        && !runtime.is_tool_active(name).await
-    {
+    // Retired `tool_search` itself (no real deferred tools remain, or eager
+    // mode where it is never advertised) fails closed the same way: a stale
+    // or guessed discovery call executes no side effects.
+    if runtime.knows_tool(name) && !runtime.is_tool_active(name).await {
+        let message = if name == TOOL_SEARCH_TOOL_NAME {
+            "tool_search is retired: no deferred tools remain to discover.".to_string()
+        } else {
+            "This tool is deferred. Search for and activate the required capability with tool_search first.".to_string()
+        };
         let value = json!({
             "ok": false,
             "error": {
                 "kind": "tool_not_active",
                 "tool": name,
-                "message": "This tool is deferred. Search for and activate the required capability with tool_search first.",
+                "message": message,
             },
             "warnings": [],
         });
+        let result_summary = if name == TOOL_SEARCH_TOOL_NAME {
+            "tool_search is retired; no deferred tools remain".to_string()
+        } else {
+            format!("Tool '{name}' is deferred; use tool_search first")
+        };
         return Ok(ToolOutput {
             value: value.clone(),
             is_success: false,
-            result_summary: format!("Tool '{name}' is deferred; use tool_search first"),
+            result_summary,
         });
     }
 
@@ -1128,8 +1138,35 @@ mod tests {
             "first search should activate, value: {}",
             first.value
         );
-        // Second identical search: nothing new to activate; matches surface
-        // as already_active instead of duplicating the active set.
+        // Drain: repeated searches keep activating remaining inactive matches
+        // (progress-monotonic: active hits never consume activation capacity).
+        let mut last = first;
+        for _ in 0..50 {
+            let next = dispatch_tool_call(&runtime, &search_call).await?;
+            assert!(next.is_success);
+            let drained = next.value["activated"]
+                .as_array()
+                .is_some_and(|a| a.is_empty());
+            last = next;
+            if drained {
+                break;
+            }
+        }
+        // Terminal search: nothing new to activate; matches surface as
+        // already_active instead of duplicating the active set.
+        assert_eq!(
+            last.value["activated"].as_array().map(Vec::len),
+            Some(0),
+            "value: {}",
+            last.value
+        );
+        assert!(
+            last.value["already_active"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "value: {}",
+            last.value
+        );
         let before = runtime.tool_catalog.active_count().await;
         let second = dispatch_tool_call(&runtime, &search_call).await?;
         assert!(second.is_success);
@@ -1142,6 +1179,276 @@ mod tests {
             second.value
         );
         assert_eq!(runtime.tool_catalog.active_count().await, before);
+        Ok(())
+    }
+
+    fn catalog_entry(name: &str, description: &str) -> crate::llm::tool_catalog::ToolCatalogEntry {
+        use crate::llm::tool_catalog::{ToolCatalogEntry, ToolSource, build_searchable_text};
+        let def = crate::llm::types::ToolDef {
+            kind: "function".into(),
+            function: crate::llm::types::ToolFunctionDef {
+                name: name.to_string(),
+                description: description.to_string(),
+                parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
+            },
+        };
+        let text = build_searchable_text(&def, &ToolSource::Builtin);
+        ToolCatalogEntry {
+            definition: def,
+            source: ToolSource::Builtin,
+            searchable_text: text,
+        }
+    }
+
+    fn deferred_catalog_runtime(
+        fs_tools: &FsTools,
+        entries: Vec<crate::llm::tool_catalog::ToolCatalogEntry>,
+    ) -> ToolRuntime<'_> {
+        let catalog = crate::llm::tool_catalog::ToolCatalog::from_entries(
+            entries,
+            &crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Deferred,
+                search_result_limit: 5,
+            },
+        );
+        ToolRuntime::from_catalog_for_test(fs_tools, catalog)
+    }
+
+    fn search_call(id: &str, query: &str, limit: usize) -> ToolCall {
+        ToolCall {
+            id: Some(id.to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "tool_search".to_string(),
+                arguments: json!({"query": query, "limit": limit}).to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_limit_one_activates_inactive_despite_higher_active_match()
+    -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_catalog_runtime(
+            &fs_tools,
+            vec![
+                catalog_entry("alpha", "alpha capability for testing"),
+                catalog_entry("alpha_helper", "alpha helper capability for testing"),
+            ],
+        );
+        // The exact-name active match outscores the inactive helper, yet the
+        // small limit must still make forward progress on inactive work.
+        runtime.tool_catalog.activate(&["alpha".to_string()]).await;
+        let output = dispatch_tool_call(&runtime, &search_call("s1", "alpha", 1)).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        let activated: Vec<&str> = output.value["activated"]
+            .as_array()
+            .expect("activated array")
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert_eq!(activated, vec!["alpha_helper"], "value: {}", output.value);
+        assert!(runtime.is_tool_active("alpha_helper").await);
+        let already: Vec<&str> = output.value["already_active"]
+            .as_array()
+            .expect("already_active array")
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert_eq!(already, vec!["alpha"], "value: {}", output.value);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stale_tool_search_after_exhaustion_fails_closed() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_catalog_runtime(
+            &fs_tools,
+            vec![catalog_entry("alpha", "alpha capability for testing")],
+        );
+        assert!(runtime.is_tool_active("tool_search").await);
+        // Final real-tool activation retires discovery from the schema set.
+        runtime.tool_catalog.activate(&["alpha".to_string()]).await;
+        assert!(!runtime.is_tool_active("tool_search").await);
+        assert!(
+            runtime
+                .active_tool_defs()
+                .await
+                .iter()
+                .all(|d| d.function.name != "tool_search")
+        );
+        // A stale direct call fails closed: no success, no side effects.
+        let before = runtime.tool_catalog.active_count().await;
+        let output = dispatch_tool_call(&runtime, &search_call("stale", "alpha", 5)).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["error"]["kind"], "tool_not_active");
+        assert_eq!(output.value["error"]["tool"], "tool_search");
+        assert_eq!(runtime.tool_catalog.active_count().await, before);
+        assert!(!runtime.is_tool_active("tool_search").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_eager_tool_search_call_fails_closed() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let catalog = crate::llm::tool_catalog::ToolCatalog::from_entries(
+            vec![catalog_entry("alpha", "alpha capability for testing")],
+            &crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Eager,
+                search_result_limit: 5,
+            },
+        );
+        assert!(!catalog.is_active("tool_search").await);
+        let runtime = ToolRuntime::from_catalog_for_test(&fs_tools, catalog);
+        let output = dispatch_tool_call(&runtime, &search_call("eager", "alpha", 5)).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["error"]["kind"], "tool_not_active");
+        assert_eq!(output.value["error"]["tool"], "tool_search");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_activates_remote_alias_with_real_only_count() -> Result<()> {
+        let (_dir, fs_tools) = deferred_test_fs();
+        let remote_def = crate::llm::types::ToolDef {
+            kind: "function".into(),
+            function: crate::llm::types::ToolFunctionDef {
+                name: "mcp_github_create_issue".to_string(),
+                description: "Create a GitHub issue".to_string(),
+                parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
+            },
+        };
+        let remote = crate::llm::tool_catalog::ToolCatalogEntry {
+            definition: remote_def,
+            source: crate::llm::tool_catalog::ToolSource::RemoteMcp {
+                server_name: "github".to_string(),
+                remote_name: "create_issue".to_string(),
+            },
+            searchable_text: "mcp_github_create_issue create a github issue github create_issue"
+                .to_string(),
+        };
+        let runtime = deferred_catalog_runtime(&fs_tools, vec![remote]);
+        let output =
+            dispatch_tool_call(&runtime, &search_call("mcp", "github create issue", 5)).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        let activated: Vec<&str> = output.value["activated"]
+            .as_array()
+            .expect("activated array")
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert_eq!(activated, vec!["mcp_github_create_issue"]);
+        assert!(runtime.is_tool_active("mcp_github_create_issue").await);
+        // The managed discovery entry never counts as deferred work, and the
+        // final activation retires it.
+        assert_eq!(output.value["remaining_deferred"], 0);
+        assert!(!runtime.is_tool_active("tool_search").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_warning_count_matches_trimmed_reporting() -> Result<()> {
+        use crate::tools::tool_search::TOOL_SEARCH_RESULT_BUDGET_CHARS;
+        let (_dir, fs_tools) = deferred_test_fs();
+        // Ten full-size already-active matches plus one unrelated inactive
+        // tool (keeps discovery alive so the search succeeds). The long
+        // names push the transparency tail itself over budget (the query
+        // echo is bounded separately and contributes no pressure), so the
+        // tail must yield while the warning stays accurate.
+        let long_desc = format!("wanted recovery helper {}", "x".repeat(300));
+        let mut entries = Vec::new();
+        for i in 0..10 {
+            entries.push(catalog_entry(
+                &format!("wanted_active_{i:02}_{}", "p".repeat(64)),
+                &long_desc,
+            ));
+        }
+        entries.push(catalog_entry(
+            "zzz_unrelated_qqq",
+            "unrelated filler capability with no shared tokens",
+        ));
+        let runtime = deferred_catalog_runtime(&fs_tools, entries);
+        let actives: Vec<String> = (0..10)
+            .map(|i| format!("wanted_active_{i:02}_{}", "p".repeat(64)))
+            .collect();
+        runtime.tool_catalog.activate(&actives).await;
+        assert!(runtime.is_tool_active("tool_search").await);
+        let query = "wanted recovery helper ".repeat(60);
+        let output = dispatch_tool_call(&runtime, &search_call("long", &query, 10)).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        assert_eq!(output.value["activated"].as_array().map(Vec::len), Some(0));
+        let already = output.value["already_active"]
+            .as_array()
+            .expect("already_active array");
+        // Trimming fired: fewer than the limit are reported, yet the payload
+        // respects the output budget.
+        assert!(already.len() < 10, "already_active: {}", output.value);
+        assert!(!already.is_empty(), "already_active: {}", output.value);
+        let rendered = serde_json::to_string(&output.value)?;
+        assert!(
+            rendered.chars().count() <= TOOL_SEARCH_RESULT_BUDGET_CHARS,
+            "budget exceeded: {} chars",
+            rendered.chars().count()
+        );
+        // The no-new-activation warning count matches the bounded list, and
+        // discovery is not retired (one real deferred tool remains).
+        let warnings = output.value["warnings"].as_array().expect("warnings array");
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+        let text = warnings[0].as_str().expect("warning text");
+        assert!(
+            text.contains(&format!("all {} matching", already.len())),
+            "warning {text:?} vs {} reported",
+            already.len()
+        );
+        assert_eq!(output.value["remaining_deferred"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_pathological_query_stays_within_budget() -> Result<()> {
+        use crate::tools::tool_search::{
+            TOOL_SEARCH_QUERY_ECHO_CHARS, TOOL_SEARCH_RESULT_BUDGET_CHARS,
+        };
+        let (_dir, fs_tools) = deferred_test_fs();
+        let mut entries = Vec::new();
+        for i in 0..10 {
+            entries.push(catalog_entry(
+                &format!("wanted_tool_{i:02}"),
+                "wanted recovery helper capability for testing",
+            ));
+        }
+        let runtime = deferred_catalog_runtime(&fs_tools, entries);
+        // Multi-kilobyte query whose only matching tokens sit past the echo
+        // bound: ranking must still see the full query (activation succeeds)
+        // while the echoed copy stays bounded.
+        let query = format!("{}wanted recovery helper", "qqq ".repeat(1500));
+        assert!(query.chars().count() > TOOL_SEARCH_RESULT_BUDGET_CHARS);
+        let output = dispatch_tool_call(&runtime, &search_call("huge", &query, 10)).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        let activated = output.value["activated"]
+            .as_array()
+            .expect("activated array");
+        assert!(!activated.is_empty(), "value: {}", output.value);
+        // The echo is prefix-truncated: it cannot contain the only matching
+        // tokens, which proves the activation above came from full-query
+        // ranking rather than from the echoed text.
+        let echo = output.value["query"].as_str().expect("query echo");
+        assert!(
+            echo.chars().count() <= TOOL_SEARCH_QUERY_ECHO_CHARS,
+            "echo exceeded bound: {} chars",
+            echo.chars().count()
+        );
+        assert!(!echo.contains("wanted"), "echo: {echo:?}");
+        // The whole envelope, echo included, respects the output budget.
+        let rendered = serde_json::to_string(&output.value)?;
+        assert!(
+            rendered.chars().count() <= TOOL_SEARCH_RESULT_BUDGET_CHARS,
+            "budget exceeded: {} chars",
+            rendered.chars().count()
+        );
         Ok(())
     }
 

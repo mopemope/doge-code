@@ -18,6 +18,12 @@ pub const TOOL_SEARCH_DESC_CHARS: usize = 250;
 /// Whole-response budget for `tool_search` results (default-tier safety net).
 pub const TOOL_SEARCH_RESULT_BUDGET_CHARS: usize = 4_000;
 
+/// Maximum echoed query length in `tool_search` responses (display width,
+/// `"..."` suffix included). Ranking always uses the full query; only the
+/// echoed copy is bounded so a pathological multi-kilobyte query cannot blow
+/// the response budget.
+pub const TOOL_SEARCH_QUERY_ECHO_CHARS: usize = 500;
+
 pub fn tool_def() -> ToolDef {
     ToolDef {
         kind: "function".to_string(),
