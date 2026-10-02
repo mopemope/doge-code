@@ -12,4 +12,4 @@
 - 通常 sandbox の gate はローカル HTTP bind の EPERM と `/tmp/.git` の親リポジトリ検出で既存テスト20件が失敗。権限承認後、Git 管理外の TMPDIR と sandbox 外の待受けで再実行した。プロダクトコードの回避変更はしていない。
 - 追加重点検証: `bash scripts/verify.sh test provenance::` 139件成功。
 - 最終 CLI smoke: API キーなしの隔離環境で JSON parse、Markdown の要確認事項・制約表示、保存済み session の不変、debug.log 非生成を確認。成果物: `/tmp/dgc-evidence-smoke-gtoyk6mw`。
-- 最終 guidance gate を作業メモ更新後に実行。実装と必須検証は完了、コミットはしていない。
+- このメモは初期版の検証記録。実行時 snapshot と実装後レビューの最終結果は [verification-snapshot-work-note.md](verification-snapshot-work-note.md) を参照する。
