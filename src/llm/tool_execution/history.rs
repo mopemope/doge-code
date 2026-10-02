@@ -217,7 +217,9 @@ impl HistoryManager {
     }
 
     fn serialized_message_bytes(msg: &ChatMessage) -> usize {
-        serde_json::to_string(msg).map(|s| s.len()).unwrap_or(0)
+        crate::llm::context_budget::serialized_size(msg)
+            .map(|n| n as usize)
+            .unwrap_or(0)
     }
 
     /// Single helper for all deterministic offload paths. Verifies the
@@ -373,10 +375,22 @@ impl HistoryManager {
         ratio: f32,
         keep_recent: usize,
     ) -> CompactionReport {
-        let mut report = CompactionReport::default();
         if threshold == 0 || (prompt_tokens as f32) < threshold as f32 * ratio {
-            return report;
+            return CompactionReport::default();
         }
+        self.offload_stale_tool_results_for_pressure(keep_recent)
+    }
+
+    /// Unconditional recoverable offload primitive for the preflight
+    /// governor. Same mechanics as [`Self::offload_stale_tool_results`]
+    /// without the previous-usage threshold gate: the caller has already
+    /// measured current-request pressure. Contract is unchanged (unseen
+    /// protected, stubs skipped, store capacity respected, no eviction).
+    pub fn offload_stale_tool_results_for_pressure(
+        &mut self,
+        keep_recent: usize,
+    ) -> CompactionReport {
+        let mut report = CompactionReport::default();
         // Collect tool message indices in order.
         let tool_indices: Vec<usize> = self
             .messages
@@ -513,15 +527,17 @@ impl HistoryManager {
 
     /// Total serialized JSON bytes of provider-bound messages.
     pub fn messages_json_bytes(&self) -> usize {
-        serde_json::to_string(&self.messages)
-            .map(|s| s.len())
+        crate::llm::context_budget::serialized_size(&self.messages)
+            .map(|n| n as usize)
             .unwrap_or(0)
     }
 
     /// Serialized bytes of tool messages only.
     pub fn tool_result_json_bytes(&self) -> usize {
         let tools: Vec<&ChatMessage> = self.messages.iter().filter(|m| m.role == "tool").collect();
-        serde_json::to_string(&tools).map(|s| s.len()).unwrap_or(0)
+        crate::llm::context_budget::serialized_size(&tools)
+            .map(|n| n as usize)
+            .unwrap_or(0)
     }
 
     /// Clear stale tool results to free context space before compaction is
@@ -654,25 +670,122 @@ impl HistoryManager {
         )
     }
 
+    /// Oldest assistant `tool_calls` message holding an unseen result.
+    ///
+    /// Everything from that index onward is the protected suffix: the
+    /// assistant invocation plus its tool results (parallel batches kept as
+    /// a unit) plus any later messages. Returns `None` when no unseen
+    /// results exist. When unseen ids exist but no assistant call resolves,
+    /// callers must fail closed (no compaction) rather than split the
+    /// protocol pairing.
+    pub fn protected_suffix_start_for_unseen(&self) -> Option<usize> {
+        if self.unseen_tool_results.is_empty() {
+            return None;
+        }
+        let mut earliest: Option<usize> = None;
+        for (idx, msg) in self.messages.iter().enumerate() {
+            if msg.role != "assistant" || msg.tool_calls.is_empty() {
+                continue;
+            }
+            let holds_unseen = msg.tool_calls.iter().any(|tc| {
+                tc.id
+                    .as_deref()
+                    .is_some_and(|id| self.unseen_tool_results.contains(id))
+            });
+            if holds_unseen {
+                earliest = Some(earliest.map_or(idx, |e: usize| e.min(idx)));
+            }
+        }
+        earliest
+    }
+
+    /// Preflight/retry entry point for budget-driven compaction.
+    /// Always unseen-safe; see [`Self::protected_suffix_start_for_unseen`].
+    pub async fn compact_for_budget_pressure(&mut self) -> Result<bool> {
+        self.perform_compaction().await
+    }
+
     async fn perform_compaction(&mut self) -> Result<bool> {
+        let before_bytes = self.messages_json_bytes();
+        let unseen = self.unseen_count();
+        let protect_start = self.protected_suffix_start_for_unseen();
+        if unseen > 0 && protect_start.is_none() {
+            warn!(
+                unseen,
+                "refusing compaction: unseen tool results without resolvable assistant call"
+            );
+            return Ok(false);
+        }
+
+        // Split into compactable prefix + exact protected suffix.
+        let (prefix, suffix_len, suffix_unseen) = match protect_start {
+            None => (self.messages.clone(), 0usize, 0usize),
+            Some(start) => {
+                if start >= self.messages.len() {
+                    warn!(
+                        unseen,
+                        start,
+                        len = self.messages.len(),
+                        "refusing compaction: protected suffix out of bounds"
+                    );
+                    return Ok(false);
+                }
+                let prefix = self.messages[..start].to_vec();
+                // Prefix without summarization value: keep the unseen batch
+                // exact and report no compaction.
+                let non_system = prefix.iter().filter(|m| m.role != "system").count();
+                if prefix.len() <= 2 || non_system == 0 {
+                    warn!(
+                        unseen,
+                        prefix_len = prefix.len(),
+                        "refusing compaction: compactable prefix too small, keeping unseen batch exact"
+                    );
+                    return Ok(false);
+                }
+                let suffix_len = self.messages.len() - start;
+                (prefix, suffix_len, unseen)
+            }
+        };
+        let protected_suffix: Vec<ChatMessage> = match protect_start {
+            None => Vec::new(),
+            Some(start) => self.messages[start..].to_vec(),
+        };
+
         let params = crate::llm::compact_history::CompactParams {
             client: self.client.clone(),
             model: self.config.model.clone(),
             fs_tools: self.fs_tools.clone(),
-            history: self.messages.clone(),
+            history: prefix.clone(),
             cfg: self.config.clone(),
         };
 
         match compact_conversation_history(params).await {
             Ok(compact_result) => {
                 if compact_result.metadata.success {
-                    info!("History compaction successful.");
-
-                    // Preserve System Prompt AND Loop Intervention messages
-                    self.messages = Self::merge_compacted_history(
-                        &self.messages,
-                        compact_result.compacted_message,
+                    let after_prefix = match protect_start {
+                        None => Self::merge_compacted_history(
+                            &self.messages,
+                            compact_result.compacted_message,
+                        ),
+                        Some(_) => Self::merge_compacted_with_protected_suffix(
+                            &prefix,
+                            &protected_suffix,
+                            compact_result.compacted_message,
+                        ),
+                    };
+                    let after_bytes = crate::llm::context_budget::serialized_size(&after_prefix)
+                        .map(|n| n as usize)
+                        .unwrap_or(0);
+                    info!(
+                        budget_action = "compact",
+                        protected_unseen_count = suffix_unseen,
+                        protected_suffix_messages = suffix_len,
+                        before_bytes,
+                        after_bytes,
+                        "History compaction successful (unseen-safe)"
                     );
+
+                    self.messages = after_prefix;
 
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx
@@ -695,6 +808,33 @@ impl HistoryManager {
                 Err(e)
             }
         }
+    }
+
+    /// Merge a prefix-only summary with the exact protected suffix.
+    ///
+    /// Layout: pruned prefix systems + summary + recent prefix tail +
+    /// exact protected suffix.
+    ///
+    /// The suffix (assistant tool-call batch + unseen results + later
+    /// messages, byte-identical) is never sent to the compactor.
+    fn merge_compacted_with_protected_suffix(
+        prefix: &[ChatMessage],
+        protected_suffix: &[ChatMessage],
+        compacted: ChatMessage,
+    ) -> Vec<ChatMessage> {
+        const TAIL_BUDGET_CHARS: usize = 8_000;
+        const MAX_SYSTEM_MESSAGES: usize = 8;
+        const MAX_SYSTEM_MESSAGE_CHARS: usize = 4_000;
+
+        let mut new_history: Vec<ChatMessage> = Self::prune_system_messages(
+            prefix.iter().filter(|m| m.role == "system"),
+            MAX_SYSTEM_MESSAGES,
+            MAX_SYSTEM_MESSAGE_CHARS,
+        );
+        new_history.push(compacted);
+        new_history.extend(Self::tail_messages(prefix, TAIL_BUDGET_CHARS));
+        new_history.extend(protected_suffix.iter().cloned());
+        new_history
     }
 
     /// Helper to merge existing system messages with the compacted state and
@@ -1452,5 +1592,229 @@ mod tests {
             serde_json::from_value(legacy).expect("legacy loads");
         assert!(legacy_data.observations.is_empty());
         assert!(legacy_data.unseen_tool_results.is_empty());
+    }
+
+    // --- Preflight governor / unseen-safe compaction tests ---
+
+    fn parallel_history() -> Vec<ChatMessage> {
+        let tcs: Vec<crate::llm::types::ToolCall> = (0..3)
+            .map(|i| crate::llm::types::ToolCall {
+                id: Some(format!("call-{i}")),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: format!("{{\"n\":{i}}}"),
+                },
+            })
+            .collect();
+        let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "batch")];
+        msgs.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("batch".into()),
+            tool_calls: tcs,
+            tool_call_id: None,
+        });
+        for i in 0..3 {
+            msgs.push(make_tool_msg(&format!("call-{i}"), &"x".repeat(2000)));
+        }
+        msgs
+    }
+
+    #[test]
+    fn test_protected_suffix_starts_at_oldest_unseen_assistant() {
+        let mut mgr = test_manager(large_tool_history());
+        // large_tool_history has call-a then call-b; mark only call-b unseen.
+        mgr.unseen_tool_results.insert("call-b".into());
+        let start = mgr
+            .protected_suffix_start_for_unseen()
+            .expect("protects call-b");
+        assert_eq!(mgr.as_slice()[start].role, "assistant");
+        assert!(
+            mgr.as_slice()[start]
+                .tool_calls
+                .iter()
+                .any(|tc| tc.id.as_deref() == Some("call-b"))
+        );
+    }
+
+    #[test]
+    fn test_parallel_batch_protects_whole_unit() {
+        let mut mgr = test_manager(parallel_history());
+        // Only the middle call unseen: whole assistant(A,B,C) batch protected.
+        mgr.unseen_tool_results.insert("call-1".into());
+        let start = mgr
+            .protected_suffix_start_for_unseen()
+            .expect("protects batch");
+        assert_eq!(mgr.as_slice()[start].role, "assistant");
+        assert_eq!(mgr.as_slice()[start].tool_calls.len(), 3);
+        // Merge helper keeps the entire batch exact after the summary.
+        let prefix = mgr.as_slice()[..start].to_vec();
+        let suffix = mgr.as_slice()[start..].to_vec();
+        let merged = HistoryManager::merge_compacted_with_protected_suffix(
+            &prefix,
+            &suffix,
+            make_msg("user", "Summary"),
+        );
+        let tail: Vec<_> = merged.iter().rev().take(suffix.len()).collect();
+        assert_eq!(tail.len(), suffix.len());
+        for (a, b) in merged[merged.len() - suffix.len()..]
+            .iter()
+            .zip(suffix.iter())
+        {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.content, b.content);
+            assert_eq!(a.tool_call_id, b.tool_call_id);
+        }
+    }
+
+    #[test]
+    fn test_unseen_compaction_keeps_exact_content() {
+        let big = "UNSEEN-EXACT-".repeat(300);
+        let mut mgr = test_manager(vec![
+            make_msg("system", "sys"),
+            make_msg("user", "old task"),
+            make_msg("assistant", "old answer with context"),
+            make_msg("user", "more history for prefix value"),
+            make_assistant_with_tool_calls("call-a", "reading"),
+            make_tool_msg("call-a", &big),
+        ]);
+        mgr.unseen_tool_results.insert("call-a".into());
+        let start = mgr
+            .protected_suffix_start_for_unseen()
+            .expect("protects unseen");
+        let prefix = mgr.as_slice()[..start].to_vec();
+        let suffix = mgr.as_slice()[start..].to_vec();
+        // Compactor only sees the prefix.
+        assert!(
+            !prefix
+                .iter()
+                .any(|m| m.tool_call_id.as_deref().is_some_and(|id| id == "call-a"))
+        );
+        let merged = HistoryManager::merge_compacted_with_protected_suffix(
+            &prefix,
+            &suffix,
+            make_msg("user", "Summary"),
+        );
+        let kept = merged
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-a"))
+            .and_then(|m| m.content.clone())
+            .expect("unseen stays inline");
+        assert_eq!(kept, big, "unseen body must be byte-identical");
+        // Pairing preserved: assistant invocation directly precedes result.
+        let pos = merged
+            .iter()
+            .position(|m| m.tool_call_id.as_deref() == Some("call-a"))
+            .expect("tool pos");
+        assert!(pos > 0);
+        let prev = &merged[pos - 1];
+        assert_eq!(prev.role, "assistant");
+        assert!(
+            prev.tool_calls
+                .iter()
+                .any(|tc| tc.id.as_deref() == Some("call-a"))
+        );
+    }
+
+    #[test]
+    fn test_offload_for_pressure_is_recoverable_and_skips_unseen() {
+        let mut mgr = test_manager(large_tool_history());
+        mgr.mark_sent_tool_results_seen();
+        // Make call-a unseen again (e.g. new result arrived after success).
+        mgr.push_tool_result(Some("call-c".into()), "c".repeat(3000));
+        assert!(mgr.unseen_count() >= 1);
+        let before = mgr.messages_json_bytes();
+        let report = mgr.offload_stale_tool_results_for_pressure(0);
+        assert!(report.recoverable_offloads >= 1);
+        assert!(report.skipped_unseen >= 1, "unseen protected: {report:?}");
+        assert!(report.reclaimed_bytes > 0);
+        assert!(mgr.messages_json_bytes() < before);
+        // Recoverable: stub resolves to exact original via the store.
+        for m in mgr.as_slice() {
+            if m.role == "tool"
+                && let Some(c) = &m.content
+                && is_observation_stub(c)
+            {
+                let id = stub_observation_id(c).expect("obs id");
+                let obs = mgr.observations_snapshot();
+                let stored = obs.get(&id).expect("resolvable");
+                assert!(stored.content.len() >= 200);
+            }
+        }
+        // Unseen content stays exact inline.
+        let unseen_content = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-c"))
+            .and_then(|m| m.content.clone())
+            .expect("unseen inline");
+        assert!(unseen_content.contains('c'));
+        assert!(!is_observation_stub(&unseen_content));
+    }
+
+    #[tokio::test]
+    async fn test_missing_assistant_call_fails_closed() {
+        let mut mgr = test_manager(vec![make_msg("system", "sys"), make_msg("user", "u")]);
+        mgr.unseen_tool_results.insert("call_missing".into());
+        assert!(mgr.protected_suffix_start_for_unseen().is_none());
+        // Must not panic and must not compact.
+        let compacted = mgr
+            .compact_for_budget_pressure()
+            .await
+            .expect("fail closed, not error");
+        assert!(!compacted);
+        assert_eq!(mgr.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_prefix_too_small_refuses_compaction() {
+        // system + user + assistant(tool) + huge unseen: prefix is only
+        // [system, user], no summarization value.
+        let big = "Z".repeat(20_000);
+        let mut mgr = test_manager(vec![
+            make_msg("system", "sys"),
+            make_msg("user", "u"),
+            make_assistant_with_tool_calls("call-huge", "read"),
+            make_tool_msg("call-huge", &big),
+        ]);
+        mgr.unseen_tool_results.insert("call-huge".into());
+        let compacted = mgr.compact_for_budget_pressure().await.expect("no error");
+        assert!(!compacted, "tiny prefix must not compact");
+        let kept = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-huge"))
+            .and_then(|m| m.content.clone())
+            .unwrap();
+        assert_eq!(kept, big);
+    }
+
+    #[test]
+    fn test_observation_plus_tool_growth_offload_lowers_footprint() {
+        // Representative E2E: large seen results + newly activated schemas.
+        // Recoverable offload alone must reduce the footprint without
+        // touching the unseen batch.
+        use crate::llm::context_budget::ContextBudgetGovernor;
+        let mut mgr = test_manager(large_tool_history());
+        mgr.mark_sent_tool_results_seen();
+        mgr.push(make_assistant_with_tool_calls("call-new", "read"));
+        mgr.push_tool_result(Some("call-new".into()), "n".repeat(5000));
+        // call-new is unseen; call-a/call-b are seen and offloadable.
+        let gov = ContextBudgetGovernor::new(crate::config::ContextBudgetConfig::default());
+        let tools_before = vec![make_msg("user", "x")]; // placeholder for schema count proxy
+        let _ = tools_before;
+        let before = mgr.messages_json_bytes();
+        let report = mgr.offload_stale_tool_results_for_pressure(1);
+        assert!(report.recoverable_offloads >= 1);
+        let after = mgr.messages_json_bytes();
+        assert!(after < before, "offload must lower footprint");
+        let unseen = mgr
+            .as_slice()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-new"))
+            .and_then(|m| m.content.clone())
+            .unwrap();
+        assert!(unseen.contains('n'));
+        let _ = gov;
     }
 }

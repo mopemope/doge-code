@@ -888,6 +888,7 @@ mod tests {
             rewrite_timeout_sec: 30,
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
+            context_budget: crate::config::ContextBudgetConfig::default(),
         };
 
         let executor = Executor::new(cfg).await;
@@ -931,6 +932,7 @@ mod tests {
             rewrite_timeout_sec: 30,
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
+            context_budget: crate::config::ContextBudgetConfig::default(),
         };
 
         let mut executor = Executor::new(cfg).await.expect("Failed to create executor");

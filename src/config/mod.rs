@@ -16,6 +16,8 @@ pub use mcp::*;
 
 pub mod app;
 pub use app::*;
+pub mod context_budget;
+pub use context_budget::*;
 pub mod execution;
 pub use execution::*;
 pub mod loading;

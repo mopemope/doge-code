@@ -1,6 +1,7 @@
 mod chat_with_tools;
 pub mod client_core;
 mod compact_history;
+pub mod context_budget;
 mod history;
 mod message_utils;
 pub mod observation;

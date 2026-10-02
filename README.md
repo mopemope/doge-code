@@ -490,9 +490,27 @@ search_result_limit = 5  # 1-10
   everything. `eager` is legacy compatibility (all tools exposed,
   `tool_search` hidden). `deferred` always uses deferred routing.
 
+### Preflight Context Governor
+
+- Before each request Doge-Code measures the current footprint
+  (messages + active tool schemas + runtime overlay + overhead) and reduces
+  pressure as overlay drop, then recoverable Observation Store offload, then
+  unseen-safe compaction as a last resort.
+- Config:
+
+```toml
+[context_budget]
+mode = "auto"  # auto / observe / off
+```
+
+- `auto` reduces automatically, `observe` logs the estimate but keeps legacy
+  behavior, `off` disables the governor.
+
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded
-- Stale tool results are cleared first ("context editing") before full compaction
+- Historical tool results are offloaded recoverably to the Observation Store
+  (`obs-*` + `observation_read`) before full compaction; unseen results are
+  never offloaded or summarized until the model has seen them once
 - LLM-based summarization preserves essential context
 - Recent-file / automatic memory hints are injected only as bootstrap context for the first request; they are never stored in durable conversation history
 - Recent conversation tail is retained across compaction (tool-call pairs kept intact)
@@ -541,6 +559,9 @@ resume = false
 
 # Top-level key: project instructions file (AGENTS.md is used if unset)
 project_instructions_file = "PROJECT.md"
+
+[context_budget]
+mode = "auto"  # auto / observe / off
 
 [project]
 exclude_patterns = ["target/", "node_modules/", "*.log"]
