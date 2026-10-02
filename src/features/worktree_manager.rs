@@ -35,6 +35,16 @@ use crate::execution::{
 /// Chars of Git stderr retained in typed errors surfaced toward the UI.
 const GIT_STDERR_BUDGET_CHARS: usize = 2_000;
 
+/// Fallback per-command timeout for failure cleanup when the normal command
+/// timeout is unlimited (`command_timeout_ms == 0`).
+const CLEANUP_DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound for any single cleanup Git invocation, even when the normal
+/// command timeout is larger or unlimited.
+const CLEANUP_MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Overall budget for the whole cleanup sequence so cancellation stays
+/// responsive even if several cleanup steps stall.
+const CLEANUP_OVERALL_BUDGET: Duration = Duration::from_secs(30);
+
 /// Namespace for Doge-generated worktree branches (`doge/<uuid>`).
 const GENERATED_BRANCH_PREFIX: &str = "doge/";
 
@@ -108,8 +118,67 @@ pub enum WorktreeError {
     VerificationFailed(String),
     #[error("Worktree creation failed: {original}; cleanup reported: {cleanup}")]
     CleanupFailed { original: String, cleanup: String },
+    #[error("Worktree creation was cancelled; cleanup reported: {cleanup}")]
+    CancelledWithCleanup { cleanup: String },
+    #[error("Git '{operation}' timed out; cleanup reported: {cleanup}")]
+    TimedOutWithCleanup {
+        operation: &'static str,
+        cleanup: String,
+    },
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl WorktreeError {
+    /// Primary lifecycle classification: cancellation survives cleanup
+    /// attachment. Covers both plain `Cancelled` and `CancelledWithCleanup`.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            WorktreeError::Cancelled | WorktreeError::CancelledWithCleanup { .. }
+        )
+    }
+
+    /// Primary lifecycle classification: timeout survives cleanup attachment.
+    pub fn is_timed_out(&self) -> bool {
+        matches!(
+            self,
+            WorktreeError::TimedOut { .. } | WorktreeError::TimedOutWithCleanup { .. }
+        )
+    }
+
+    /// Cleanup diagnostics carried alongside the primary outcome, if any.
+    /// Used by the TUI to surface leftovers without reclassifying the
+    /// primary lifecycle outcome.
+    pub fn cleanup_diagnostic(&self) -> Option<&str> {
+        match self {
+            WorktreeError::CleanupFailed { cleanup, .. }
+            | WorktreeError::CancelledWithCleanup { cleanup }
+            | WorktreeError::TimedOutWithCleanup { cleanup, .. } => Some(cleanup),
+            _ => None,
+        }
+    }
+}
+
+/// Primary lifecycle classification for a worktree error, independent of any
+/// attached cleanup diagnostics. Control flow matches on this, never on
+/// error-string substrings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreePrimary {
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+/// Classify the primary outcome of a worktree error.
+pub fn classify_primary(error: &WorktreeError) -> WorktreePrimary {
+    if error.is_cancelled() {
+        WorktreePrimary::Cancelled
+    } else if error.is_timed_out() {
+        WorktreePrimary::TimedOut
+    } else {
+        WorktreePrimary::Failed
+    }
 }
 
 /// One `git worktree list --porcelain -z` entry.
@@ -130,6 +199,27 @@ pub fn resolve_timeout(command_timeout_ms: u64) -> Option<Duration> {
         None
     } else {
         Some(Duration::from_millis(command_timeout_ms))
+    }
+}
+
+/// Resolve the finite per-command timeout used for failure cleanup. Always
+/// returns a finite budget, even when the normal command timeout is
+/// unlimited (`command_timeout_ms == 0`). A configured timeout larger than
+/// the cleanup cap is clamped down so cleanup stays responsive.
+pub fn resolve_cleanup_timeout(command_timeout_ms: u64) -> Duration {
+    bound_cleanup_timeout(resolve_timeout(command_timeout_ms))
+}
+
+/// Clamp an already-resolved normal timeout to the finite cleanup budget.
+/// `None` (unlimited normal execution) maps to the cleanup default; any
+/// configured timeout above the cap is clamped to the cap. A zero duration
+/// can never usefully bound a subprocess (the managed runner would time out
+/// immediately), so it also maps to the cleanup default.
+pub fn bound_cleanup_timeout(timeout: Option<Duration>) -> Duration {
+    match timeout {
+        None => CLEANUP_DEFAULT_COMMAND_TIMEOUT,
+        Some(duration) if duration.is_zero() => CLEANUP_DEFAULT_COMMAND_TIMEOUT,
+        Some(duration) => duration.min(CLEANUP_MAX_COMMAND_TIMEOUT),
     }
 }
 
@@ -482,6 +572,55 @@ async fn list_worktrees(
     Ok(parse_worktree_porcelain_z(&output.stdout))
 }
 
+/// Outcome of probing for the invocation-generated branch. A Git non-zero
+/// exit whose stderr positively indicates a missing ref proves the ref is
+/// absent; any spawn/wait/timeout/signal (no exit status)/output failure —
+/// or a non-zero exit without missing-ref evidence — is an observer failure
+/// and must fail closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedBranchProbe {
+    /// Git exited non-zero reporting a missing revision: the ref is
+    /// definitely absent.
+    Absent,
+    /// The probe itself could not run reliably; carries a cleanup note.
+    Unknown(String),
+}
+
+/// Whether `git rev-parse --verify` stderr positively indicates a missing
+/// ref, as opposed to a repository/infrastructure failure. Matching is
+/// case-insensitive and limited to Git's missing-revision diagnostics;
+/// anything else (including empty stderr) returns `false` so the caller
+/// fails closed with an observation failure instead of assuming absence.
+fn branch_probe_stderr_indicates_absence(stderr: &str) -> bool {
+    let lowered = stderr.to_lowercase();
+    lowered.contains("unknown revision") || lowered.contains("needed a single revision")
+}
+
+/// Classify a branch-existence probe error fail-closed. Only a
+/// `GitCommandFailed` with a concrete non-zero exit status *and* stderr
+/// positively indicating a missing ref is authoritative absence; every
+/// other error — spawn/wait/cleanup, cancellation, timeout, signal death
+/// without an exit status, invalid output, or a Git failure that does not
+/// identify the ref as missing — is an observer failure that must be
+/// reported, never treated as absence.
+pub fn classify_branch_probe_error(
+    generated_branch: &str,
+    error: &WorktreeError,
+) -> GeneratedBranchProbe {
+    match error {
+        WorktreeError::GitCommandFailed {
+            exit_code: Some(code),
+            stderr,
+            ..
+        } if *code != 0 && branch_probe_stderr_indicates_absence(stderr) => {
+            GeneratedBranchProbe::Absent
+        }
+        other => GeneratedBranchProbe::Unknown(format!(
+            "cleanup: could not verify branch {generated_branch}: {other}; left in place"
+        )),
+    }
+}
+
 /// Best-effort cleanup of this invocation's generated resources. Only the
 /// generated path (inside this invocation's storage area) and the generated
 /// `doge/` branch are ever candidates; anything else is left untouched.
@@ -489,14 +628,48 @@ async fn list_worktrees(
 /// cleanup failures; an empty vector means nothing remained.
 ///
 /// Cleanup uses a fresh cancellation token: it must still run when the
-/// original operation was cancelled, bounded by the same timeout.
+/// original operation was cancelled. Every cleanup Git invocation uses the
+/// finite cleanup budget (never the unlimited normal timeout), and the
+/// whole sequence is bounded by an overall cleanup budget.
 async fn cleanup_generated_worktree(
     repo_root: &Path,
     generated_path: &Path,
     generated_branch: &str,
     timeout: Option<Duration>,
 ) -> Vec<String> {
+    if !is_generated_branch(generated_branch) || !is_generated_path(generated_path, repo_root) {
+        return vec![format!(
+            "cleanup refused: {} / {} is outside this invocation's generated identity",
+            generated_path.display(),
+            generated_branch
+        )];
+    }
+    match tokio::time::timeout(
+        CLEANUP_OVERALL_BUDGET,
+        cleanup_generated_worktree_inner(repo_root, generated_path, generated_branch, timeout),
+    )
+    .await
+    {
+        Ok(notes) => notes,
+        Err(_) => vec![format!(
+            "cleanup: overall cleanup budget of {} ms exceeded for {}; leftovers may remain",
+            CLEANUP_OVERALL_BUDGET.as_millis(),
+            generated_path.display()
+        )],
+    }
+}
+
+async fn cleanup_generated_worktree_inner(
+    repo_root: &Path,
+    generated_path: &Path,
+    generated_branch: &str,
+    timeout: Option<Duration>,
+) -> Vec<String> {
     let mut notes = Vec::new();
+    // `debug_assert!` documents the wrapper contract; the checks below stay
+    // fail-closed in release builds as well.
+    debug_assert!(is_generated_branch(generated_branch));
+    debug_assert!(is_generated_path(generated_path, repo_root));
     if !is_generated_branch(generated_branch) || !is_generated_path(generated_path, repo_root) {
         notes.push(format!(
             "cleanup refused: {} / {} is outside this invocation's generated identity",
@@ -505,10 +678,12 @@ async fn cleanup_generated_worktree(
         ));
         return notes;
     }
+    // Finite per-command budget even when normal execution is unlimited.
+    let cleanup_timeout = Some(bound_cleanup_timeout(timeout));
     let fresh = CancellationToken::new();
     let expected_ref = format!("refs/heads/{generated_branch}");
 
-    let records = match list_worktrees(repo_root, "cleanup-list", timeout, &fresh).await {
+    let records = match list_worktrees(repo_root, "cleanup-list", cleanup_timeout, &fresh).await {
         Ok(records) => records,
         Err(error) => {
             return vec![format!(
@@ -531,7 +706,7 @@ async fn cleanup_generated_worktree(
                 &generated_path.to_string_lossy(),
             ],
             "cleanup-remove",
-            timeout,
+            cleanup_timeout,
             &fresh,
         )
         .await
@@ -556,7 +731,7 @@ async fn cleanup_generated_worktree(
     // Remove the generated branch only when no worktree has it checked out
     // anymore. `branch -d` (never `-D`) refuses to delete work that gained
     // commits in the meantime; that refusal is reported, not forced.
-    let records = match list_worktrees(repo_root, "cleanup-list", timeout, &fresh).await {
+    let records = match list_worktrees(repo_root, "cleanup-list", cleanup_timeout, &fresh).await {
         Ok(records) => records,
         Err(error) => {
             notes.push(format!("cleanup: could not re-list worktrees: {error}"));
@@ -576,19 +751,25 @@ async fn cleanup_generated_worktree(
         repo_root,
         &["rev-parse", "--verify", &expected_ref],
         "cleanup-branch-exists",
-        timeout,
+        cleanup_timeout,
         &fresh,
     )
     .await
     {
         Ok(_) => {}
-        Err(_) => return notes,
+        Err(error) => match classify_branch_probe_error(generated_branch, &error) {
+            GeneratedBranchProbe::Absent => return notes,
+            GeneratedBranchProbe::Unknown(note) => {
+                notes.push(note);
+                return notes;
+            }
+        },
     }
     if let Err(error) = run_git(
         repo_root,
         &["branch", "-d", generated_branch],
         "cleanup-branch",
-        timeout,
+        cleanup_timeout,
         &fresh,
     )
     .await
@@ -600,27 +781,92 @@ async fn cleanup_generated_worktree(
     notes
 }
 
-/// Attach cleanup notes to the original failure without hiding it. An empty
-/// note list returns the original error unchanged, and cancellation/timeout
-/// are always returned unchanged so they stay distinguishable for lifecycle
-/// mapping (leftover notes are already `tracing::warn!`-logged by the
-/// caller and, for the TUI job, re-attached to the cancel message there).
+/// Attach cleanup notes to the original failure while preserving the primary
+/// lifecycle classification. An empty note list returns the original error
+/// unchanged. Cancellation stays cancellation (`CancelledWithCleanup`),
+/// timeout stays timeout (`TimedOutWithCleanup`), and other failures gain
+/// the cleanup context (`CleanupFailed`); cleanup diagnostics are always
+/// retrievable via [`WorktreeError::cleanup_diagnostic`] without parsing
+/// strings.
 fn with_cleanup_notes(original: WorktreeError, notes: Vec<String>) -> WorktreeError {
     if notes.is_empty() {
         return original;
     }
-    if matches!(
-        original,
-        WorktreeError::Cancelled | WorktreeError::TimedOut { .. }
-    ) {
-        return original;
-    }
-    WorktreeError::CleanupFailed {
-        original: original.to_string(),
-        cleanup: notes.join("; "),
+    let cleanup = notes.join("; ");
+    match original {
+        WorktreeError::Cancelled => WorktreeError::CancelledWithCleanup { cleanup },
+        WorktreeError::TimedOut { operation } => {
+            WorktreeError::TimedOutWithCleanup { operation, cleanup }
+        }
+        // Already carry diagnostics: append without reclassifying the
+        // primary lifecycle outcome. Cancellation must never become a
+        // generic failure merely because a second cleanup note arrived.
+        WorktreeError::CancelledWithCleanup { cleanup: existing } => {
+            WorktreeError::CancelledWithCleanup {
+                cleanup: if existing.is_empty() {
+                    cleanup
+                } else {
+                    format!("{existing}; {cleanup}")
+                },
+            }
+        }
+        WorktreeError::TimedOutWithCleanup {
+            operation,
+            cleanup: existing,
+        } => WorktreeError::TimedOutWithCleanup {
+            operation,
+            cleanup: if existing.is_empty() {
+                cleanup
+            } else {
+                format!("{existing}; {cleanup}")
+            },
+        },
+        WorktreeError::CleanupFailed {
+            original,
+            cleanup: existing,
+        } => WorktreeError::CleanupFailed {
+            original,
+            cleanup: if existing.is_empty() {
+                cleanup
+            } else {
+                format!("{existing}; {cleanup}")
+            },
+        },
+        other => WorktreeError::CleanupFailed {
+            original: other.to_string(),
+            cleanup,
+        },
     }
 }
 
+/// Canonicalize the verified worktree path. A failure here still owns the
+/// invocation-generated worktree/branch, so failure cleanup runs before the
+/// typed failure is returned (with any diagnostics attached instead of
+/// orphaning the resources silently).
+async fn canonicalize_verified_path(
+    repo_root: &Path,
+    worktree_path: &Path,
+    generated_branch: &str,
+    timeout: Option<Duration>,
+) -> Result<PathBuf, WorktreeError> {
+    match worktree_path.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(error) => {
+            let notes =
+                cleanup_generated_worktree(repo_root, worktree_path, generated_branch, timeout)
+                    .await;
+            for note in &notes {
+                tracing::warn!(note = %note, "worktree path cleanup reported");
+            }
+            Err(with_cleanup_notes(
+                WorktreeError::VerificationFailed(format!(
+                    "cannot canonicalize verified worktree path: {error}"
+                )),
+                notes,
+            ))
+        }
+    }
+}
 /// Create one isolated linked worktree and its generated branch in a single
 /// Git operation (`git worktree add -b <branch> <path> HEAD`), then verify
 /// the registration through porcelain output. Only `CreatedWorktree` after
@@ -698,11 +944,8 @@ pub async fn create_worktree(
         }
     }
 
-    let worktree_path = worktree_path.canonicalize().map_err(|error| {
-        WorktreeError::VerificationFailed(format!(
-            "cannot canonicalize verified worktree path: {error}"
-        ))
-    })?;
+    let worktree_path =
+        canonicalize_verified_path(&repo_root, &worktree_path, &branch, timeout).await?;
 
     tracing::info!(
         repository_root = %repo_root.display(),
@@ -911,22 +1154,529 @@ mod tests {
 
     #[test]
     fn test_cleanup_notes_preserve_cancel_and_timeout() {
-        // Cancellation/timeout stay distinguishable even when cleanup
-        // reports leftovers; other failures gain the cleanup context.
+        // Cancellation stays cancellation while carrying cleanup diagnostics;
+        // timeout stays timeout; other failures gain the cleanup context.
         let cancelled = with_cleanup_notes(WorktreeError::Cancelled, vec!["leftover".to_string()]);
-        assert!(matches!(cancelled, WorktreeError::Cancelled));
+        assert!(matches!(
+            cancelled,
+            WorktreeError::CancelledWithCleanup { .. }
+        ));
+        assert!(cancelled.is_cancelled());
+        assert!(!cancelled.is_timed_out());
+        assert_eq!(cancelled.cleanup_diagnostic(), Some("leftover"));
+        assert_eq!(classify_primary(&cancelled), WorktreePrimary::Cancelled);
+
         let timed_out = with_cleanup_notes(
             WorktreeError::TimedOut { operation: "op" },
             vec!["leftover".to_string()],
         );
-        assert!(matches!(timed_out, WorktreeError::TimedOut { .. }));
+        assert!(matches!(
+            timed_out,
+            WorktreeError::TimedOutWithCleanup { .. }
+        ));
+        assert!(timed_out.is_timed_out());
+        assert!(!timed_out.is_cancelled());
+        assert_eq!(timed_out.cleanup_diagnostic(), Some("leftover"));
+        assert_eq!(classify_primary(&timed_out), WorktreePrimary::TimedOut);
+
         let failed = with_cleanup_notes(
             WorktreeError::VerificationFailed("bad".to_string()),
             vec!["note".to_string()],
         );
         assert!(matches!(failed, WorktreeError::CleanupFailed { .. }));
+        assert!(!failed.is_cancelled());
+        assert!(!failed.is_timed_out());
+        assert_eq!(failed.cleanup_diagnostic(), Some("note"));
+        assert_eq!(classify_primary(&failed), WorktreePrimary::Failed);
+
         let clean = with_cleanup_notes(WorktreeError::Cancelled, Vec::new());
         assert!(matches!(clean, WorktreeError::Cancelled));
+        assert!(clean.cleanup_diagnostic().is_none());
+
+        let clean_timeout =
+            with_cleanup_notes(WorktreeError::TimedOut { operation: "op" }, Vec::new());
+        assert!(matches!(clean_timeout, WorktreeError::TimedOut { .. }));
+        assert!(clean_timeout.cleanup_diagnostic().is_none());
+    }
+
+    #[test]
+    fn test_cleanup_budget_is_finite_when_normal_timeout_unlimited() {
+        // Normal execution keeps unlimited semantics, but cleanup never does.
+        assert_eq!(resolve_timeout(0), None);
+        let budget = resolve_cleanup_timeout(0);
+        assert!(budget > Duration::ZERO);
+        assert!(budget <= CLEANUP_MAX_COMMAND_TIMEOUT);
+        assert_eq!(bound_cleanup_timeout(None), CLEANUP_DEFAULT_COMMAND_TIMEOUT);
+        // A large configured timeout is clamped to the cleanup cap.
+        assert_eq!(
+            bound_cleanup_timeout(Some(Duration::from_secs(600))),
+            CLEANUP_MAX_COMMAND_TIMEOUT
+        );
+        assert_eq!(
+            resolve_cleanup_timeout(600_000),
+            CLEANUP_MAX_COMMAND_TIMEOUT
+        );
+        // A small configured timeout stays bounded and finite.
+        assert_eq!(
+            bound_cleanup_timeout(Some(Duration::from_millis(1500))),
+            Duration::from_millis(1500)
+        );
+        // A zero duration can never bound a subprocess; it maps to the
+        // finite default instead of an immediate timeout.
+        assert_eq!(
+            bound_cleanup_timeout(Some(Duration::ZERO)),
+            CLEANUP_DEFAULT_COMMAND_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_cleanup_notes_append_without_reclassifying() {
+        // Already-wrapped errors keep their primary lifecycle classification
+        // when further notes arrive; cancellation never becomes failure.
+        let again = with_cleanup_notes(
+            WorktreeError::CancelledWithCleanup {
+                cleanup: "first".to_string(),
+            },
+            vec!["second".to_string()],
+        );
+        assert!(matches!(again, WorktreeError::CancelledWithCleanup { .. }));
+        assert!(again.is_cancelled());
+        assert_eq!(again.cleanup_diagnostic(), Some("first; second"));
+        assert_eq!(classify_primary(&again), WorktreePrimary::Cancelled);
+
+        let again = with_cleanup_notes(
+            WorktreeError::TimedOutWithCleanup {
+                operation: "op",
+                cleanup: "first".to_string(),
+            },
+            vec!["second".to_string()],
+        );
+        assert!(matches!(again, WorktreeError::TimedOutWithCleanup { .. }));
+        assert!(again.is_timed_out());
+        assert_eq!(again.cleanup_diagnostic(), Some("first; second"));
+        assert_eq!(classify_primary(&again), WorktreePrimary::TimedOut);
+
+        let again = with_cleanup_notes(
+            WorktreeError::CleanupFailed {
+                original: "boom".to_string(),
+                cleanup: "first".to_string(),
+            },
+            vec!["second".to_string()],
+        );
+        assert!(matches!(again, WorktreeError::CleanupFailed { .. }));
+        assert_eq!(again.cleanup_diagnostic(), Some("first; second"));
+        assert_eq!(classify_primary(&again), WorktreePrimary::Failed);
+    }
+
+    #[test]
+    fn test_branch_probe_absent_only_on_git_nonzero_exit() {
+        let absent = classify_branch_probe_error(
+            "doge/id",
+            &WorktreeError::GitCommandFailed {
+                operation: "cleanup-branch-exists",
+                exit_code: Some(128),
+                stderr: "unknown revision".to_string(),
+            },
+        );
+        assert_eq!(absent, GeneratedBranchProbe::Absent);
+
+        // A Git failure without an exit status (signal death, unknown exit)
+        // is an observer failure, not proof of absence: fail closed.
+        match classify_branch_probe_error(
+            "doge/id",
+            &WorktreeError::GitCommandFailed {
+                operation: "cleanup-branch-exists",
+                exit_code: None,
+                stderr: String::new(),
+            },
+        ) {
+            GeneratedBranchProbe::Unknown(note) => {
+                assert!(note.contains("could not verify branch doge/id"), "{note}");
+                assert!(note.contains("left in place"), "{note}");
+            }
+            other => panic!("missing exit status must fail closed, got {other:?}"),
+        }
+
+        // Spawn/wait/timeout/cancellation/observer failures fail closed.
+        for error in [
+            WorktreeError::ProcessError {
+                operation: "cleanup-branch-exists",
+                message: "failed to spawn git: boom".to_string(),
+            },
+            WorktreeError::TimedOut {
+                operation: "cleanup-branch-exists",
+            },
+            WorktreeError::Cancelled,
+            WorktreeError::InvalidGitOutput {
+                operation: "cleanup-branch-exists",
+                reason: "bad".to_string(),
+            },
+        ] {
+            match classify_branch_probe_error("doge/id", &error) {
+                GeneratedBranchProbe::Unknown(note) => {
+                    assert!(note.contains("could not verify branch doge/id"), "{note}");
+                    assert!(note.contains("left in place"), "{note}");
+                }
+                other => panic!("observer failure must fail closed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_branch_probe_requires_absence_evidence_in_stderr() {
+        // A non-zero Git exit without missing-ref evidence (wrong
+        // repository, corrupted state, unexpected failure) must fail closed
+        // instead of being treated as authoritative absence.
+        for stderr in [
+            "",
+            "fatal: not a git repository (or any of the parent directories)",
+            "fatal: unable to read log 'refs/heads/doge/id': Input/output error",
+        ] {
+            match classify_branch_probe_error(
+                "doge/id",
+                &WorktreeError::GitCommandFailed {
+                    operation: "cleanup-branch-exists",
+                    exit_code: Some(128),
+                    stderr: stderr.to_string(),
+                },
+            ) {
+                GeneratedBranchProbe::Unknown(note) => {
+                    assert!(note.contains("could not verify branch doge/id"), "{note}");
+                    assert!(note.contains("left in place"), "{note}");
+                }
+                other => {
+                    panic!("exit 128 without absence evidence must fail closed, got {other:?}")
+                }
+            }
+        }
+
+        // A contradictory success exit code is never absence either.
+        match classify_branch_probe_error(
+            "doge/id",
+            &WorktreeError::GitCommandFailed {
+                operation: "cleanup-branch-exists",
+                exit_code: Some(0),
+                stderr: "fatal: Needed a single revision".to_string(),
+            },
+        ) {
+            GeneratedBranchProbe::Unknown(_) => {}
+            other => panic!("success exit code must fail closed, got {other:?}"),
+        }
+
+        // Both of Git's missing-revision diagnostics count as absence
+        // (case-insensitively, so locale-cased output still matches).
+        for stderr in [
+            "fatal: Needed a single revision",
+            "FATAL: NEEDED A SINGLE REVISION",
+            "error: unknown revision refs/heads/doge/id",
+        ] {
+            assert_eq!(
+                classify_branch_probe_error(
+                    "doge/id",
+                    &WorktreeError::GitCommandFailed {
+                        operation: "cleanup-branch-exists",
+                        exit_code: Some(128),
+                        stderr: stderr.to_string(),
+                    },
+                ),
+                GeneratedBranchProbe::Absent,
+                "stderr: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_primary_classification_never_parses_strings() {
+        // Typed predicates stay distinct across attached diagnostics.
+        let cancelled = WorktreeError::CancelledWithCleanup {
+            cleanup: "x".to_string(),
+        };
+        assert!(cancelled.is_cancelled());
+        assert_eq!(classify_primary(&cancelled), WorktreePrimary::Cancelled);
+        let timed_out = WorktreeError::TimedOutWithCleanup {
+            operation: "create-worktree",
+            cleanup: "y".to_string(),
+        };
+        assert!(timed_out.is_timed_out());
+        assert_eq!(classify_primary(&timed_out), WorktreePrimary::TimedOut);
+        // Display carries diagnostics but classification does not depend on it.
+        assert!(cancelled.to_string().contains("cancelled"));
+        assert!(timed_out.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn test_cleanup_never_uses_global_prune_or_force_delete() {
+        // Structural guard: the manager must never introduce a global prune
+        // or a forced branch deletion that could discard commits. Forbidden
+        // tokens are built at runtime so this test's own literals cannot
+        // self-match the source under test.
+        let source = include_str!("worktree_manager.rs");
+        // Only scan production code: the test module itself names the
+        // forbidden tokens, so split before `#[cfg(test)]`.
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let prune_cmd = ["worktree", "prune"].join(" ");
+        assert!(!prod.contains(&prune_cmd), "no global prune allowed");
+        let prune_arg = format!("\"{}\"", ["pr", "une"].concat());
+        assert!(!prod.contains(&prune_arg), "no global prune allowed");
+        let force_flag = format!("\"{}\"", ["-", "D"].concat());
+        assert!(
+            !prod.contains(&force_flag),
+            "no forced branch deletion allowed"
+        );
+        let safe_delete = format!("\"{}\", \"{}\"", "branch", ["-", "d"].concat());
+        assert!(
+            prod.contains(&safe_delete),
+            "branch removal must use safe `-d`"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_refuses_outside_generated_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+
+        // Outside path and outside branch are both refused without touching
+        // anything: no new branches appear.
+        let outside_path = canonical.join("elsewhere");
+        let notes = cleanup_generated_worktree(
+            &canonical,
+            &outside_path,
+            "doge/some-id",
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(
+            notes.iter().any(|note| note.contains("outside")),
+            "{notes:?}"
+        );
+
+        let inside_path = worktree_base_dir(&canonical).join("some-id");
+        let notes = cleanup_generated_worktree(
+            &canonical,
+            &inside_path,
+            "main",
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(
+            notes.iter().any(|note| note.contains("outside")),
+            "{notes:?}"
+        );
+
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "doge/*"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8(branches.stdout)
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_unlimited_timeout_stays_bounded() {
+        // Cleanup with `None` (unlimited normal timeout) still resolves to a
+        // finite per-command budget; the call below completes promptly with
+        // a diagnostic instead of hanging.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+        let missing = worktree_base_dir(&canonical).join("missing-id");
+        let notes = tokio::time::timeout(
+            Duration::from_secs(20),
+            cleanup_generated_worktree(&canonical, &missing, "doge/missing-id", None),
+        )
+        .await
+        .expect("cleanup with unlimited normal timeout must stay bounded");
+        // Missing path/branch yields no leftovers; the key assertion is that
+        // the future above completed within the test timeout.
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// Run one Git command synchronously in tests. Every invocation uses an
+    /// explicit `current_dir`; the process-global cwd is never touched.
+    fn git_ok(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git must run");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            root.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_registered_worktree_and_branch() {
+        // Positive path: a registered invocation-owned worktree and its
+        // generated branch are both removed without diagnostics.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let branch = format!("{GENERATED_BRANCH_PREFIX}{id}");
+        let path = worktree_base_dir(&canonical).join(&id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                &path.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        assert!(path.is_dir());
+        assert!(branch_exists(&repo, &branch));
+
+        let notes =
+            cleanup_generated_worktree(&canonical, &path, &branch, Some(Duration::from_secs(10)))
+                .await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(!path.exists(), "registered worktree must be removed");
+        assert!(
+            !branch_exists(&repo, &branch),
+            "generated branch must be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_stray_directory_without_branch() {
+        // `git worktree add` can fail after creating the invocation-owned
+        // directory but before registering it; the stray directory is
+        // removed even though no branch exists.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let branch = format!("{GENERATED_BRANCH_PREFIX}{id}");
+        let path = worktree_base_dir(&canonical).join(&id);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("partial.txt"), "partial").unwrap();
+
+        let notes =
+            cleanup_generated_worktree(&canonical, &path, &branch, Some(Duration::from_secs(10)))
+                .await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(!path.exists(), "stray directory must be removed");
+        assert!(!branch_exists(&repo, &branch));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_leaves_branch_checked_out_elsewhere() {
+        // The generated branch checked out by a *different* worktree path
+        // must never be deleted: cleanup reports and leaves it in place.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let branch = format!("{GENERATED_BRANCH_PREFIX}{id}");
+        let path = worktree_base_dir(&canonical).join(&id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                &path.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        // A different invocation-owned path that was never registered.
+        let other = worktree_base_dir(&canonical).join(uuid::Uuid::now_v7().to_string());
+        assert!(!other.exists());
+
+        let notes =
+            cleanup_generated_worktree(&canonical, &other, &branch, Some(Duration::from_secs(10)))
+                .await;
+        assert!(
+            notes.iter().any(|note| note.contains("still checked out")),
+            "{notes:?}"
+        );
+        assert!(
+            branch_exists(&repo, &branch),
+            "branch in use elsewhere must be preserved"
+        );
+        assert!(path.is_dir(), "other worktree must be untouched");
+
+        git_ok(
+            &repo,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        );
+        git_ok(&repo, &["branch", "-D", &branch]);
+    }
+
+    #[tokio::test]
+    async fn test_canonicalize_failure_still_cleans_up_generated_branch() {
+        // Regression: a post-verification canonicalize failure owns the
+        // invocation-generated branch and must surface its leftover instead
+        // of orphaning it silently.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        let canonical = repo.canonicalize().unwrap();
+
+        // Standalone generated branch holding an unmerged commit, so safe
+        // `branch -d` refuses and the diagnostic is observable. Created and
+        // abandoned without a checkout, then HEAD is restored.
+        let id = uuid::Uuid::now_v7().to_string();
+        let branch = format!("{GENERATED_BRANCH_PREFIX}{id}");
+        git_ok(&repo, &["checkout", "-b", &branch]);
+        std::fs::write(repo.join("unmerged.txt"), "unmerged").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "unmerged"]);
+        git_ok(&repo, &["checkout", "-"]);
+
+        // The verified path vanished before canonicalization. This simulates
+        // the TOCTOU race deterministically: no sleeps, no timing.
+        let missing = worktree_base_dir(&canonical).join(&id);
+        assert!(!missing.exists());
+
+        match canonicalize_verified_path(
+            &canonical,
+            &missing,
+            &branch,
+            Some(Duration::from_secs(10)),
+        )
+        .await
+        {
+            Err(error) => {
+                let diagnostic = error
+                    .cleanup_diagnostic()
+                    .expect("cleanup diagnostic must be attached");
+                assert!(diagnostic.contains("remains"), "{diagnostic}");
+                assert_eq!(classify_primary(&error), WorktreePrimary::Failed);
+                // Safety: the unmerged branch was reported, never
+                // force-deleted.
+                assert!(branch_exists(&repo, &branch));
+            }
+            Ok(_) => panic!("missing path must fail canonicalization"),
+        }
     }
 
     #[tokio::test]

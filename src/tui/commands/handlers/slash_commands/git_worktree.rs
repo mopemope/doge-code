@@ -71,6 +71,34 @@ pub fn handle_git_worktree(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     }
 }
 
+/// User-facing messages for a cancelled worktree job. The primary outcome
+/// stays cancellation; any cleanup diagnostics are surfaced as a separate
+/// `Leftovers:` line without reclassifying the outcome. Pure for
+/// deterministic testing (no timing or Git involved).
+fn cancelled_messages(error: Option<&WorktreeError>) -> Vec<String> {
+    let mut messages = vec!["::shell_output:Worktree creation cancelled.".to_string()];
+    if let Some(diagnostic) = error.and_then(|error| error.cleanup_diagnostic()) {
+        messages.push(format!("::shell_output:Leftovers: {diagnostic}"));
+    }
+    messages.push("::status:cancelled".to_string());
+    messages
+}
+
+/// Messages for a cancel that lands after the worktree was already created
+/// and verified. The outcome stays cancellation, but the invocation-owned
+/// path/branch are surfaced so they are not silently orphaned. Pure for
+/// deterministic testing.
+fn cancelled_after_success_messages(path: &std::path::Path, branch: &str) -> Vec<String> {
+    vec![
+        "::shell_output:Worktree creation cancelled.".to_string(),
+        format!(
+            "::shell_output:Leftovers: worktree {} (branch {branch}) remains; left in place",
+            path.display(),
+        ),
+        "::status:cancelled".to_string(),
+    ]
+}
+
 async fn run_worktree_job(
     project_root: PathBuf,
     ui_tx: Sender<String>,
@@ -96,20 +124,26 @@ async fn run_worktree_job(
     )
     .await;
 
-    // A cancellation landing anywhere in the run reports `Cancelled`, even
-    // when the error already carries cleanup leftovers (those stay visible
-    // in the message). Timeout is an infrastructure failure, not a cancel.
+    // Cancellation stays cancellation even when cleanup also reported
+    // leftovers: the primary lifecycle classification is preserved while the
+    // diagnostics remain visible in the message. When the work actually
+    // completed before the cancel landed, its path/branch are still surfaced
+    // so the invocation-owned resources are not silently orphaned.
     if cancellation.is_cancelled() {
-        match outcome {
-            Err(WorktreeError::CleanupFailed { cleanup, .. }) => {
-                ui_tx.send_logged("::shell_output:Worktree creation cancelled.".to_string());
-                ui_tx.send_logged(format!("::shell_output:Leftovers: {cleanup}"));
+        match &outcome {
+            Err(error) => {
+                for message in cancelled_messages(Some(error)) {
+                    ui_tx.send_logged(message);
+                }
             }
-            _ => {
-                ui_tx.send_logged("::shell_output:Worktree creation cancelled.".to_string());
+            Ok(created) => {
+                for message in
+                    cancelled_after_success_messages(&created.worktree_path, &created.branch)
+                {
+                    ui_tx.send_logged(message);
+                }
             }
         }
-        ui_tx.send_logged("::status:cancelled".to_string());
         return JobRunOutcome::Cancelled;
     }
 
@@ -129,9 +163,10 @@ async fn run_worktree_job(
             ui_tx.send_logged("::status:idle".to_string());
             JobRunOutcome::Completed
         }
-        Err(WorktreeError::Cancelled) => {
-            ui_tx.send_logged("::shell_output:Worktree creation cancelled.".to_string());
-            ui_tx.send_logged("::status:cancelled".to_string());
+        Err(error) if error.is_cancelled() => {
+            for message in cancelled_messages(Some(&error)) {
+                ui_tx.send_logged(message);
+            }
             JobRunOutcome::Cancelled
         }
         Err(error) => {
@@ -294,6 +329,66 @@ mod tests {
         );
 
         executor.jobs.cancel(blocker);
+    }
+
+    #[test]
+    fn test_cancelled_messages_surface_leftovers_without_reclassifying() {
+        use crate::features::worktree_manager::WorktreeError;
+
+        // Clean cancellation: no leftovers line.
+        let clean = cancelled_messages(Some(&WorktreeError::Cancelled));
+        assert_eq!(clean.len(), 2);
+        assert!(clean[0].contains("cancelled"));
+        assert_eq!(clean[1], "::status:cancelled");
+
+        // Cancellation with leftovers: primary message unchanged, diagnostics
+        // carried on a separate line.
+        let with_leftovers = cancelled_messages(Some(&WorktreeError::CancelledWithCleanup {
+            cleanup: "branch doge/x remains".to_string(),
+        }));
+        assert_eq!(with_leftovers.len(), 3);
+        assert!(with_leftovers[0].contains("cancelled"));
+        assert!(with_leftovers[1].contains("Leftovers: branch doge/x remains"));
+        assert_eq!(with_leftovers[2], "::status:cancelled");
+
+        // Timeout diagnostics are typed separately and never classified as
+        // cancellation.
+        let timed_out = WorktreeError::TimedOutWithCleanup {
+            operation: "create-worktree",
+            cleanup: "stray dir remains".to_string(),
+        };
+        assert!(!timed_out.is_cancelled());
+        assert!(timed_out.is_timed_out());
+        assert!(timed_out.cleanup_diagnostic().is_some());
+        assert!(timed_out.to_string().contains("stray dir remains"));
+    }
+
+    #[test]
+    fn test_cancel_after_success_surfaces_created_path() {
+        let messages =
+            cancelled_after_success_messages(std::path::Path::new("/tmp/wt-123"), "doge/abc");
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].contains("cancelled"));
+        assert!(messages[1].contains("Leftovers: worktree /tmp/wt-123"));
+        assert!(messages[1].contains("doge/abc"));
+        assert_eq!(messages[2], "::status:cancelled");
+    }
+
+    #[test]
+    fn test_cancel_with_leftovers_keeps_cancelled_outcome() {
+        use crate::features::worktree_manager::{WorktreePrimary, classify_primary};
+
+        // End-to-end classification without Git: a primary cancellation
+        // carrying leftover diagnostics still classifies as cancellation and
+        // still surfaces the leftovers line.
+        let error = WorktreeError::CancelledWithCleanup {
+            cleanup: "branch doge/x remains".to_string(),
+        };
+        assert_eq!(classify_primary(&error), WorktreePrimary::Cancelled);
+        let messages = cancelled_messages(Some(&error));
+        assert_eq!(messages.len(), 3);
+        assert!(messages[1].contains("Leftovers: branch doge/x remains"));
+        assert_eq!(messages[2], "::status:cancelled");
     }
 
     #[tokio::test]
