@@ -7,6 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LlmConfig;
 use crate::llm::LlmErrorKind;
+use crate::llm::prompt_cache::{
+    PromptCacheCounters, PromptCacheSessionUsage, PromptCacheUsageSnapshot,
+};
 use crate::llm::types::{ChatMessage, ChoiceMessage, Usage};
 
 mod network;
@@ -34,6 +37,9 @@ pub struct OpenAIClient {
     /// (including an explicit `0`). False means the provider does not report
     /// reasoning usage and callers must not display `0 tokens`.
     pub reasoning_usage_seen: Arc<AtomicBool>,
+    /// Prompt-cache telemetry (last-request + session totals).
+    /// Shared via `Arc` like the other counters so `Clone` shares state.
+    pub prompt_cache_counters: Arc<PromptCacheCounters>,
 }
 
 impl OpenAIClient {
@@ -52,6 +58,7 @@ impl OpenAIClient {
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
+            prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
         })
     }
 
@@ -130,6 +137,7 @@ impl OpenAIClient {
         self.total_prompt_tokens_used.store(0, Ordering::Relaxed);
         self.total_reasoning_tokens_used.store(0, Ordering::Relaxed);
         self.reasoning_usage_seen.store(false, Ordering::Relaxed);
+        self.prompt_cache_counters.clear();
     }
 
     /// Get the last request's reasoning tokens.
@@ -160,6 +168,11 @@ impl OpenAIClient {
     /// Record one response's [`Usage`], including optional reasoning details.
     /// A present `reasoning_tokens` field (even `0`) marks usage as seen;
     /// an absent field leaves `reasoning_usage_seen` untouched.
+    /// Prompt-cache details follow the same contract: an explicit `0` marks
+    /// reported/seen as true, while absent details reset the last-request
+    /// state to "not reported" without touching the ever-seen flags.
+    /// This is the single source of truth for all request paths
+    /// (`chat_tools_once`, `chat_once_request`, compaction, sub-agent).
     pub fn record_usage(&self, usage: &Usage) {
         self.set_tokens(usage.total_tokens);
         self.set_prompt_tokens(usage.prompt_tokens);
@@ -171,6 +184,76 @@ impl OpenAIClient {
             self.add_total_reasoning_tokens(reasoning);
             self.reasoning_usage_seen.store(true, Ordering::Relaxed);
         }
+        self.prompt_cache_counters
+            .record(usage.prompt_tokens_details.as_ref());
+    }
+
+    /// Last request's prompt-cache usage. `None` fields mean the provider did
+    /// not report that metric for the last request (distinct from `Some(0)`).
+    pub fn last_prompt_cache_usage(&self) -> PromptCacheUsageSnapshot {
+        self.prompt_cache_counters.snapshot_last()
+    }
+
+    /// Session total of `cached_tokens` (cache reads).
+    pub fn get_total_cached_prompt_tokens(&self) -> u64 {
+        self.prompt_cache_counters.total_cached()
+    }
+
+    /// Session total of `cache_write_tokens` (cache writes).
+    pub fn get_total_cache_write_tokens(&self) -> u64 {
+        self.prompt_cache_counters.total_cache_write()
+    }
+
+    /// True once any response carried `cached_tokens` (including `0`).
+    pub fn has_cached_prompt_usage(&self) -> bool {
+        self.prompt_cache_counters.has_cached()
+    }
+
+    /// True once any response carried `cache_write_tokens` (including `0`).
+    pub fn has_cache_write_usage(&self) -> bool {
+        self.prompt_cache_counters.has_cache_write()
+    }
+
+    /// Session-level cache usage with the prompt-total denominator.
+    /// Cached tokens still occupy the context window, so callers must not
+    /// subtract them from context-budget calculations.
+    pub fn prompt_cache_session_usage(&self) -> PromptCacheSessionUsage {
+        PromptCacheSessionUsage {
+            total_cached_tokens: self.get_total_cached_prompt_tokens(),
+            total_cache_write_tokens: self.get_total_cache_write_tokens(),
+            total_prompt_tokens: self.get_total_prompt_tokens_used(),
+        }
+    }
+
+    /// Session token cache-hit ratio: `total_cached / total_prompt`.
+    /// `None` when no prompt tokens exist yet or the provider never reported
+    /// cache telemetry. Cache writes are never mixed into this ratio.
+    pub fn prompt_cache_hit_ratio(&self) -> Option<f64> {
+        if !self.has_cached_prompt_usage() {
+            return None;
+        }
+        self.prompt_cache_session_usage().hit_ratio()
+    }
+
+    /// Last-request token cache-hit ratio: `last_cached / last_prompt`.
+    /// `None` when the last response did not report `cached_tokens` or the
+    /// last prompt size is zero.
+    pub fn last_prompt_cache_hit_ratio(&self) -> Option<f64> {
+        let last = self.last_prompt_cache_usage();
+        let cached = last.cached_tokens?;
+        let last_prompt = self.get_prompt_tokens_used();
+        if last_prompt == 0 {
+            return None;
+        }
+        let ratio = cached as f64 / last_prompt as f64;
+        if ratio.is_finite() { Some(ratio) } else { None }
+    }
+
+    /// Restore a previously snapshotted last-request cache state.
+    /// Used by the `task` sub-agent to protect the main loop's telemetry;
+    /// session totals are intentionally left accumulated.
+    pub fn restore_last_prompt_cache_usage(&self, snapshot: PromptCacheUsageSnapshot) {
+        self.prompt_cache_counters.restore_last(snapshot);
     }
 
     #[allow(dead_code)]
@@ -481,6 +564,7 @@ mod tests {
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
+            prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -495,6 +579,7 @@ mod tests {
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
+            prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }
@@ -535,6 +620,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            prompt_tokens_details: None,
             completion_tokens_details: None,
         });
         assert!(!client.has_reasoning_usage());
@@ -545,6 +631,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            prompt_tokens_details: None,
             completion_tokens_details: Some(CompletionTokensDetails {
                 reasoning_tokens: Some(30),
                 extra: Default::default(),
@@ -559,6 +646,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            prompt_tokens_details: None,
             completion_tokens_details: Some(CompletionTokensDetails {
                 reasoning_tokens: Some(0),
                 extra: Default::default(),
@@ -571,5 +659,214 @@ mod tests {
         client.clear_totals();
         assert!(!client.has_reasoning_usage());
         assert_eq!(client.get_total_reasoning_tokens_used(), 0);
+    }
+
+    #[test]
+    fn prompt_cache_record_accumulates_and_resets_last() {
+        use crate::llm::types::{PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        assert!(!client.has_cached_prompt_usage());
+        assert!(!client.has_cache_write_usage());
+        assert!(client.prompt_cache_hit_ratio().is_none());
+
+        client.record_usage(&Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 100,
+            total_tokens: 10_100,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(8000),
+                cache_write_tokens: Some(2000),
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        assert!(client.has_cached_prompt_usage());
+        assert!(client.has_cache_write_usage());
+        assert_eq!(client.get_total_cached_prompt_tokens(), 8000);
+        assert_eq!(client.get_total_cache_write_tokens(), 2000);
+        assert_eq!(
+            client.last_prompt_cache_usage(),
+            crate::llm::prompt_cache::PromptCacheUsageSnapshot {
+                cached_tokens: Some(8000),
+                cache_write_tokens: Some(2000),
+            }
+        );
+
+        client.record_usage(&Usage {
+            prompt_tokens: 12_000,
+            completion_tokens: 100,
+            total_tokens: 12_100,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(10_000),
+                cache_write_tokens: Some(0),
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        assert_eq!(client.get_total_cached_prompt_tokens(), 18_000);
+        assert_eq!(client.get_total_cache_write_tokens(), 2000);
+        assert_eq!(client.get_total_prompt_tokens_used(), 22_000);
+    }
+
+    #[test]
+    fn prompt_cache_last_resets_when_absent() {
+        use crate::llm::types::{PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        client.record_usage(&Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 100,
+            total_tokens: 10_100,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(8000),
+                cache_write_tokens: None,
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        assert_eq!(client.last_prompt_cache_usage().cached_tokens, Some(8000));
+        // Absent details must not leave a stale 8000 behind.
+        client.record_usage(&Usage {
+            prompt_tokens: 12_000,
+            completion_tokens: 100,
+            total_tokens: 12_100,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+        assert_eq!(client.last_prompt_cache_usage().cached_tokens, None);
+        assert_eq!(client.last_prompt_cache_usage().cache_write_tokens, None);
+        // Session totals keep the first request's contribution.
+        assert_eq!(client.get_total_cached_prompt_tokens(), 8000);
+        // Ever-seen stays true so session display knows telemetry exists.
+        assert!(client.has_cached_prompt_usage());
+        assert!(client.prompt_cache_hit_ratio().is_some());
+    }
+
+    #[test]
+    fn prompt_cache_hit_ratio_math_and_zero_denominator() {
+        use crate::llm::types::{PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        // No telemetry yet -> None, never 0.
+        assert!(client.prompt_cache_hit_ratio().is_none());
+        assert!(client.last_prompt_cache_hit_ratio().is_none());
+        client.record_usage(&Usage {
+            prompt_tokens: 20_000,
+            completion_tokens: 100,
+            total_tokens: 20_100,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(15_000),
+                cache_write_tokens: None,
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        let session_ratio = client.prompt_cache_hit_ratio().expect("ratio");
+        assert!((session_ratio - 0.75).abs() < 1e-9);
+        let last_ratio = client.last_prompt_cache_hit_ratio().expect("last ratio");
+        assert!((last_ratio - 0.75).abs() < 1e-9);
+
+        // Zero denominator never divides: fresh client with no prompt tokens.
+        let empty = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        assert!(empty.prompt_cache_hit_ratio().is_none());
+    }
+
+    #[test]
+    fn prompt_cache_clear_totals_resets_cache() {
+        use crate::llm::types::{PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        client.record_usage(&Usage {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(60),
+                cache_write_tokens: Some(20),
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        client.clear_totals();
+        assert_eq!(client.get_total_cached_prompt_tokens(), 0);
+        assert_eq!(client.get_total_cache_write_tokens(), 0);
+        assert!(!client.has_cached_prompt_usage());
+        assert!(!client.has_cache_write_usage());
+        assert_eq!(client.last_prompt_cache_usage().cached_tokens, None);
+        assert!(client.prompt_cache_hit_ratio().is_none());
+    }
+
+    #[test]
+    fn prompt_cache_restore_last_keeps_session_totals() {
+        use crate::llm::types::{PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        client.record_usage(&Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 100,
+            total_tokens: 10_100,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(6000),
+                cache_write_tokens: None,
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        let saved = client.last_prompt_cache_usage();
+        client.record_usage(&Usage {
+            prompt_tokens: 5_000,
+            completion_tokens: 50,
+            total_tokens: 5_050,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(2000),
+                cache_write_tokens: None,
+                extra: Default::default(),
+            }),
+            completion_tokens_details: None,
+        });
+        client.restore_last_prompt_cache_usage(saved);
+        assert_eq!(client.last_prompt_cache_usage().cached_tokens, Some(6000));
+        // Sub-agent usage stays in the session totals.
+        assert_eq!(client.get_total_cached_prompt_tokens(), 8000);
+    }
+
+    #[test]
+    fn prompt_cache_coexists_with_reasoning_telemetry() {
+        use crate::llm::types::{CompletionTokensDetails, PromptTokensDetails, Usage};
+        let client = OpenAIClient::new("https://api.example.com/", "x").unwrap();
+        client.record_usage(&Usage {
+            prompt_tokens: 12_000,
+            completion_tokens: 500,
+            total_tokens: 12_500,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(9000),
+                cache_write_tokens: Some(3000),
+                extra: Default::default(),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(800),
+                extra: Default::default(),
+            }),
+        });
+        // Both telemetry families are recorded independently.
+        assert!(client.has_cached_prompt_usage());
+        assert!(client.has_reasoning_usage());
+        assert_eq!(client.get_total_cached_prompt_tokens(), 9000);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 800);
+        assert_eq!(client.get_total_prompt_tokens_used(), 12_000);
+        // Compaction-style follow-up accumulates into the same session totals.
+        client.record_usage(&Usage {
+            prompt_tokens: 8_000,
+            completion_tokens: 200,
+            total_tokens: 8_200,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(6000),
+                cache_write_tokens: None,
+                extra: Default::default(),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(100),
+                extra: Default::default(),
+            }),
+        });
+        assert_eq!(client.get_total_cached_prompt_tokens(), 15_000);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 900);
+        assert_eq!(client.get_total_prompt_tokens_used(), 20_000);
     }
 }

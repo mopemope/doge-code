@@ -352,7 +352,7 @@ The TUI provides various slash commands for quick operations:
 | `/open` | Open a file |
 | `/git-worktree` | Create an isolated linked worktree and branch (does not switch the current session into it) |
 | `/theme` | Change color theme |
-| `/tokens` | Display token usage |
+| `/tokens` | Display token usage (prompt/cache/reasoning usage when reported by the provider) |
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |
 | `/session <sub>` | Manage sessions: `new`, `list`, `show`, `switch`, `save`, `delete`, `current`, `clear` |

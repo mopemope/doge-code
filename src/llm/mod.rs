@@ -5,6 +5,7 @@ pub mod context_budget;
 mod history;
 mod message_utils;
 pub mod observation;
+pub mod prompt_cache;
 mod prompts;
 pub mod reasoning;
 pub mod runtime_context;

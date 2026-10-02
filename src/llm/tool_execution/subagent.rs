@@ -68,6 +68,7 @@ pub async fn run_subagent(
     let saved_tokens = client.get_tokens_used();
     let saved_prompt_tokens = client.get_prompt_tokens_used();
     let saved_reasoning_tokens = client.get_reasoning_tokens_used();
+    let saved_cache_usage = client.last_prompt_cache_usage();
 
     let result = run_subagent_inner(
         client,
@@ -85,6 +86,11 @@ pub async fn run_subagent(
     client.set_tokens(saved_tokens);
     client.set_prompt_tokens(saved_prompt_tokens);
     client.set_reasoning_tokens(saved_reasoning_tokens);
+    // Session totals (`total_cached_tokens`, `total_cache_write_tokens`,
+    // `total_prompt_tokens_used`) intentionally keep accumulating: sub-agent
+    // LLM traffic is part of session cost. Only the last-request view is
+    // restored.
+    client.restore_last_prompt_cache_usage(saved_cache_usage);
     result
 }
 

@@ -77,11 +77,26 @@ pub struct CompletionTokensDetails {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u32>,
+    /// Preserve unknown provider fields (e.g. `audio_tokens`,
+    /// `text_tokens`, `image_tokens`, future metrics) without failing
+    /// deserialization.
+    #[serde(default, flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
     #[serde(default)]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
@@ -134,6 +149,62 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.reasoning_tokens),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn usage_deserializes_with_cached_tokens() {
+        let payload = r#"{"prompt_tokens":10000,"completion_tokens":100,"total_tokens":10100,"prompt_tokens_details":{"cached_tokens":8000}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens),
+            Some(8000)
+        );
+    }
+
+    #[test]
+    fn usage_deserializes_with_explicit_zero_cached_tokens() {
+        let payload = r#"{"prompt_tokens":10000,"completion_tokens":100,"total_tokens":10100,"prompt_tokens_details":{"cached_tokens":0}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        // Explicit zero must stay Some(0), never normalized to None.
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens),
+            Some(0)
+        );
+        assert!(usage.prompt_tokens_details.is_some());
+    }
+
+    #[test]
+    fn usage_deserializes_without_prompt_details() {
+        let payload = r#"{"prompt_tokens":10000,"completion_tokens":100,"total_tokens":10100}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn usage_deserializes_with_cache_write_tokens() {
+        let payload = r#"{"prompt_tokens":10000,"completion_tokens":100,"total_tokens":10100,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":9000}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        let details = usage.prompt_tokens_details.as_ref().expect("details");
+        assert_eq!(details.cached_tokens, Some(0));
+        assert_eq!(details.cache_write_tokens, Some(9000));
+    }
+
+    #[test]
+    fn usage_deserializes_with_unknown_prompt_detail_fields() {
+        let payload = r#"{"prompt_tokens":10000,"completion_tokens":100,"total_tokens":10100,"prompt_tokens_details":{"cached_tokens":100,"some_future_metric":123}}"#;
+        let usage: Usage = serde_json::from_str(payload).unwrap();
+        let details = usage.prompt_tokens_details.as_ref().expect("details");
+        assert_eq!(details.cached_tokens, Some(100));
+        assert_eq!(
+            details.extra.get("some_future_metric"),
+            Some(&serde_json::json!(123))
         );
     }
 }
