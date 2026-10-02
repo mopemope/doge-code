@@ -33,15 +33,8 @@ pub async fn doc_generate(
     config: &AppConfig,
     repomap: Arc<RwLock<Option<RepoMap>>>,
 ) -> Result<String> {
-    // Check API key first
-    let api_key = config
-        .api_key
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
-
-    // Instantiate OpenAIClient with configured timeouts
-    let client =
-        OpenAIClient::new(config.base_url.clone(), api_key)?.with_llm_config(config.llm.clone());
+    let client = OpenAIClient::from_config(config)?
+        .ok_or_else(|| anyhow::anyhow!("LLM authentication required"))?;
     let client_arc = Arc::new(client);
 
     let generator = DocGenerator::new(

@@ -25,11 +25,8 @@ pub async fn run_watch_mode(cfg: AppConfig) -> Result<()> {
     // Load and parse ignore files (.gitignore, .dogeignore)
     let gitignore = load_gitignore()?;
 
-    let api_key = cfg
-        .api_key
-        .as_ref()
-        .context("OPENAI_API_KEY is required for watch mode")?;
-    let llm_client = OpenAIClient::new(&cfg.base_url, api_key)?.with_llm_config(cfg.llm.clone());
+    let llm_client =
+        OpenAIClient::from_config(&cfg)?.context("LLM authentication required for watch mode")?;
     let model = cfg.model.clone();
 
     // Use Arc<Mutex<>> for thread-safe access to file processing tracking
@@ -422,12 +419,14 @@ async fn execute_llm_task(
 
     let messages = vec![
         ChatMessage {
+            provider_state: None,
             role: "system".to_string(),
             content: Some(system_prompt),
             tool_calls: vec![],
             tool_call_id: None,
         },
         ChatMessage {
+            provider_state: None,
             role: "user".to_string(),
             content: Some(user_prompt),
             tool_calls: vec![],

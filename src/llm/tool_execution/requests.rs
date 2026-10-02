@@ -37,6 +37,28 @@ pub async fn chat_tools_once(
     cancel: Option<tokio_util::sync::CancellationToken>,
     ui_tx: Option<Sender<String>>,
 ) -> Result<ChoiceMessageWithTools> {
+    if let Some(auth) = &client.subscription {
+        let effort = crate::llm::reasoning::resolve_reasoning_hint(
+            &client.base_url,
+            model,
+            &reasoning_mode,
+            reasoning_effort,
+        );
+        return crate::features::openai_subscription::responses::infer(
+            client,
+            auth,
+            model,
+            messages,
+            tools,
+            effort,
+            cancel.unwrap_or_default(),
+        )
+        .await;
+    }
+    anyhow::ensure!(
+        !messages.iter().any(|m| m.provider_state.is_some()),
+        "Responses history cannot be sent through another provider; start a new session"
+    );
     const MAX_RETRIES: u64 = 100;
     const MAX_TIMEOUT_RETRIES: u64 = 20;
     let mut last_error = anyhow!("Failed after {} retries", MAX_RETRIES);
@@ -384,6 +406,7 @@ mod tests {
 
     fn user_message() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some("do the thing".into()),
             tool_calls: vec![],

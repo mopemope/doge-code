@@ -36,6 +36,7 @@ fn test_session_metric_tracking() {
 
     // Simulate a conversation where the first user message should set the session title
     let user_msg = crate::llm::types::ChatMessage {
+        provider_state: None,
         role: "user".into(),
         content: Some(
             "これはテストの最初のユーザー入力です。Unicode文字列を含みます。".to_string(),

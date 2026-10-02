@@ -68,6 +68,7 @@ pub fn fence_for_path(path: &Path) -> &'static str {
 /// semantic-edit v1: 対象Symbol全体の replacement のみを生成させる。
 pub fn build_symbol_edit_chat_request(req: &SymbolEditRequest) -> ChatRequest {
     let system = ChatMessage {
+        provider_state: None,
         role: "system".to_string(),
         content: Some(
             "You are editing exactly one semantic symbol. Return only its complete replacement."
@@ -97,6 +98,7 @@ pub fn build_symbol_edit_chat_request(req: &SymbolEditRequest) -> ChatRequest {
     );
 
     let user = ChatMessage {
+        provider_state: None,
         role: "user".to_string(),
         content: Some(user_content),
         tool_calls: Vec::new(),

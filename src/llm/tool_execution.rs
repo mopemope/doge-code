@@ -4,7 +4,7 @@ mod diff_collection;
 mod dispatch;
 mod error;
 pub mod history;
-mod requests;
+pub(crate) mod requests;
 mod streaming;
 pub mod subagent;
 pub mod ui_rendering;

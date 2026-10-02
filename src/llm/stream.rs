@@ -62,6 +62,25 @@ impl OpenAIClient {
         messages: &[ChatMessage],
         cancel: Option<CancellationToken>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        if let Some(auth) = &self.subscription {
+            let result = crate::features::openai_subscription::responses::infer(
+                self,
+                auth,
+                model,
+                messages,
+                &[],
+                None,
+                cancel.unwrap_or_default(),
+            )
+            .await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok(result.content.unwrap_or_default())
+            })));
+        }
+        anyhow::ensure!(
+            !messages.iter().any(|m| m.provider_state.is_some()),
+            "Responses history requires its original provider"
+        );
         #[derive(Serialize)]
         struct ChatRequestRef<'a> {
             model: &'a str,

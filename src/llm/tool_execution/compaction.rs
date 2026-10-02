@@ -88,6 +88,7 @@ mod tests {
     fn create_dummy_messages(count: usize) -> Vec<ChatMessage> {
         (0..count)
             .map(|i| ChatMessage {
+                provider_state: None,
                 role: if i % 2 == 0 {
                     "user".into()
                 } else {

@@ -137,6 +137,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
 
     // Add system prompt for summarization
     msgs.push(llm::types::ChatMessage {
+        provider_state: None,
         role: "system".into(),
         content: Some(COMPACT_PROMPT.to_string()),
         tool_calls: vec![],
@@ -155,6 +156,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
             if !summary.is_empty() {
                 // Create a new compacted message with the summary
                 let compacted_message = llm::types::ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some(summary),
                     tool_calls: vec![],
@@ -172,6 +174,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
                 // Handle case where response has no content
                 Ok(CompactResult {
                     compacted_message: llm::types::ChatMessage {
+                        provider_state: None,
                         role: "user".into(),
                         content: Some("".to_string()),
                         tool_calls: vec![],
@@ -190,6 +193,7 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
             // Handle error
             Ok(CompactResult {
                 compacted_message: llm::types::ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("".to_string()),
                     tool_calls: vec![],
@@ -213,6 +217,7 @@ pub async fn compact_conversation_history_ref(
         model,
         messages: MessagesWithSystem {
             system: ChatMessage {
+                provider_state: None,
                 role: "system".into(),
                 content: Some(COMPACT_PROMPT.to_string()),
                 tool_calls: vec![],
@@ -230,6 +235,7 @@ pub async fn compact_conversation_history_ref(
             if !summary.is_empty() {
                 Ok(CompactResult {
                     compacted_message: ChatMessage {
+                        provider_state: None,
                         role: "user".into(),
                         content: Some(summary),
                         tool_calls: vec![],
@@ -243,6 +249,7 @@ pub async fn compact_conversation_history_ref(
             } else {
                 Ok(CompactResult {
                     compacted_message: ChatMessage {
+                        provider_state: None,
                         role: "user".into(),
                         content: Some("".to_string()),
                         tool_calls: vec![],
@@ -259,6 +266,7 @@ pub async fn compact_conversation_history_ref(
         }
         Err(e) => Ok(CompactResult {
             compacted_message: ChatMessage {
+                provider_state: None,
                 role: "user".into(),
                 content: Some("".to_string()),
                 tool_calls: vec![],
@@ -287,6 +295,7 @@ mod tests {
     #[test]
     fn test_compact_result_struct() {
         let message = ChatMessage {
+            provider_state: None,
             role: "user".to_string(),
             content: Some("test content".to_string()),
             tool_calls: vec![],

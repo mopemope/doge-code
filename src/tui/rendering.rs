@@ -57,7 +57,10 @@ impl TuiApp {
     }
 
     fn render_status_line(&self, f: &mut Frame, area: Rect, model: Option<&str>, theme: &Theme) {
-        let model_name = model.unwrap_or("unknown");
+        let model_name = self
+            .inference_label
+            .as_deref()
+            .unwrap_or_else(|| model.unwrap_or("unknown"));
 
         let status_str = match self.status {
             crate::tui::state::Status::Ready => "READY",

@@ -186,6 +186,7 @@ pub struct TuiApp {
     pub status: Status,
     pub detailed_status: Option<String>,
     pub model: Option<String>,
+    pub inference_label: Option<String>,
     // input history and navigation index; index==history.len() means current (editing) buffer
     pub input_history: Vec<String>,
     pub history_index: usize,
@@ -459,6 +460,7 @@ impl TuiApp {
             max_log_lines: 10000,
             status: Status::Ready,
             detailed_status: None,
+            inference_label: None,
             model,
             input_history,
             history_index,
