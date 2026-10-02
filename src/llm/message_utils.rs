@@ -93,11 +93,7 @@ pub fn max_output_chars(tool_name: &str) -> usize {
     const DEFAULT_MAX_LEN: usize = 8000;
     const READ_MAX_LEN: usize = 40000; // Allow more context for reading files
 
-    if tool_name == "fs_read"
-        || tool_name == "fs_read_many_files"
-        || tool_name == "plan_write"
-        || tool_name == "plan_read"
-    {
+    if tool_name == "fs_read" || tool_name == "fs_read_many_files" || tool_name == "plan_read" {
         READ_MAX_LEN
     } else {
         DEFAULT_MAX_LEN
@@ -284,5 +280,14 @@ mod tests {
             serde_json::from_str(&result).expect("fallback envelope must be valid JSON");
         assert!(parsed["truncated_raw"].is_string());
         assert!(parsed["note"].as_str().unwrap().contains("truncated"));
+    }
+
+    #[test]
+    fn test_plan_write_is_default_tier_plan_read_is_read_tier() {
+        // Regression: plan_write must not return to the historical 40k tier.
+        assert_eq!(max_output_chars("plan_write"), 8_000);
+        assert_eq!(max_output_chars("plan_read"), 40_000);
+        assert_eq!(max_output_chars("fs_read"), 40_000);
+        assert_eq!(max_output_chars("fs_read_many_files"), 40_000);
     }
 }

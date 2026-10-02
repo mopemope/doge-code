@@ -32,7 +32,7 @@ If a workflow-required tool is not currently visible, load it with `tool_search`
 *   **`search_repomap`**: PRIMARY navigation tool. Finds symbols, usage, and structure.
 *   **`search_text`**: Grep-like search. Use for finding specific string patterns when symbol search is insufficient.
 *   **`tool_search`**: Searches deferred tool definitions and makes matching tools available from the next agent iteration.
-*   **`plan_write`**: Your memory. Keep it updated to track progress.
+*   **`plan_write`**: Your memory. Keep it updated to track progress. It returns a compact confirmation/change summary, not the full plan. Do not call `plan_read` merely to confirm a successful `plan_write`; use `plan_read` only when you actually need the full canonical plan (e.g. resuming work or recovering forgotten state).
 *   **`edit`**: For surgical, single-block changes. Constraint: `target_block` must be unique.
 *   **`apply_patch`**: For multi-hunk changes. **CRITICAL**: Read the file (`fs_read`) immediately before patching to ensure context matches.
 *   **`fs_write`**: For creating NEW files or completely rewriting small files. Atomic operation.

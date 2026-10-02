@@ -17,11 +17,12 @@ every tool result before it enters the conversation:
 
 | Tier | Limit | Tools |
 |---|---|---|
-| Read tier | 40,000 chars | `fs_read`, `fs_read_many_files`, `plan_write`, `plan_read` |
-| Default tier | 8,000 chars | everything else (incl. `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, `execute_process`, `execute_bash`, `execute_shell`) |
+| Read tier | 40,000 chars | `fs_read`, `fs_read_many_files`, `plan_read` |
+| Default tier | 8,000 chars | everything else (incl. `plan_write`, `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, `execute_process`, `execute_bash`, `execute_shell`) |
 
-Note: plan tools sit in the read tier even though `plan_write` echoes data back;
-this is historical.
+`plan_write` returns only a compact change summary (never the full plan); the
+40,000-char read tier is reserved for explicit full-state reads such as
+`plan_read`. Use `plan_read` for the full canonical plan.
 
 Truncation in `truncate_tool_output` is **JSON-safe**: oversized outputs are
 parsed and their largest string fields are shortened (head-biased) and array
@@ -94,6 +95,44 @@ fix these before generalizing the contract to more tools:
 Resolved gaps (kept here for history): `apply_patch` now returns only the diff
 plus line statistics (no `original_content`/`modified_content` echo), and
 truncation is JSON-safe (`truncate_tool_output` budgets string fields in-place).
+
+## `plan_write` result contract
+
+`plan_write` returns a compact mutation acknowledgement, never the full plan:
+
+```json
+{
+  "ok": true,
+  "changed": true,
+  "delta": {
+    "added_ids": [],
+    "updated_ids": ["step-2"],
+    "removed_ids": []
+  },
+  "item_count": 5,
+  "status_counts": {
+    "pending": 3,
+    "in_progress": 1,
+    "completed": 1
+  },
+  "warnings": []
+}
+```
+
+- `ok`: always `true` on success.
+- `changed`: top-level no-op signal (`false` when the write was a no-op).
+  Loop detection and the task sentinel key off this field; never move it.
+- `delta`: `added_ids` (new since the previous snapshot), `updated_ids`
+  (same id, changed content/status/parent/requirement-links/obligations),
+  `removed_ids` (dropped, mainly via `mode="replace"`). Empty arrays are
+  omitted; a no-op yields `"delta": {}`.
+- `item_count` / `status_counts`: final totals after the write.
+- `warnings`: provenance / verification / requirement-link warnings the LLM
+  must read. Budgeted to ~6,000 chars total (warnings only are reduced;
+  `delta` and counts are never truncated). When reduced, the result carries
+  `"warnings_truncated": true` plus the original `"warning_count"`.
+- Never present: `plan`, `items`, `session_id`, full item content,
+  obligations, or requirement links. Call `plan_read` for full state.
 
 ## `execute_process` result shape
 

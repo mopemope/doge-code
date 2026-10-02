@@ -1258,4 +1258,100 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_plan_write_returns_compact_result() -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(session_manager);
+        let runtime = deferred_test_runtime(&fs_tools);
+        runtime
+            .tool_catalog
+            .activate(&["plan_write".to_string(), "plan_read".to_string()])
+            .await;
+
+        let args = json!({
+            "items": [
+                {"id": "step-1", "content": "Do first thing", "status": "pending"},
+                {"id": "step-2", "content": "Do second thing", "status": "pending"},
+            ],
+            "mode": "replace",
+        });
+        let call = ToolCall {
+            id: Some("call_plan_write".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "plan_write".to_string(),
+                arguments: args.to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        // Compact contract fields exist...
+        assert_eq!(output.value.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            output.value.get("changed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(output.value.get("delta").is_some());
+        assert_eq!(
+            output.value.get("item_count").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert!(output.value.get("status_counts").is_some());
+        assert!(output.value.get("warnings").is_some());
+        // ...and no full plan leaks across the LLM boundary.
+        assert!(output.value.get("plan").is_none());
+        assert!(output.value.get("items").is_none());
+        assert!(output.value.get("session_id").is_none());
+        let rendered = output.value.to_string();
+        assert!(!rendered.contains("Do first thing"));
+        // First write of two fresh items reports both as added.
+        let added = output.value["delta"]["added_ids"]
+            .as_array()
+            .expect("added_ids array");
+        assert_eq!(added.len(), 2);
+
+        // Repeating the identical write is a no-op (LoopDetector contract).
+        let noop_call = ToolCall {
+            id: Some("call_plan_write_noop".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "plan_write".to_string(),
+                arguments: args.to_string(),
+            },
+        };
+        let noop = dispatch_tool_call(&runtime, &noop_call).await?;
+        assert!(noop.is_success);
+        assert_eq!(
+            noop.value.get("changed").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(noop.value.get("plan").is_none());
+
+        // plan_read still returns the full canonical plan.
+        let read_call = ToolCall {
+            id: Some("call_plan_read".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "plan_read".to_string(),
+                arguments: json!({}).to_string(),
+            },
+        };
+        let read = dispatch_tool_call(&runtime, &read_call).await?;
+        assert!(read.is_success);
+        let items = read.value["items"].as_array().expect("plan items");
+        assert_eq!(items.len(), 2);
+        Ok(())
+    }
 }
