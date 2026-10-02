@@ -1,0 +1,44 @@
+[
+  {
+    "case_id": "docs-search-prerequisite",
+    "prompt": "Document in README development instructions that search_text tests require ripgrep on PATH. Keep the note concise and avoid unrelated changes.",
+    "expected_skills": ["dgc-verify"],
+    "acceptance": ["README contains the actionable prerequisite", "No runtime implementation changes", "Guidance checks pass"]
+  },
+  {
+    "case_id": "tool-exists",
+    "prompt": "Add a read-only fs_exists tool that reports whether a project-scoped path exists. Apply existing path policy, wire schema and dispatch, document it, and test missing and out-of-scope paths.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Schema, dispatch, handler and README agree", "Out-of-scope paths fail under existing policy", "Bounded structured response", "Isolated success/error regressions and required Rust checks pass"]
+  },
+  {
+    "case_id": "execution-cancellation",
+    "prompt": "Audit managed-process cancellation and future-drop cleanup. Add a regression for any uncovered descendant cleanup path, and fix a demonstrated defect if one is found.",
+    "expected_skills": ["dgc-execution", "dgc-verify"],
+    "acceptance": ["Evidence identifies covered and uncovered cleanup paths", "No new ad-hoc process runner", "Tests use disposable process fixtures", "Any claimed fix has reproduction and regression evidence"]
+  },
+  {
+    "case_id": "mutation-conflict",
+    "prompt": "Review whether an edit followed by an external file modification can be safely undone. Add a missing behavior regression or fix a reproduced defect while preserving the conflicting file.",
+    "expected_skills": ["dgc-mutation-provenance", "dgc-verify"],
+    "acceptance": ["Conflicting file content is preserved", "Undo state and provenance are consistent", "Shared mutation/finalize path is retained", "Success and conflict evidence use temporary files"]
+  },
+  {
+    "case_id": "context-unseen-results",
+    "prompt": "Verify that a failed provider request followed by context pressure preserves unseen tool results exactly. Extend regression coverage for a concrete gap and fix it if reproduced.",
+    "expected_skills": ["dgc-context-history", "dgc-verify"],
+    "acceptance": ["Exact unseen content remains recoverable", "Failed requests do not mark results seen", "Runtime hints remain request-scoped", "No unbounded retry or destructive compaction"]
+  },
+  {
+    "case_id": "tui-help-routing",
+    "prompt": "Compare TUI slash-command help against dispatch and README. Correct a demonstrated mismatch with a focused test, and provide manual verification evidence for any visible change.",
+    "expected_skills": ["dgc-verify"],
+    "acceptance": ["Help, dispatch and README are consistent", "Changes stay in the demonstrated mismatch", "Visible changes have manual evidence or an explicit environment blocker"]
+  },
+  {
+    "case_id": "investigation-only-history",
+    "prompt": "Investigate why an LLM cannot call search_history in this project. Report exact registration and dispatch evidence and possible remedies. Do not modify files.",
+    "expected_skills": ["dgc-tool-dev"],
+    "acceptance": ["Identifies absent default schema and present internal dispatch", "Makes no workspace changes", "Does not claim the behavior was fixed"]
+  }
+]

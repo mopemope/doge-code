@@ -4,6 +4,24 @@ Single source of truth for what a tool returns to the LLM. Every tool handler
 under `src/llm/tool_execution/dispatch/tools.rs` must conform to this contract.
 `AGENTS.md` links here instead of duplicating the details.
 
+## Tool registration
+
+For a default LLM tool, all sites must agree:
+
+1. Implement the execution entry point and `tool_def()` in `src/tools/<name>.rs`,
+   and wire the module in `src/tools/mod.rs`.
+2. Register the schema factory in `src/llm/tool_def.rs::default_tools_def`.
+3. Add the dispatch arm in `src/llm/tool_execution/dispatch.rs` and the handler
+   in `src/llm/tool_execution/dispatch/tools.rs` (or its owning dispatch module).
+4. Return `ToolOutput { value, is_success, result_summary }` from the handler.
+5. Add isolated success/error tests and dispatch regressions when routing changes.
+6. Document the tool in the README tool list.
+
+`python3 scripts/check-agent-guidance.py` checks static schema/dispatch/README
+parity. Runtime discovery schemas, internal dispatch, and README-only commands
+are explicitly classified in [routing exceptions](ai/tool-routing-exceptions.json).
+The check does not replace behavioral dispatch/output tests.
+
 ## Handler return shape
 
 Handlers return `ToolOutput { value, is_success, result_summary }` — never a
@@ -86,11 +104,12 @@ fix these before generalizing the contract to more tools:
 
    New tools must use `next_cursor` + `response_budget_chars`. Unifying the
    existing three is an open backlog item.
-2. **`search_history` is a ghost tool.** It has a dispatch arm ("search_history"
+2. **`search_history` is an internal-only legacy route.** It has a dispatch arm ("search_history"
    in `src/llm/tool_execution/dispatch.rs`) and a handler
    (`search_history` in `src/llm/tool_execution/dispatch/tools.rs`) but is not
    registered in `default_tools_def` (`src/llm/tool_def.rs`), so the LLM can
-   never call it. Either register it in the schema list or delete both sides.
+   never discover it from the default schema inventory. This is recorded as a
+   routing exception; exposing or removing it is a separate behavior decision.
 
 Resolved gaps (kept here for history): `apply_patch` now returns only the diff
 plus line statistics (no `original_content`/`modified_content` echo), and

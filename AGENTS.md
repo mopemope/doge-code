@@ -1,190 +1,74 @@
-# Repository Guidelines
+# doge-code development
 
-Guidelines for AI coding agents working on doge-code (an AI coding agent itself, binary `dgc`). User-facing feature docs live in `README.md`; this file focuses on how to change the codebase correctly.
+This Rust repository builds the AI coding agent `dgc`. Respond in Japanese.
+User-facing behavior belongs in `README.md`; development guidance starts here.
 
-## Verification Commands
+## Work according to the request
 
-Run the narrowest check first, then broaden:
+- For investigation requests, establish reproduction and evidence before proposing
+  a fix; edit only when implementation is authorized.
+- For small local changes, read the affected code and callers. For cross-module
+  changes, record acceptance criteria, affected boundaries, and focused checks.
+- Use current official sources for external APIs, dependency upgrades, or facts
+  that may have changed. Local behavior is established by code and tests.
+- Use `rg` and bounded reads. Load only guidance relevant to the change.
+- Clarify product decisions that affect visible behavior; continue authorized
+  implementation and verification without repeated approval requests.
+- Delegate only when authorized and tasks are independent. Give each worker a
+  bounded scope, required evidence, and file ownership; count total token use.
+- For long work, retain decisions, open issues, and completed checks in a short
+  project-local work note. Do not commit `.doge/` runtime state.
 
-- `cargo test --locked <module_or_name>` — run matching tests only (fast feedback). Full `cargo test --locked` (370+ tests) is slow; run it only before finishing. The `search_text` tests shell out to ripgrep, so `rg` must be on `PATH`.
-- `cargo clippy --locked --all-targets --all-features` — must produce zero warnings. This is a merge gate (CI enforces `-D warnings`).
-- `cargo fmt --all` — format before finishing; CI runs `cargo fmt --check`.
-- `cargo run --release -- <flags>` — launch the TUI agent for manual verification of TUI changes.
+## Choose the relevant guidance
 
-## Module Map
+Skill bodies are shared under `docs/ai/skills/`. Open the relevant `SKILL.md`
+directly if the host cannot discover skills. No full-document reading is required.
 
-| Path | Responsibility |
+| Change | Guidance |
 |---|---|
-| `src/main.rs` | CLI entry point (clap), mode wiring |
-| `src/execution/` | Execution foundation: policy, lifecycle, bounded output, and policy-free managed process mechanics |
-| `src/execution/runner.rs` | Policy-free managed process mechanics: `ManagedProcessSpec`/`ManagedRunOptions`, bounded capture, timeout/cancellation, process-group cleanup/reap, and future-drop safety guard |
-| `src/execution/process.rs` | ExecutionPolicy-aware LLM adapter: cwd/env/program policy, timeout resolution, and stable `ProcessResult` mapping |
-| `src/execution/lifecycle.rs` | Unix process groups, SIGTERM/SIGKILL, explicit reap, and process-group existence checks |
-| `src/exec.rs` | Non-interactive `exec` orchestration |
-| `src/llm/` | OpenAI-compatible client, agent loop, tool dispatch |
-| `src/llm/tool_def.rs` | Registry of tools exposed to the LLM (`default_tools_def`) |
-| `src/llm/tool_execution/agent_loop.rs` | Main agent loop: iteration, loop detection, compaction triggers |
-| `src/llm/tool_execution/dispatch.rs` | Tool call dispatch (one arm per tool) |
-| `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
-| `src/llm/tool_execution/history.rs` | Conversation state only (proactive + reactive compaction, stale tool-result clearing) |
-| `src/llm/runtime_context.rs` | Request-scoped bootstrap hints (Recent Files / automatic memory), first-request-only overlay |
-| `src/llm/context_budget.rs` | Preflight context governor: request footprint, token estimate, pressure classification (pure, no history mutation) |
-| `src/config/context_budget.rs` | Preflight governor config (`[context_budget] mode = auto/observe/off`) |
-| `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
-| `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
-| `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
-| `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
-| `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
-| `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
-| `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
-| `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v4 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` legacy read-only, `v4.rs` current), `store.rs` (v1+v2+v3+v4 merged reads, v4 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `obligations.rs` (obligation matching, binding hash, evidence states), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
-| `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
-| `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
-| `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
-| `src/session/` | SQLite session persistence (SeaORM) |
-| `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
-| `src/mcp/` | MCP protocol/transport boundary (rmcp 3.x) |
-| `src/mcp/client.rs` | Outbound MCP transport, negotiated connection lifecycle, timeouts, cancellation, and SDK response handling |
-| `src/tools/remote_tools.rs` | Remote registry, stable aliases, and MCP-result → Doge normalized-result boundary |
-| `src/mcp/server.rs` | Local listener lifecycle / graceful shutdown (`spawn_mcp_server`, `McpServerHandle`, bind-before-spawn) |
-| `src/mcp/service.rs` | MCP tool/resource service (`DogeMcpService`, `McpServiceState` with shared `AppConfig`/RepoMap/build lock) |
-| `src/mcp/http_security.rs` | Local HTTP Host/Origin security + loopback bind validation |
-| `src/mcp/resource_path.rs` | Project resource path validation (`doge://files/`, `doge://symbols/`) |
-| `src/config/` | AppConfig, `.doge/config.toml` loading |
-| `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
-| `src/watch.rs` | File watch mode (`dgc watch`) |
-| `src/error_recovery/` | Autonomous error recovery hints |
-| `src/hooks/` | Post-instruction hook system (repomap updates) |
-| `resources/system_prompt.md` | System prompt template (Tera, rust-embed) |
-| `elisp/` | Emacs integration (outside CI; see `elisp/emacs-integration.md`) |
+| Tool schema, registration, dispatch, output | [dgc-tool-dev](docs/ai/skills/dgc-tool-dev/SKILL.md), [output contract](docs/tool-output-contract.md) |
+| Verification or CI failures | [dgc-verify](docs/ai/skills/dgc-verify/SKILL.md) |
+| Process policy, timeout, cancellation, jobs | [dgc-execution](docs/ai/skills/dgc-execution/SKILL.md) |
+| Edit tools, undo, persistence, provenance | [dgc-mutation-provenance](docs/ai/skills/dgc-mutation-provenance/SKILL.md) |
+| Context budget, history, compaction, runtime hints | [dgc-context-history](docs/ai/skills/dgc-context-history/SKILL.md) |
+| TUI, MCP, RepoMap, configuration, prompt | Relevant section of [architecture](docs/ai/architecture.md) |
+| Agent guidance, skill layout, development scripts | [agent workflow](docs/ai/workflow.md) |
+| Comparing guidance or model configurations | [evaluation protocol](docs/ai/evaluation.md) |
 
-## Common Change Patterns
+## Shared constraints
 
-### Adding a new tool (all steps required)
+- Rust Edition 2024, MSRV in `Cargo.toml`; use rustfmt and `tracing`.
+- Feature implementations belong under `src/features/`.
+- Use typed errors or `?` in production. Message-bearing `expect()` is fine in tests.
+- Tests use `tempdir()` and explicit `AppConfig.project_root`, never real user
+  config or repository-root fixtures. Cover behavior and error paths.
+- dgc text mutation tools use the shared commit helper, `MutationReceipt`, and
+  `FsTools::finalize_mutation`. See [contracts](docs/ai/contracts.md).
+- Finite processes use `src/execution/runner.rs`; preserve policy separation.
+  Register long-running user-visible TUI work through `JobManager`.
+- Budget tool output at its source; return structured outcomes. Keep tool order
+  deterministic. See [output contract](docs/tool-output-contract.md).
+- Preserve unseen tool results and recoverable historical observations. Keep
+  runtime hints request-scoped. Cached tokens still consume context capacity.
+- Distinguish observed user directives from interpreted requirements.
+- Keep durable session/provenance state out of rebuildable RepoMap SQLite and
+  legacy `action_log`. Never commit credentials or project-local runtime state.
 
-1. Implement `src/tools/<name>.rs` with a `tool_def()` returning `ToolDef` and an execution entry point.
-2. Register the `tool_def()` in `src/llm/tool_def.rs` (`default_tools_def`).
-3. Add a dispatch arm in `src/llm/tool_execution/dispatch.rs` and a handler in `src/llm/tool_execution/dispatch/tools.rs`.
-4. Handler must return `ToolOutput { value, is_success, result_summary }` — never a bare string.
-5. Add tests next to the implementation and, if dispatch-relevant, in `dispatch.rs::tests`.
-6. Document the tool in `README.md`.
+## Verification and completion
 
-Skipping step 3 leaves a tool that the LLM can call but that fails with "unknown tool" — check every registration site. The full checklist lives in `docs/tool-output-contract.md`.
-
-### Changing the system prompt
-
-Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}`). It is embedded at compile time via rust-embed (`src/assets.rs`) — rebuild to pick up changes. Project instructions files (`AGENTS.md` / `QWEN.md` / `GEMINI.md`, or `project_instructions_file` config key) are appended at runtime (`src/tui/commands/prompt.rs`).
-
-### RepoMap / analysis changes
-
-Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
-
-### Adding a TUI slash command
-
-1. Implement the handler in `src/tui/commands/handlers/slash_commands/<name>.rs` (see existing files; `help.rs` owns the help listing).
-2. Register the command in the slash-command dispatch there (`mod.rs` wires handlers).
-3. Document it in the README slash-command table.
-
-## Coding Style
-
-- Rust Edition 2024, four-space indentation (`rustfmt.toml`).
-- `snake_case` functions/modules, `CamelCase` types, `SCREAMING_SNAKE_CASE` constants.
-- Prefer `tracing` spans/macros over `println!`/ad-hoc logging.
-- Replace `unwrap()`/`expect()` in production paths with `?`/typed errors (`anyhow` + `thiserror`); `expect()` with a message is acceptable in tests.
-- Feature-gated code belongs under `src/features/`.
-
-## Mutation Contract (workspace text changes)
-
-All workspace text mutations must produce a `MutationReceipt` via the shared
-commit helper (`src/tools/mutation.rs`). Never update undo/session/provenance
-independently from a write tool — use `FsTools::finalize_mutation` after a
-successful commit.
-
-New workspace mutation tools must implement: candidate generation, shared
-commit helper, `MutationReceipt`, `finalize_mutation`, and regression tests
-(success / no-op / failure / race / undo / provenance). This prevents future
-tracking gaps.
-
-## Job Lifecycle
-
-- Do not spawn new user-visible long-running TUI work directly with
-  `tokio::spawn` or `std::thread::spawn`. Register it through `JobManager`
-  (`src/jobs/`) so cancellation, shutdown and job inspection remain
-  consistent.
-
-## Tool Output Conventions (token efficiency)
-
-These are hard requirements — the LLM consumes tool output directly. Full spec: `docs/tool-output-contract.md`.
-
-- Returning-tool responses are structured JSON with `warnings` and `next_cursor` for pagination; never return unbounded text.
-- Large outputs (file reads, listings, repomap results) must support summary mode + `response_budget_chars` budgeting. Follow the pattern in `src/tools/read.rs`.
-- Global caps (`src/llm/message_utils.rs`): 8,000 chars default, 40,000 chars only for `fs_read`, `fs_read_many_files`, `plan_read`. Everything else — including `plan_write`, `search_repomap`, `fs_list`, `find_file`, memory tools, `edit`, `apply_patch`, bash/shell — is 8,000.
-- State-mutating tools must not echo large state snapshots when the caller already supplied that state; return compact mutation metadata and provide a separate read tool for full state (`plan_write` returns a delta/counts acknowledgement; `plan_read` serves the full canonical plan).
-- The global truncator is JSON-safe (it budgets string fields in-place rather than slicing the serialized payload), but it is a safety net only: tools must keep their own output under the cap using `src/tools/budget.rs` helpers (bash/shell 6k head+tail, `apply_patch` diff-only, `find_file` 200 paths, `read_memory` 6k) or `response_budget_chars`.
-- Execution changes belong in `src/execution/` (`runner.rs` / `policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `runner.rs` is policy-free process mechanics, while `process.rs` is the ExecutionPolicy-aware LLM adapter. `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
-- Do not create new ad-hoc `Command::output()` / `wait_with_output()` paths for finite background commands. Use `src/execution/runner.rs` unless the process is intentionally long-lived or interactive (PTY, MCP transport, daemon/service, or another documented exception).
-- Do not infer remote MCP tool success from transport success. For a completed call, `CallToolResult.is_error` is authoritative: `Some(true)` maps to `ToolOutput.is_success = false`; `Some(false)` and `None` map to success. Protocol/transport errors remain typed errors.
-- Never log remote MCP arguments, full results, environment values, or credentials. Structured stdio uses `command` + argv and never a shell parser.
-
-## Runtime Context
-
-Runtime hints are request-scoped context, not conversation state.
-Do not push recent-file/memory hints into durable HistoryManager messages.
-
-## Context Budget / Observation Safety
-
-Preflight context reductions must preserve unseen tool results.
-Seen historical results should be offloaded through the Observation Store
-before conversation compaction. Never replace an unseen tool result with a
-non-recoverable clearing stub merely to satisfy a local token estimate.
-
-## Prompt Cache Telemetry
-
-Prompt-cache metrics are observational only.
-Cached prompt tokens still count toward context-window pressure.
-Do not subtract cached tokens from context-budget calculations.
-
-Keep tool definition ordering deterministic; tool/schema changes are
-cache-relevant request-prefix changes.
-
-## Testing Guidelines
-
-- Unit tests go beside the code under `#[cfg(test)]`; larger fixtures may use `<name>_test.rs` files (both styles exist).
-- Names describe behavior: `test_<behavior>`. Cover success and error paths.
-- Dispatch/agent-loop changes need regression tests in `src/llm/tool_execution/dispatch.rs` or `agent_loop.rs` test modules.
-- Tests must not touch the real CWD or user config; use `tempdir()` and construct `AppConfig` with an explicit `project_root`.
-
-## Known Pitfalls
-
-- Two workflow formats coexist: `.doge/workflows/*.yml` (shell `run:` steps and structured `program:`/`args:` steps, run by the `run_workflow` tool in `src/tools/workflow.rs`) and `.doge/workflows/*.md` (LLM-executed steps, run by the CLI `run` subcommand via `src/features/workflow.rs`). Keep both in mind; do not "fix" one to match the other without checking callers.
-- `fs_read` accepts both `start_line` (legacy) and `cursor` (preferred, 1-based). New code should use `cursor`. Note `search_repomap`'s cursor is 0-based — the two conventions currently differ.
-- `.doge/`, `target/`, and agent-generated files (`GEMINI.md`, `QWEN.md`, etc.) are excluded from RepoMap via `.dogeignore`.
-- Workflow files and session state under `.doge/` are project-local; never commit them.
-- `search_history` has a dispatch arm but is not registered in `default_tools_def` — a live example of the registration-gap pitfall. Check every site listed in `docs/tool-output-contract.md` when adding tools.
-- Tests must never write to the repo root (e.g. a `temp/` directory). Leftover test artifacts used to accumulate there. Always use `tempdir()` per the Testing Guidelines.
-- The README tool list must stay in sync with `default_tools_def` (`src/llm/tool_def.rs`); new tools require a README entry (checklist step 6).
-- `.doge/repomap.sqlite` is rebuildable analysis/cache state and may be recreated during database recovery. Never store durable session/provenance state there.
-- Legacy `action_log` is not the provenance store. Do not build new durable features on legacy `action_log`/repomap DB.
-
-## Provenance rule
-
-Never treat an inferred requirement as a verbatim user directive.
-Observed directives and interpreted requirements are distinct provenance nodes.
-
-## Commit & Pull Request Guidelines
-
-- Format: `type(scope): summary` (e.g. `feat(tooling): ...`, `refactor(core): ...`). Keep bodies short.
-- PRs must describe user-visible impact and list verification performed (`cargo fmt/clippy/test` output for non-trivial fixes).
-- TUI changes: include a screenshot or terminal recording.
-- New flags/commands must be documented in `README.md` before review.
-
-## Configuration & Secrets
-
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
-- Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
-- Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
-
-## CI
-
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR: `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked`. Keep it green.
+- First run matching tests: `bash scripts/verify.sh test <module_or_name>`.
+  The wrapper rejects zero executed tests. `rg` must be available for search tests.
+- Before finishing Rust changes: `cargo fmt --all`, then
+  `bash scripts/verify.sh rust` (fmt check, warning-free Clippy, full locked tests).
+- Docs/Skills/development-script-only changes: `bash scripts/verify.sh guidance`.
+  Rust checks are required if runtime code or Rust build inputs also changed.
+- Dependency/MSRV changes additionally use `bash scripts/verify.sh msrv`;
+  TUI/dependency changes use `bash scripts/verify.sh tui-deps`. macOS checks and
+  manual TUI verification are described in the verification skill.
+- Reuse passed checks until relevant files or conditions change. Report command,
+  result, and environment-blocked checks; blocked checks are not passes.
+- Update README for new tools, flags, commands, and visible behavior. TUI changes
+  need a screenshot or terminal recording. Commits use `type(scope): summary`.
+- Finish when acceptance criteria are met and required checks pass, or report the
+  concrete blocker and remaining work. Do not claim measured token savings
+  without comparable evaluation runs.

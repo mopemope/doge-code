@@ -740,19 +740,34 @@ steps:
 ## 🧪 Development
 
 ### Build and Test
+
+Start with [AGENTS.md](AGENTS.md) for change-specific guidance. Shared development
+Skills live in `docs/ai/skills/` and are linked for Codex, Claude, and OpenCode.
+Development check scripts require Python 3.11+. Search tests require ripgrep
+(`rg`) on PATH. Check logs are retained in a temporary directory.
+
 ```bash
 # Code formatting
 cargo fmt --all
 
-# Run linting
-cargo clippy --all-targets --all-features
+# Focused Rust tests (zero matching/executed tests is an error)
+bash scripts/verify.sh test llm::tool_execution::dispatch::
 
-# Run tests
-cargo test
+# Complete Rust gates: fmt check, locked Clippy (-D warnings), locked tests
+bash scripts/verify.sh rust
+
+# Docs/Skills/development scripts only: layout, links, routing and script tests
+bash scripts/verify.sh guidance
 
 # Build release version
-cargo build --release
+cargo build --locked --release
 ```
+
+Use `bash scripts/verify.sh msrv` for the installed MSRV toolchain,
+`bash scripts/verify.sh tui-deps` for the TUI dependency graph, and
+`bash scripts/verify.sh macos` for focused tests on macOS. See the
+[verification matrix](docs/ai/workflow.md) for required checks and
+[agent evaluation protocol](docs/ai/evaluation.md) for measuring guidance changes.
 
 ### Adding New Languages
 1. Add tree-sitter parser dependency to `Cargo.toml`
@@ -761,10 +776,11 @@ cargo build --release
 4. Add tests in `src/analysis/tests/`
 
 ### Adding New Tools
-1. Implement tool in `src/tools/` directory
-2. Add to `FsTools` trait implementation
-3. Register in `src/tools/mod.rs`
-4. Add tests and documentation
+
+Follow the [tool registration checklist](docs/tool-output-contract.md#tool-registration)
+and [dgc-tool-dev skill](docs/ai/skills/dgc-tool-dev/SKILL.md). A default tool needs
+its implementation, module wiring, schema registration, dispatch handler, behavior
+tests, and a README entry. Run the guidance check to detect missing wiring.
 
 ### Adding Custom Commands
 Create a TOML file in `.doge/commands/` directory:
@@ -778,6 +794,10 @@ template = "Execute the following task: {args}"
 
 - **System Prompt**: `resources/system_prompt.md` - AI behavior guidelines
 - **Agent Guidelines**: `AGENTS.md` - Integration procedures
+- **Agent Development Workflow**: [docs/ai/workflow.md](docs/ai/workflow.md) - Shared Skills and verification matrix
+- **Architecture Routing**: [docs/ai/architecture.md](docs/ai/architecture.md) - Module responsibilities and change entry points
+- **Development Contracts**: [docs/ai/contracts.md](docs/ai/contracts.md) - Mutation, execution, context, and provenance boundaries
+- **Agent Evaluation**: [docs/ai/evaluation.md](docs/ai/evaluation.md) - Representative tasks and measured comparisons
 - **Tool Output Contract**: `docs/tool-output-contract.md` - Tool response/truncation spec
 - **Emacs Integration**: `elisp/emacs-integration.md`
 - **API Documentation**: Generate with `cargo doc`
@@ -814,7 +834,7 @@ template = "Execute the following task: {args}"
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
 ## 🙏 Acknowledgments
 
