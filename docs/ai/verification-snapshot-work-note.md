@@ -19,4 +19,7 @@
 - 取得の 10秒 budget は cooperative。atomic snapshot、全依存環境、途中で変更して戻した操作の完全検出は保証しない。toolchain / execution environment / test count は未記録。coverage の判定は維持。
 - 実装後レビュー: 異なる検証の参照をまとめた current capture に未解決の missing path がある場合、unknown 差分を無視して matches_start を返すことを修正。未知・不完全・重複 entry は一致としない。回帰テストを2件追加。
 - 実装後レビュー: export の親ディレクトリ差し替えと安全確認後の無制限再読込を修正。directory FD anchored 読み取りを共有し、保存済み証跡と manifest に一致する text bytes の私有一時コピーで既存 loader/query を実行する。一時領域は終了時に削除。回帰テストを3件追加。
-- レビュー後の重点検証: snapshot 16件、evidence report 28件、CLI 2件成功。`origin/develop` の更新を取り込み、最終 gate を再実行してから PR を作成する。
+- レビュー後の重点検証: snapshot 16件、evidence report 28件、CLI 2件成功。最新 `origin/develop` (`be92b80`) を競合なく取り込んだ。
+- レビュー後の最終 gate: `cargo fmt --all`、`env TMPDIR=/var/tmp bash scripts/verify.sh rust` 成功。警告なし Clippy、locked tests 1265件。ログ: `/var/tmp/dgc-verify-v10e84et`。初回 Clippy の引数数指摘は root/query root を型でまとめて解消。
+- `bash scripts/verify.sh guidance` 28件、`bash scripts/verify.sh tui-deps` 成功。TUI 表示は今回の修正で変わらず、前記 recording の確認結果を維持。macOS 実機未検証。
+- レビュー後 CLI smoke: API キーなしで schema 2 JSON / Markdown 出力を確認。test/fmt の変更検出と clippy の一致表示を維持し、保存済み証跡と Git index は不変。成果物: `/tmp/dgc-review-evidence.json`、`.md`。

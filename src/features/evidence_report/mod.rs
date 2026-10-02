@@ -128,8 +128,10 @@ async fn build_with(
             )
         };
         let report = collect::build(
-            &root,
-            query_files.path(),
+            collect::ReportRoots {
+                project: &root,
+                query: query_files.path(),
+            },
             inputs,
             git_before.clone(),
             snapshot.clone(),

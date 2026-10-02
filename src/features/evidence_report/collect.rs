@@ -251,9 +251,13 @@ pub(super) fn paths(inputs: &mut Inputs, git: &GitSnapshot) -> BTreeSet<String> 
     paths
 }
 
+pub(super) struct ReportRoots<'a> {
+    pub project: &'a Path,
+    pub query: &'a Path,
+}
+
 pub(super) fn build(
-    root: &Path,
-    query_root: &Path,
+    roots: ReportRoots<'_>,
     mut inputs: Inputs,
     mut git: GitSnapshot,
     snapshot: Snapshot,
@@ -261,6 +265,8 @@ pub(super) fn build(
     include_content: bool,
     generated_at: String,
 ) -> EvidenceReport {
+    let root = roots.project;
+    let query_root = roots.query;
     let unavailable_files: BTreeSet<_> = snapshot
         .files
         .iter()
