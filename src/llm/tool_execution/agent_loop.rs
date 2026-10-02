@@ -1,4 +1,10 @@
+use crate::config::ContextBudgetMode;
 use crate::llm::LlmErrorKind;
+use crate::llm::context_budget::{
+    BudgetPressure, ContextBudgetGovernor, ReactiveRetryGuard, RequestFootprint,
+    TokenEstimateSource, cleanup_threshold, should_compact_for_pressure,
+    should_offload_for_pressure,
+};
 use crate::llm::tool_execution::error::{AgentLoopError, handle_agent_error};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
@@ -326,6 +332,8 @@ pub async fn run_agent_loop(
     let mut last_plan_write_args_hash: Option<u64> = None;
     let mut repeated_plan_write_count = 0usize;
     let mut consecutive_plan_write_no_change_count = 0usize;
+    let mut budget_governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
+    let mut reactive_guard = ReactiveRetryGuard::new();
 
     loop {
         iters += 1;
@@ -339,24 +347,11 @@ pub async fn run_agent_loop(
             return Err(AgentLoopError::MaxIterations(iters).into());
         }
 
-        // --- Proactive Compaction Check ---
-        match history.check_and_compact_proactive().await {
-            Ok(true) => {
-                // Compaction summarizes history without needing reasoning
-                // budget; notify the controller for bookkeeping (v1: no-op).
-                reasoning_controller.observe_compaction();
-            }
-            Ok(false) => {}
-            Err(e) => {
-                error!("Proactive compaction error: {}", e);
-                // Continue even if compaction failed, hoping context length isn't fatal yet
-            }
-        }
-        // ----------------------------------
-
         // Fresh active-tool snapshot every iteration so `tool_search`
         // activations appear in the very next request. Activation is
-        // sticky: tools are only added, never evicted mid-run.
+        // sticky: tools are only added, never evicted mid-run. The
+        // governor must measure this snapshot (not the previous usage)
+        // before deciding any reduction.
         let active_tools = runtime.active_tool_defs().await;
         let reasoning_effort = reasoning_controller.current_effort();
         let reasoning_mode = cfg.reasoning.mode;
@@ -366,12 +361,327 @@ pub async fn run_agent_loop(
             reasoning_mode = reasoning_mode.as_str(),
             "reasoning decision for next request",
         );
-        // First logical request carries the runtime overlay; the pending flag
-        // is consumed before the request starts so HTTP retries, reactive
-        // compaction, and JSON correction never re-inject it.
-        let chat_result = {
-            let request_messages = if runtime_context_pending {
+
+        let effective_limit = cfg.get_effective_compaction_limit() as u64;
+        let cleanup_limit = cleanup_threshold(effective_limit);
+        let context_window = cfg.get_context_window_size();
+        let budget_mode = cfg.context_budget.mode;
+
+        // Footprint of the exact bytes about to be sent (after reductions).
+        // Used for post-response calibration. `None` in Off mode.
+        let mut sent_footprint: Option<RequestFootprint> = None;
+        // Whether the final request carries the one-shot runtime overlay.
+        let send_with_overlay: bool;
+
+        if budget_mode == ContextBudgetMode::Off {
+            // Legacy path only: previous-usage proactive check, no measuring.
+            match history.check_and_compact_proactive().await {
+                Ok(true) => {
+                    reasoning_controller.observe_compaction();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!("Proactive compaction error: {}", e);
+                }
+            }
+            send_with_overlay = runtime_context_pending;
+            runtime_context_pending = false;
+        } else if budget_mode == ContextBudgetMode::Observe {
+            // Migration/debug: log the new estimate but keep legacy behavior.
+            let overlay_present = runtime_context_pending;
+            let overlay_bytes = if overlay_present {
+                runtime_context
+                    .render()
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let observed = (|| -> anyhow::Result<(RequestFootprint, u64, BudgetPressure)> {
+                let footprint = if overlay_present {
+                    let projected =
+                        crate::llm::runtime_context::RequestMessages::with_runtime_context(
+                            history.as_slice(),
+                            &runtime_context,
+                        );
+                    budget_governor.measure_with_overlay(
+                        projected.as_slice(),
+                        &active_tools,
+                        overlay_bytes,
+                    )?
+                } else {
+                    budget_governor.measure(history.as_slice(), &active_tools)?
+                };
+                let estimate = budget_governor.estimate(footprint);
+                let pressure = budget_governor.classify(estimate, effective_limit);
+                let tokens = estimate.prompt_tokens;
+                debug!(
+                    context_budget_mode = budget_mode.as_str(),
+                    estimate_source = match estimate.source {
+                        TokenEstimateSource::Heuristic => "heuristic",
+                        TokenEstimateSource::Calibrated => "calibrated",
+                        TokenEstimateSource::ProviderExact => "provider_exact",
+                    },
+                    message_json_bytes = footprint.message_json_bytes,
+                    tool_schema_json_bytes = footprint.tool_schema_json_bytes,
+                    total_json_bytes = footprint.total_json_bytes,
+                    estimated_prompt_tokens = tokens,
+                    cleanup_threshold = cleanup_limit,
+                    effective_limit,
+                    context_window,
+                    active_tool_count = active_tools.len(),
+                    runtime_overlay_present = overlay_present,
+                    unseen_tool_results = history.unseen_count(),
+                    "context budget observe (no governor action)"
+                );
+                Ok((footprint, tokens, pressure))
+            })();
+            if let Err(e) = observed {
+                warn!(error = %e, "context budget observe measurement failed");
+            }
+            match history.check_and_compact_proactive().await {
+                Ok(true) => {
+                    reasoning_controller.observe_compaction();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!("Proactive compaction error: {}", e);
+                }
+            }
+            send_with_overlay = runtime_context_pending;
+            runtime_context_pending = false;
+            // Re-measure the exact bytes about to be sent for calibration.
+            let final_fp: anyhow::Result<RequestFootprint> = if send_with_overlay {
+                let projected = crate::llm::runtime_context::RequestMessages::with_runtime_context(
+                    history.as_slice(),
+                    &runtime_context,
+                );
+                budget_governor.measure_with_overlay(
+                    projected.as_slice(),
+                    &active_tools,
+                    overlay_bytes,
+                )
+            } else {
+                budget_governor.measure(history.as_slice(), &active_tools)
+            };
+            match final_fp {
+                Ok(fp) => sent_footprint = Some(fp),
+                Err(e) => warn!(error = %e, "context budget observe remeasure failed"),
+            }
+        } else {
+            // Auto: current-request preflight.
+            // A. active tools already snapshotted above.
+            // B/C/D. candidate projection + footprint + estimate.
+            let mut use_overlay = runtime_context_pending;
+            let mut overlay_bytes = if use_overlay {
+                runtime_context
+                    .render()
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let measure_current = |hist: &[ChatMessage],
+                                   overlay: bool,
+                                   overlay_b: u64|
+             -> anyhow::Result<RequestFootprint> {
+                if overlay {
+                    let projected =
+                        crate::llm::runtime_context::RequestMessages::with_runtime_context(
+                            hist,
+                            &runtime_context,
+                        );
+                    budget_governor.measure_with_overlay(
+                        projected.as_slice(),
+                        &active_tools,
+                        overlay_b,
+                    )
+                } else {
+                    budget_governor.measure(hist, &active_tools)
+                }
+            };
+            let initial_footprint = measure_current(history.as_slice(), use_overlay, overlay_bytes);
+            let mut measurement_failed = false;
+            let mut footprint = match initial_footprint {
+                Ok(fp) => fp,
+                Err(e) => {
+                    warn!(error = %e, "context budget measurement failed; sending best-effort");
+                    measurement_failed = true;
+                    // Dummy footprint keeps types; reductions are skipped and
+                    // the shared send path below delivers best-effort.
+                    RequestFootprint::new(0, 0, 0)
+                }
+            };
+            if !measurement_failed {
+                let mut estimate = budget_governor.estimate(footprint);
+                let mut pressure = budget_governor.classify(estimate, effective_limit);
+                debug!(
+                    context_budget_mode = budget_mode.as_str(),
+                    estimate_source = match estimate.source {
+                        TokenEstimateSource::Heuristic => "heuristic",
+                        TokenEstimateSource::Calibrated => "calibrated",
+                        TokenEstimateSource::ProviderExact => "provider_exact",
+                    },
+                    message_json_bytes = footprint.message_json_bytes,
+                    tool_schema_json_bytes = footprint.tool_schema_json_bytes,
+                    total_json_bytes = footprint.total_json_bytes,
+                    estimated_prompt_tokens = estimate.prompt_tokens,
+                    cleanup_threshold = cleanup_limit,
+                    effective_limit,
+                    context_window,
+                    active_tool_count = active_tools.len(),
+                    runtime_overlay_present = use_overlay,
+                    unseen_tool_results = history.unseen_count(),
+                    "context budget preflight initial"
+                );
+
+                // E. Runtime overlay drop first (cache-aware ordering). A dropped
+                // overlay is never deferred to the next iteration (one-shot).
+                if !matches!(pressure, BudgetPressure::Healthy) && use_overlay {
+                    use_overlay = false;
+                    overlay_bytes = 0;
+                    runtime_context_pending = false;
+                    match measure_current(history.as_slice(), false, 0) {
+                        Ok(fp) => {
+                            let before = estimate.prompt_tokens;
+                            footprint = fp;
+                            estimate = budget_governor.estimate(footprint);
+                            pressure = budget_governor.classify(estimate, effective_limit);
+                            debug!(
+                                budget_action = "drop_runtime_overlay",
+                                before_estimate = before,
+                                estimated_prompt_tokens = estimate.prompt_tokens,
+                                total_json_bytes = footprint.total_json_bytes,
+                                "dropped runtime overlay for budget pressure"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "remeasure after overlay drop failed"),
+                    }
+                } else if use_overlay {
+                    // Healthy with overlay: consume the one-shot flag but keep
+                    // the overlay for this request.
+                    runtime_context_pending = false;
+                } else {
+                    // No overlay pending; ensure the flag stays consumed.
+                    runtime_context_pending = false;
+                }
+
+                // F/G. Recoverable Observation Store offload, then remeasure.
+                // Never uses the lossy `clear_stale_tool_results` path.
+                if should_offload_for_pressure(pressure) {
+                    let report = history.offload_stale_tool_results_for_pressure(3);
+                    if report.recoverable_offloads > 0
+                        || report.fallback_elisions > 0
+                        || report.skipped_unseen > 0
+                    {
+                        debug!(
+                            budget_action = "observation_offload",
+                            recoverable_offloads = report.recoverable_offloads,
+                            fallback_elisions = report.fallback_elisions,
+                            skipped_unseen = report.skipped_unseen,
+                            reclaimed_json_bytes = report.reclaimed_bytes,
+                            "preflight observation offload"
+                        );
+                        if let Some(tx) = &ui_tx
+                            && (report.recoverable_offloads > 0 || report.fallback_elisions > 0)
+                        {
+                            let _ = tx.send(format!(
+                            "::status:waiting:Offloaded {} tool result(s) ({} recoverable) to free context...",
+                            report.recoverable_offloads + report.fallback_elisions,
+                            report.recoverable_offloads
+                        ));
+                        }
+                    }
+                    match measure_current(history.as_slice(), use_overlay, overlay_bytes) {
+                        Ok(fp) => {
+                            footprint = fp;
+                            estimate = budget_governor.estimate(footprint);
+                            pressure = budget_governor.classify(estimate, effective_limit);
+                            debug!(
+                                estimated_prompt_tokens = estimate.prompt_tokens,
+                                total_json_bytes = footprint.total_json_bytes,
+                                "context budget post-offload remeasure"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "remeasure after offload failed"),
+                    }
+                }
+
+                // H/I. Calibrated-only proactive compaction (last resort).
+                // Heuristic-only Compact never compacts: best-effort send to
+                // avoid false-positive LLM compaction and cache destruction.
+                if should_compact_for_pressure(pressure, estimate.source) {
+                    match history.compact_for_budget_pressure().await {
+                        Ok(true) => {
+                            reasoning_controller.observe_compaction();
+                            match measure_current(history.as_slice(), use_overlay, overlay_bytes) {
+                                Ok(fp) => {
+                                    footprint = fp;
+                                    estimate = budget_governor.estimate(footprint);
+                                    pressure = budget_governor.classify(estimate, effective_limit);
+                                    debug!(
+                                        budget_action = "compact",
+                                        estimated_prompt_tokens = estimate.prompt_tokens,
+                                        total_json_bytes = footprint.total_json_bytes,
+                                        "context budget post-compact remeasure"
+                                    );
+                                }
+                                Err(e) => warn!(error = %e, "remeasure after compact failed"),
+                            }
+                        }
+                        Ok(false) => {
+                            debug!(
+                                budget_action = "compact_skipped",
+                                "preflight compaction made no progress; sending best-effort"
+                            );
+                        }
+                        Err(e) => {
+                            error!("Preflight compaction error: {}", e);
+                        }
+                    }
+                } else if matches!(pressure, BudgetPressure::Compact) {
+                    debug!(
+                        budget_action = "compact_deferred_heuristic",
+                        "heuristic-only Compact: skipping compaction, best-effort send"
+                    );
+                }
+
+                debug!(
+                    context_budget_mode = budget_mode.as_str(),
+                    estimate_source = match estimate.source {
+                        TokenEstimateSource::Heuristic => "heuristic",
+                        TokenEstimateSource::Calibrated => "calibrated",
+                        TokenEstimateSource::ProviderExact => "provider_exact",
+                    },
+                    message_json_bytes = footprint.message_json_bytes,
+                    tool_schema_json_bytes = footprint.tool_schema_json_bytes,
+                    total_json_bytes = footprint.total_json_bytes,
+                    estimated_prompt_tokens = estimate.prompt_tokens,
+                    cleanup_threshold = cleanup_limit,
+                    effective_limit,
+                    context_window,
+                    active_tool_count = active_tools.len(),
+                    runtime_overlay_present = use_overlay,
+                    unseen_tool_results = history.unseen_count(),
+                    "context budget preflight final"
+                );
+            }
+            if measurement_failed {
                 runtime_context_pending = false;
+                send_with_overlay = use_overlay;
+                // sent_footprint stays None (no calibration without measurement).
+            } else {
+                send_with_overlay = use_overlay;
+                sent_footprint = Some(footprint);
+            }
+        }
+
+        // J. Send (best-effort; provider is the final authority).
+        // First logical request carries the runtime overlay; the pending flag
+        // was consumed during preflight so retries, reactive compaction, and
+        // JSON correction never re-inject it.
+        let chat_result = {
+            let request_messages = if send_with_overlay {
                 crate::llm::runtime_context::RequestMessages::with_runtime_context(
                     history.as_slice(),
                     &runtime_context,
@@ -400,20 +710,28 @@ pub async fn run_agent_loop(
         let msg = match chat_result {
             Ok(msg) => msg,
             Err(e) => {
-                // Check if the error is due to context length exceeded
+                // Check if the error is due to context length exceeded.
+                // Unseen-safe reactive compaction, at most one retry per
+                // logical request (guard resets on success).
                 if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>()
                 {
-                    match history.compact_reactive().await {
-                        Ok(true) => {
-                            info!("History compaction successful (reactive). Resuming.");
-                            reasoning_controller.observe_compaction();
-                            continue;
-                        }
-                        Ok(false) => {
-                            // Should not happen if compact_reactive returns true only on success
-                        }
-                        Err(compact_err) => {
-                            error!("Error during reactive history compaction: {}", compact_err);
+                    if !reactive_guard.should_attempt() {
+                        error!("context length exceeded after reactive compaction; not retrying");
+                    } else {
+                        match history.compact_reactive().await {
+                            Ok(true) => {
+                                info!("History compaction successful (reactive). Resuming.");
+                                reasoning_controller.observe_compaction();
+                                reactive_guard.record_attempt();
+                                continue;
+                            }
+                            Ok(false) => {
+                                // No progress (e.g. huge protected unseen
+                                // suffix): retrying the same bytes is futile.
+                            }
+                            Err(compact_err) => {
+                                error!("Error during reactive history compaction: {}", compact_err);
+                            }
                         }
                     }
                 }
@@ -445,6 +763,13 @@ pub async fn run_agent_loop(
                 return Err(agent_error.into());
             }
         };
+        // Calibrate before the sub-agent can overwrite the shared
+        // per-request counter, then mark results seen. Failed requests above
+        // never reach here so unseen results stay inline.
+        if let Some(fp) = sent_footprint {
+            budget_governor.observe_actual(fp, client.get_prompt_tokens_used());
+        }
+        reactive_guard.record_success();
         // A complete model response means every tool result in the request
         // was successfully consumed. Mark them seen before pushing the new
         // assistant/tool messages; network errors above never reach here so
@@ -1151,6 +1476,22 @@ mod tests {
                 .is_some_and(|c| c.contains("RuntimeContext"))),
             "runtime overlay leaked into updated_messages"
         );
+    }
+
+    #[test]
+    fn test_reactive_guard_finite_retry() {
+        use crate::llm::context_budget::ReactiveRetryGuard;
+        // Simulate two consecutive provider overflows: first compacts and
+        // retries, second errors instead of compacting again.
+        let mut guard = ReactiveRetryGuard::new();
+        assert!(guard.should_attempt(), "first overflow may compact");
+        guard.record_attempt();
+        assert!(
+            !guard.should_attempt(),
+            "second overflow must not compact again"
+        );
+        guard.record_success();
+        assert!(guard.should_attempt(), "success resets for later overflows");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+use super::context_budget::PartialContextBudgetConfig;
 use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
 use super::mcp::{PartialLocalMcpServerConfig, PartialMcpServerConfig};
@@ -39,6 +40,7 @@ pub struct FileConfig {
     pub execution: Option<PartialExecutionConfig>,
     pub tool_routing: Option<PartialToolRoutingConfig>,
     pub reasoning: Option<PartialReasoningConfig>,
+    pub context_budget: Option<PartialContextBudgetConfig>,
 }
 
 pub fn get_default_config_content() -> String {
@@ -122,6 +124,11 @@ command_timeout_ms = 300000
 # deliberative_effort = "medium"
 # recovery_effort = "high"
 # fixed_effort = "medium"
+
+# Preflight context governor: measure the current request footprint
+# (messages + active tool schemas + runtime overlay) before sending.
+# [context_budget]
+# mode = "auto"  # auto / observe / off
 
 # Allowed paths for file access
 # allowed_paths = ["/tmp", "/home/user/project"]
