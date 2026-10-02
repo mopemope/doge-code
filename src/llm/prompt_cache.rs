@@ -711,6 +711,40 @@ mod tests {
     }
 
     #[test]
+    fn test_discovery_retirement_changes_schema_deterministically() {
+        // Retirement is observable as a prefix change (tool_search leaves the
+        // schema surface) and recomputation stays stable.
+        let initial = vec![
+            tool_def("edit", "edit file", serde_json::json!({"type":"object"})),
+            tool_def("fs_read", "read", serde_json::json!({"type":"object"})),
+            tool_def(
+                "tool_search",
+                "search",
+                serde_json::json!({"type":"object"}),
+            ),
+        ];
+        let retired = vec![
+            tool_def("edit", "edit file", serde_json::json!({"type":"object"})),
+            tool_def("fs_read", "read", serde_json::json!({"type":"object"})),
+        ];
+        assert_ne!(
+            tool_schema_fingerprint(&initial),
+            tool_schema_fingerprint(&retired)
+        );
+        assert_eq!(
+            tool_schema_fingerprint(&retired),
+            tool_schema_fingerprint(&retired)
+        );
+        let messages = vec![system_msg("stable")];
+        let before = compute_prefix_signature("m", &messages, &initial, None);
+        let after = compute_prefix_signature("m", &messages, &retired, None);
+        let change = after.diff(Some(&before));
+        assert!(change.tool_schema_changed);
+        assert!(!change.leading_system_changed);
+        assert!(!change.model_changed);
+    }
+
+    #[test]
     fn test_first_request_has_no_change() {
         let tools = vec![tool_def("a", "d", serde_json::json!({"type":"object"}))];
         let messages = vec![system_msg("s")];
