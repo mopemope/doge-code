@@ -111,6 +111,7 @@ async fn dispatch_inner(
         "doc_generate" => tools::doc_generate(runtime, args_val).await,
         "search_history" => tools::search_history(runtime, args_val).await,
         "tool_search" => tools::tool_search(runtime, args_val).await,
+        "observation_read" => tools::observation_read(runtime, args_val).await,
 
         other => {
             if let Some(outcome) = runtime
@@ -1352,6 +1353,151 @@ mod tests {
         assert!(read.is_success);
         let items = read.value["items"].as_array().expect("plan items");
         assert_eq!(items.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_observation_read_is_registered() {
+        let names: Vec<String> = crate::llm::tool_def::default_tools_def()
+            .iter()
+            .map(|def| def.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"observation_read".to_string()),
+            "tools: {names:?}"
+        );
+        // Appended, not reordered: observation_read is last.
+        assert_eq!(names.last().map(String::as_str), Some("observation_read"));
+    }
+
+    #[tokio::test]
+    async fn test_observation_read_returns_exact_content() -> Result<()> {
+        let dir = tempdir()?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        // Seed the conversation-owned store directly.
+        let original = "exact-model-visible-content-日本語🎉".repeat(50);
+        let obs_id = {
+            let mut store = runtime.observation_store.write().unwrap();
+            store
+                .insert("call-orig".into(), "fs_read".into(), original.clone(), 5000)
+                .expect("seed")
+        };
+        let call = ToolCall {
+            id: Some("call-obs-read".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "observation_read".to_string(),
+                arguments: json!({"id": obs_id}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(output.is_success, "value: {}", output.value);
+        assert_eq!(output.value["ok"], true);
+        assert_eq!(output.value["id"], obs_id.as_str());
+        // Paged read with small limit reassembles losslessly.
+        let mut assembled = String::new();
+        let mut offset = 0usize;
+        loop {
+            let page_call = ToolCall {
+                id: Some(format!("call-page-{offset}")),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "observation_read".to_string(),
+                    arguments: json!({"id": obs_id, "offset": offset, "limit": 200}).to_string(),
+                },
+            };
+            let page_out = dispatch_tool_call(&runtime, &page_call).await?;
+            assert!(page_out.is_success);
+            assembled.push_str(page_out.value["content"].as_str().unwrap());
+            match page_out.value.get("next_cursor") {
+                Some(v) if !v.is_null() => offset = v.as_u64().unwrap() as usize,
+                _ => break,
+            }
+        }
+        assert_eq!(assembled, original);
+        // Unknown ids error without fallback execution.
+        let unknown = ToolCall {
+            id: Some("call-unknown".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "observation_read".to_string(),
+                arguments: json!({"id": "obs-999999"}).to_string(),
+            },
+        };
+        let err_out = dispatch_tool_call(&runtime, &unknown).await?;
+        assert!(!err_out.is_success);
+        assert_eq!(err_out.value["ok"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_observation_read_needs_no_mutation_approval() -> Result<()> {
+        // Read-only: must not require task_plan / mutation approval and must
+        // not touch the session changed-files list.
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store,
+            current_session: None,
+        }));
+        {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_session(None)?;
+        }
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager.clone());
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        let before_changed = manager
+            .lock()
+            .unwrap()
+            .current_session
+            .as_ref()
+            .map(|s| s.changed_files.len())
+            .unwrap_or(0);
+        let obs_id = {
+            let mut store = runtime.observation_store.write().unwrap();
+            store
+                .insert("c".into(), "search_text".into(), "hello".repeat(100), 600)
+                .unwrap()
+        };
+        let call = ToolCall {
+            id: Some("call-ro".to_string()),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "observation_read".to_string(),
+                arguments: json!({"id": obs_id}).to_string(),
+            },
+        };
+        let out = dispatch_tool_call(&runtime, &call).await?;
+        assert!(out.is_success);
+        let after_changed = manager
+            .lock()
+            .unwrap()
+            .current_session
+            .as_ref()
+            .map(|s| s.changed_files.len())
+            .unwrap_or(0);
+        assert_eq!(before_changed, after_changed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_observation_read_core_eager_visible() -> Result<()> {
+        // Stable unconditional surface: visible even in deferred mode without
+        // a prior tool_search.
+        let (_dir, fs_tools) = deferred_test_fs();
+        let runtime = deferred_test_runtime(&fs_tools);
+        assert!(runtime.is_tool_active("observation_read").await);
         Ok(())
     }
 }

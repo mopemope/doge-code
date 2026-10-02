@@ -139,6 +139,13 @@ pub struct SessionData {
     /// Count of failed provenance event writes in this session.
     #[serde(default)]
     pub provenance_record_failures: u64,
+    /// Conversation-owned Observation Store (recoverable offloaded tool
+    /// results). Empty for legacy sessions; serde default keeps them loadable.
+    #[serde(default)]
+    pub observations: crate::llm::observation::ObservationStore,
+    /// Tool-call ids not yet confirmed seen by the model.
+    #[serde(default)]
+    pub unseen_tool_results: std::collections::BTreeSet<String>,
 }
 
 impl SessionData {
@@ -165,6 +172,8 @@ impl SessionData {
             changed_files: Vec::new(),
             provenance_incomplete: false,
             provenance_record_failures: 0,
+            observations: crate::llm::observation::ObservationStore::new(),
+            unseen_tool_results: std::collections::BTreeSet::new(),
         }
     }
 

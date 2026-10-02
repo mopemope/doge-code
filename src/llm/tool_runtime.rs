@@ -24,6 +24,10 @@ pub struct ToolRuntime<'a> {
     /// Per-turn provenance attribution (directive id, if any). Propagated to
     /// every tool execution in this turn; never stored globally.
     pub attribution: ProvenanceAttribution,
+    /// Conversation-owned Observation Store handle. Cloned from the owning
+    /// `HistoryManager` per agent run so `observation_read` retrieves only
+    /// this conversation's offloaded results without global state.
+    pub observation_store: crate::llm::observation::SharedObservationStore,
 }
 
 impl<'a> ToolRuntime<'a> {
@@ -85,6 +89,7 @@ impl<'a> ToolRuntime<'a> {
             subagent_model: subagent_model.into(),
             cancel_token,
             attribution,
+            observation_store: crate::llm::observation::new_shared_store(),
         })
     }
 
@@ -99,7 +104,17 @@ impl<'a> ToolRuntime<'a> {
             subagent_model: "test-model".to_string(),
             cancel_token: None,
             attribution: ProvenanceAttribution::none(),
+            observation_store: crate::llm::observation::new_shared_store(),
         }
+    }
+
+    /// Attach the conversation-owned Observation Store handle. Called once
+    /// per agent run so `observation_read` sees this run's offloads.
+    pub fn set_observation_store(
+        &mut self,
+        handle: crate::llm::observation::SharedObservationStore,
+    ) {
+        self.observation_store = handle;
     }
 
     /// Currently LLM-visible tool schemas, in stable name order.
