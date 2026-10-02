@@ -15,7 +15,7 @@ mod symbol_edit;
 mod tool_catalog;
 mod tool_def;
 pub mod tool_execution;
-mod tool_runtime;
+pub(crate) mod tool_runtime;
 pub mod types;
 
 use reqwest::StatusCode;

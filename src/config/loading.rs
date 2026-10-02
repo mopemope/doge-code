@@ -13,8 +13,9 @@ use super::tool_routing::PartialToolRoutingConfig;
 
 use super::watch::PartialWatchConfig;
 
-#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+#[derive(Clone, Default, serde::Deserialize, PartialEq)]
 pub struct FileConfig {
+    pub provider: Option<crate::features::openai_subscription::ProviderKind>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
@@ -265,5 +266,14 @@ pub fn load_project_config(project_root: &Path) -> Result<FileConfig> {
         }
     } else {
         Ok(FileConfig::default())
+    }
+}
+
+impl std::fmt::Debug for FileConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileConfig")
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish_non_exhaustive()
     }
 }

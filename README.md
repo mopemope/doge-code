@@ -67,7 +67,7 @@ Non-interactive session management. Sessions are listed most recently updated fi
 
 ### Prerequisites
 - Rust 1.88+ (Rust Edition 2024)
-- OpenAI compatible API key (set via `OPENAI_API_KEY` environment variable)
+- An OpenAI-compatible API key (`OPENAI_API_KEY`), or an eligible ChatGPT account with plan usage authorized through Sign in with ChatGPT
 - ripgrep (`rg` on `PATH`; required at runtime by the `search_text` tool, which shells out to `rg` with no fallback)
 
 ### Build from Source
@@ -87,6 +87,79 @@ base_url = "https://api.anthropic.com"
 # Top-level key (not under [project])
 project_instructions_file = "PROJECT.md"
 ```
+
+## Use your ChatGPT plan (preview)
+
+On macOS and Linux, sign in through the official Sign in with ChatGPT flow to
+use an eligible account's plan allowance with dgc. Account/workspace eligibility,
+available models, app limits and service policy are enforced by OpenAI.
+
+```bash
+dgc auth login openai-chatgpt
+# Earlier consent declined: explicitly request plan usage
+dgc auth login openai-chatgpt --account <account-label> --enable-plan-usage
+dgc auth status openai-chatgpt
+dgc models --provider openai-chatgpt
+# Choose a slug from the model catalog:
+dgc --provider openai-chatgpt --model <catalog-slug> exec "Explain this project"
+dgc --provider openai-chatgpt --model <catalog-slug>
+```
+
+The explicit login command opens the system browser and listens on a temporary
+`127.0.0.1` callback port. Use `--no-browser` to open the displayed authorization
+URL manually. Do not share that URL. A successful identity sign-in without plan
+usage permission is shown separately and cannot make inference requests.
+Ordinary exec, watch and workflow commands never open a sign-in browser.
+
+Login does not change your existing provider configuration. The default remains
+`openai-compatible` and uses your API key. Select `openai-chatgpt` with `--provider`,
+`DGC_PROVIDER`, or a top-level `provider = "openai-chatgpt"` configuration key
+(CLI > environment > project > user > default). Always choose a model explicitly;
+the API-key default model is not reused for this provider. `--api-key` cannot be
+combined with the ChatGPT provider, and its requests always use the official
+Responses endpoint even if another base URL is configured.
+
+```bash
+dgc auth list openai-chatgpt
+dgc auth login openai-chatgpt --new-account
+dgc auth login openai-chatgpt --account <account-label>
+dgc auth use openai-chatgpt <account-label>
+dgc auth logout openai-chatgpt [account-label]
+```
+
+Start a new session when changing the ChatGPT account or model. Responses
+sessions retain ordered output and encrypted reasoning items locally so tool
+calls and their results can be replayed after `--resume`. A saved provider/account
+binding also survives history compaction. These sessions cannot be continued
+through another billing provider. Existing API-key sessions remain readable.
+For catalog models whose context capacity dgc does not recognize, set
+`context_window_size` in the `[llm]` section to the documented model capacity.
+Local context estimates are approximate; encrypted reasoning is preserved as
+opaque state and its ciphertext length is not used as a token count.
+
+Credentials are stored in the user's platform configuration directory under
+`doge-code/openai-chatgpt/`, separately from project `.doge/` state. Unix directories
+use 0700 and files use 0600, with atomic writes and process-wide file locking.
+Local status reports expiry and granted permission; it does not prove current
+server eligibility. Refreshes replace rotating tokens together. An interrupted
+or uncertain renewal requires sign-in again instead of replaying the old token.
+Logout clears local tokens; a warning indicates when remote revocation could not
+be confirmed, in which case disconnect the app in ChatGPT Settings.
+
+Plan limits stop new inference and never silently switch to API-key billing.
+Review limits and app access in [ChatGPT settings](https://chatgpt.com/#settings).
+Reported token counts are request/session measurements, not remaining plan
+allowance or a predicted reset time. Transient admission failures have bounded
+retries; failed or incomplete streams never authorize tool execution.
+
+This preview supports text and dgc's local function tools (including local MCP
+adapters and local tool discovery). It uses HTTP/SSE with `store:false` and
+`stream:true`. Hosted Responses tool search, hosted MCP, image generation,
+WebSocket continuation and device-code sign-in are outside this integration.
+Protected credential storage for Windows is not implemented yet.
+
+See the official [OSS integration](https://developers.openai.com/siwc/token-sharing-open-source)
+and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
 
 ## Export evidence for review
 

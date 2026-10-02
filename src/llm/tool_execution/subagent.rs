@@ -40,12 +40,14 @@ pub async fn run_subagent(
 
     let messages: Vec<ChatMessage> = vec![
         ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(subagent_system_prompt(project_dir)),
             tool_calls: vec![],
             tool_call_id: None,
         },
         ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(format!(
                 "Task description: {description}\n\nTask instructions:\n{prompt}"
@@ -161,6 +163,7 @@ async fn run_subagent_inner(
         }
 
         messages.push(ChatMessage {
+            provider_state: msg.provider_state.clone(),
             role: "assistant".into(),
             content: msg.content.clone(),
             tool_calls: msg.tool_calls.clone(),
@@ -173,6 +176,7 @@ async fn run_subagent_inner(
             if !SUBAGENT_ALLOWED_TOOLS.contains(&tool_name) {
                 debug!(tool = tool_name, "subagent tool blocked");
                 messages.push(ChatMessage {
+            provider_state: None,
                     role: "tool".into(),
                     content: Some(
                         serde_json::json!({
@@ -229,6 +233,7 @@ async fn run_subagent_inner(
             };
 
             messages.push(ChatMessage {
+                provider_state: None,
                 role: "tool".into(),
                 content: Some(tool_message_content),
                 tool_calls: vec![],

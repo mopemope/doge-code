@@ -28,8 +28,9 @@ pub enum AppConfigError {
     Missing(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
+    pub provider: crate::features::openai_subscription::ProviderKind,
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
@@ -74,6 +75,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            provider: Default::default(),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o-mini".to_string(),
             api_key: None,
@@ -162,6 +164,28 @@ impl AppConfig {
         let project_cfg = load_project_config(&project_root).unwrap_or_default();
         let file_cfg = load_file_config().unwrap_or_default();
 
+        let provider = resolve_provider(
+            cli.provider,
+            std::env::var("DGC_PROVIDER").ok().as_deref(),
+            project_cfg.provider,
+            file_cfg.provider,
+        )?;
+        if provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+            && cli.api_key.is_some()
+        {
+            anyhow::bail!("--api-key cannot be combined with --provider openai-chatgpt");
+        }
+        let explicit_model = !cli.model.is_empty()
+            || std::env::var("OPENAI_MODEL").is_ok()
+            || project_cfg.model.is_some()
+            || file_cfg.model.is_some();
+        if provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+            && !explicit_model
+        {
+            anyhow::bail!(
+                "Select a ChatGPT model with --model. Run dgc models --provider openai-chatgpt."
+            );
+        }
         let api_key = cli
             .api_key
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
@@ -279,7 +303,20 @@ impl AppConfig {
             project_cfg.context_budget.as_ref(),
         );
 
-        Ok(Self {
+        let base_url = if provider
+            == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+        {
+            if base_url != "https://api.openai.com/v1" {
+                eprintln!(
+                    "openai-chatgpt uses the official Responses endpoint; the configured base URL is not used."
+                );
+            }
+            "https://api.openai.com/v1".to_owned()
+        } else {
+            base_url
+        };
+        let config = Self {
+            provider,
             base_url,
             model,
             api_key,
@@ -330,7 +367,15 @@ impl AppConfig {
             tool_routing,
             reasoning,
             context_budget,
-        })
+        };
+        if config.provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+            && config.get_context_window_size().is_none()
+        {
+            eprintln!(
+                "ChatGPT model context capacity is unknown. Set [llm] context_window_size explicitly; local estimates are approximate."
+            );
+        }
+        Ok(config)
     }
 }
 
@@ -486,5 +531,78 @@ pub fn merge_local_mcp_server(
             .and_then(|p| p.address.clone())
             .or_else(|| file_cfg.and_then(|f| f.address.clone()))
             .unwrap_or(defaults.address),
+    }
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+fn resolve_provider(
+    cli: Option<crate::features::openai_subscription::ProviderKind>,
+    environment: Option<&str>,
+    project: Option<crate::features::openai_subscription::ProviderKind>,
+    user: Option<crate::features::openai_subscription::ProviderKind>,
+) -> Result<crate::features::openai_subscription::ProviderKind> {
+    use crate::features::openai_subscription::ProviderKind;
+    if let Some(provider) = cli {
+        return Ok(provider);
+    }
+    if let Some(environment) = environment {
+        return match environment {
+            "openai-compatible" => Ok(ProviderKind::OpenaiCompatible),
+            "openai-chatgpt" => Ok(ProviderKind::OpenaiChatgpt),
+            _ => anyhow::bail!("invalid DGC_PROVIDER"),
+        };
+    }
+    Ok(project.or(user).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use crate::features::openai_subscription::ProviderKind::{
+        OpenaiChatgpt as Chatgpt, OpenaiCompatible as Compatible,
+    };
+    #[test]
+    fn explicit_provider_precedence_and_invalid_environment() {
+        assert_eq!(
+            resolve_provider(
+                Some(Chatgpt),
+                Some("invalid"),
+                Some(Compatible),
+                Some(Compatible)
+            )
+            .expect("CLI wins"),
+            Chatgpt
+        );
+        assert!(resolve_provider(None, Some("invalid"), None, None).is_err());
+        assert_eq!(
+            resolve_provider(
+                None,
+                Some("openai-compatible"),
+                Some(Chatgpt),
+                Some(Chatgpt)
+            )
+            .expect("environment"),
+            Compatible
+        );
+        assert_eq!(
+            resolve_provider(None, None, Some(Chatgpt), Some(Compatible)).expect("project"),
+            Chatgpt
+        );
+        assert_eq!(
+            resolve_provider(None, None, None, Some(Chatgpt)).expect("user"),
+            Chatgpt
+        );
+        assert_eq!(
+            resolve_provider(None, None, None, None).expect("legacy"),
+            Compatible
+        );
     }
 }

@@ -118,6 +118,7 @@ pub(crate) fn spawn_agent_turn(
     let mut msgs = Vec::new();
     let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&executor.cfg);
     msgs.push(crate::llm::ChatMessage {
+        provider_state: None,
         role: "system".into(),
         content: Some(sys_prompt),
         tool_calls: vec![],
@@ -130,6 +131,7 @@ pub(crate) fn spawn_agent_turn(
         let lines: Vec<&str> = ui.shell_output_buffer.lines().rev().take(50).collect();
         let context = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
         msgs.push(crate::llm::ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(format!(
                 "Recent shell output (last 50 lines):\n```\n{context}\n```"
@@ -142,6 +144,7 @@ pub(crate) fn spawn_agent_turn(
         executor.enforce_plan_context(&mut msgs, &content, Some(ui));
     }
     msgs.push(crate::llm::ChatMessage {
+        provider_state: None,
         role: "user".into(),
         content: Some(content.clone()),
         tool_calls: vec![],
@@ -278,8 +281,18 @@ pub(crate) fn spawn_agent_turn(
                         ));
                     }
                     if let Ok(mut history) = conversation_history.lock() {
-                        history.append_user(content_for_job.clone());
                         let mut sm = session_manager.lock().unwrap();
+                        if client.is_subscription() {
+                            if let Some(session) = &sm.current_session {
+                                match serde_json::to_value(&session.conversation)
+                                    .and_then(serde_json::from_value::<Vec<crate::llm::ChatMessage>>) {
+                                    Ok(messages) => history.overwrite_messages(messages.into_iter().filter(|m| m.role != "system").collect()),
+                                    Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
+                                }
+                            }
+                        } else {
+                            history.append_user(content_for_job.clone());
+                        }
                         let msgs_vec = history.build_messages();
                         if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
                             tracing::error!(
@@ -304,8 +317,18 @@ pub(crate) fn spawn_agent_turn(
                         ));
                     }
                     if let Ok(mut history) = conversation_history.lock() {
-                        history.append_user(content_for_job.clone());
                         let mut sm = session_manager.lock().unwrap();
+                        if client.is_subscription() {
+                            if let Some(session) = &sm.current_session {
+                                match serde_json::to_value(&session.conversation)
+                                    .and_then(serde_json::from_value::<Vec<crate::llm::ChatMessage>>) {
+                                    Ok(messages) => history.overwrite_messages(messages.into_iter().filter(|m| m.role != "system").collect()),
+                                    Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
+                                }
+                            }
+                        } else {
+                            history.append_user(content_for_job.clone());
+                        }
                         let msgs_vec = history.build_messages();
                         if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
                             tracing::error!(

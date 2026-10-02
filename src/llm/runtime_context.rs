@@ -209,6 +209,7 @@ impl<'a> RequestMessages<'a> {
     ) -> Self {
         use crate::llm::types::ChatMessage;
         let overlay = ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(rendered),
             tool_calls: vec![],
@@ -249,6 +250,7 @@ mod tests {
 
     fn system(content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(content.to_string()),
             tool_calls: vec![],
@@ -258,6 +260,7 @@ mod tests {
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(content.to_string()),
             tool_calls: vec![],
@@ -267,6 +270,7 @@ mod tests {
 
     fn assistant(content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some(content.to_string()),
             tool_calls: vec![],
@@ -276,6 +280,7 @@ mod tests {
 
     fn assistant_tool_call(id: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![ToolCall {
@@ -292,6 +297,7 @@ mod tests {
 
     fn tool_result(id: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "tool".into(),
             content: Some("{}".to_string()),
             tool_calls: vec![],

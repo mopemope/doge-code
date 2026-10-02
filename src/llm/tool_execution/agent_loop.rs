@@ -133,6 +133,7 @@ fn block_plan_write_call(
     let blocked_content = truncate_tool_output(blocked.to_string(), PLAN_WRITE_TOOL_NAME);
     history.push_tool_result(tc.id.clone(), blocked_content);
     history.push(ChatMessage {
+        provider_state: None,
         role: "system".into(),
         content: Some(plan_write_block_system_message(reason).to_string()),
         tool_calls: vec![],
@@ -244,7 +245,24 @@ pub async fn run_agent_loop(
     attribution: crate::provenance::ProvenanceAttribution,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
+    if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
+        let binding = match client.account_label() {
+            Some(account) => format!("openai-chatgpt:{account}:{model}"),
+            None => "openai-compatible".to_owned(),
+        };
+        crate::utils::safe_std_lock(manager, "session_manager")?.bind_inference(binding)?;
+    }
 
+    let measure = |governor: &crate::llm::context_budget::ContextBudgetGovernor,
+                   messages: &[ChatMessage],
+                   tools: &[crate::llm::ToolDef],
+                   overlay: u64| {
+        if let Some(account) = client.account_label() {
+            governor.measure_subscription(account, model, messages, tools, overlay)
+        } else {
+            governor.measure_with_overlay(messages, tools, overlay)
+        }
+    };
     // Initialize HistoryManager
     let mut history = crate::llm::tool_execution::history::HistoryManager::new(
         client.clone(),
@@ -269,6 +287,7 @@ pub async fn run_agent_loop(
         if !has_system_prompt {
             debug!("Injecting default system prompt");
             let system_msg = ChatMessage {
+                provider_state: None,
                 role: "system".into(),
                 content: Some(build_system_prompt(cfg)),
                 tool_calls: vec![],
@@ -412,13 +431,14 @@ pub async fn run_agent_loop(
                             history.as_slice(),
                             &runtime_context,
                         );
-                    budget_governor.measure_with_overlay(
+                    measure(
+                        &budget_governor,
                         projected.as_slice(),
                         &active_tools,
                         overlay_bytes,
                     )?
                 } else {
-                    budget_governor.measure(history.as_slice(), &active_tools)?
+                    measure(&budget_governor, history.as_slice(), &active_tools, 0)?
                 };
                 let estimate = budget_governor.estimate(footprint);
                 let pressure = budget_governor.classify(estimate, effective_limit);
@@ -464,13 +484,14 @@ pub async fn run_agent_loop(
                     history.as_slice(),
                     &runtime_context,
                 );
-                budget_governor.measure_with_overlay(
+                measure(
+                    &budget_governor,
                     projected.as_slice(),
                     &active_tools,
                     overlay_bytes,
                 )
             } else {
-                budget_governor.measure(history.as_slice(), &active_tools)
+                measure(&budget_governor, history.as_slice(), &active_tools, 0)
             };
             match final_fp {
                 Ok(fp) => sent_footprint = Some(fp),
@@ -499,13 +520,14 @@ pub async fn run_agent_loop(
                             hist,
                             &runtime_context,
                         );
-                    budget_governor.measure_with_overlay(
+                    measure(
+                        &budget_governor,
                         projected.as_slice(),
                         &active_tools,
                         overlay_b,
                     )
                 } else {
-                    budget_governor.measure(hist, &active_tools)
+                    measure(&budget_governor, hist, &active_tools, 0)
                 }
             };
             let initial_footprint = measure_current(history.as_slice(), use_overlay, overlay_bytes);
@@ -770,6 +792,7 @@ pub async fn run_agent_loop(
                         e
                     );
                     history.push(ChatMessage {
+                        provider_state: None,
                         role: "user".into(),
                         content: Some(feedback),
                         tool_calls: vec![],
@@ -859,6 +882,7 @@ pub async fn run_agent_loop(
             }
 
             history.push(ChatMessage {
+                provider_state: msg.provider_state.clone(),
                 role: "assistant".into(),
                 content: msg.content.clone(),
                 tool_calls: msg.tool_calls.clone(),
@@ -935,6 +959,7 @@ pub async fn run_agent_loop(
         }
 
         history.push(ChatMessage {
+            provider_state: msg.provider_state.clone(),
             role: "assistant".into(),
             content: msg.content.clone(),
             tool_calls: msg.tool_calls.clone(),
@@ -1344,6 +1369,7 @@ File modification detected. You MUST now verify your changes:
                 }
 
                 history.push(ChatMessage {
+                    provider_state: None,
                     role: "system".into(), // Escalated to system role
                     content: Some(warning_msg),
                     tool_calls: vec![],
@@ -1376,6 +1402,7 @@ File modification detected. You MUST now verify your changes:
                         tx.send("::status:warning:Progress stalled. Intervening...".to_string());
                 }
                 history.push(ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some(stall_warning),
                     tool_calls: vec![],
@@ -1396,6 +1423,7 @@ File modification detected. You MUST now verify your changes:
 
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
                     history.push(ChatMessage {
+                        provider_state: None,
                         role: "user".into(),
                         content: Some(hint.to_string()),
                         tool_calls: vec![],
@@ -1404,6 +1432,7 @@ File modification detected. You MUST now verify your changes:
                 }
             }
         }
+        history.checkpoint_subscription()?;
         // Aggregate the finished batch once (order-independent): the heaviest
         // phase wins, so a single failure escalates the next request to
         // Recovery while a clean batch decays back to Routine/Deliberative.
@@ -1512,12 +1541,14 @@ mod tests {
         .expect("test client");
         let messages = vec![
             ChatMessage {
+                provider_state: None,
                 role: "system".into(),
                 content: Some("test system prompt".to_string()),
                 tool_calls: vec![],
                 tool_call_id: None,
             },
             ChatMessage {
+                provider_state: None,
                 role: "user".into(),
                 content: Some("cache".to_string()),
                 tool_calls: vec![],

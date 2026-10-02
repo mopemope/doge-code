@@ -57,10 +57,7 @@ impl TuiExecutor {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
-        let client = match cfg.api_key.clone() {
-            Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
-            None => None,
-        };
+        let client = OpenAIClient::from_config(&cfg)?;
         // Load system prompt
         let sys_prompt = build_system_prompt(&cfg);
         let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;
@@ -124,10 +121,7 @@ impl TuiExecutor {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
-        let client = match cfg.api_key.clone() {
-            Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
-            None => None,
-        };
+        let client = OpenAIClient::from_config(&cfg)?;
         // Load system prompt
         let sys_prompt = build_system_prompt(&cfg);
         let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;

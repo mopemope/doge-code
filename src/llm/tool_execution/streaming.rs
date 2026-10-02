@@ -18,6 +18,21 @@ pub async fn run_agent_streaming_once(
     cancel: Option<CancellationToken>,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
+    if client.is_subscription() {
+        return crate::llm::run_agent_loop(
+            client,
+            model,
+            fs,
+            messages,
+            None,
+            cancel,
+            &fs.config,
+            None,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        .map(|(history, reply)| (history, Some(reply)));
+    }
     let cancel_token = cancel.unwrap_or_default();
 
     // Start stream
@@ -89,6 +104,7 @@ pub async fn run_agent_streaming_once(
                                 let exec = execute_tool_call(&runtime, idx, &buf).await;
                                 if let Ok(val) = exec {
                                     messages.push(ChatMessage {
+                                        provider_state: None,
                                         role: "tool".into(),
                                         content: Some(
                                             serde_json::to_string(&val)
@@ -124,6 +140,7 @@ pub async fn run_agent_streaming_once(
     // If we have accumulated content and no tool call executed, return it as assistant message
     if !acc_text.is_empty() {
         messages.push(ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some(acc_text.clone()),
             tool_calls: vec![],

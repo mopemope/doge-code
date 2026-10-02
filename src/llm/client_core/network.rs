@@ -31,6 +31,14 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
     req: &T,
     cancel: Option<CancellationToken>,
 ) -> Result<ChoiceMessage> {
+    let value = serde_json::to_value(req)?;
+    anyhow::ensure!(
+        !value
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|messages| messages.iter().any(|m| m.get("provider_state").is_some())),
+        "Responses history requires its original provider; start a new session"
+    );
     let url = client.endpoint();
 
     let mut headers = HeaderMap::new();

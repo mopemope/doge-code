@@ -14,8 +14,9 @@ use crate::llm::types::{ChatMessage, ChoiceMessage, Usage};
 
 mod network;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAIClient {
+    pub(crate) subscription: Option<crate::features::openai_subscription::auth::AuthHandle>,
     pub base_url: String,
     pub api_key: String,
     pub(crate) inner: reqwest::Client,
@@ -42,11 +43,49 @@ pub struct OpenAIClient {
     pub prompt_cache_counters: Arc<PromptCacheCounters>,
 }
 
+impl std::fmt::Debug for OpenAIClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIClient")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("subscription", &self.subscription)
+            .finish_non_exhaustive()
+    }
+}
+
 impl OpenAIClient {
+    pub fn from_config(cfg: &crate::config::AppConfig) -> Result<Option<Self>> {
+        use crate::features::openai_subscription::{
+            ProviderKind, auth::AuthHandle, credentials::CredentialStore,
+        };
+        if cfg.provider == ProviderKind::OpenaiChatgpt {
+            let auth = AuthHandle::selected(CredentialStore::default_path()?)?;
+            let mut client =
+                Self::new("https://api.openai.com/v1", "")?.with_llm_config(cfg.llm.clone());
+            client.subscription = Some(auth);
+            Ok(Some(client))
+        } else {
+            cfg.api_key
+                .as_ref()
+                .map(|key| {
+                    Self::new(&cfg.base_url, key).map(|c| c.with_llm_config(cfg.llm.clone()))
+                })
+                .transpose()
+        }
+    }
+
+    pub fn is_subscription(&self) -> bool {
+        self.subscription.is_some()
+    }
+    pub fn account_label(&self) -> Option<&str> {
+        self.subscription.as_ref().map(|a| a.account.as_str())
+    }
+
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
         let url = base_url.into();
         let inner = reqwest::Client::builder().build()?;
         Ok(Self {
+            subscription: None,
             base_url: url,
             api_key: api_key.into(),
             inner,
@@ -264,6 +303,19 @@ impl OpenAIClient {
         cancel: Option<CancellationToken>,
     ) -> Result<ChoiceMessage> {
         // Delegate to network module implementation for clarity and to keep this file small
+        if self.is_subscription() {
+            return self
+                .chat_once_request(
+                    &crate::llm::types::ChatRequest {
+                        model: model.into(),
+                        messages,
+                        temperature: None,
+                        stream: None,
+                    },
+                    cancel,
+                )
+                .await;
+        }
         crate::llm::client_core::network::chat_once(self, model, messages, cancel).await
     }
 
@@ -272,6 +324,33 @@ impl OpenAIClient {
         req: &T,
         cancel: Option<CancellationToken>,
     ) -> Result<ChoiceMessage> {
+        if let Some(auth) = &self.subscription {
+            let value = serde_json::to_value(req)?;
+            let model = value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("request model missing"))?;
+            let messages: Vec<ChatMessage> = serde_json::from_value(
+                value
+                    .get("messages")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("request messages missing"))?,
+            )?;
+            let result = crate::features::openai_subscription::responses::infer(
+                self,
+                auth,
+                model,
+                &messages,
+                &[],
+                None,
+                cancel.unwrap_or_default(),
+            )
+            .await?;
+            return Ok(ChoiceMessage {
+                role: result.role,
+                content: result.content.unwrap_or_default(),
+            });
+        }
         crate::llm::client_core::network::chat_once_request(self, req, cancel).await
     }
 
@@ -343,6 +422,7 @@ mod tests {
             .chat_once(
                 "gpt-test",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -383,6 +463,7 @@ mod tests {
             .chat_once(
                 "gpt",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -419,6 +500,7 @@ mod tests {
             .chat_once(
                 "gpt",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -453,6 +535,7 @@ mod tests {
             .chat_once(
                 "gpt",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -493,6 +576,7 @@ mod tests {
             .chat_once(
                 "gpt",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -538,6 +622,7 @@ mod tests {
             .chat_once(
                 "gpt",
                 vec![ChatMessage {
+                    provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: vec![],
@@ -553,6 +638,7 @@ mod tests {
     #[test]
     fn endpoint_normalization() {
         let c = OpenAIClient {
+            subscription: None,
             base_url: "https://api.example.com/v1/".into(),
             api_key: "x".into(),
             inner: reqwest::Client::new(),
@@ -568,6 +654,7 @@ mod tests {
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
+            subscription: None,
             base_url: "https://api.example.com/".into(),
             api_key: "x".into(),
             inner: reqwest::Client::new(),
