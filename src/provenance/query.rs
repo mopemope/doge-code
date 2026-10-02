@@ -1117,6 +1117,7 @@ mod tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_workspace: None,
                 plan_item_id: Some("step-2".to_string()),
                 observed_change_ids: vec![change.event_id.clone()],
                 matched_obligations: Vec::new(),
@@ -1157,6 +1158,7 @@ mod tests {
         let store = ProvenanceStore::new(sess_dir.path().join("s"));
         let change = commit_for(&store, "s", "src/lib.rs", &sym_id, &fp);
         let event = VerificationObservedEvent {
+            execution_workspace: None,
             plan_item_id: None,
             verification_kind: VerificationKind::Test,
             source: VerificationSource::ExecuteProcess,

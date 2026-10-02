@@ -259,6 +259,7 @@ pub fn capture_verification_context_full(
         requirement_ids.dedup();
     }
     VerificationContext {
+        execution_workspace: None,
         directive_id,
         plan_item_id,
         requirement_ids,
@@ -310,6 +311,7 @@ pub fn build_verification_event(input: VerificationRecordInput<'_>) -> Verificat
     }
 
     VerificationObservedEvent {
+        execution_workspace: input.context.execution_workspace.clone().map(Box::new),
         directive_id: input.context.directive_id.clone(),
         plan_item_id: input.context.plan_item_id.clone(),
         requirement_ids: input.context.requirement_ids.clone(),
@@ -509,6 +511,7 @@ mod tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_workspace: None,
                 plan_item_id: Some("step-1".to_string()),
                 observed_change_ids: vec!["chg-1".to_string()],
                 matched_obligations: Vec::new(),

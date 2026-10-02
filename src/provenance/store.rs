@@ -8,9 +8,12 @@ use uuid::Uuid;
 use super::types::{
     LEGACY_PROVENANCE_SCHEMA_VERSION, PROVENANCE_SCHEMA_VERSION, PlanChangedEvent, ProvenanceEvent,
     ProvenanceEventEnvelope, V2_PROVENANCE_SCHEMA_VERSION, V3_PROVENANCE_SCHEMA_VERSION,
-    from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire, to_v4_wire,
+    V4_PROVENANCE_SCHEMA_VERSION, from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire,
+    from_v5_wire, to_v5_wire,
 };
-use super::wire::{EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 as wire_v4};
+use super::wire::{
+    EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 as wire_v4, v5 as wire_v5,
+};
 
 /// Durable provenance store for one session.
 ///
@@ -18,11 +21,12 @@ use super::wire::{EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 a
 /// - legacy v1 (read-only): `<session_dir>/provenance/v1/events/<event-id>.json`
 /// - legacy v2 (read-only): `<session_dir>/provenance/v2/events/<event-id>.json`
 /// - legacy v3 (read-only): `<session_dir>/provenance/v3/events/<event-id>.json`
-/// - current v4 (read + write): `<session_dir>/provenance/v4/events/<event-id>.json`
+/// - legacy v4 (read-only): `<session_dir>/provenance/v4/events/<event-id>.json`
+/// - current v5 (read + write): `<session_dir>/provenance/v5/events/<event-id>.json`
 ///
-/// v1/v2/v3 files are never copied, rewritten, or migrated on disk; they are
-/// converted into the canonical v4 representation on read. New events are
-/// always written as v4.
+/// v1/v2/v3/v4 files are never copied, rewritten, or migrated on disk; they are
+/// converted into the canonical representation on read. New events are
+/// always written as v5.
 #[derive(Debug, Clone)]
 pub struct ProvenanceStore {
     provenance_root: PathBuf,
@@ -32,7 +36,7 @@ pub struct ProvenanceStore {
 impl ProvenanceStore {
     pub fn new(session_dir: PathBuf) -> Self {
         let provenance_root = session_dir.join("provenance");
-        let current_dir = provenance_root.join("v4").join("events");
+        let current_dir = provenance_root.join("v5").join("events");
         Self {
             provenance_root,
             current_dir,
@@ -72,19 +76,23 @@ impl ProvenanceStore {
         self.provenance_root.join("v3").join("events")
     }
 
+    fn v4_events_dir(&self) -> PathBuf {
+        self.provenance_root.join("v4").join("events")
+    }
+
     fn current_events_dir(&self) -> PathBuf {
         self.current_dir.clone()
     }
 
-    /// Current v4 write directory.
+    /// Current v5 write directory.
     ///
     /// This is the only directory new events are written to. Reads cover
-    /// v1/v2/v3 (legacy) and v4; see [`ProvenanceStore::load_all`].
+    /// v1/v2/v3/v4 (legacy) and v5; see [`ProvenanceStore::load_all`].
     pub fn events_dir(&self) -> &Path {
         &self.current_dir
     }
 
-    /// Owned path of the current v4 events directory.
+    /// Owned path of the current v5 events directory.
     pub fn current_events_path(&self) -> PathBuf {
         self.current_events_dir()
     }
@@ -106,7 +114,7 @@ impl ProvenanceStore {
 
     /// Atomically persist one event and return its envelope.
     ///
-    /// The payload is written to a sibling temp file in the v4 events
+    /// The payload is written to a sibling temp file in the v5 events
     /// directory and persisted with `persist_noclobber` (fail if the
     /// destination already exists). Never check-then-write.
     pub fn append(
@@ -140,7 +148,7 @@ impl ProvenanceStore {
             timestamp: Utc::now().to_rfc3339(),
             event,
         };
-        let wire = to_v4_wire(&canonical);
+        let wire = to_v5_wire(&canonical);
         let payload =
             serde_json::to_string_pretty(&wire).context("failed to serialize provenance event")?;
         let dest = current_dir.join(format!("{event_id}.json"));
@@ -172,13 +180,13 @@ impl ProvenanceStore {
         Ok(canonical)
     }
 
-    /// Load all events from v1 + v2 + v3 (legacy) and v4 (current), merged and
+    /// Load all events from v1 + v2 + v3 + v4 (legacy) and v5 (current), merged and
     /// sorted by `(timestamp, event_id)`.
     ///
     /// One corrupt or future-schema file never fails the whole query; it is
     /// skipped with a warning entry. When the same event id exists in
     /// multiple versions (manual copy/migration mistake, not expected UUID
-    /// collision), the highest version wins deterministically (v4 > v3 > v2 > v1)
+    /// collision), the highest version wins deterministically (v5 > v4 > v3 > v2 > v1)
     /// and a warning explains why.
     pub fn load_all(&self) -> Result<ProvenanceLoadResult> {
         let mut warnings = Vec::new();
@@ -191,7 +199,8 @@ impl ProvenanceStore {
             (self.v1_events_dir(), 1u32, "v1"),
             (self.v2_events_dir(), 2u32, "v2"),
             (self.v3_events_dir(), 3u32, "v3"),
-            (self.current_events_dir(), 4u32, "v4"),
+            (self.v4_events_dir(), 4u32, "v4"),
+            (self.current_events_dir(), 5u32, "v5"),
         ] {
             let loaded = load_events_dir(&dir, &mut warnings);
             for env in loaded {
@@ -348,9 +357,17 @@ fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEven
                     path.display()
                 )),
             }
-        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+        } else if header.schema_version == V4_PROVENANCE_SCHEMA_VERSION {
             match serde_json::from_str::<wire_v4::V4Envelope>(&raw) {
                 Ok(env) => events.push(from_v4_wire(env)),
+                Err(e) => warnings.push(format!(
+                    "Skipping malformed provenance event {}: {e}",
+                    path.display()
+                )),
+            }
+        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+            match serde_json::from_str::<wire_v5::V5Envelope>(&raw) {
+                Ok(env) => events.push(from_v5_wire(env)),
                 Err(e) => warnings.push(format!(
                     "Skipping malformed provenance event {}: {e}",
                     path.display()
@@ -464,7 +481,7 @@ mod tests {
             store
                 .events_dir()
                 .to_string_lossy()
-                .ends_with("provenance/v4/events")
+                .ends_with("provenance/v5/events")
         );
     }
 
@@ -961,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v4_plan_changed_roundtrip() {
+    fn test_v5_plan_changed_roundtrip() {
         use crate::provenance::types::{
             VerificationCommandMatcher, VerificationKind, VerificationObligation,
         };
@@ -991,7 +1008,7 @@ mod tests {
             }],
         });
         let env = store.append("s", event).unwrap();
-        assert_eq!(env.schema_version, 4);
+        assert_eq!(env.schema_version, PROVENANCE_SCHEMA_VERSION);
         let loaded = store.load_all().unwrap();
         assert_eq!(loaded.events.len(), 1);
         match &loaded.events[0].event {
@@ -1002,18 +1019,19 @@ mod tests {
         }
         // Raw file is under v4.
         let v4_dir = store.current_events_path();
-        assert!(v4_dir.to_string_lossy().ends_with("provenance/v4/events"));
+        assert!(v4_dir.to_string_lossy().ends_with("provenance/v5/events"));
         let raw = std::fs::read_to_string(v4_dir.join(format!("{}.json", env.event_id))).unwrap();
-        assert!(raw.contains("\"schema_version\": 4") || raw.contains("\"schema_version\":4"));
+        assert!(raw.contains("\"schema_version\": 5") || raw.contains("\"schema_version\":5"));
     }
 
     #[test]
-    fn test_v4_verification_roundtrip() {
+    fn test_v5_verification_roundtrip() {
         use crate::provenance::types::VerificationObligationRef;
         let dir = tempfile::tempdir().unwrap();
         let store = ProvenanceStore::new(dir.path().join("s"));
         let event = ProvenanceEvent::VerificationObserved(
             crate::provenance::types::VerificationObservedEvent {
+                execution_workspace: None,
                 directive_id: None,
                 plan_item_id: Some("step-1".to_string()),
                 requirement_ids: vec![],
@@ -1125,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_writes_only_under_v4() {
+    fn test_store_writes_only_under_v5() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s");
         let store = ProvenanceStore::new(session_dir.clone());
@@ -1136,7 +1154,7 @@ mod tests {
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(true)
         );
-        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v4/events"))
+        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v5/events"))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -1326,5 +1344,86 @@ mod tests {
             None
         );
         let _ = after2;
+    }
+}
+
+#[cfg(test)]
+mod execution_snapshot_tests {
+    use super::*;
+    use crate::provenance::*;
+    #[tokio::test]
+    async fn v5_snapshot_roundtrip_and_frozen_v4_reader_preserve_history() {
+        let root = tempfile::tempdir().expect("project");
+        std::fs::write(root.path().join("input"), "PRIVATE-SOURCE").expect("input");
+        let record = crate::features::verification_snapshot::finish(
+            root.path(),
+            crate::features::verification_snapshot::begin(
+                root.path(),
+                std::collections::BTreeSet::from(["input".into()]),
+                None,
+            )
+            .await,
+            None,
+        )
+        .await;
+        let store = ProvenanceStore::new(root.path().join("session"));
+        let event = build_verification_event(VerificationRecordInput {
+            kind: VerificationKind::Test,
+            source: VerificationSource::ExecuteProcess,
+            program: "cargo",
+            args: &["test".into()],
+            cwd_relative: None,
+            success: true,
+            status: "completed",
+            exit_code: Some(0),
+            timed_out: false,
+            stdout: "",
+            stderr: "",
+            capture_truncated: false,
+            context: VerificationContext {
+                execution_workspace: Some(record),
+                ..Default::default()
+            },
+            extra_warnings: vec![],
+        });
+        let env = store
+            .append("s", ProvenanceEvent::VerificationObserved(event))
+            .expect("append v5");
+        let v5_file = store.events_dir().join(format!("{}.json", env.event_id));
+        let v5_before = std::fs::read(&v5_file).expect("bytes");
+        assert!(!String::from_utf8_lossy(&v5_before).contains("PRIVATE-SOURCE"));
+        let loaded = store.load_all().expect("load v5");
+        match &loaded.events[0].event {
+            ProvenanceEvent::VerificationObserved(v) => assert!(v.execution_workspace.is_some()),
+            _ => panic!("verification"),
+        }
+        let frozen = crate::provenance::types::to_v4_wire(&env);
+        assert_eq!(frozen.schema_version, 4);
+        let v4_bytes = serde_json::to_vec(&frozen).expect("v4 wire");
+        assert!(!String::from_utf8_lossy(&v4_bytes).contains("execution_workspace"));
+        let legacy = store.v4_events_dir();
+        std::fs::create_dir_all(&legacy).expect("legacy dir");
+        let legacy_file = legacy.join(format!("{}.json", env.event_id));
+        std::fs::write(&legacy_file, &v4_bytes).expect("v4 fixture");
+        let both = store.load_all().expect("mixed versions");
+        assert_eq!(both.events.len(), 1);
+        assert!(both.warnings.iter().any(|w| w.contains("v5 wins")));
+        assert_eq!(std::fs::read(&v5_file).expect("unchanged v5"), v5_before);
+        std::fs::remove_file(v5_file).expect("remove test v5");
+        let old = store.load_all().expect("legacy only");
+        match &old.events[0].event {
+            ProvenanceEvent::VerificationObserved(v) => {
+                assert!(v.execution_workspace.is_none());
+                assert!(v.outcome.success);
+            }
+            _ => panic!("verification"),
+        }
+        assert_eq!(std::fs::read(legacy_file).expect("unchanged v4"), v4_bytes);
+        assert_eq!(
+            std::fs::read_dir(store.events_dir())
+                .expect("v5 directory")
+                .count(),
+            0
+        );
     }
 }

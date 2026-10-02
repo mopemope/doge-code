@@ -1807,4 +1807,78 @@ mod tests {
         assert!(runtime.is_tool_active("observation_read").await);
         Ok(())
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn classified_runs_keep_outcomes_and_record_workspace_endpoints() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir()?;
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()?
+                .success()
+        );
+        std::fs::write(root.path().join("input"), "PRIVATE-SOURCE")?;
+        let program = root.path().join("pytest");
+        std::fs::write(
+            &program,
+            "#!/usr/bin/env python3\nimport pathlib,sys,time\nmode=sys.argv[1]\nif mode=='change': pathlib.Path('input').write_text('changed')\nif mode=='timeout': time.sleep(60)\nsys.exit(7 if mode=='fail' else 0)\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            store: crate::session::SessionStore::new(root.path().join(".doge/sessions"))?,
+            current_session: None,
+        }));
+        manager.lock().expect("manager").create_session(None)?;
+        let config = Arc::new(AppConfig {
+            project_root: root.path().into(),
+            execution_configured: true,
+            ..Default::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        for mode in ["stable", "change", "fail", "timeout"] {
+            let call = ToolCall { id: Some(format!("snapshot-{mode}")), r#type: "function".into(), function: ToolCallFunction {
+                name: "execute_process".into(), arguments: json!({"program":program,"args":[mode],"timeout_ms":if mode=="timeout" { 100 } else { 5000 }}).to_string(),
+            }};
+            let output = dispatch_tool_call(&runtime, &call).await?;
+            assert_eq!(output.is_success, mode == "stable" || mode == "change");
+            assert_eq!(output.value["ok"], output.value["success"]);
+            assert_eq!(
+                output.value["verification_workspace"]["run_state"],
+                if mode == "change" {
+                    "changed_between_endpoints"
+                } else {
+                    "stable_endpoints"
+                }
+            );
+            assert!(serde_json::to_string(&output.value)?.len() < 8000);
+            assert!(!serde_json::to_string(&output.value)?.contains("PRIVATE-SOURCE"));
+        }
+        let events = crate::tools::provenance::load_current_events(&fs_tools)?.expect("session");
+        assert_eq!(events.events.len(), 4);
+        assert!(events.events.iter().all(|env| env.schema_version == 5));
+        let missing = root.path().join("missing/pytest");
+        let call = ToolCall {
+            id: Some("spawn-failed".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "execute_process".into(),
+                arguments: json!({"program":missing,"args":[]}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert_eq!(output.value["status"], "spawn_failed");
+        assert!(output.value.get("verification_workspace").is_none());
+        assert_eq!(
+            crate::tools::provenance::load_current_events(&fs_tools)?
+                .expect("session")
+                .events
+                .len(),
+            4
+        );
+        Ok(())
+    }
 }

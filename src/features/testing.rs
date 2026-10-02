@@ -42,6 +42,8 @@ pub struct FailedTest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
+    #[serde(default)]
+    pub execution_observed: bool,
     pub command: String,
     pub stdout: String,
     pub stderr: String,
@@ -285,6 +287,7 @@ pub async fn run_test_command_with_cancel(
         Ok(output) => output,
         Err(error) => {
             return TestResult {
+                execution_observed: false,
                 command,
                 stdout: String::new(),
                 stderr: format!("Failed to run tests: {error}"),
@@ -316,6 +319,7 @@ pub async fn run_test_command_with_cancel(
     }
 
     TestResult {
+        execution_observed: !cancelled,
         command,
         stdout: managed.stdout,
         stderr: managed.stderr,

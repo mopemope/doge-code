@@ -6,7 +6,8 @@ use super::wire::v3 as wire_v3;
 use super::wire::v4 as wire_v4;
 
 /// Current on-disk schema version for newly written provenance events.
-pub const PROVENANCE_SCHEMA_VERSION: u32 = 4;
+pub const PROVENANCE_SCHEMA_VERSION: u32 = 5;
+pub const V4_PROVENANCE_SCHEMA_VERSION: u32 = 4;
 /// Legacy read-only schema version. v1 files are converted on read and are
 /// never physically migrated.
 pub const LEGACY_PROVENANCE_SCHEMA_VERSION: u32 = 1;
@@ -431,6 +432,9 @@ pub fn file_content_hash(content: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationObservedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_workspace:
+        Option<Box<crate::features::verification_snapshot::ExecutionWorkspace>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directive_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_item_id: Option<String>,
@@ -503,6 +507,7 @@ pub struct VerificationOutcome {
 /// attribution at the same pre-execution instant.
 #[derive(Debug, Clone, Default)]
 pub struct VerificationContext {
+    pub execution_workspace: Option<crate::features::verification_snapshot::ExecutionWorkspace>,
     pub directive_id: Option<String>,
     pub plan_item_id: Option<String>,
     pub requirement_ids: Vec<String>,
@@ -576,6 +581,7 @@ pub fn from_v1_wire(env: wire_v1::V1Envelope) -> ProvenanceEventEnvelope {
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
+                execution_workspace: None,
                 verification_kind: match v.verification_kind {
                     wire_v1::V1VerificationKind::Test => VerificationKind::Test,
                     wire_v1::V1VerificationKind::Build => VerificationKind::Build,
@@ -694,6 +700,7 @@ pub fn from_v2_wire(env: wire_v2::V2Envelope) -> ProvenanceEventEnvelope {
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
+                execution_workspace: None,
                 verification_kind: match v.verification_kind {
                     wire_v2::V2VerificationKind::Test => VerificationKind::Test,
                     wire_v2::V2VerificationKind::Build => VerificationKind::Build,
@@ -859,6 +866,7 @@ pub fn from_v3_wire(env: wire_v3::V3Envelope) -> ProvenanceEventEnvelope {
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
+                execution_workspace: None,
                 verification_kind: match v.verification_kind {
                     wire_v3::V3VerificationKind::Test => VerificationKind::Test,
                     wire_v3::V3VerificationKind::Build => VerificationKind::Build,
@@ -1217,6 +1225,7 @@ pub fn from_v4_wire(env: wire_v4::V4Envelope) -> ProvenanceEventEnvelope {
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
+                execution_workspace: None,
                 verification_kind: kind_from_v4(v.verification_kind),
                 source: match v.source {
                     wire_v4::V4VerificationSource::ExecuteProcess => {
@@ -1453,10 +1462,62 @@ pub fn to_v4_wire(env: &ProvenanceEventEnvelope) -> wire_v4::V4Envelope {
         }
     };
     wire_v4::V4Envelope {
-        schema_version: PROVENANCE_SCHEMA_VERSION,
+        schema_version: V4_PROVENANCE_SCHEMA_VERSION,
         event_id: env.event_id.clone(),
         session_id: env.session_id.clone(),
         timestamp: env.timestamp.clone(),
+        event,
+    }
+}
+
+/// Explicit v5 conversion through unchanged v4 payload adapters.
+pub fn from_v5_wire(env: super::wire::v5::V5Envelope) -> ProvenanceEventEnvelope {
+    use super::wire::v5::V5Event;
+    let (event, workspace) = match env.event {
+        V5Event::DirectiveObserved(v) => (wire_v4::V4Event::DirectiveObserved(v), None),
+        V5Event::RequirementChanged(v) => (wire_v4::V4Event::RequirementChanged(v), None),
+        V5Event::PlanChanged(v) => (wire_v4::V4Event::PlanChanged(v), None),
+        V5Event::ChangeCommitted(v) => (wire_v4::V4Event::ChangeCommitted(v), None),
+        V5Event::VerificationObserved(v) => (
+            wire_v4::V4Event::VerificationObserved(v.observation),
+            v.execution_workspace,
+        ),
+    };
+    let mut canonical = from_v4_wire(wire_v4::V4Envelope {
+        schema_version: 4,
+        event_id: env.event_id,
+        session_id: env.session_id,
+        timestamp: env.timestamp,
+        event,
+    });
+    if let ProvenanceEvent::VerificationObserved(v) = &mut canonical.event {
+        v.execution_workspace = workspace;
+    }
+    canonical
+}
+pub fn to_v5_wire(env: &ProvenanceEventEnvelope) -> super::wire::v5::V5Envelope {
+    use super::wire::v5::{V5Envelope, V5Event, V5VerificationObserved};
+    let legacy = to_v4_wire(env);
+    let event = match legacy.event {
+        wire_v4::V4Event::DirectiveObserved(v) => V5Event::DirectiveObserved(v),
+        wire_v4::V4Event::RequirementChanged(v) => V5Event::RequirementChanged(v),
+        wire_v4::V4Event::PlanChanged(v) => V5Event::PlanChanged(v),
+        wire_v4::V4Event::ChangeCommitted(v) => V5Event::ChangeCommitted(v),
+        wire_v4::V4Event::VerificationObserved(v) => {
+            V5Event::VerificationObserved(V5VerificationObserved {
+                observation: v,
+                execution_workspace: match &env.event {
+                    ProvenanceEvent::VerificationObserved(c) => c.execution_workspace.clone(),
+                    _ => None,
+                },
+            })
+        }
+    };
+    V5Envelope {
+        schema_version: PROVENANCE_SCHEMA_VERSION,
+        event_id: legacy.event_id,
+        session_id: legacy.session_id,
+        timestamp: legacy.timestamp,
         event,
     }
 }

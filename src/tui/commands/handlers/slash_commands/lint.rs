@@ -36,6 +36,8 @@ pub struct LintIssue {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LintResult {
+    #[serde(default)]
+    pub execution_observed: bool,
     pub command: String,
     pub issues: Vec<LintIssue>,
     pub stdout: String,
@@ -454,7 +456,7 @@ async fn lint_job_async(
                 );
                 // Freeze verification context (including obligation attribution)
                 // before the command starts; later changes never leak in.
-                let verification_context = lint_kind.map(|kind| {
+                let mut verification_context = lint_kind.map(|kind| {
                     crate::tools::provenance::capture_verification_context_for_invocation(
                         &tools,
                         &crate::provenance::ProvenanceAttribution::none(),
@@ -463,6 +465,17 @@ async fn lint_job_async(
                         &lint_cmd.args,
                     )
                 });
+                if let Some(context) = &mut verification_context {
+                    crate::tools::provenance::prepare_verification_snapshot(
+                        &tools,
+                        context,
+                        Some(cancellation.child_token()),
+                    )
+                    .await;
+                }
+                if cancellation.is_cancelled() {
+                    return JobRunOutcome::Cancelled;
+                }
                 let result = run_command_with_output(
                     &project_root,
                     lint_cmd,
@@ -480,8 +493,25 @@ async fn lint_job_async(
                 // One command = one observed verification event. Kind comes
                 // from the structured program + argv; unrecognized lint
                 // commands are not forced into evidence.
-                if let (Some(kind), Some(verification_context)) = (lint_kind, verification_context)
+                if let (Some(kind), Some(mut verification_context)) =
+                    (lint_kind, verification_context)
+                    && result.execution_observed
                 {
+                    crate::tools::provenance::finish_verification_snapshot(
+                        &tools,
+                        &mut verification_context,
+                        Some(cancellation.child_token()),
+                    )
+                    .await;
+                    if cancellation.is_cancelled() {
+                        return JobRunOutcome::Cancelled;
+                    }
+                    if let Some(record) = &verification_context.execution_workspace
+                        && let Some(warning) =
+                            crate::features::verification_snapshot::warning(record)
+                    {
+                        ui_tx.send_logged(format!("[verification][warning] {warning}"));
+                    }
                     // A recording failure never fails the lint run itself;
                     // the session is marked incomplete and the UI is told.
                     if !crate::tools::provenance::record_tui_lint_verification(
@@ -732,6 +762,7 @@ async fn run_command_with_output(
         Ok(output) => output,
         Err(error) => {
             return LintResult {
+                execution_observed: false,
                 command: command_text,
                 issues: Vec::new(),
                 stdout: String::new(),
@@ -749,6 +780,7 @@ async fn run_command_with_output(
     let cancelled = managed.termination == ManagedProcessTermination::Cancelled;
     let success = managed.success();
     LintResult {
+        execution_observed: !cancelled,
         command: command_text,
         issues: Vec::new(),
         stdout: managed.stdout,
@@ -1099,6 +1131,7 @@ mod tests {
 
     fn lint_result(command: LintCommand, stdout: &str, stderr: &str, success: bool) -> LintResult {
         LintResult {
+            execution_observed: true,
             command: format!("{} {}", command.command, command.args.join(" ")),
             issues: Vec::new(),
             stdout: stdout.to_string(),
