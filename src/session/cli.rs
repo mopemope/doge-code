@@ -14,6 +14,18 @@ pub enum SessionCommands {
     List,
     /// Show details of a session
     Show { id: String },
+    /// Export recorded evidence against the current project workspace
+    Evidence {
+        id: String,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: crate::features::evidence_report::ReportFormat,
+        /// Compare the exact local commit with the working tree (no merge-base)
+        #[arg(long)]
+        base: Option<String>,
+        /// Include directive text, change diffs and stored output excerpts
+        #[arg(long)]
+        include_content: bool,
+    },
     /// Delete a session
     Delete {
         id: String,
@@ -64,9 +76,33 @@ fn stdin_is_tty() -> bool {
 }
 
 /// Entry point for the `dgc session` subcommands.
-pub fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
+pub async fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
+    if let SessionCommands::Evidence {
+        id,
+        format,
+        base,
+        include_content,
+    } = &command
+    {
+        let output = crate::features::evidence_report::export(
+            &cfg.project_root,
+            id,
+            base.as_deref(),
+            *include_content,
+            *format,
+        )
+        .await?;
+        use std::io::Write;
+        std::io::stdout().lock().write_all(output.as_bytes())?;
+        return Ok(());
+    }
     let store = session_store(&cfg)?;
     match command {
+        SessionCommands::Evidence { .. } => {
+            return Err(anyhow!(
+                "evidence command was not routed to its read-only handler"
+            ));
+        }
         SessionCommands::List => {
             let summaries = store.list_with_stats()?;
             println!("{}", format::format_summary_list(&summaries, None));

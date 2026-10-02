@@ -347,6 +347,65 @@ pub fn capture_verification_context_for_invocation(
     ctx
 }
 
+/// Add bounded code-state observations without changing frozen attribution.
+pub async fn prepare_verification_snapshot(
+    fs_tools: &FsTools,
+    context: &mut crate::provenance::VerificationContext,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) {
+    let Some(storage) = fs_tools.current_session_storage_context() else {
+        return;
+    };
+    let loaded = load_current_events(fs_tools);
+    let mut references = std::collections::BTreeSet::new();
+    let mut incomplete;
+    match loaded {
+        Ok(Some(events)) => {
+            incomplete = !events.warnings.is_empty();
+            for env in events.events {
+                if env.session_id != storage.session_id {
+                    incomplete = true;
+                    continue;
+                }
+                if let ProvenanceEvent::ChangeCommitted(c) = env.event {
+                    references.insert(c.file);
+                }
+            }
+        }
+        _ => incomplete = true,
+    }
+    let mut record = crate::features::verification_snapshot::begin(
+        &fs_tools.config.project_root,
+        references,
+        cancel,
+    )
+    .await;
+    if incomplete {
+        record.start.status = crate::features::verification_snapshot::CaptureStatus::Partial;
+        record
+            .start
+            .diagnostics
+            .push(crate::features::verification_snapshot::Diagnostic::FileUnavailable);
+    }
+    context.execution_workspace = Some(record);
+}
+pub async fn finish_verification_snapshot(
+    fs_tools: &FsTools,
+    context: &mut crate::provenance::VerificationContext,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) {
+    if let Some(record) = context.execution_workspace.take() {
+        context.execution_workspace = Some(
+            crate::features::verification_snapshot::finish(
+                &fs_tools.config.project_root,
+                record,
+                cancel,
+            )
+            .await,
+        );
+    }
+}
+
 /// Project-relative cwd evidence, or `None` for the project root default.
 ///
 /// Returns `None` when `cwd` is absent or cannot be relativized under the
@@ -972,7 +1031,7 @@ fn budget_coverage(
 }
 
 /// Execute `provenance_read` against the current session.
-pub fn provenance_read(
+pub async fn provenance_read(
     fs_tools: &FsTools,
     args: ProvenanceReadArgs,
 ) -> anyhow::Result<ProvenanceReadResponse> {
@@ -1081,8 +1140,63 @@ pub fn provenance_read(
                 (r.change_id, s.to_string())
             })
             .collect();
+    let snapshot_records: Vec<_> = filtered[start..end]
+        .iter()
+        .filter_map(|env| match &env.event {
+            ProvenanceEvent::VerificationObserved(v) => v.execution_workspace.as_deref(),
+            _ => None,
+        })
+        .collect();
+    let current = if snapshot_records.is_empty() {
+        None
+    } else {
+        let references = snapshot_records
+            .iter()
+            .flat_map(|r| {
+                r.start
+                    .files
+                    .iter()
+                    .chain(r.end.iter().flat_map(|s| s.files.iter()))
+            })
+            .map(|f| f.path.clone())
+            .collect();
+        Some(
+            crate::features::verification_snapshot::capture(
+                &fs_tools.config.project_root,
+                references,
+                None,
+            )
+            .await,
+        )
+    };
     for env in filtered[start..end].iter() {
-        let summary = summarize_event(env, args.include_diff, args.include_content, &states);
+        let mut summary = summarize_event(env, args.include_diff, args.include_content, &states);
+        if let ProvenanceEvent::VerificationObserved(v) = &env.event {
+            let comparison = crate::features::verification_snapshot::compare_current(
+                v.execution_workspace.as_deref(),
+                current.as_ref(),
+            );
+            if let Some(obj) = summary.as_object_mut() {
+                let state = comparison.state;
+                obj.insert("current_code_state".into(), serde_json::json!({"state":state,
+                    "changed":comparison.differences.changed.len(),"added":comparison.differences.added.len(),
+                    "deleted":comparison.differences.deleted.len(),"unknown":comparison.differences.unknown.len()}));
+                if let Some(record) = &v.execution_workspace {
+                    obj.insert(
+                        "execution_workspace".into(),
+                        crate::features::verification_snapshot::summary(record),
+                    );
+                }
+            }
+            if comparison.state
+                != crate::features::verification_snapshot::CurrentState::MatchesStart
+                && !warnings
+                    .iter()
+                    .any(|w| w.starts_with("Displayed verification code-state"))
+            {
+                warnings.push("Displayed verification code-state correspondence is not fully confirmed; inspect per-event current_code_state. Command outcome and historical coverage are independent.".into());
+            }
+        }
         let len = serde_json::to_string(&summary)
             .map(|s| s.len())
             .unwrap_or(0)
@@ -1432,8 +1546,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_provenance_read_pagination_and_filters() {
+    #[tokio::test]
+    async fn test_provenance_read_pagination_and_filters() {
         let proj = tempfile::tempdir().unwrap();
         let (fs, _ctx) = fs_with_session(proj.path());
         // Two changes + one verification.
@@ -1481,7 +1595,7 @@ mod tests {
             cursor: Some(0),
             ..Default::default()
         };
-        let resp = provenance_read(&fs, args).unwrap();
+        let resp = provenance_read(&fs, args).await.unwrap();
         assert_eq!(resp.events.len(), 2);
         assert_eq!(resp.next_cursor, Some(2));
         let args2 = ProvenanceReadArgs {
@@ -1489,7 +1603,7 @@ mod tests {
             cursor: Some(2),
             ..Default::default()
         };
-        let resp2 = provenance_read(&fs, args2).unwrap();
+        let resp2 = provenance_read(&fs, args2).await.unwrap();
         assert_eq!(resp2.events.len(), 1);
         assert_eq!(resp2.next_cursor, None);
         // Plan filter.
@@ -1497,7 +1611,7 @@ mod tests {
             plan_item_id: Some("step-1".into()),
             ..Default::default()
         };
-        let resp3 = provenance_read(&fs, args3).unwrap();
+        let resp3 = provenance_read(&fs, args3).await.unwrap();
         assert!(
             resp3
                 .events
@@ -1510,7 +1624,7 @@ mod tests {
             include_diff: true,
             ..Default::default()
         };
-        let resp4 = provenance_read(&fs, args4).unwrap();
+        let resp4 = provenance_read(&fs, args4).await.unwrap();
         assert!(resp4.events.iter().any(|e| e.get("diff").is_some()));
     }
 
@@ -1518,6 +1632,7 @@ mod tests {
     fn test_verification_context_race_snapshot() {
         // Change A captured; Change B lands before completion; observed keeps A only.
         let ctx_a = crate::provenance::VerificationContext {
+            execution_workspace: None,
             plan_item_id: Some("step-1".into()),
             observed_change_ids: vec!["change-A".to_string()],
             matched_obligations: Vec::new(),
@@ -1561,6 +1676,57 @@ mod tests {
     #[test]
     fn test_unused_helper_compiles() {
         let _ = test_fs_tools(std::path::Path::new("/tmp"));
+    }
+    #[tokio::test]
+    async fn snapshot_current_summary_is_compact_and_detects_later_changes() {
+        let root = tempfile::tempdir().expect("project");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .expect("init git")
+                .success()
+        );
+        std::fs::write(root.path().join("Cargo.lock"), "PRIVATE-LOCKFILE").expect("lockfile");
+        let (fs, _) = fs_with_session(root.path());
+        let mut context = crate::provenance::VerificationContext::default();
+        prepare_verification_snapshot(&fs, &mut context, None).await;
+        finish_verification_snapshot(&fs, &mut context, None).await;
+        assert!(record_tui_test_verification(
+            &fs,
+            "cargo",
+            &["test".into()],
+            true,
+            "completed",
+            Some(0),
+            false,
+            "",
+            "",
+            false,
+            vec![],
+            context
+        ));
+        let before = provenance_read(&fs, ProvenanceReadArgs::default())
+            .await
+            .expect("before read");
+        assert_eq!(
+            before.events[0]["current_code_state"]["state"],
+            "matches_start"
+        );
+        std::fs::write(root.path().join("Cargo.lock"), "changed lockfile").expect("change");
+        let after = provenance_read(&fs, ProvenanceReadArgs::default())
+            .await
+            .expect("after read");
+        assert_eq!(
+            after.events[0]["current_code_state"]["state"],
+            "differs_from_start"
+        );
+        assert_eq!(after.events[0]["success"], true);
+        let json = serde_json::to_string(&after).expect("JSON");
+        assert!(!json.contains("PRIVATE-LOCKFILE"));
+        assert!(!json.contains("manifest_digest"));
+        assert!(json.len() < 6000);
     }
 }
 
@@ -1750,7 +1916,8 @@ mod provenance_extra_tests {
         assert!(after_commit.contains("2;"));
         // Break provenance writes: a file where the events dir should be.
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v4/events");
+        let events_dir =
+            crate::provenance::ProvenanceStore::new(ctx.session_dir.clone()).current_events_path();
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         // `before_content` is irrelevant here: the append fails before any
@@ -2038,6 +2205,7 @@ mod provenance_extra_tests {
                 stderr: "",
                 capture_truncated: false,
                 context: crate::provenance::VerificationContext {
+                    execution_workspace: None,
                     plan_item_id: Some("step-1".into()),
                     observed_change_ids: vec![change_env.event_id.clone()],
                     matched_obligations: Vec::new(),
@@ -2105,8 +2273,8 @@ mod provenance_extra_tests {
         assert!(res.warnings.iter().any(|w| w.contains("incomplete")));
     }
 
-    #[test]
-    fn test_provenance_read_budget_malformed_and_coverage() {
+    #[tokio::test]
+    async fn test_provenance_read_budget_malformed_and_coverage() {
         let (_proj, fs, _sid) = setup_project_with_session();
         let ctx = fs.current_session_storage_context().unwrap();
         let store = ProvenanceStore::new(ctx.session_dir.clone());
@@ -2154,6 +2322,7 @@ mod provenance_extra_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         assert!(resp.warnings.iter().any(|w| w.contains("malformed")));
         assert!(resp.coverage.unlinked_change_ids.len() == 1);
@@ -2165,6 +2334,7 @@ mod provenance_extra_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         let serialized = serde_json::to_string(&resp2).unwrap();
         assert!(
@@ -2274,7 +2444,8 @@ mod review_fix_tests {
     fn test_tui_record_returns_false_and_marks_session_on_failure() {
         let (_proj, fs) = setup();
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v4/events");
+        let events_dir =
+            crate::provenance::ProvenanceStore::new(ctx.session_dir.clone()).current_events_path();
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         let ok = record_tui_test_verification(
@@ -2438,6 +2609,7 @@ mod review_fix_tests {
         // Verification observing the change with correct binding.
         let binding = crate::provenance::obligations::obligation_binding_hash("step-1", &[], &ob);
         let ctx = crate::provenance::VerificationContext {
+            execution_workspace: None,
             directive_id: None,
             plan_item_id: Some("step-1".to_string()),
             requirement_ids: vec![],
@@ -2601,8 +2773,8 @@ mod review_fix_tests {
         assert!(!res.warnings.iter().any(|w| w.contains("step-1")));
     }
 
-    #[test]
-    fn test_provenance_read_obligation_filter() {
+    #[tokio::test]
+    async fn test_provenance_read_obligation_filter() {
         let (_proj, fs) = setup();
         let ob = obligation_for_test("vo-filter");
         // Plan with obligation.
@@ -2622,7 +2794,7 @@ mod review_fix_tests {
             verification_obligation_id: Some("vo-filter".to_string()),
             ..Default::default()
         };
-        let resp = provenance_read(&fs, args).unwrap();
+        let resp = provenance_read(&fs, args).await.unwrap();
         // PlanChanged with obligation should be found.
         assert!(!resp.events.is_empty());
         assert!(

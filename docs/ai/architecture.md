@@ -29,7 +29,7 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
 | `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
 | `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v4 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` legacy read-only, `v4.rs` current), `store.rs` (v1+v2+v3+v4 merged reads, v4 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `obligations.rs` (obligation matching, binding hash, evidence states), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
+| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v5 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` legacy read-only, `v4.rs` legacy read-only, `v5.rs` current), `store.rs` (v1+v2+v3+v4+v5 merged reads, v5 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `obligations.rs` (obligation matching, binding hash, evidence states), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
 | `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
 | `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
@@ -43,6 +43,8 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/mcp/http_security.rs` | Local HTTP Host/Origin security + loopback bind validation |
 | `src/mcp/resource_path.rs` | Project resource path validation (`doge://files/`, `doge://symbols/`) |
 | `src/config/` | AppConfig, `.doge/config.toml` loading |
+| `src/features/evidence_report/` | Read-only session evidence collection, Git/workspace snapshots, typed schema v2, Markdown/JSON export |
+| `src/features/verification_snapshot/` | Bounded project code-state endpoint acquisition and comparison for verification records; no coverage inference |
 | `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
 | `src/watch.rs` | File watch mode (`dgc watch`) |
 | `src/error_recovery/` | Autonomous error recovery hints |

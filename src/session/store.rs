@@ -11,6 +11,7 @@ const MAX_SESSIONS: usize = 100;
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     pub(crate) root: PathBuf,
+    read_only: bool,
 }
 
 impl SessionStore {
@@ -21,7 +22,10 @@ impl SessionStore {
             error!(?e, "Failed to create session store directory: {:?}", base);
             SessionError::CreateDirError(e)
         })?;
-        Ok(Self { root: base })
+        Ok(Self {
+            root: base,
+            read_only: false,
+        })
     }
 
     /// Create a SessionStore with the specified path as the root directory.
@@ -32,7 +36,99 @@ impl SessionStore {
             error!(?e, "Failed to create session store directory: {:?}", root);
             SessionError::CreateDirError(e)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            read_only: false,
+        })
+    }
+
+    /// Open an existing store without creating directories or cleaning sessions.
+    pub fn open_existing(root: impl Into<PathBuf>) -> Result<Self, SessionError> {
+        let root = root.into();
+        if !root.is_dir() {
+            return Err(SessionError::NotFound("session store".to_string()));
+        }
+        for (index, entry) in fs::read_dir(&root)
+            .map_err(SessionError::ReadError)?
+            .enumerate()
+        {
+            if index >= 10_000 {
+                return Err(SessionError::ReadError(std::io::Error::other(
+                    "session inventory exceeds read limit",
+                )));
+            }
+            let entry = entry.map_err(SessionError::ReadError)?;
+            let kind = entry.file_type().map_err(SessionError::ReadError)?;
+            if kind.is_symlink() {
+                return Err(SessionError::InvalidId("symlink in session store".into()));
+            }
+            if kind.is_dir() {
+                let metadata = fs::symlink_metadata(entry.path().join("session.json"));
+                if metadata.is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
+                    return Err(SessionError::InvalidId("unsafe session metadata".into()));
+                }
+            }
+        }
+        Ok(Self {
+            root,
+            read_only: true,
+        })
+    }
+
+    fn read_session_file(&self, path: &std::path::Path) -> Result<String, SessionError> {
+        if !self.read_only {
+            return fs::read_to_string(path).map_err(SessionError::ReadError);
+        }
+        use std::io::Read;
+        const LIMIT: u64 = 16 * 1024 * 1024;
+        let file = {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                env::current_dir()
+                    .map_err(SessionError::ReadError)?
+                    .join(path)
+            };
+            let anchor = absolute
+                .ancestors()
+                .last()
+                .ok_or_else(|| SessionError::InvalidId("unsafe session path".into()))?;
+            let relative = absolute
+                .strip_prefix(anchor)
+                .ok()
+                .and_then(|p| p.to_str())
+                .ok_or_else(|| SessionError::InvalidId("unsafe session path".into()))?;
+            crate::features::verification_snapshot::open_relative(anchor, relative)
+                .map_err(SessionError::ReadError)?
+        };
+        let meta = file.metadata().map_err(SessionError::ReadError)?;
+        if !meta.is_file() || meta.len() > LIMIT {
+            return Err(SessionError::ReadError(std::io::Error::other(
+                "unsafe or oversized session metadata",
+            )));
+        }
+        let mut bytes = Vec::new();
+        file.take(LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(SessionError::ReadError)?;
+        if bytes.len() as u64 > LIMIT {
+            return Err(SessionError::ReadError(std::io::Error::other(
+                "session metadata exceeds read limit",
+            )));
+        }
+        String::from_utf8(bytes).map_err(|e| {
+            SessionError::ReadError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    fn ensure_writable(&self) -> Result<(), SessionError> {
+        if self.read_only {
+            return Err(SessionError::WriteError(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only session store",
+            )));
+        }
+        Ok(())
     }
 
     /// Get metadata for all sessions, sorted by last update in descending
@@ -47,20 +143,49 @@ impl SessionStore {
     /// descending order (most recently active first).
     pub fn list_with_stats(&self) -> Result<Vec<SessionSummary>, SessionError> {
         let mut out = Vec::new();
+        let mut scanned_bytes = 0usize;
+        let mut scanned_entries = 0usize;
         if !self.root.exists() {
             return Ok(out);
         }
         for entry in fs::read_dir(&self.root).map_err(SessionError::ReadError)? {
             let entry = match entry {
                 Ok(e) => e,
+                Err(error) if self.read_only => return Err(SessionError::ReadError(error)),
                 Err(_) => continue,
             };
+            scanned_entries += 1;
+            if self.read_only && scanned_entries > 10_000 {
+                return Err(SessionError::ReadError(std::io::Error::other(
+                    "session inventory exceeds read limit",
+                )));
+            }
             let p = entry.path();
             if !p.is_dir() {
                 continue;
             }
             let session_p = p.join("session.json");
-            if let Ok(s) = fs::read_to_string(&session_p).map_err(SessionError::ReadError)
+            if self.read_only && (p.is_symlink() || session_p.is_symlink()) {
+                return Err(SessionError::InvalidId(
+                    "symlink in session inventory".into(),
+                ));
+            }
+            let text = self.read_session_file(&session_p);
+            if self.read_only {
+                if let Ok(s) = &text {
+                    scanned_bytes += s.len();
+                    if scanned_bytes > 128 * 1024 * 1024 {
+                        return Err(SessionError::ReadError(std::io::Error::other(
+                            "session inventory bytes exceed read limit",
+                        )));
+                    }
+                } else if session_p.exists()
+                    && let Err(error) = text
+                {
+                    return Err(error);
+                }
+            }
+            if let Ok(s) = text
                 && let Ok(session_data) =
                     serde_json::from_str::<SessionData>(&s).map_err(SessionError::ParseError)
             {
@@ -109,9 +234,14 @@ impl SessionStore {
             return Err(SessionError::NotFound(id.to_string()));
         }
 
+        if self.read_only
+            && (id == "." || id == ".." || id.contains(['/', '\\']) || dir.is_symlink())
+        {
+            return Err(SessionError::InvalidId(id.to_string()));
+        }
         // Load the entire session data from a single JSON file
         let session_file = dir.join("session.json");
-        let session_s = fs::read_to_string(session_file).map_err(SessionError::ReadError)?;
+        let session_s = self.read_session_file(&session_file)?;
         let session_data: SessionData =
             serde_json::from_str(&session_s).map_err(SessionError::ParseError)?;
 
@@ -121,6 +251,7 @@ impl SessionStore {
     /// Save the session data.
     /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
+        self.ensure_writable()?;
         let dir = self.session_dir(&data.meta.id);
         fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
 
@@ -143,6 +274,7 @@ impl SessionStore {
 
     /// Delete session data by specifying the session ID.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
+        self.ensure_writable()?;
         if id.is_empty() {
             return Err(SessionError::InvalidId(id.to_string()));
         }

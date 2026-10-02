@@ -1,4 +1,6 @@
 pub mod doc_skill;
+pub mod evidence_report;
+pub mod verification_snapshot;
 
 pub mod semantic_edit;
 pub mod test_gen;

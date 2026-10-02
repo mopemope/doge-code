@@ -1,0 +1,22 @@
+# 検証実行時 snapshot の作業記録
+
+- 受け入れ条件: 実行前後の project 内 Git 対象と provenance 参照ファイルを記録し、現在との比較を独立表示する。
+- 成否・帰属・coverage は維持。新しい wire v5 を追加し、v1〜v4 は移行しない。
+- 対象境界: features/verification_snapshot、provenance store/wire、execute_process、TUI test/lint、provenance_read、evidence report。
+- 上限: 10000 paths、16 MiB/file、128 MiB/read、4 MiB/snapshot JSON、10秒/取得。
+- 実装開始時点で evidence report 初期版の未コミット差分が存在。保持して作業する。
+- 実装完了: Unix directory FD / openat の no-follow 読み取り、streaming exact-byte hash、Git 対象の前後列挙照合、bounded endpoint / current comparison。
+- v5 は frozen v4 payload adapter と version-one execution workspace を使用。snapshot の追加で enum が大きくなるため canonical/wire の optional payload を Box 化した。JSON の意味は変えない。
+- 実行済み重点検証: snapshot 14件、provenance 141件、provenance tool 33件、dispatch 36件、testing 6件、TUI slash commands 46件、evidence report 25件、CLI 2件、execution 155件。
+- 最終 Rust gate: `env TMPDIR=/var/tmp bash scripts/verify.sh rust` 成功。fmt、警告なし Clippy、locked tests 1243件。ログ: `/var/tmp/dgc-verify-kr6zvzzz`。
+- guidance 28件、tui-deps 検査は成功。作業メモと説明文の最終更新後に guidance を再実行する。
+- sandbox 内の dispatch / execution の既存 HTTP 待受けは EPERM で失敗。承認後、Git 管理外 TMPDIR と sandbox 外で再実行し成功。プロダクトの回避変更はしていない。
+- release build / `cargo run --release --locked --manifest-path ... -- --no-repomap` 成功。API キーを渡さず隔離 fixture で `/test`、`/lint` を手動確認。
+- `/test` の成功と、検証中に src/input.txt が変わった警告を同時に表示。`/lint` の cargo fmt が src/lib.rs を変えた警告も表示。clippy --fix は sandbox の TCP locking が EPERM だったため、承認後に TUI を再実行し成功。v5 の成否と変更状態をファイルで確認。
+- terminal recording: `/tmp/dgc-snapshot-tui-unrestricted.typescript`（成功した再実行）。初回の制限記録: `/tmp/dgc-snapshot-tui-record.typescript`。
+- release CLI smoke: schema 2 の JSON と Markdown を出力。test/fmt の differs_from_start、clippy の matches_start を確認。session / provenance / Git index の bytes は不変。成果物: `/tmp/dgc-verification-snapshot-smoke.json` と `.md`。
+- `bash scripts/verify.sh macos` は Linux で拒否（exit 2）。macOS 実機検証は未実施であり、Linux 成功を代用しない。
+- 取得の 10秒 budget は cooperative。atomic snapshot、全依存環境、途中で変更して戻した操作の完全検出は保証しない。toolchain / execution environment / test count は未記録。coverage の判定は維持。
+- 実装後レビュー: 異なる検証の参照をまとめた current capture に未解決の missing path がある場合、unknown 差分を無視して matches_start を返すことを修正。未知・不完全・重複 entry は一致としない。回帰テストを2件追加。
+- 実装後レビュー: export の親ディレクトリ差し替えと安全確認後の無制限再読込を修正。directory FD anchored 読み取りを共有し、保存済み証跡と manifest に一致する text bytes の私有一時コピーで既存 loader/query を実行する。一時領域は終了時に削除。回帰テストを3件追加。
+- レビュー後の重点検証: snapshot 16件、evidence report 28件、CLI 2件成功。`origin/develop` の更新を取り込み、最終 gate を再実行してから PR を作成する。

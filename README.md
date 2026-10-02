@@ -88,6 +88,105 @@ base_url = "https://api.anthropic.com"
 project_instructions_file = "PROJECT.md"
 ```
 
+## Export evidence for review
+
+Export a saved session's requirements, changes and recorded command outcomes
+without an API key or an LLM call:
+
+```bash
+dgc session evidence <SESSION_ID>
+dgc session evidence <SESSION_ID> --format json
+dgc session evidence <SESSION_ID> --base main
+dgc session evidence <SESSION_ID> --include-content
+dgc session evidence <SESSION_ID> > /tmp/dgc-evidence.md
+```
+
+IDs accept a unique prefix. The default format is Markdown; JSON is a single
+schema-versioned document. The command uses the current directory as the project
+root and reads `.doge/sessions` there. It bypasses `.env`, project/user config,
+normal file logging, RepoMap, and MCP startup. Output goes only to stdout;
+diagnostics go to stderr. It does not change source files, the Git index, saved
+sessions, or provenance. On Unix, file reads reject symlink traversal through
+parent directories. Bounded saved evidence and selected text files are copied
+into private temporary directories for consistent collection; these copies are
+removed when export finishes. Export fails closed on platforms without these
+safe read primitives. Save reports outside the repository: shell redirection
+inside the project may introduce an untracked file before comparison starts.
+
+`--base` compares the exact locally resolved commit with the current working
+tree, including committed changes since that base and current staged/unstaged
+results. It does **not** automatically choose a merge-base or reproduce a PR's
+three-dot comparison. Without `--base`, comparison uses HEAD. Staged and unstaged
+flags are also retained when they cancel out in the final file. Untracked files
+are included; ignored files, `.git/`, `.doge/` runtime files, and paths outside the
+current project are excluded from Git comparison. Explicit session file records
+are still included in the manifest. Renames appear as deletion/addition.
+Submodules and unsupported file/path formats are marked incomplete. Git capture
+is bounded; incomplete capture is never used as a complete file list. An explicit
+base comparison that cannot be performed fails; without a base, a report can
+retain session evidence with an unavailable-comparison warning.
+
+The report preserves historical attribution and distinguishes pending, failing,
+stale, diverged, reverted, superseded and observed-passing evidence. A requirement
+with a successful observation may still have pending obligations. Session linkage
+on a file does not attribute all its hunks or external edits to dgc. The manifest
+identifies selected files **at export time**, using exact-byte BLAKE3 hashes when
+available. A before/after check retries once if saved evidence or workspace files
+change, then fails if they keep changing. This is an optimistic check, not an
+atomic snapshot, execution-time environment record, signature, or proof of
+correctness. Test counts and historical execution environments are `null` because
+existing events do not record them. No tests are re-executed by export.
+
+New verification observations from structured `execute_process`, `/test`, and
+classified `/lint` commands record project workspace endpoints before and after
+execution. Report schema version 2 adds `execution_workspace` and
+`current_code_state` to each command observation. The command outcome and
+historical requirement/obligation coverage remain independent of these fields.
+`stable_endpoints` means the bounded nonempty set was fully observed and matched
+at both endpoints; `changed_between_endpoints` identifies observed changes;
+`indeterminate` means correspondence could not be confirmed. Current comparison
+is `matches_start`, `differs_from_start`, or `indeterminate`. Legacy v1–v4 events
+show `not_recorded`, without reconstructing historical files from current ones.
+
+Execution endpoints cover Git-tracked and nonignored untracked files inside the
+project, plus validated provenance references (including referenced ignored
+files). `.git/` and `.doge/` are always excluded. New files and deletions are
+compared; binary regular files use exact-byte hashes and Unix execute bits are
+recorded. Symlinks are never followed, including parent directory components;
+submodules, special files, unsafe paths and unreadable files cannot establish a
+match. Without Git, referenced files can be recorded but collection is partial.
+No file bodies, environment variables, toolchain probes or remote URLs are added.
+
+Each endpoint is limited to 10,000 paths, 16 MiB per file, 128 MiB of reads and
+4 MiB serialized data, with a cooperative 10-second collection budget. Acquisition
+failure does not change command success or failure. `/test`, `/lint` and the
+process tool warn about changed or indeterminate endpoints; `provenance_read`
+returns compact endpoint/current comparison summaries within its existing budget.
+Export compares execution records with current project state without rerunning
+commands. A successful command followed by a changed test or lockfile remains a
+successful historical observation and displays changed code correspondence.
+Endpoint equality does not guarantee unchanged inputs throughout execution:
+changes restored between observations may be missed. These observations do not
+capture all ignored dependencies, execution environments, or reproducibility.
+
+Normal output includes requirement/plan descriptions and recorded program/argv.
+`--include-content` additionally includes raw/effective directives, recorded diffs
+and saved stdout/stderr excerpts (which may already be truncated). Neither mode
+exports the full conversation, environment variables, API configuration, remote
+URLs or Observation Store. Outside-project command cwd is replaced by
+`outside_project`. Review descriptions and argv before sharing; values entered
+there are not guaranteed to be free of secrets. Evidence and command text is
+rendered as literal text rather than active Markdown/HTML.
+
+A generated report exits successfully even when recorded tests failed or evidence
+is missing. Invalid input, unreadable sessions, persistent concurrent changes and
+explicit-base failures exit nonzero before report output. Output I/O failures
+also exit nonzero; a destination may already have received some bytes.
+Limits are 10,000 entries per inventory, 16 MiB per input file, 128 MiB per input
+scan and 32 MiB per rendered report; exceeding a limit fails instead of silently
+truncating the artifact. The shared managed runner's capture limits also apply
+to Git commands, with a 10-second timeout per command.
+
 ## 🛠️ Tools and Commands
 
 ### File System Tools
@@ -177,7 +276,7 @@ Verification:
 - `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
 - `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification. It also freezes `matched_obligations` (id + binding hash) for structured runs.
 - Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
-- Storage: `.doge/sessions/<id>/provenance/v4/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/` and `provenance/v3/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
+- Storage: `.doge/sessions/<id>/provenance/v5/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 
@@ -199,11 +298,11 @@ step-2
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
 - A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
-- Tracked mutations (v4): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
+- Tracked mutations (v5 writes, legacy v1–v4 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
-- Storage: `.doge/sessions/<id>/provenance/v4/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/` and `provenance/v3/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Storage: `.doge/sessions/<id>/provenance/v5/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
 - Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
 
 ## Verification Obligations

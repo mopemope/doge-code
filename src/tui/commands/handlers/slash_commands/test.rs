@@ -141,7 +141,7 @@ async fn run_test_job(
             // Snapshot verification context before the command starts so a
             // change landing mid-run is never attributed to this run.
             // Obligation attribution is frozen here via the shared matcher.
-            let verification_context =
+            let mut verification_context =
                 crate::tools::provenance::capture_verification_context_for_invocation(
                     &tools,
                     &crate::provenance::ProvenanceAttribution::none(),
@@ -149,6 +149,15 @@ async fn run_test_job(
                     &test_cmd.command,
                     &test_cmd.args,
                 );
+            crate::tools::provenance::prepare_verification_snapshot(
+                &tools,
+                &mut verification_context,
+                Some(cancellation.child_token()),
+            )
+            .await;
+            if cancellation.is_cancelled() {
+                return JobRunOutcome::Cancelled;
+            }
             // Per-command child token so parent cancel stops all commands.
             let child = cancellation.child_token();
             let mut result = testing::run_test_command_with_cancel(
@@ -171,27 +180,44 @@ async fn run_test_job(
             // A recording failure never fails the test run itself; the
             // session is marked incomplete and the UI is told, matching the
             // semantic-edit and plan_write paths.
-            if !crate::tools::provenance::record_tui_test_verification(
-                &tools,
-                &test_cmd.command,
-                &test_cmd.args,
-                result.success,
-                if result.timed_out {
-                    "timed_out"
-                } else {
-                    "completed"
-                },
-                result.exit_code,
-                result.timed_out,
-                &result.stdout,
-                &result.stderr,
-                result.output_truncated,
-                result.warnings.clone(),
-                verification_context,
-            ) {
-                ui_tx.send_logged(
-                    "[provenance][warning] Test ran, but provenance recording failed.".to_string(),
-                );
+            if result.execution_observed {
+                crate::tools::provenance::finish_verification_snapshot(
+                    &tools,
+                    &mut verification_context,
+                    Some(cancellation.child_token()),
+                )
+                .await;
+                if cancellation.is_cancelled() {
+                    return JobRunOutcome::Cancelled;
+                }
+                if let Some(record) = &verification_context.execution_workspace
+                    && let Some(warning) = crate::features::verification_snapshot::warning(record)
+                {
+                    ui_tx.send_logged(format!("[verification][warning] {warning}"));
+                }
+                if !crate::tools::provenance::record_tui_test_verification(
+                    &tools,
+                    &test_cmd.command,
+                    &test_cmd.args,
+                    result.success,
+                    if result.timed_out {
+                        "timed_out"
+                    } else {
+                        "completed"
+                    },
+                    result.exit_code,
+                    result.timed_out,
+                    &result.stdout,
+                    &result.stderr,
+                    result.output_truncated,
+                    result.warnings.clone(),
+                    verification_context,
+                ) {
+                    ui_tx.send_logged(
+                        "[provenance][warning] Test ran, but provenance recording failed."
+                            .to_string(),
+                    );
+                }
             }
 
             // Store the command output

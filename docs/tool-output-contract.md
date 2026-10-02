@@ -76,7 +76,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 
 | Tool | Self-budget |
 |---|---|
-| `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat |
+| `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat; classified verification additionally returns a compact (<1000 chars) `verification_workspace` summary, with command success unchanged |
 | `execute_bash` / `execute_shell` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`) |
 | trusted `/test` / `/lint` diagnostics | raw managed capture is bounded per stream, then failure parsing runs before an internal ~32,000-character head+tail diagnostic budget; this is intentionally separate from the LLM 6,000-character tool budget |
 | `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars |
@@ -324,3 +324,8 @@ tool:
 catalog-managed (`src/llm/tool_catalog.rs`) and only advertised while
 deferred tools remain, so eager mode stays byte-identical to the legacy
 inventory. All other steps apply to it.
+
+`provenance_read` verification rows include compact `execution_workspace` and
+`current_code_state` summaries. Full endpoint file arrays belong in session
+evidence reports, never tool responses. Historical coverage does not establish
+current code correspondence.
