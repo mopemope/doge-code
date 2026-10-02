@@ -9,6 +9,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  agent-guidance:
+    name: Agent guidance and development scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/verify.sh guidance
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -71,15 +78,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Check active Crossterm generation
-        shell: bash
-        run: |
-          set -euo pipefail
-          # ratatui-crossterm keeps crossterm 0.28 as optional lock metadata;
-          # qualify inverse-tree checks so that record is not mistaken for an active backend.
-          cargo tree -i crossterm@0.29.0
-          legacy_tree="$(cargo tree --all-features --target all -i crossterm@0.28.1 2>&1)"
-          printf '%s\n' "$legacy_tree"
-          if grep -q '^crossterm v0.28.1' <<<"$legacy_tree"; then
-            echo "crossterm 0.28.1 is active in the dependency graph" >&2
-            exit 1
-          fi
+        run: bash scripts/verify.sh tui-deps
