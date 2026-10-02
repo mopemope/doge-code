@@ -55,7 +55,7 @@ pub async fn execute_process(
     // Classify before execution; only structured `execute_process` is auto
     // evidence. Bash/shell strings are never inferred as verification.
     let verification_kind = crate::provenance::classify_verification(&program, &process_args);
-    let verification_context = verification_kind.map(|kind| {
+    let mut verification_context = verification_kind.map(|kind| {
         crate::tools::provenance::capture_verification_context_for_invocation(
             runtime.fs,
             &runtime.attribution,
@@ -64,6 +64,14 @@ pub async fn execute_process(
             &process_args,
         )
     });
+    if let Some(context) = &mut verification_context {
+        crate::tools::provenance::prepare_verification_snapshot(
+            runtime.fs,
+            context,
+            runtime.cancel_token.clone(),
+        )
+        .await;
+    }
     let cwd_relative = crate::tools::provenance::relative_cwd_for_evidence(runtime.fs, &cwd_param);
     match runtime
         .fs
@@ -84,13 +92,43 @@ pub async fn execute_process(
             let status = value
                 .get("status")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+                .unwrap_or("unknown")
+                .to_string();
             // Record observed verification for completed/timed-out runs only.
             // Policy denials and spawn failures never started execution;
             // cancellation propagates as Err below and is never recorded.
-            if let (Some(kind), Some(context)) = (verification_kind, verification_context)
+            if let (Some(kind), Some(mut context)) = (verification_kind, verification_context)
                 && (status == "completed" || status == "timed_out")
             {
+                crate::tools::provenance::finish_verification_snapshot(
+                    runtime.fs,
+                    &mut context,
+                    runtime.cancel_token.clone(),
+                )
+                .await;
+                if runtime
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                {
+                    return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
+                }
+                if let Some(record) = &context.execution_workspace
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert(
+                        "verification_workspace".into(),
+                        crate::features::verification_snapshot::summary(record),
+                    );
+                    if let Some(warning) = crate::features::verification_snapshot::warning(record)
+                        && let Some(warnings) = obj
+                            .entry("warnings")
+                            .or_insert_with(|| json!([]))
+                            .as_array_mut()
+                    {
+                        warnings.push(json!(warning));
+                    }
+                }
                 record_execute_process_verification(
                     runtime,
                     kind,
@@ -99,7 +137,7 @@ pub async fn execute_process(
                     cwd_relative,
                     &context,
                     &value,
-                    status,
+                    &status,
                 );
             }
             Ok(ToolOutput {
@@ -398,7 +436,7 @@ pub async fn provenance_read(
 ) -> Result<ToolOutput> {
     let params: crate::tools::provenance::ProvenanceReadArgs =
         serde_json::from_value(args.clone())?;
-    match crate::tools::provenance::provenance_read(runtime.fs, params) {
+    match crate::tools::provenance::provenance_read(runtime.fs, params).await {
         Ok(res) => {
             let value = serde_json::to_value(&res)?;
             let count = res.events.len();

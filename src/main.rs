@@ -124,7 +124,7 @@ pub enum Commands {
         workflow: String,
     },
 
-    /// Manage sessions (list, show, delete)
+    /// Manage sessions (list, show, delete, evidence)
     #[command()]
     Session {
         #[command(subcommand)]
@@ -134,8 +134,26 @@ pub enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv().ok();
     let cli = Cli::parse();
+    // Evidence export uses current-directory storage without loading user
+    // credentials, creating default config/debug.log, or starting services.
+    if let Some(Commands::Session {
+        command: command @ session::cli::SessionCommands::Evidence { .. },
+    }) = &cli.command
+    {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init()
+            .ok();
+        let cfg = AppConfig {
+            project_root: std::env::current_dir()?,
+            ..AppConfig::default()
+        };
+        return session::cli::run(cfg, command.clone()).await;
+    }
+    dotenv().ok();
     logging::init_logging()?;
 
     let cfg = AppConfig::from_cli(cli.clone())?;
@@ -143,7 +161,7 @@ async fn main() -> Result<()> {
 
     // Handle `dgc session` early: no repomap, no MCP server, no LLM setup.
     if let Some(Commands::Session { command }) = &cli.command {
-        return session::cli::run(cfg, command.clone());
+        return session::cli::run(cfg, command.clone()).await;
     }
 
     // Initialize repomap

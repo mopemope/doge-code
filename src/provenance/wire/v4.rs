@@ -1,4 +1,4 @@
-//! v4 wire schema (current read + write).
+//! v4 wire schema (frozen read-only).
 //!
 //! v4 adds Verification Obligations:
 //! - `PlanChanged` transitions carry before/after obligation snapshots.
@@ -6,7 +6,7 @@
 //!
 //! Shapes here are intentionally separate structs from the canonical
 //! `super::types` representation so durable evolution stays explicit.
-//! v1/v2/v3 are read-only; only v4 is written.
+//! v1/v2/v3/v4 are read-only; new writes use v5.
 
 use serde::{Deserialize, Serialize};
 

@@ -555,6 +555,7 @@ mod traceability_tests {
     #[test]
     fn test_verification_race_keeps_capture_only() {
         let ctx_a = VerificationContext {
+            execution_workspace: None,
             directive_id: Some("d1".to_string()),
             plan_item_id: Some("step-1".to_string()),
             requirement_ids: vec!["r1".to_string()],
@@ -623,6 +624,7 @@ mod traceability_tests {
             )
             .unwrap();
         let failed = VerificationObservedEvent {
+            execution_workspace: None,
             directive_id: Some("d1".to_string()),
             plan_item_id: None,
             requirement_ids: vec!["r1".to_string()],
@@ -743,6 +745,7 @@ mod traceability_tests {
             )
             .unwrap();
         let ctx = VerificationContext {
+            execution_workspace: None,
             directive_id: Some("d1".to_string()),
             plan_item_id: Some("p1".to_string()),
             requirement_ids: vec!["r1".to_string()],
@@ -920,6 +923,7 @@ mod traceability_tests {
             .unwrap();
         // Verify only C1.
         let ctx = VerificationContext {
+            execution_workspace: None,
             directive_id: Some("d1".to_string()),
             plan_item_id: Some("p1".to_string()),
             requirement_ids: vec!["r1".to_string()],
@@ -971,8 +975,8 @@ mod traceability_tests {
 
     // --- provenance_read filters (§135) ---
 
-    #[test]
-    fn test_provenance_read_directive_and_requirement_filters() {
+    #[tokio::test]
+    async fn test_provenance_read_directive_and_requirement_filters() {
         let proj = tempfile::tempdir().unwrap();
         let fs = fs_with_session(proj.path());
         let d1 = crate::tools::provenance::record_directive_observed(
@@ -1010,6 +1014,7 @@ mod traceability_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         assert!(
             resp.events.iter().any(|e| e["event_id"] == d1.event_id),
@@ -1027,6 +1032,7 @@ mod traceability_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         assert!(
             resp2
@@ -1045,6 +1051,7 @@ mod traceability_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         assert!(
             resp3
@@ -1054,8 +1061,8 @@ mod traceability_tests {
         );
     }
 
-    #[test]
-    fn test_provenance_read_hides_directive_content_by_default() {
+    #[tokio::test]
+    async fn test_provenance_read_hides_directive_content_by_default() {
         let proj = tempfile::tempdir().unwrap();
         let fs = fs_with_session(proj.path());
         let secret = "token sk-secret-123";
@@ -1071,6 +1078,7 @@ mod traceability_tests {
             &fs,
             crate::tools::provenance::ProvenanceReadArgs::default(),
         )
+        .await
         .unwrap();
         // Default returns preview + hashes, never the full-text fields.
         for e in &resp.events {
@@ -1093,6 +1101,7 @@ mod traceability_tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         let serialized_full = serde_json::to_string(&full.events).unwrap();
         assert!(serialized_full.contains("sk-secret-123"));

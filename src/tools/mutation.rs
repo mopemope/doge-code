@@ -834,7 +834,8 @@ mod finalize_integration_tests {
         std::fs::write(&file, "v0\n").unwrap();
         // Break only the v2 events dir (a file where the dir should be).
         let ctx = fs.current_session_storage_context().unwrap();
-        let events_dir = ctx.session_dir.join("provenance/v4/events");
+        let events_dir =
+            crate::provenance::ProvenanceStore::new(ctx.session_dir.clone()).current_events_path();
         std::fs::create_dir_all(events_dir.parent().unwrap()).unwrap();
         std::fs::write(&events_dir, "not-a-dir").unwrap();
         let res = fs.fs_write(file.to_str().unwrap(), "v1\n").await.unwrap();
@@ -860,6 +861,7 @@ mod finalize_integration_tests {
         assert_eq!(active.len(), 2);
         // A verification snapshot captures the whole chain.
         let ctx = crate::provenance::VerificationContext {
+            execution_workspace: None,
             plan_item_id: None,
             observed_change_ids: active.clone(),
             matched_obligations: Vec::new(),
