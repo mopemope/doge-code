@@ -3,7 +3,7 @@ use crate::llm::tool_execution::error::{AgentLoopError, handle_agent_error};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
-use crate::tools::plan::{PlanList, PlanWriteArgs, PlanWriteResult};
+use crate::tools::plan::{PlanList, PlanWriteArgs};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
 use std::hash::{Hash, Hasher};
@@ -135,6 +135,20 @@ fn plan_write_arguments_hash(arguments: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalized.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Publish the canonical plan to the TUI over the existing `::plan_list:`
+/// protocol. Reads from the plan store, never from the LLM-facing tool
+/// result, so compact `plan_write` output stays UI-independent.
+fn publish_plan_list(tx: &std::sync::mpsc::Sender<String>, plan: &PlanList) {
+    match serde_json::to_string(&plan.items) {
+        Ok(plan_list_json) => {
+            let _ = tx.send(format!("::plan_list:{plan_list_json}"));
+        }
+        Err(err) => {
+            warn!(error = %err, "failed to serialize canonical plan for UI");
+        }
+    }
 }
 
 /// Progress override for the TaskSentinel: a successful tool call that returns
@@ -833,28 +847,23 @@ File modification detected. You MUST now verify your changes:
                 let _ = tx.send("::status:waiting".into());
             }
 
-            // Check if the tool call is plan_write/plan_read and update the plan list in the UI
-            if matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
-                && let Some(tool_result_value) = output_value
+            // Refresh the TUI plan projection from the canonical store after a
+            // successful plan_write/plan_read. The LLM-facing ToolOutput shape
+            // is intentionally not the source: compact plan_write results carry
+            // no plan items. A UI refresh failure must never fail the write.
+            if success
+                && matches!(tc.function.name.as_str(), "plan_write" | "plan_read")
+                && ui_tx.is_some()
             {
-                let raw_plan_value = (*tool_result_value).clone();
-                let parsed_plan = if tc.function.name == "plan_write" {
-                    serde_json::from_value::<PlanWriteResult>(raw_plan_value.clone())
-                        .map(|result| result.plan)
-                        .or_else(|_| serde_json::from_value::<PlanList>(raw_plan_value))
-                        .ok()
-                } else {
-                    serde_json::from_value::<PlanList>(raw_plan_value).ok()
-                };
-
-                if let Some(plan_list) = parsed_plan {
-                    debug!(?plan_list, tool = %tc.function.name, "Updated plan list from plan tool");
-                    // Send the plan list to the UI
-                    if let Some(tx) = &ui_tx {
-                        // Serialize the plan list to JSON and send it to the UI
-                        if let Ok(plan_list_json) = serde_json::to_string(&plan_list.items) {
-                            let _ = tx.send(format!("::plan_list:{}", plan_list_json));
+                match fs.plan_read() {
+                    Ok(plan_list) => {
+                        debug!(tool = %tc.function.name, "Updated plan list from canonical store");
+                        if let Some(tx) = &ui_tx {
+                            publish_plan_list(tx, &plan_list);
                         }
+                    }
+                    Err(err) => {
+                        warn!(error = %err, tool = %tc.function.name, "plan UI refresh failed; write remains successful");
                     }
                 }
             }
@@ -974,11 +983,11 @@ mod tests {
         assert_eq!(not_truncated.len(), 30000);
         assert!(!not_truncated.contains("truncated"));
 
-        // Exception for plan_write
+        // plan_write is compact metadata: default 8k tier.
         let plan_content = "na".repeat(15000); // 30000 chars
-        let not_truncated_plan = truncate_tool_output(plan_content.clone(), "plan_write");
-        assert_eq!(not_truncated_plan.len(), 30000);
-        assert!(!not_truncated_plan.contains("truncated"));
+        let truncated_plan = truncate_tool_output(plan_content.clone(), "plan_write");
+        assert!(truncated_plan.contains("truncated"));
+        assert!(truncated_plan.chars().count() <= 8000);
 
         // fs_read too huge
         let huge_read = "na".repeat(21000); // 42000 chars
@@ -1104,5 +1113,43 @@ mod tests {
         );
         assert_eq!(value.get("repeat_count").and_then(|v| v.as_u64()), Some(3));
         assert!(value.get("no_change_count").is_none());
+    }
+
+    #[test]
+    fn test_publish_plan_list_sends_canonical_items() {
+        use crate::tools::plan::PlanItem;
+
+        let plan = PlanList {
+            session_id: Some("s".to_string()),
+            items: vec![
+                PlanItem {
+                    id: "step-1".to_string(),
+                    parent_id: None,
+                    content: "first".to_string(),
+                    status: "pending".to_string(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
+                },
+                PlanItem {
+                    id: "step-2".to_string(),
+                    parent_id: None,
+                    content: "second".to_string(),
+                    status: "completed".to_string(),
+                    requirement_ids: Vec::new(),
+                    verification_obligations: Vec::new(),
+                },
+            ],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        publish_plan_list(&tx, &plan);
+        let msg = rx.recv().expect("plan message sent");
+        assert!(msg.starts_with("::plan_list:"));
+        let payload = msg.trim_start_matches("::plan_list:");
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(payload).expect("valid items JSON");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], "step-1");
+        // Full content reaches the TUI (unlike the compact LLM result).
+        assert_eq!(items[0]["content"], "first");
     }
 }

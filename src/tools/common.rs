@@ -776,6 +776,9 @@ impl FsTools {
         }
 
         result.warnings = warnings;
+        // Canonical semantic delta, computed from the same before/after
+        // snapshots used for provenance transitions.
+        result.delta = plan::summarize_plan_changes(&before_items, &result.plan.items);
         Ok(result)
     }
 

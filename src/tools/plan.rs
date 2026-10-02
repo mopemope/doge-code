@@ -3,12 +3,12 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update item statuses."#;
+const DESCRIPTION: &str = r#"Manages the execution plan. Use strict ID/Status rules: max one 'in_progress'. Use `mode='replace'` to overwrite or `'merge'` to update item statuses. Returns a compact change summary rather than echoing the full plan. Use plan_read only when the complete canonical plan is needed."#;
 
 // Verification obligation types live in the canonical provenance model
 // (`crate::provenance::types`) so plan JSON and provenance wire share one
@@ -47,8 +47,212 @@ pub struct PlanList {
 pub struct PlanWriteResult {
     pub plan: PlanList,
     pub changed: bool,
+    #[serde(default)]
+    pub delta: PlanWriteDelta,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// Compact LLM-facing outcome for `plan_write`.
+///
+/// The internal [`PlanWriteResult`] keeps the full canonical [`PlanList`]
+/// (needed by persistence, provenance, and validation). This type is the only
+/// shape that crosses the LLM boundary: ids and counts, never item content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanWriteToolResult {
+    pub ok: bool,
+    pub changed: bool,
+    #[serde(default)]
+    pub delta: PlanWriteDelta,
+    pub item_count: usize,
+    #[serde(default)]
+    pub status_counts: PlanStatusCounts,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_count: Option<usize>,
+}
+
+/// IDs added / updated / removed by a `plan_write`, in plan order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanWriteDelta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_ids: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updated_ids: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_ids: Vec<String>,
+}
+
+/// Counts of plan items per known status.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanStatusCounts {
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+}
+
+impl PlanStatusCounts {
+    pub fn from_items(items: &[PlanItem]) -> Self {
+        let mut counts = Self::default();
+        for item in items {
+            match item.status.as_str() {
+                "pending" => counts.pending += 1,
+                "in_progress" => counts.in_progress += 1,
+                "completed" => counts.completed += 1,
+                other => {
+                    // Post-validation plans carry only known statuses; never
+                    // break the validation contract here, just note and skip.
+                    debug!(status = %other, id = %item.id, "unknown plan status in counts");
+                }
+            }
+        }
+        counts
+    }
+}
+
+/// Target serialized size (chars) for the compact LLM-facing result.
+/// Only `warnings` may be reduced to meet it; delta/counts are never truncated.
+pub const PLAN_WRITE_RESULT_TARGET_CHARS: usize = 6_000;
+
+/// Semantic item comparison: same id, differing in content, status,
+/// parentage, requirement links, or verification obligations.
+///
+/// Obligation order is insignificant (canonical id-sorted comparison via
+/// [`obligations_equal`]); a pure reorder is not an update.
+fn plan_item_semantically_changed(before: &PlanItem, after: &PlanItem) -> bool {
+    before.content != after.content
+        || before.status != after.status
+        || before.parent_id != after.parent_id
+        || before.requirement_ids != after.requirement_ids
+        || !obligations_equal(
+            &before.verification_obligations,
+            &after.verification_obligations,
+        )
+}
+
+/// Pure, deterministic diff of two plan snapshots.
+///
+/// - `added_ids`: in `after`, not in `before` (ordered as in `after`)
+/// - `updated_ids`: in both, semantically changed (ordered as in `after`)
+/// - `removed_ids`: in `before`, not in `after` (ordered as in `before`)
+///
+/// Runs in O(n); result order never depends on hash-map iteration order.
+pub fn summarize_plan_changes(before: &[PlanItem], after: &[PlanItem]) -> PlanWriteDelta {
+    let before_index: HashMap<&str, &PlanItem> =
+        before.iter().map(|item| (item.id.as_str(), item)).collect();
+    let after_index: HashMap<&str, &PlanItem> =
+        after.iter().map(|item| (item.id.as_str(), item)).collect();
+
+    let mut delta = PlanWriteDelta::default();
+    for item in after {
+        match before_index.get(item.id.as_str()) {
+            None => delta.added_ids.push(item.id.clone()),
+            Some(previous) => {
+                if plan_item_semantically_changed(previous, item) {
+                    delta.updated_ids.push(item.id.clone());
+                }
+            }
+        }
+    }
+    for item in before {
+        if !after_index.contains_key(item.id.as_str()) {
+            delta.removed_ids.push(item.id.clone());
+        }
+    }
+    delta
+}
+
+fn truncate_warning_head(warning: &str, budget: usize) -> String {
+    const RESERVE: usize = 60;
+    let total = warning.chars().count();
+    if total <= budget {
+        return warning.to_string();
+    }
+    if budget <= RESERVE {
+        return format!("[truncated warning of {total} chars]");
+    }
+    // Char-based take: byte slicing (`&warning[..keep]`) would panic or
+    // over-keep on multi-byte UTF-8 boundaries.
+    let keep = budget.saturating_sub(RESERVE);
+    let kept: String = warning.chars().take(keep).collect();
+    let kept_chars = kept.chars().count();
+    format!(
+        "{kept}\n[...truncated {} of {total} chars]",
+        total - kept_chars
+    )
+}
+
+impl PlanWriteToolResult {
+    /// Build the compact LLM-facing result from the internal outcome.
+    /// `warnings` are budgeted to [`PLAN_WRITE_RESULT_TARGET_CHARS`];
+    /// `delta`, counts, and flags are always preserved verbatim.
+    pub fn from_internal(result: &PlanWriteResult) -> Self {
+        Self::from_internal_with_budget(result, PLAN_WRITE_RESULT_TARGET_CHARS)
+    }
+
+    fn from_internal_with_budget(result: &PlanWriteResult, target_chars: usize) -> Self {
+        let total_warnings = result.warnings.len();
+        let mut warnings = result.warnings.clone();
+
+        let base = Self {
+            ok: true,
+            changed: result.changed,
+            delta: result.delta.clone(),
+            item_count: result.plan.items.len(),
+            status_counts: PlanStatusCounts::from_items(&result.plan.items),
+            warnings: Vec::new(),
+            warnings_truncated: None,
+            warning_count: None,
+        };
+        let fits = |warnings: &[String]| {
+            let candidate = Self {
+                warnings: warnings.to_vec(),
+                ..base.clone()
+            };
+            serde_json::to_string(&candidate)
+                .map(|s| s.chars().count() <= target_chars)
+                .unwrap_or(false)
+        };
+
+        if !fits(&warnings) {
+            // Drop from the tail first, keeping the earliest warnings.
+            while warnings.len() > 1 && !fits(&warnings) {
+                warnings.pop();
+            }
+            // A single still-oversized warning is head-truncated in place.
+            while !warnings.is_empty() && !fits(&warnings) {
+                let last = warnings.len() - 1;
+                let current = warnings[last].chars().count();
+                if current <= 1 {
+                    warnings.pop();
+                    break;
+                }
+                let shorter = current / 2;
+                warnings[last] = truncate_warning_head(&warnings[last], shorter);
+                if warnings[last].chars().count() >= current {
+                    warnings.pop();
+                    break;
+                }
+            }
+        }
+
+        // Only claim truncation when warnings were actually reduced. A huge
+        // delta alone can exceed the budget with zero warnings; that must not
+        // report `warnings_truncated` (delta/counts are never truncated).
+        let reduced = warnings != result.warnings;
+
+        Self {
+            warnings,
+            warnings_truncated: if reduced { Some(true) } else { None },
+            warning_count: if reduced { Some(total_warnings) } else { None },
+            ..base
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -251,6 +455,7 @@ pub fn plan_write_from_base_path(
     Ok(PlanWriteResult {
         plan: plan_list,
         changed,
+        delta: PlanWriteDelta::default(),
         warnings: Vec::new(),
     })
 }
@@ -1241,5 +1446,323 @@ mod tests {
             std::slice::from_ref(&ob1),
             std::slice::from_ref(&ob2)
         ));
+    }
+
+    fn delta_item(id: &str, content: &str, status: &str) -> PlanItem {
+        PlanItem {
+            id: id.to_string(),
+            parent_id: None,
+            content: content.to_string(),
+            status: status.to_string(),
+            requirement_ids: Vec::new(),
+            verification_obligations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_summarize_no_change_yields_empty_delta() {
+        let before = vec![delta_item("a", "work a", "pending")];
+        let after = before.clone();
+        let delta = summarize_plan_changes(&before, &after);
+        assert!(delta.added_ids.is_empty());
+        assert!(delta.updated_ids.is_empty());
+        assert!(delta.removed_ids.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_added() {
+        let before = vec![delta_item("a", "work a", "pending")];
+        let after = vec![
+            delta_item("a", "work a", "pending"),
+            delta_item("b", "work b", "pending"),
+        ];
+        let delta = summarize_plan_changes(&before, &after);
+        assert_eq!(delta.added_ids, vec!["b".to_string()]);
+        assert!(delta.updated_ids.is_empty());
+        assert!(delta.removed_ids.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_updated_status() {
+        let before = vec![delta_item("a", "work a", "pending")];
+        let after = vec![delta_item("a", "work a", "in_progress")];
+        let delta = summarize_plan_changes(&before, &after);
+        assert!(delta.added_ids.is_empty());
+        assert_eq!(delta.updated_ids, vec!["a".to_string()]);
+        assert!(delta.removed_ids.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_updated_content() {
+        let before = vec![delta_item("a", "work a", "pending")];
+        let after = vec![delta_item("a", "work a revised", "pending")];
+        let delta = summarize_plan_changes(&before, &after);
+        assert_eq!(delta.updated_ids, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_summarize_updated_requirements() {
+        let mut before_item = delta_item("a", "work a", "pending");
+        let mut after_item = delta_item("a", "work a", "pending");
+        before_item.requirement_ids = vec!["req-1".to_string()];
+        after_item.requirement_ids = vec!["req-1".to_string(), "req-2".to_string()];
+        let delta = summarize_plan_changes(
+            std::slice::from_ref(&before_item),
+            std::slice::from_ref(&after_item),
+        );
+        assert_eq!(delta.updated_ids, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_summarize_updated_obligations() {
+        let before_item = plan_item_with_obligations("a", vec![obligation("vo-1")]);
+        let mut changed_ob = obligation("vo-1");
+        changed_ob.description = "different".to_string();
+        let after_item = plan_item_with_obligations("a", vec![changed_ob]);
+        let delta = summarize_plan_changes(
+            std::slice::from_ref(&before_item),
+            std::slice::from_ref(&after_item),
+        );
+        assert_eq!(delta.updated_ids, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_summarize_obligation_reorder_is_not_updated() {
+        let ob1 = obligation("vo-1");
+        let mut ob2 = obligation("vo-2");
+        ob2.kind = crate::provenance::VerificationKind::Lint;
+        let before_item = plan_item_with_obligations("a", vec![ob1.clone(), ob2.clone()]);
+        let after_item = plan_item_with_obligations("a", vec![ob2, ob1]);
+        let delta = summarize_plan_changes(
+            std::slice::from_ref(&before_item),
+            std::slice::from_ref(&after_item),
+        );
+        assert!(delta.updated_ids.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_removed() {
+        let before = vec![
+            delta_item("a", "work a", "pending"),
+            delta_item("b", "work b", "pending"),
+        ];
+        let after = vec![delta_item("a", "work a", "pending")];
+        let delta = summarize_plan_changes(&before, &after);
+        assert!(delta.added_ids.is_empty());
+        assert!(delta.updated_ids.is_empty());
+        assert_eq!(delta.removed_ids, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn test_summarize_combined() {
+        let before = vec![
+            delta_item("keep", "keep", "pending"),
+            delta_item("change", "old", "pending"),
+            delta_item("drop", "drop", "pending"),
+        ];
+        let after = vec![
+            delta_item("change", "old", "in_progress"),
+            delta_item("keep", "keep", "pending"),
+            delta_item("new", "new", "pending"),
+        ];
+        let delta = summarize_plan_changes(&before, &after);
+        assert_eq!(delta.added_ids, vec!["new".to_string()]);
+        assert_eq!(delta.updated_ids, vec!["change".to_string()]);
+        assert_eq!(delta.removed_ids, vec!["drop".to_string()]);
+    }
+
+    #[test]
+    fn test_summarize_deterministic_order_follows_plan() {
+        // HashMap iteration order must not leak into the delta: added follows
+        // `after` order, removed follows `before` order.
+        let before: Vec<PlanItem> = (0..20)
+            .map(|i| delta_item(&format!("old-{i:02}"), "gone", "pending"))
+            .collect();
+        let after: Vec<PlanItem> = (0..20)
+            .map(|i| delta_item(&format!("new-{i:02}"), "fresh", "pending"))
+            .collect();
+        for _ in 0..5 {
+            let delta = summarize_plan_changes(&before, &after);
+            let expected_added: Vec<String> = (0..20).map(|i| format!("new-{i:02}")).collect();
+            let expected_removed: Vec<String> = (0..20).map(|i| format!("old-{i:02}")).collect();
+            assert_eq!(delta.added_ids, expected_added);
+            assert_eq!(delta.removed_ids, expected_removed);
+        }
+    }
+
+    #[test]
+    fn test_status_counts() {
+        let items = vec![
+            delta_item("a", "a", "pending"),
+            delta_item("b", "b", "pending"),
+            delta_item("c", "c", "pending"),
+            delta_item("d", "d", "in_progress"),
+            delta_item("e", "e", "completed"),
+            delta_item("f", "f", "completed"),
+            delta_item("g", "g", "completed"),
+            delta_item("h", "h", "completed"),
+        ];
+        let counts = PlanStatusCounts::from_items(&items);
+        assert_eq!(counts.pending, 3);
+        assert_eq!(counts.in_progress, 1);
+        assert_eq!(counts.completed, 4);
+    }
+
+    #[test]
+    fn test_status_counts_empty_is_zero() {
+        let counts = PlanStatusCounts::from_items(&[]);
+        assert_eq!(counts, PlanStatusCounts::default());
+    }
+
+    #[test]
+    fn test_status_counts_ignores_unknown_without_panic() {
+        let items = vec![
+            delta_item("a", "a", "pending"),
+            delta_item("b", "b", "bogus"),
+        ];
+        let counts = PlanStatusCounts::from_items(&items);
+        assert_eq!(counts.pending, 1);
+        assert_eq!(counts.in_progress, 0);
+        assert_eq!(counts.completed, 0);
+    }
+
+    #[test]
+    fn test_tool_result_preserves_warnings() {
+        let internal = PlanWriteResult {
+            plan: PlanList {
+                session_id: Some("s".to_string()),
+                items: vec![delta_item("a", "a", "pending")],
+            },
+            changed: true,
+            delta: PlanWriteDelta {
+                added_ids: vec!["a".to_string()],
+                ..PlanWriteDelta::default()
+            },
+            warnings: vec!["warning-a".to_string(), "warning-b".to_string()],
+        };
+        let tool = PlanWriteToolResult::from_internal(&internal);
+        assert!(tool.ok);
+        assert!(tool.changed);
+        assert_eq!(
+            tool.warnings,
+            vec!["warning-a".to_string(), "warning-b".to_string()]
+        );
+        assert_eq!(tool.item_count, 1);
+        assert_eq!(tool.status_counts.pending, 1);
+        assert!(tool.warnings_truncated.is_none());
+        assert!(tool.warning_count.is_none());
+    }
+
+    #[test]
+    fn test_tool_result_noop_delta_empty() {
+        let items = vec![delta_item("a", "a", "pending")];
+        let internal = PlanWriteResult {
+            plan: PlanList {
+                session_id: Some("s".to_string()),
+                items: items.clone(),
+            },
+            changed: false,
+            delta: summarize_plan_changes(&items, &items),
+            warnings: Vec::new(),
+        };
+        let tool = PlanWriteToolResult::from_internal(&internal);
+        assert!(!tool.changed);
+        assert!(tool.delta.added_ids.is_empty());
+        assert!(tool.delta.updated_ids.is_empty());
+        assert!(tool.delta.removed_ids.is_empty());
+        let serialized = serde_json::to_string(&tool).unwrap();
+        assert!(serialized.contains("\"delta\":{}"));
+    }
+
+    #[test]
+    fn test_tool_result_truncates_warnings_only() {
+        let items = vec![delta_item("a", "a", "pending")];
+        let warnings: Vec<String> = (0..40)
+            .map(|i| format!("w{i:02}-{}", "x".repeat(500)))
+            .collect();
+        let internal = PlanWriteResult {
+            plan: PlanList {
+                session_id: Some("s".to_string()),
+                items,
+            },
+            changed: true,
+            delta: PlanWriteDelta {
+                updated_ids: vec!["a".to_string()],
+                ..PlanWriteDelta::default()
+            },
+            warnings,
+        };
+        let tool = PlanWriteToolResult::from_internal(&internal);
+        let serialized = serde_json::to_string(&tool).unwrap();
+        assert!(serialized.chars().count() <= PLAN_WRITE_RESULT_TARGET_CHARS);
+        // Delta and counts are never truncated.
+        assert_eq!(tool.delta.updated_ids, vec!["a".to_string()]);
+        assert_eq!(tool.item_count, 1);
+        assert_eq!(tool.warnings_truncated, Some(true));
+        assert_eq!(tool.warning_count, Some(40));
+    }
+
+    #[test]
+    fn test_tool_result_huge_delta_without_warnings_claims_no_truncation() {
+        // A huge delta alone can exceed the warning budget with zero warnings.
+        // That must not report `warnings_truncated` (delta is never truncated).
+        let items: Vec<PlanItem> = (0..500)
+            .map(|i| delta_item(&format!("step-{i:04}"), "x", "pending"))
+            .collect();
+        let internal = PlanWriteResult {
+            plan: PlanList {
+                session_id: Some("s".to_string()),
+                items: items.clone(),
+            },
+            changed: true,
+            delta: summarize_plan_changes(&[], &items),
+            warnings: Vec::new(),
+        };
+        let compact =
+            serde_json::to_string(&PlanWriteToolResult::from_internal(&internal)).unwrap();
+        assert!(
+            compact.chars().count() > PLAN_WRITE_RESULT_TARGET_CHARS,
+            "fixture must actually exceed the budget"
+        );
+        let tool = PlanWriteToolResult::from_internal(&internal);
+        assert_eq!(tool.delta.added_ids.len(), 500);
+        assert!(tool.warnings_truncated.is_none());
+        assert!(tool.warning_count.is_none());
+    }
+
+    #[test]
+    fn test_compact_result_much_smaller_than_full_plan() {
+        let items: Vec<PlanItem> = (0..100)
+            .map(|i| PlanItem {
+                id: format!("step-{i:03}"),
+                parent_id: None,
+                content: format!("do work item {i:03} {}", "x".repeat(200)),
+                status: if i == 0 {
+                    "in_progress".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
+            })
+            .collect();
+        let internal = PlanWriteResult {
+            plan: PlanList {
+                session_id: Some("s".to_string()),
+                items: items.clone(),
+            },
+            changed: true,
+            delta: summarize_plan_changes(&[], &items),
+            warnings: Vec::new(),
+        };
+        let old_style = serde_json::to_string(&internal).unwrap();
+        let compact =
+            serde_json::to_string(&PlanWriteToolResult::from_internal(&internal)).unwrap();
+        assert!(compact.len() < old_style.len());
+        assert!(compact.chars().count() < 4_000);
+        // No plan item content leaks into the compact result.
+        assert!(!compact.contains("do work item"));
+        assert!(!compact.contains("\"plan\""));
+        assert!(!compact.contains("\"items\""));
     }
 }
