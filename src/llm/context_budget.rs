@@ -203,6 +203,36 @@ impl ContextBudgetGovernor {
         ))
     }
 
+    /// Measure the Responses wire projection, excluding opaque ciphertext from
+    /// the text-token heuristic. Previous actual usage still calibrates pressure.
+    pub fn measure_subscription(
+        &self,
+        account: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        overlay: u64,
+    ) -> Result<RequestFootprint> {
+        let mut request = crate::features::openai_subscription::responses::build(
+            model, account, messages, tools, None,
+        )?;
+        let mut opaque_items = 0u64;
+        for item in &mut request.input {
+            if let Some(object) = item.as_object_mut()
+                && object.remove("encrypted_content").is_some()
+            {
+                opaque_items += 1;
+            }
+        }
+        let messages =
+            serialized_size(&request.input)?.saturating_add(opaque_items.saturating_mul(1536));
+        Ok(RequestFootprint::new(
+            messages,
+            serialized_size(&request.tools)?,
+            overlay,
+        ))
+    }
+
     /// Measure with a separately known overlay size for telemetry.
     /// `message_json_bytes` already includes the overlay; this only records
     /// the overlay portion without changing the total.
@@ -319,6 +349,7 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: role.into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -328,6 +359,7 @@ mod tests {
 
     fn tool_msg(id: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "tool".into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -337,6 +369,7 @@ mod tests {
 
     fn assistant_call(id: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![ToolCall {
@@ -658,6 +691,7 @@ mod tests {
         let g = governor();
         let base = vec![msg("system", "prompt"), msg("user", "work")];
         let overlay = ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some("<RuntimeContext>\nrecent files\n</RuntimeContext>".into()),
             tool_calls: vec![],

@@ -35,13 +35,16 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Clone)]
 #[command(
     name = "doge-code",
     version,
     about = "Interactive AI coding agent (TUI)"
 )]
 pub struct Cli {
+    /// Inference billing provider (default: existing API-key provider)
+    #[arg(long, value_enum)]
+    pub provider: Option<features::openai_subscription::ProviderKind>,
     /// OpenAI-compatible API base URL (no default; falls back to env OPENAI_BASE_URL or config file)
     #[arg(long, default_value = "")]
     pub base_url: String,
@@ -81,6 +84,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
+    /// Manage Sign in with ChatGPT credentials
+    Auth {
+        #[command(subcommand)]
+        command: features::openai_subscription::cli::AuthCommand,
+    },
+    /// List account-specific ChatGPT models
+    Models {
+        #[arg(long, value_enum, default_value = "openai-chatgpt")]
+        provider: features::openai_subscription::ProviderKind,
+    },
     /// Run in TUI mode (default if no subcommand is provided)
     #[command()]
     Tui,
@@ -152,6 +165,30 @@ async fn main() -> Result<()> {
             ..AppConfig::default()
         };
         return session::cli::run(cfg, command.clone()).await;
+    }
+    if let Some(Commands::Auth { command }) = &cli.command {
+        let store = features::openai_subscription::credentials::CredentialStore::default_path()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let operation =
+            features::openai_subscription::cli::run(command.clone(), store, cancel.clone());
+        tokio::pin!(operation);
+        return tokio::select! {
+            result = &mut operation => result,
+            _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await }
+        };
+    }
+    if let Some(Commands::Models { provider }) = &cli.command {
+        anyhow::ensure!(
+            *provider == features::openai_subscription::ProviderKind::OpenaiChatgpt,
+            "models currently supports openai-chatgpt only"
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let operation = features::openai_subscription::cli::models(
+            features::openai_subscription::credentials::CredentialStore::default_path()?,
+            cancel.clone(),
+        );
+        tokio::pin!(operation);
+        return tokio::select! { result = &mut operation => result, _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await } };
     }
     dotenv().ok();
     logging::init_logging()?;
@@ -310,7 +347,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
         // Handled early, before repomap/MCP initialization.
-        Some(Commands::Session { .. }) => unreachable!("session subcommand handled earlier"),
+        Some(Commands::Auth { .. } | Commands::Models { .. } | Commands::Session { .. }) => {
+            unreachable!("session subcommand handled earlier")
+        }
     }
 }
 
@@ -389,6 +428,19 @@ async fn run_tui(
         }
     };
 
+    if let Some(account) = exec
+        .client
+        .as_ref()
+        .and_then(|client| client.account_label())
+    {
+        app.inference_label = Some(format!("openai-chatgpt | {account} | {}", cfg.model));
+        app.push_log(format!(
+            "Provider: openai-chatgpt | Account: {account} | Model: {}",
+            cfg.model
+        ));
+        app.push_log("ChatGPT plan usage: review limits in ChatGPT Settings > Usage. Token counts do not indicate remaining allowance.");
+    }
+
     let mut exec = exec;
     exec.set_ui_tx(app.sender());
     exec.publish_plan_list();
@@ -450,4 +502,13 @@ async fn run_exec(
 ) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg).await?;
     executor.run(instruction, json).await
+}
+
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cli")
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }

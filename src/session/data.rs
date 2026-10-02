@@ -108,6 +108,8 @@ pub struct SessionSummary {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_binding: Option<String>,
     pub meta: SessionMeta,
     /// Last updated timestamp (RFC3339 string)
     #[serde(
@@ -160,6 +162,7 @@ impl SessionData {
             title_is_default: true,
         };
         Self {
+            inference_binding: None,
             meta,
             timestamp: now,
             conversation: Vec::new(),

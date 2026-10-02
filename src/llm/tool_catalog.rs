@@ -997,6 +997,7 @@ mod tests {
         let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
         assert!(!catalog.is_active("edit").await);
         let messages = vec![ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![crate::llm::types::ToolCall {
@@ -1222,6 +1223,7 @@ mod tests {
             &deferred_routing(),
         );
         let messages = vec![ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![crate::llm::types::ToolCall {

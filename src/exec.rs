@@ -70,10 +70,7 @@ impl Executor {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
-        let client = match cfg.api_key.clone() {
-            Some(key) => Some(OpenAIClient::new(cfg.base_url.clone(), key)?),
-            None => None,
-        };
+        let client = OpenAIClient::from_config(&cfg)?;
 
         // Initialize conversation history with model-aware context sizing.
         // Fall back to a large default if no model context size is known.
@@ -183,6 +180,7 @@ impl Executor {
         // Or just prepend system prompt manually to the list passed to run_agent_loop.
 
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(sys_prompt),
             tool_calls: vec![],
@@ -192,6 +190,7 @@ impl Executor {
         // Extended above
 
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(instruction.to_string()),
             tool_calls: vec![],
@@ -306,6 +305,7 @@ impl Executor {
 
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
+                    provider_state: None,
                     role: "assistant".into(),
                     content: Some(final_msg.content.clone()),
                     tool_calls: vec![],
@@ -440,6 +440,7 @@ impl Executor {
         let mut msgs = Vec::new();
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(sys_prompt),
             tool_calls: vec![],
@@ -447,6 +448,7 @@ impl Executor {
         });
 
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(request.clone()),
             tool_calls: vec![],
@@ -493,6 +495,7 @@ impl Executor {
                 let tools_called = collect_tools_called(&updated_messages);
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
+                    provider_state: None,
                     role: "assistant".into(),
                     content: Some(final_msg.content.clone()),
                     tool_calls: vec![],
@@ -666,6 +669,7 @@ impl Executor {
         }
 
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(sys_prompt),
             tool_calls: vec![],
@@ -673,6 +677,7 @@ impl Executor {
         });
 
         msgs.push(llm::types::ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(instruction.to_string()),
             tool_calls: vec![],
@@ -862,6 +867,7 @@ mod tests {
 
         // Create a minimal config without API key
         let cfg = AppConfig {
+            provider: Default::default(),
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
@@ -906,6 +912,7 @@ mod tests {
 
         // Create a minimal config without API key
         let cfg = AppConfig {
+            provider: Default::default(),
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
@@ -1011,6 +1018,7 @@ mod tests {
     fn test_collect_tools_called_preserves_order_and_duplicates() {
         let messages = vec![
             ChatMessage {
+                provider_state: None,
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: vec![ToolCall {
@@ -1024,6 +1032,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                provider_state: None,
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: vec![
@@ -1047,6 +1056,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                provider_state: None,
                 role: "tool".to_string(),
                 content: Some("ok".to_string()),
                 tool_calls: vec![],

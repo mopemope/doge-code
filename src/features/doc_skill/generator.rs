@@ -156,6 +156,7 @@ Do not include the code itself in the output—only the doc comment text.",
 
     async fn call_llm(&self, prompt: String) -> Result<String> {
         let messages = vec![ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(prompt),
             tool_calls: vec![],

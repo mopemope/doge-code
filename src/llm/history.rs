@@ -27,6 +27,7 @@ impl ChatHistory {
             self.messages.insert(
                 0,
                 ChatMessage {
+                    provider_state: None,
                     role: "system".into(),
                     content: Some(sys),
                     tool_calls: vec![],
@@ -40,6 +41,7 @@ impl ChatHistory {
     #[allow(dead_code)]
     pub fn append_user(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -51,6 +53,7 @@ impl ChatHistory {
     #[allow(dead_code)]
     pub fn append_assistant(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -138,6 +141,12 @@ impl ChatHistory {
     /// 3. User/Assistant conversation - Standard priority
     /// 4. Tool outputs (role="tool") - First to go
     fn smart_trim(&mut self) {
+        // Responses turns carry ordered opaque items. Only HistoryManager may
+        // compact them with tool pairing and unseen-result protection.
+        if self.messages.iter().any(|m| m.provider_state.is_some()) {
+            return;
+        }
+
         let mut total_tokens: usize = self.messages.iter().map(Self::estimate_tokens).sum();
 
         if total_tokens <= self.max_tokens {
@@ -228,6 +237,7 @@ mod tests {
         h.append_system_once();
 
         let tool_call_msg = ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![crate::llm::types::ToolCall {
@@ -243,12 +253,14 @@ mod tests {
 
         // Manual push to control roles
         h.messages.push(ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some("sys".into()),
             tool_calls: vec![],
             tool_call_id: None,
         });
         h.messages.push(ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some("Do work".into()),
             tool_calls: vec![],
@@ -258,6 +270,7 @@ mod tests {
 
         // Big tool output
         h.messages.push(ChatMessage {
+            provider_state: None,
             role: "tool".into(),
             content: Some("A".repeat(200)), // ~50 tokens alone
             tool_calls: vec![],
@@ -266,12 +279,14 @@ mod tests {
 
         // Add padding messages to ensure the tool message is not in the protected last 2
         h.messages.push(ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some("ok".into()),
             tool_calls: vec![],
             tool_call_id: None,
         });
         h.messages.push(ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some("next".into()),
             tool_calls: vec![],
@@ -301,6 +316,7 @@ mod tests {
     #[test]
     fn estimate_includes_tool_calls() {
         let msg = ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some("Thinking...".into()),
             tool_calls: vec![crate::llm::types::ToolCall {

@@ -158,6 +158,7 @@ impl TuiExecutor {
             reason, PLAN_CREATION_GUIDANCE, instruction
         );
         msgs.push(ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(directive),
             tool_calls: vec![],
@@ -183,6 +184,7 @@ impl TuiExecutor {
                         ui.push_log("[plan] 計画は作成済みです。実装を進めてください。");
                     }
                     msgs.push(ChatMessage {
+                        provider_state: None,
                         role: "system".into(),
                         content: Some(plan_msg),
                         tool_calls: vec![],

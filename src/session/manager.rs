@@ -120,6 +120,21 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn bind_inference(&mut self, binding: String) -> Result<()> {
+        if let Some(session) = &mut self.current_session {
+            if let Some(existing) = &session.inference_binding {
+                anyhow::ensure!(
+                    existing == &binding,
+                    "Session belongs to another inference account/provider/model; start a new session or restore its original selection"
+                );
+            } else {
+                session.inference_binding = Some(binding);
+                self.store.save(session)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Update the current session with conversation history
     pub fn update_current_session_with_history(
         &mut self,

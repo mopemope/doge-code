@@ -8,3 +8,5 @@ pub mod testing;
 
 pub mod workflow;
 pub mod worktree_manager;
+
+pub mod openai_subscription;

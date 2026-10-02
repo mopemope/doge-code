@@ -376,6 +376,7 @@ mod tests {
 
     fn system_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -385,6 +386,7 @@ mod tests {
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            provider_state: None,
             role: "user".into(),
             content: Some(content.into()),
             tool_calls: vec![],
@@ -572,6 +574,7 @@ mod tests {
         let first = vec![system_msg("stable"), user_msg("one")];
         let mut second = first.clone();
         second.push(ChatMessage {
+            provider_state: None,
             role: "assistant".into(),
             content: Some("answer".into()),
             tool_calls: vec![],
@@ -626,6 +629,7 @@ mod tests {
         let base = vec![system_msg("stable"), user_msg("hi")];
         let mut with_overlay = vec![system_msg("stable")];
         with_overlay.push(ChatMessage {
+            provider_state: None,
             role: "system".into(),
             content: Some("<RuntimeContext>\nrecent\n</RuntimeContext>".into()),
             tool_calls: vec![],
