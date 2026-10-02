@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::context_budget::{ContextBudgetConfig, merge_context_budget};
 use super::execution::{ExecutionConfig, merge_execution};
 use super::llm::LlmConfig;
 use super::mcp::{
@@ -65,6 +66,9 @@ pub struct AppConfig {
     /// Adaptive reasoning policy (`[reasoning]`). Controls per-iteration
     /// `reasoning_effort` without changing tool routing or loop detection.
     pub reasoning: ReasoningConfig,
+    /// Preflight context governor (`[context_budget]`). Measures the current
+    /// request footprint before sending; never evicts tools or observations.
+    pub context_budget: ContextBudgetConfig,
 }
 
 impl Default for AppConfig {
@@ -95,6 +99,7 @@ impl Default for AppConfig {
             rewrite_timeout_sec: 30,
             tool_routing: ToolRoutingConfig::default(),
             reasoning: ReasoningConfig::default(),
+            context_budget: ContextBudgetConfig::default(),
         }
     }
 }
@@ -269,6 +274,11 @@ impl AppConfig {
         let reasoning =
             merge_reasoning(file_cfg.reasoning.as_ref(), project_cfg.reasoning.as_ref());
 
+        let context_budget = merge_context_budget(
+            file_cfg.context_budget.as_ref(),
+            project_cfg.context_budget.as_ref(),
+        );
+
         Ok(Self {
             base_url,
             model,
@@ -319,6 +329,7 @@ impl AppConfig {
                 .unwrap_or(30),
             tool_routing,
             reasoning,
+            context_budget,
         })
     }
 }

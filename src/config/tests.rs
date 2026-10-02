@@ -451,3 +451,28 @@ fn test_file_config_ignores_unknown_fields() {
     let config = config.unwrap();
     assert_eq!(config.llm.unwrap().connect_timeout_ms, Some(1000));
 }
+
+#[test]
+fn test_context_budget_merge_project_wins() {
+    let file = PartialContextBudgetConfig {
+        mode: Some("observe".to_string()),
+    };
+    let project = PartialContextBudgetConfig {
+        mode: Some("off".to_string()),
+    };
+    let merged = merge_context_budget(Some(&file), Some(&project));
+    assert_eq!(merged.mode, ContextBudgetMode::Off);
+}
+
+#[test]
+fn test_context_budget_config_parses_toml() {
+    let toml_str = r#"
+        [context_budget]
+        mode = "observe"
+    "#;
+    let cfg: FileConfig = toml::from_str(toml_str).expect("parse context_budget config");
+    let budget = cfg.context_budget.expect("context_budget section");
+    assert_eq!(budget.mode.as_deref(), Some("observe"));
+    let resolved = merge_context_budget(None, Some(&budget));
+    assert_eq!(resolved.mode, ContextBudgetMode::Observe);
+}

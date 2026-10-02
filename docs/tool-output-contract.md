@@ -221,7 +221,6 @@ never logged verbatim. Structured stdio passes `command` and `args` directly
 to the child process; it never invokes a shell or parses a new command line.
 
 ## `tool_search` result contract
-
 `tool_search` discovers deferred tools without ever echoing full schemas:
 
 ```json
@@ -251,6 +250,28 @@ to the child process; it never invokes a shell or parses a new command line.
   `error.kind == "tool_not_active"` (`is_success: false`) before any side
   effect, including remote MCP calls. Unknown tools remain "unknown tool"
   errors.
+
+## Observation Store (`obs-*`)
+
+Large historical tool results are offloaded recoverably via
+`src/llm/observation.rs` (`HistoryManager::offload_stale_tool_results`).
+The stub `(offloaded tool result: <tool>, <N> B, observation obs-000001; use
+observation_read if needed)` is recoverable with `observation_read`; the
+legacy `[cleared tool result; ...]` stub is only a store-full fallback and is
+never used for preflight reductions.
+
+- Unseen results are protected from both offloading and conversation
+  compaction until a successful provider request has consumed them
+  (`HistoryManager::mark_sent_tool_results_seen`). Failed requests
+  (timeout, rate limit, server error, disconnect, cancellation,
+  `context_length_exceeded`, deserialize failure) leave results unseen.
+- Conversation compaction is always unseen-safe: the oldest assistant
+  `tool_calls` message holding an unseen result (parallel batches kept as a
+  unit) starts an exact protected suffix that the summarizer never sees.
+  Unresolvable unseen ids fail closed (no compaction).
+- Preflight order is overlay drop, then recoverable offload, then
+  unseen-safe compaction as a last resort. Preflight never evicts `obs-*`
+  entries or deactivates tools.
 
 ## Tool registration checklist
 

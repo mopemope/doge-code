@@ -28,6 +28,8 @@ Run the narrowest check first, then broaden:
 | `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
 | `src/llm/tool_execution/history.rs` | Conversation state only (proactive + reactive compaction, stale tool-result clearing) |
 | `src/llm/runtime_context.rs` | Request-scoped bootstrap hints (Recent Files / automatic memory), first-request-only overlay |
+| `src/llm/context_budget.rs` | Preflight context governor: request footprint, token estimate, pressure classification (pure, no history mutation) |
+| `src/config/context_budget.rs` | Preflight governor config (`[context_budget] mode = auto/observe/off`) |
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see Tool Output Conventions) |
 | `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
 | `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
@@ -129,6 +131,13 @@ These are hard requirements — the LLM consumes tool output directly. Full spec
 
 Runtime hints are request-scoped context, not conversation state.
 Do not push recent-file/memory hints into durable HistoryManager messages.
+
+## Context Budget / Observation Safety
+
+Preflight context reductions must preserve unseen tool results.
+Seen historical results should be offloaded through the Observation Store
+before conversation compaction. Never replace an unseen tool result with a
+non-recoverable clearing stub merely to satisfy a local token estimate.
 
 ## Testing Guidelines
 
