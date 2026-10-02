@@ -213,6 +213,10 @@ fn tool_call_made_progress(
                         .is_some_and(|inner| json_has_non_empty_array(Some(inner), &["entries"]))),
         ),
         "find_file" => Some(success && json_has_non_empty_array(output, &["files"])),
+        // Deferred discovery is progress only when it activates new work.
+        // A repeat search that surfaces only already-active matches (or no
+        // matches) must not claim progress; real activation does.
+        "tool_search" => Some(success && json_has_non_empty_array(output, &["activated"])),
         "search_memory" => Some(
             success
                 && output
@@ -1657,6 +1661,36 @@ mod tests {
         // Write tools keep the default heuristic.
         assert_eq!(tool_call_made_progress("edit", true, None), None);
         assert_eq!(tool_call_made_progress("execute_bash", true, None), None);
+
+        // tool_search: real activation is progress; zero activation is not.
+        assert_eq!(
+            tool_call_made_progress(
+                "tool_search",
+                true,
+                Some(&json!({"ok": true, "activated": [{"name": "edit"}]}))
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            tool_call_made_progress(
+                "tool_search",
+                true,
+                Some(&json!({"ok": true, "activated": [], "already_active": [{"name": "edit"}]}))
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            tool_call_made_progress(
+                "tool_search",
+                true,
+                Some(&json!({"ok": true, "activated": []}))
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            tool_call_made_progress("tool_search", false, None),
+            Some(false)
+        );
     }
 
     #[test]

@@ -263,8 +263,24 @@ to the child process; it never invokes a shell or parses a new command line.
   hard max = 10 (`limit == 0` or omitted falls back to the default).
 - Per-hit descriptions are bounded (~250 chars); the whole response is
   budgeted (<= 4,000 chars, far below the default 8,000-char tier).
+- Ranking always uses the full query, but only a bounded prefix (~500 chars)
+  of the query is echoed in the response so a pathological query cannot blow
+  the response budget.
 - Activated tools become available on the next LLM iteration; activation
   is sticky for the current `ToolRuntime` / agent run.
+- Inactive matches receive activation capacity independently of
+  already-active matches: the `limit` bounds inactive activation, while
+  already-active matches are reported separately under the same independent
+  bound and can never crowd out a relevant inactive match.
+- `remaining_deferred` counts only real inactive tools and always excludes
+  managed `tool_search`, in both eager and deferred modes.
+- The final real-tool activation retires `tool_search` from the next
+  LLM-visible schema set. A stale or guessed `tool_search` call after
+  retirement fails closed with `error.kind == "tool_not_active"`
+  (`is_success: false`) and no side effects.
+- A search that activates nothing (no matches, or only already-active
+  matches) is reported with a warning and counts as no task progress; only
+  real activation counts as progress.
 - A guessed deferred tool name never executes: dispatch fails closed with
   `error.kind == "tool_not_active"` (`is_success: false`) before any side
   effect, including remote MCP calls. Unknown tools remain "unknown tool"

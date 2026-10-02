@@ -95,11 +95,17 @@ pub struct ToolSearchHit {
 }
 
 /// Ranked search result.
+///
+/// Progress-monotonic contract: `hits` carries the top inactive matches
+/// first (activation capacity, bounded by the search limit), followed by
+/// already-active matches (transparency only, bounded independently so
+/// reporting can never starve activation).
 #[derive(Debug, Clone)]
 pub struct ToolSearchResult {
     pub query: String,
     pub hits: Vec<ToolSearchHit>,
-    /// Deferred tools still inactive after this search (pre-activation count).
+    /// Real deferred tools still inactive after this search
+    /// (pre-activation count, excluding managed `tool_search`).
     pub remaining_deferred: usize,
 }
 
@@ -205,21 +211,25 @@ impl ToolCatalog {
 
     /// Test/fixture constructor from explicit entries.
     pub fn from_entries(entries: Vec<ToolCatalogEntry>, routing: &ToolRoutingConfig) -> Self {
-        let mut map: BTreeMap<String, ToolCatalogEntry> = entries
-            .into_iter()
-            .map(|e| (e.definition.function.name.clone(), e))
-            .collect();
+        let mut map: BTreeMap<String, ToolCatalogEntry> = BTreeMap::new();
+        for e in entries {
+            // Mirror `from_parts`: a caller-supplied entry named `tool_search`
+            // would collide with the managed discovery entry, so it is
+            // dropped in favor of the canonical managed definition below.
+            if e.definition.function.name == TOOL_SEARCH_TOOL_NAME {
+                continue;
+            }
+            map.insert(e.definition.function.name.clone(), e);
+        }
         // Mirror `from_parts`: the managed discovery tool is always in the
         // inventory so counts and lookups behave identically.
-        if !map.contains_key(TOOL_SEARCH_TOOL_NAME) {
-            let search_def = crate::tools::tool_search::tool_def();
-            let search_entry = ToolCatalogEntry {
-                searchable_text: build_searchable_text(&search_def, &ToolSource::Builtin),
-                definition: search_def,
-                source: ToolSource::Builtin,
-            };
-            map.insert(TOOL_SEARCH_TOOL_NAME.to_string(), search_entry);
-        }
+        let search_def = crate::tools::tool_search::tool_def();
+        let search_entry = ToolCatalogEntry {
+            searchable_text: build_searchable_text(&search_def, &ToolSource::Builtin),
+            definition: search_def,
+            source: ToolSource::Builtin,
+        };
+        map.insert(TOOL_SEARCH_TOOL_NAME.to_string(), search_entry);
         let deferred = routing.is_deferred_for_count(map.len());
         let initial = initial_active_set(&map, deferred);
         Self {
@@ -239,7 +249,18 @@ impl ToolCatalog {
     }
 
     pub async fn deferred_count(&self) -> usize {
-        self.entries.len() - self.active.read().await.len()
+        let active = self.active.read().await;
+        self.real_deferred_count(&active)
+    }
+
+    /// Real inactive tools: every catalog entry except managed
+    /// `tool_search`, minus the active set. Discovery machinery is never
+    /// deferred work, so it is excluded in both eager and deferred modes.
+    fn real_deferred_count(&self, active: &BTreeSet<String>) -> usize {
+        self.entries
+            .keys()
+            .filter(|name| is_real_tool(name) && !active.contains(name.as_str()))
+            .count()
     }
 
     pub fn is_deferred(&self) -> bool {
@@ -280,6 +301,8 @@ impl ToolCatalog {
 
     /// Activate known tools. Unknown names are ignored; re-activating an
     /// active tool is a no-op. Returns newly activated names in sorted order.
+    /// Once no real deferred tools remain, managed `tool_search` is retired
+    /// from the active set so the next schema snapshot omits it.
     pub async fn activate(&self, names: &[String]) -> Vec<String> {
         let mut guard = self.active.write().await;
         let mut newly = Vec::new();
@@ -291,6 +314,12 @@ impl ToolCatalog {
         newly.sort();
         if !newly.is_empty() {
             debug!(activated = newly.len(), "tool catalog activated tools");
+        }
+        if self.real_deferred_count(&guard) == 0 {
+            guard.remove(TOOL_SEARCH_TOOL_NAME);
+            // Retirement is sticky: a stale explicit activation of discovery
+            // reports nothing newly activated and leaves it inactive.
+            newly.retain(|name| name != TOOL_SEARCH_TOOL_NAME);
         }
         newly
     }
@@ -320,6 +349,13 @@ impl ToolCatalog {
     /// Deterministic lexical search over deferred + active tools.
     /// Pure ranking; callers decide activation. `limit == 0` falls back to
     /// the configured default; values above the hard max are clamped.
+    ///
+    /// Progress-monotonic: active and inactive matches are partitioned
+    /// *before* any limit is applied. The limit bounds inactive activation
+    /// capacity; already-active matches are reported separately under the
+    /// same independent bound, so high-ranking active tools can never crowd
+    /// out a relevant inactive match. `hits` lists inactive matches first
+    /// (score desc, name asc), then active matches (same order).
     pub async fn search(
         &self,
         query: &str,
@@ -332,7 +368,14 @@ impl ToolCatalog {
             limit.clamp(MIN_TOOL_SEARCH_RESULT_LIMIT, MAX_TOOL_SEARCH_RESULT_LIMIT)
         };
         let trimmed = query.trim();
-        let remaining_deferred = self.deferred_count().await;
+        // Snapshot active state under a short read lock, then score lock-free.
+        // Holding the guard across the scoring loop would block `activate`
+        // writers for the whole ranking pass and risks lock-order issues.
+        let (active_snapshot, remaining_deferred) = {
+            let active = self.active.read().await;
+            (active.clone(), self.real_deferred_count(&active))
+        };
+        let active = active_snapshot;
         if trimmed.is_empty() {
             return ToolSearchResult {
                 query: query.to_string(),
@@ -346,7 +389,8 @@ impl ToolCatalog {
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
 
-        let mut scored: Vec<ToolSearchHit> = Vec::new();
+        let mut inactive: Vec<ToolSearchHit> = Vec::new();
+        let mut already_active: Vec<ToolSearchHit> = Vec::new();
         // BTreeMap iteration is name-ordered; final sort breaks score ties
         // by name so results never depend on hash iteration order.
         for entry in self.entries.values() {
@@ -364,29 +408,44 @@ impl ToolCatalog {
             }
             let score = score_entry(entry, &query_norm, &query_tokens);
             if score > 0 {
-                scored.push(ToolSearchHit {
+                let hit = ToolSearchHit {
                     name: entry.name().to_string(),
                     source: entry.source.clone(),
                     server: entry.source.server_name().map(str::to_string),
                     description: truncate_chars(entry.description(), TOOL_SEARCH_DESC_CHARS),
                     score,
-                });
+                };
+                if active.contains(entry.name()) {
+                    already_active.push(hit);
+                } else {
+                    inactive.push(hit);
+                }
             }
         }
-        scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
-        scored.truncate(limit);
+        for ranked in [&mut inactive, &mut already_active] {
+            ranked.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+        }
+        inactive.truncate(limit);
+        already_active.truncate(limit);
+        let total = inactive.len() + already_active.len();
         debug!(
             query_len = trimmed.len(),
-            matches = scored.len(),
+            matches = total,
             limit,
             "tool_search ranked"
         );
+        inactive.extend(already_active);
         ToolSearchResult {
             query: query.to_string(),
-            hits: scored,
+            hits: inactive,
             remaining_deferred,
         }
     }
+}
+
+/// Managed discovery machinery is lifecycle, not real deferred work.
+fn is_real_tool(name: &str) -> bool {
+    name != TOOL_SEARCH_TOOL_NAME
 }
 
 /// Initial LLM-visible set for one routing decision. Shared by both
@@ -953,6 +1012,253 @@ mod tests {
         let activated = catalog.activate_known_from_history(&messages).await;
         assert_eq!(activated, vec!["edit".to_string()]);
         assert!(catalog.is_active("edit").await);
+    }
+
+    #[tokio::test]
+    async fn test_active_hits_do_not_consume_activation_capacity() {
+        // `alpha` is active and outscores everything (exact name match), but
+        // the inactive `alpha_helper` must still receive activation capacity.
+        let catalog = ToolCatalog::from_entries(
+            vec![
+                entry("alpha", "alpha capability for testing"),
+                entry("alpha_helper", "alpha helper capability for testing"),
+            ],
+            &deferred_routing(),
+        );
+        catalog.activate(&["alpha".to_string()]).await;
+        let result = catalog.search("alpha", 1, None).await;
+        let names: Vec<&str> = result.hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(
+            names.contains(&"alpha_helper"),
+            "inactive match starved by active hit: {names:?}"
+        );
+        // Activation-relevant matches lead; transparency follows.
+        assert_eq!(
+            result.hits.first().map(|h| h.name.as_str()),
+            Some("alpha_helper"),
+            "hits: {names:?}"
+        );
+        // Reporting stays bounded independently of activation capacity.
+        assert!(result.hits.len() <= 2, "hits: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_mixed_equal_scores_stay_deterministic() {
+        let catalog = ToolCatalog::from_entries(
+            vec![
+                entry("m_tool_b", "shared helper tool alpha"),
+                entry("m_tool_a", "shared helper tool alpha"),
+                entry("m_tool_c", "shared helper tool alpha"),
+            ],
+            &deferred_routing(),
+        );
+        catalog.activate(&["m_tool_b".to_string()]).await;
+        let first = catalog.search("helper", 10, None).await;
+        let second = catalog.search("helper", 10, None).await;
+        let a: Vec<&str> = first.hits.iter().map(|h| h.name.as_str()).collect();
+        let b: Vec<&str> = second.hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(a, b);
+        // Name tie-break applies within each set; inactive leads.
+        assert_eq!(a, vec!["m_tool_a", "m_tool_c", "m_tool_b"]);
+    }
+
+    #[tokio::test]
+    async fn test_already_active_reporting_is_bounded_independently() {
+        let mut entries = vec![
+            entry("wanted_one", "wanted recovery helper"),
+            entry("wanted_two", "wanted recovery helper"),
+        ];
+        for i in 0..6 {
+            entries.push(entry(
+                &format!("wanted_active_{i}"),
+                "wanted recovery helper",
+            ));
+        }
+        let catalog = ToolCatalog::from_entries(entries, &deferred_routing());
+        let actives: Vec<String> = (0..6).map(|i| format!("wanted_active_{i}")).collect();
+        catalog.activate(&actives).await;
+        let result = catalog.search("wanted recovery", 2, None).await;
+        let names: Vec<&str> = result.hits.iter().map(|h| h.name.as_str()).collect();
+        // Inactive capacity is intact (both inactive matches surface) while
+        // already-active reporting is capped at the same independent bound.
+        assert_eq!(
+            names,
+            vec![
+                "wanted_one",
+                "wanted_two",
+                "wanted_active_0",
+                "wanted_active_1"
+            ],
+            "hits: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remaining_deferred_excludes_managed_search() {
+        // 6 core active + 3 real deferred; the managed entry is not work.
+        let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
+        assert_eq!(catalog.deferred_count().await, 3);
+        let searched = catalog.search("edit source code patch", 5, None).await;
+        assert_eq!(searched.remaining_deferred, 3);
+        // Eager mode: everything real is visible, so nothing is deferred.
+        let eager = ToolCatalog::from_entries(core_entries(), &eager_routing());
+        assert_eq!(eager.deferred_count().await, 0);
+        // Deferred routing with no real deferred tools: discovery alone is
+        // not deferred work, so it starts retired.
+        let core_only: Vec<ToolCatalogEntry> = CORE_EAGER_TOOLS
+            .iter()
+            .map(|name| entry(name, "core eager helper"))
+            .collect();
+        let retired = ToolCatalog::from_entries(core_only, &deferred_routing());
+        assert_eq!(retired.deferred_count().await, 0);
+        assert!(!retired.is_active(TOOL_SEARCH_TOOL_NAME).await);
+    }
+
+    #[tokio::test]
+    async fn test_final_activation_retires_tool_search() {
+        let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
+        assert!(catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+        catalog
+            .activate(&[
+                "edit".to_string(),
+                "apply_patch".to_string(),
+                "fs_write".to_string(),
+            ])
+            .await;
+        assert_eq!(catalog.deferred_count().await, 0);
+        assert!(!catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+        let defs = catalog.active_tool_defs().await;
+        assert!(
+            defs.iter()
+                .all(|d| d.function.name != TOOL_SEARCH_TOOL_NAME),
+            "retired discovery must leave the schema surface"
+        );
+        // Deterministic name order is preserved after retirement.
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[tokio::test]
+    async fn test_reactivating_tool_search_after_exhaustion_stays_retired() {
+        let catalog = ToolCatalog::from_entries(
+            vec![entry("alpha", "alpha capability for testing")],
+            &deferred_routing(),
+        );
+        assert!(catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+        let first = catalog.activate(&["alpha".to_string()]).await;
+        assert_eq!(first, vec!["alpha".to_string()]);
+        assert!(!catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+        // Retirement is sticky: a stale explicit re-activation must report
+        // nothing newly activated and leave discovery inactive.
+        let stale = catalog.activate(&[TOOL_SEARCH_TOOL_NAME.to_string()]).await;
+        assert!(stale.is_empty(), "newly: {stale:?}");
+        assert!(!catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+    }
+
+    #[tokio::test]
+    async fn test_from_entries_drops_custom_tool_search_entry() {
+        // `from_parts` skips a builtin named `tool_search` in favor of the
+        // managed discovery definition; the fixture constructor must match so
+        // counts and served schemas never drift between test and production.
+        let catalog = ToolCatalog::from_entries(
+            vec![
+                entry("alpha", "alpha capability for testing"),
+                entry(TOOL_SEARCH_TOOL_NAME, "custom impostor discovery"),
+            ],
+            &deferred_routing(),
+        );
+        assert_eq!(catalog.all_tool_count(), 2);
+        let managed = crate::tools::tool_search::tool_def();
+        let served = catalog
+            .all_tool_defs()
+            .into_iter()
+            .find(|d| d.function.name == TOOL_SEARCH_TOOL_NAME)
+            .expect("managed tool_search present");
+        assert_eq!(served.function.description, managed.function.description);
+        // The impostor never counts as deferred work.
+        assert_eq!(catalog.deferred_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_search_and_activate_stay_consistent() {
+        use std::sync::Arc;
+        let catalog = Arc::new(ToolCatalog::from_entries(
+            vec![
+                entry("alpha", "alpha capability for testing"),
+                entry("alpha_helper", "alpha helper capability for testing"),
+            ],
+            &deferred_routing(),
+        ));
+        // Ranking must not hold the active-set lock across scoring: a
+        // concurrent activation must complete while searches are in flight,
+        // and every search still returns a coherent snapshot.
+        let searcher = {
+            let catalog = Arc::clone(&catalog);
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                for _ in 0..20 {
+                    let result = catalog.search("alpha", 1, None).await;
+                    assert!(!result.hits.is_empty());
+                    seen.push(result.hits.first().map(|h| h.name.clone()).expect("hit"));
+                }
+                seen
+            })
+        };
+        catalog.activate(&["alpha".to_string()]).await;
+        let seen = searcher.await.expect("search task");
+        assert!(seen.iter().all(|n| n == "alpha" || n == "alpha_helper"));
+        assert!(catalog.is_active("alpha").await);
+    }
+
+    #[tokio::test]
+    async fn test_history_reactivation_does_not_starve_discovery() {
+        let catalog = ToolCatalog::from_entries(
+            vec![
+                entry("alpha", "alpha capability for testing"),
+                entry("alpha_helper", "alpha helper capability for testing"),
+            ],
+            &deferred_routing(),
+        );
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("1".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "alpha".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        }];
+        catalog.activate_known_from_history(&messages).await;
+        assert!(catalog.is_active("alpha").await);
+        // The reactivated high scorer cannot crowd out remaining discovery.
+        let result = catalog.search("alpha", 1, None).await;
+        assert_eq!(
+            result.hits.first().map(|h| h.name.as_str()),
+            Some("alpha_helper")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_core_eager_surface_includes_observation_read() {
+        let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
+        for core in CORE_EAGER_TOOLS {
+            assert!(
+                catalog.is_active(core).await,
+                "{core} should stay eagerly visible"
+            );
+        }
+        assert!(catalog.is_active("observation_read").await);
+        let defs = catalog.active_tool_defs().await;
+        assert!(
+            defs.iter().any(|d| d.function.name == "observation_read"),
+            "observation_read must stay schema-visible without discovery"
+        );
     }
 
     #[test]

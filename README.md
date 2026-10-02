@@ -569,11 +569,16 @@ Verification failures are returned to LLM for automatic correction.
 ### Tool Search / Deferred Tools
 - Doge-Code can keep large tool catalogs out of the initial LLM context.
   Core tools (`search_repomap`, `fs_read`, `search_text`, `task`,
-  `execute_process`) are loaded eagerly; other built-in and MCP tools are
-  found and activated on demand via `tool_search`.
+  `execute_process`, `observation_read`) are loaded eagerly; other built-in
+  and MCP tools are found and activated on demand via `tool_search`.
 - Activated tools appear in the next LLM request and stay active for the run.
+- Already-active matches never consume activation capacity: the search limit
+  bounds inactive activation, and active matches are reported separately.
 - Guessing a deferred tool name never executes it: dispatch fails closed
   with `tool_not_active` until `tool_search` activates it.
+- Once every real deferred tool is active, `tool_search` retires from the
+  next tool list; a stale `tool_search` call then fails closed with
+  `tool_not_active` and no side effects.
 - Provider-independent (works with OpenAI / Anthropic / OpenRouter / any
   OpenAI-compatible provider) and deterministic: lexical ranking only, no
   embeddings.
