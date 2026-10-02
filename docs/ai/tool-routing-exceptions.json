@@ -1,0 +1,12 @@
+{
+  "dispatch_only": {
+    "search_history": "Legacy internal route; deliberately absent from the public schema inventory. Publishing or removing it requires an explicit behavior change."
+  },
+  "runtime_tools": {
+    "tool_search": "Discovery schema is supplied by ToolCatalog rather than default_tools_def."
+  },
+  "readme_commands": {
+    "edit_symbol": "TUI slash command, not an LLM tool.",
+    "session": "Automatic session management, not an LLM tool."
+  }
+}
