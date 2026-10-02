@@ -633,7 +633,9 @@ pub async fn tool_search(
 ) -> Result<ToolOutput> {
     use crate::config::tool_routing::MAX_TOOL_SEARCH_RESULT_LIMIT;
     use crate::llm::tool_execution::ui_rendering::truncate_string_with_graphemes;
-    use crate::tools::tool_search::{TOOL_SEARCH_RESULT_BUDGET_CHARS, ToolSearchParams};
+    use crate::tools::tool_search::{
+        TOOL_SEARCH_QUERY_ECHO_CHARS, TOOL_SEARCH_RESULT_BUDGET_CHARS, ToolSearchParams,
+    };
 
     // Per-field lenient parsing: a wrongly typed `limit`/`server` falls back
     // to defaults instead of rejecting an otherwise valid query.
@@ -668,6 +670,11 @@ pub async fn tool_search(
 
     let result = runtime.tool_catalog.search(&query, limit, server).await;
 
+    // The catalog already partitions active vs inactive matches before
+    // applying the limit, so high-ranking active tools cannot consume
+    // inactive activation capacity. Re-partition here against live state
+    // and bound reporting independently (reporting never eats capacity:
+    // activation below consumes the full inactive set).
     let mut to_activate = Vec::new();
     let mut already_active = Vec::new();
     for hit in &result.hits {
@@ -677,6 +684,7 @@ pub async fn tool_search(
             to_activate.push(hit.clone());
         }
     }
+    already_active.truncate(limit);
     let names: Vec<String> = to_activate.iter().map(|h| h.name.clone()).collect();
     let newly = runtime.tool_catalog.activate(&names).await;
     let newly_set: std::collections::HashSet<&str> = newly.iter().map(String::as_str).collect();
@@ -696,7 +704,7 @@ pub async fn tool_search(
             item
         })
         .collect();
-    let already: Vec<serde_json::Value> = already_active
+    let mut already: Vec<serde_json::Value> = already_active
         .iter()
         .map(|h| {
             let mut item = json!({
@@ -710,24 +718,54 @@ pub async fn tool_search(
             item
         })
         .collect();
+    // Activation also retires `tool_search` once no real deferred tools
+    // remain; report the post-activation real-only count.
     let remaining_deferred = runtime.tool_catalog.deferred_count().await;
-    let mut warnings = Vec::new();
-    if result.hits.is_empty() {
-        warnings.push(
-            "No matching tools found. Try different keywords (capability, resource, or service name).".to_string(),
-        );
-    }
-
-    let value = json!({
+    // Ranking above used the full query. Only the echoed copy is bounded so
+    // a pathological query cannot blow the response budget.
+    let query_echo = truncate_string_with_graphemes(query.trim(), TOOL_SEARCH_QUERY_ECHO_CHARS);
+    let mut value = json!({
         "ok": true,
-        "query": result.query,
+        "query": query_echo,
         "activated": activated,
         "already_active": already,
         "remaining_deferred": remaining_deferred,
-        "warnings": warnings,
+        "warnings": [],
     });
     // Self-budget: descriptions are pre-truncated and hits are capped, so
-    // the envelope stays far below the global default tier.
+    // the envelope stays far below the global default tier. If the combined
+    // inactive + already-active reporting ever exceeds the budget, the
+    // transparency tail yields first; newly activated tools are always kept.
+    // Warnings are rebuilt after every trim so reported counts always match
+    // the bounded payload, and the budget check includes the warnings.
+    loop {
+        let mut warnings = Vec::new();
+        if result.hits.is_empty() {
+            warnings.push(
+                "No matching tools found. Try different keywords (capability, resource, or service name).".to_string(),
+            );
+        } else if activated.is_empty() {
+            warnings.push(format!(
+                "No new tools activated: all {} matching tool(s) are already active.",
+                already.len()
+            ));
+        }
+        if remaining_deferred == 0 {
+            warnings.push(
+                "All deferred tools are now active; tool_search is retired from the next tool list."
+                    .to_string(),
+            );
+        }
+        value["warnings"] = json!(warnings);
+        value["already_active"] = json!(already.clone());
+        let over_budget = serde_json::to_string(&value)
+            .map(|s| s.chars().count() > TOOL_SEARCH_RESULT_BUDGET_CHARS)
+            .unwrap_or(false);
+        if !over_budget || already.is_empty() {
+            break;
+        }
+        already.pop();
+    }
     debug_assert!(
         serde_json::to_string(&value)
             .map(|s| s.chars().count() <= TOOL_SEARCH_RESULT_BUDGET_CHARS)
