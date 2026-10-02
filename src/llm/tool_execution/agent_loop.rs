@@ -251,9 +251,26 @@ pub async fn run_agent_loop(
         }
     }
 
-    // Inject Proactive Context (Files + Smart Memory)
-    if let Err(e) = history.inject_context().await {
-        warn!("Failed to inject context: {}", e);
+    // Build the request-scoped runtime context once per turn. Recent-file /
+    // automatic-memory hints are bootstrap-only overlays for the first LLM
+    // request; they never enter durable history, session persistence, or
+    // compaction input.
+    let user_goal = crate::llm::runtime_context::last_user_goal(history.as_slice());
+    let runtime_context = crate::llm::runtime_context::RuntimeContextBuilder::new(fs)
+        .build(user_goal.as_deref())
+        .await;
+    let mut runtime_context_pending = !runtime_context.is_empty();
+    if runtime_context_pending {
+        debug!(
+            runtime_context_present = true,
+            runtime_context_chars = runtime_context.char_len(),
+            active_context_present = runtime_context.active_context.is_some(),
+            memory_context_present = runtime_context.memory_context.is_some(),
+            runtime_context_truncated = runtime_context.truncated,
+            "built request-scoped runtime context"
+        );
+    } else {
+        debug!("no runtime context for this turn");
     }
 
     let cancel_token = cancel.unwrap_or_default();
@@ -327,64 +344,84 @@ pub async fn run_agent_loop(
             reasoning_mode = reasoning_mode.as_str(),
             "reasoning decision for next request",
         );
-        let msg = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                warn!("run_agent_loop cancelled before chat_tools_once");
-                return Err(anyhow!(LlmErrorKind::Cancelled));
+        // First logical request carries the runtime overlay; the pending flag
+        // is consumed before the request starts so HTTP retries, reactive
+        // compaction, and JSON correction never re-inject it.
+        let chat_result = {
+            let request_messages = if runtime_context_pending {
+                runtime_context_pending = false;
+                crate::llm::runtime_context::RequestMessages::with_runtime_context(
+                    history.as_slice(),
+                    &runtime_context,
+                )
+            } else {
+                crate::llm::runtime_context::RequestMessages::borrowed(history.as_slice())
+            };
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    warn!("run_agent_loop cancelled before chat_tools_once");
+                    Err(anyhow!(LlmErrorKind::Cancelled))
+                }
+                res = crate::llm::tool_execution::requests::chat_tools_once(
+                    client,
+                    model,
+                    request_messages.as_slice(),
+                    &active_tools,
+                    reasoning_effort,
+                    reasoning_mode,
+                    Some(cancel_token.clone()),
+                    ui_tx.clone(),
+                ) => res,
             }
-            res = crate::llm::tool_execution::requests::chat_tools_once(
-                client,
-                model,
-                history.as_slice(),
-                &active_tools,
-                reasoning_effort,
-                reasoning_mode,
-                Some(cancel_token.clone()),
-                ui_tx.clone(),
-            ) => {
-                match res {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        // Check if the error is due to context length exceeded
-                        if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>() {
-                            match history.compact_reactive().await {
-                                Ok(true) => {
-                                    info!("History compaction successful (reactive). Resuming.");
-                                    reasoning_controller.observe_compaction();
-                                    continue;
-                                }
-                                Ok(false) => {
-                                     // Should not happen if compact_reactive returns true only on success
-                                }
-                                Err(compact_err) => {
-                                     error!("Error during reactive history compaction: {}", compact_err);
-                                }
-                            }
-                        }
-
-                        if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
-                            warn!("JSON parse error from LLM: {}", e);
-                            reasoning_controller.observe_json_recovery();
-                            let feedback = format!("Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.", e);
-                            history.push(ChatMessage {
-                                role: "user".into(),
-                                content: Some(feedback),
-                                tool_calls: vec![],
-                                tool_call_id: None,
-                            });
-                             if let Some(tx) = &ui_tx {
-                                let _ = tx.send("::status:warning:Invalid JSON received. Requesting correction...".to_string());
-                            }
+        };
+        let msg = match chat_result {
+            Ok(msg) => msg,
+            Err(e) => {
+                // Check if the error is due to context length exceeded
+                if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>()
+                {
+                    match history.compact_reactive().await {
+                        Ok(true) => {
+                            info!("History compaction successful (reactive). Resuming.");
+                            reasoning_controller.observe_compaction();
                             continue;
                         }
-
-                        let agent_error = AgentLoopError::Llm(e.to_string());
-                        handle_agent_error(&agent_error, &ui_tx);
-                        return Err(agent_error.into());
+                        Ok(false) => {
+                            // Should not happen if compact_reactive returns true only on success
+                        }
+                        Err(compact_err) => {
+                            error!("Error during reactive history compaction: {}", compact_err);
+                        }
                     }
                 }
-            },
+
+                if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
+                    warn!("JSON parse error from LLM: {}", e);
+                    reasoning_controller.observe_json_recovery();
+                    let feedback = format!(
+                        "Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.",
+                        e
+                    );
+                    history.push(ChatMessage {
+                        role: "user".into(),
+                        content: Some(feedback),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+                    if let Some(tx) = &ui_tx {
+                        let _ = tx.send(
+                            "::status:warning:Invalid JSON received. Requesting correction..."
+                                .to_string(),
+                        );
+                    }
+                    continue;
+                }
+
+                let agent_error = AgentLoopError::Llm(e.to_string());
+                handle_agent_error(&agent_error, &ui_tx);
+                return Err(agent_error.into());
+            }
         };
 
         // If assistant returned final content without tool calls, we are done.
@@ -965,6 +1002,136 @@ File modification detected. You MUST now verify your changes:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_runtime_context_sent_only_on_first_request() {
+        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+
+        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
+            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
+            return;
+        }
+        let server = match ServerBuilder::new().run() {
+            Ok(server) => server,
+            Err(err) => {
+                eprintln!("Skipping httptest-based test (server start failed: {err})");
+                return;
+            }
+        };
+
+        // First response: a real tool call; second response: final answer.
+        let tool_call_response = serde_json::json!({
+            "id": "test-tool",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_memory",
+                            "arguments": "{\"query\":\"cache\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let done_response = serde_json::json!({
+            "id": "test-done",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"}
+            }]
+        });
+
+        // Request #1 carries the bootstrap overlay plus normal tool schemas;
+        // request #2 carries normal history only.
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("RuntimeContext")),
+                request::body(matches("search_memory")),
+            ])
+            .times(1)
+            .respond_with(json_encoded(tool_call_response)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(not(matches("RuntimeContext"))),
+                request::body(matches("search_memory")),
+            ])
+            .times(1)
+            .respond_with(json_encoded(done_response)),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            tool_routing: crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Eager,
+                search_result_limit: 5,
+            },
+            ..Default::default()
+        };
+        let fs = FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(cfg.clone()),
+        );
+        // Seed bootstrap state: a recent file and a memory matching the goal.
+        fs.context_manager
+            .write()
+            .await
+            .add_file(std::path::Path::new("src/cache.rs"));
+        fs.write_memory("cache", "cache design notes", None, None)
+            .await
+            .expect("write memory");
+
+        let client = crate::llm::client_core::OpenAIClient::new(
+            format!("{}/", server.url_str("")),
+            "test-key",
+        )
+        .expect("test client");
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some("test system prompt".to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some("cache".to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ];
+
+        let (updated_messages, final_msg) = run_agent_loop(
+            &client,
+            "test-model",
+            &fs,
+            messages,
+            None,
+            None,
+            &cfg,
+            None,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        .expect("agent loop completes");
+        assert_eq!(final_msg.content, "done");
+        // The overlay must never leak into durable history.
+        assert!(
+            !updated_messages.iter().any(|m| m
+                .content
+                .as_deref()
+                .is_some_and(|c| c.contains("RuntimeContext"))),
+            "runtime overlay leaked into updated_messages"
+        );
+    }
 
     #[test]
     fn test_truncate_tool_output() {
