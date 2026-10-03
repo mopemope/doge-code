@@ -1,7 +1,7 @@
 use crate::llm::observation::{
     MIN_OBSERVABLE_TOOL_CHARS, OBSERVATION_READ_TOOL_NAME, OBSERVATION_STUB_PREFIX,
-    ObservationFootprint, ObservationStore, SharedObservationStore, fallback_stub,
-    is_observation_stub, new_shared_store, observation_stub, stub_observation_id,
+    ObservationFootprint, ObservationGcReport, ObservationStore, SharedObservationStore,
+    fallback_stub, is_observation_stub, new_shared_store, observation_stub, stub_observation_id,
 };
 use crate::llm::types::ChatMessage;
 use crate::llm::{OpenAIClient, compact_conversation_history};
@@ -119,6 +119,9 @@ impl HistoryManager {
     }
 
     /// Restore a manager with a previously persisted observation store.
+    /// Runs the shared restore reconciliation so legacy dead entries that
+    /// are no longer reachable from `messages` are collected immediately
+    /// (self-healing, no disk migration).
     pub fn with_observations(
         client: OpenAIClient,
         messages: Vec<ChatMessage>,
@@ -128,7 +131,7 @@ impl HistoryManager {
         observations: ObservationStore,
         unseen_tool_results: BTreeSet<String>,
     ) -> Self {
-        Self {
+        let mut this = Self {
             messages,
             client,
             ui_tx,
@@ -136,7 +139,9 @@ impl HistoryManager {
             config,
             observations: std::sync::Arc::new(std::sync::RwLock::new(observations)),
             unseen_tool_results,
-        }
+        };
+        this.reconcile_observations_after_restore("with_observations");
+        this
     }
 
     /// Add a message to the history
@@ -202,7 +207,163 @@ impl HistoryManager {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to restore observation store; keeping existing state");
+                return;
             }
+        }
+        self.reconcile_observations_after_restore("restore");
+    }
+
+    /// Mark-and-sweep GC over the Observation Store.
+    ///
+    /// Roots are the current canonical `messages` only: every role's
+    /// `content`, every `tool_calls[*].function.arguments`, and every string
+    /// leaf in `provider_state.output` are scanned for currently stored
+    /// (`known`) observation ids. Observation content itself is never a root,
+    /// unknown `obs-*` strings are never added, and `unseen_tool_results` is
+    /// untouched (a separate visibility concept).
+    ///
+    /// Fail-safe: lock failures return a zeroed (no-op, "skipped" rather
+    /// than "empty store") report without deleting anything and never panic.
+    /// `next_id` is preserved by the store primitive; removed ids are never
+    /// reused.
+    pub fn gc_unreferenced_observations(&mut self) -> ObservationGcReport {
+        // Single write-lock critical section: snapshot known ids, mark live,
+        // and sweep without releasing the guard. A read-then-write split
+        // could sweep an entry inserted concurrently after the snapshot
+        // without ever evaluating its reachability.
+        let mut guard = match self.observations.write() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(error = %e, "observation GC skipped: store lock unavailable");
+                return ObservationGcReport::default();
+            }
+        };
+        let known_ids = guard.ids();
+        if known_ids.is_empty() {
+            return ObservationGcReport::default();
+        }
+        let live_ids = Self::referenced_observation_ids(&self.messages, &known_ids);
+        guard.retain_referenced(&live_ids)
+    }
+
+    /// Live-set marker: which `known_ids` are still reachable from canonical
+    /// messages. Conservative (false positives keep an entry, false negatives
+    /// must not drop a reachable one).
+    fn referenced_observation_ids(
+        messages: &[ChatMessage],
+        known_ids: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut live = BTreeSet::new();
+        if known_ids.is_empty() || messages.is_empty() {
+            return live;
+        }
+        for msg in messages {
+            if live.len() >= known_ids.len() {
+                break;
+            }
+            if let Some(content) = msg.content.as_deref()
+                && content.contains("obs-")
+            {
+                for id in known_ids {
+                    if live.contains(id) {
+                        continue;
+                    }
+                    if content.contains(id) {
+                        live.insert(id.clone());
+                    }
+                }
+            }
+            for tc in &msg.tool_calls {
+                if live.len() >= known_ids.len() {
+                    break;
+                }
+                if !tc.function.arguments.contains("obs-") {
+                    continue;
+                }
+                for id in known_ids {
+                    if live.contains(id) {
+                        continue;
+                    }
+                    if tc.function.arguments.contains(id) {
+                        live.insert(id.clone());
+                    }
+                }
+            }
+            if let Some(state) = msg.provider_state.as_ref() {
+                for value in &state.output {
+                    if live.len() >= known_ids.len() {
+                        break;
+                    }
+                    Self::mark_ids_in_json(value, known_ids, &mut live);
+                }
+            }
+        }
+        live
+    }
+
+    /// Current canonical messages' live observation set (for tests/telemetry).
+    #[cfg(test)]
+    pub(crate) fn collect_live_observation_ids(&self) -> BTreeSet<String> {
+        let known_ids: BTreeSet<String> = match self.observations.read() {
+            Ok(guard) => guard.ids(),
+            Err(_) => return BTreeSet::new(),
+        };
+        Self::referenced_observation_ids(&self.messages, &known_ids)
+    }
+
+    fn mark_ids_in_json(
+        value: &serde_json::Value,
+        known_ids: &BTreeSet<String>,
+        live: &mut BTreeSet<String>,
+    ) {
+        match value {
+            serde_json::Value::String(s) => {
+                if !s.contains("obs-") {
+                    return;
+                }
+                for id in known_ids {
+                    if live.contains(id) {
+                        continue;
+                    }
+                    if s.contains(id) {
+                        live.insert(id.clone());
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if live.len() >= known_ids.len() {
+                        break;
+                    }
+                    Self::mark_ids_in_json(item, known_ids, live);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values() {
+                    if live.len() >= known_ids.len() {
+                        break;
+                    }
+                    Self::mark_ids_in_json(item, known_ids, live);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Shared restore reconciliation: store install -> live-set -> sweep.
+    /// Used by `restore_observations` and `with_observations` so both paths
+    /// share one GC contract. Logs only when entries were actually removed.
+    fn reconcile_observations_after_restore(&mut self, reason: &'static str) {
+        let report = self.gc_unreferenced_observations();
+        if report.removed_entries > 0 {
+            info!(
+                observation_gc_reason = reason,
+                removed_entries = report.removed_entries,
+                removed_content_bytes = report.removed_content_bytes,
+                remaining_entries = report.after_entries,
+                remaining_content_bytes = report.after_content_bytes,
+                "collected unreachable observations after restore"
+            );
         }
     }
 
@@ -216,7 +377,20 @@ impl HistoryManager {
     }
 
     pub fn clear(&mut self) {
+        // Full conversation reset: messages, Observation Store, and unseen
+        // tracking are cleared together so no dead observation survives.
+        // Matches `SessionData::clear_conversation_context()` which replaces
+        // the store with a fresh one (a new conversation restarts ids).
         self.messages.clear();
+        match self.observations.write() {
+            Ok(mut guard) => {
+                *guard = ObservationStore::new();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to clear observation store; keeping existing state");
+            }
+        }
+        self.unseen_tool_results.clear();
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, ChatMessage> {
@@ -840,6 +1014,22 @@ impl HistoryManager {
                     );
 
                     self.messages = after_prefix;
+
+                    // Post-compaction live-set GC: the summary + tail is now
+                    // canonical, so stubs dropped from the tail are no longer
+                    // reachable. Mark must run after the assignment, never
+                    // before (pre-mark would keep soon-dead stubs alive).
+                    let gc = self.gc_unreferenced_observations();
+                    if gc.removed_entries > 0 {
+                        info!(
+                            observation_gc_reason = "compaction",
+                            removed_entries = gc.removed_entries,
+                            removed_content_bytes = gc.removed_content_bytes,
+                            remaining_entries = gc.after_entries,
+                            remaining_content_bytes = gc.after_content_bytes,
+                            "collected unreachable observations after compaction"
+                        );
+                    }
 
                     if let Some(tx) = &self.ui_tx {
                         let _ = tx
@@ -1887,5 +2077,320 @@ mod tests {
             .unwrap();
         assert!(unseen.contains('n'));
         let _ = gov;
+    }
+
+    // --- Observation GC reachability tests ---
+
+    fn store_with_one(content: &str) -> (ObservationStore, String) {
+        let mut store = ObservationStore::new();
+        let id = store
+            .insert("call-1".into(), "fs_read".into(), content.into(), 100)
+            .expect("insert");
+        (store, id)
+    }
+
+    fn manager_with_store(messages: Vec<ChatMessage>, store: ObservationStore) -> HistoryManager {
+        let mgr = test_manager(messages);
+        // Install without triggering restore GC yet; tests control GC timing
+        // via direct lock install for pure marking checks.
+        if let Ok(mut guard) = mgr.observations.write() {
+            *guard = store;
+        }
+        mgr
+    }
+
+    #[test]
+    fn gc_keeps_stub_reference() {
+        let (store, id) = store_with_one(&"x".repeat(500));
+        let stub = crate::llm::observation::observation_stub("fs_read", 500, &id);
+        let mgr = manager_with_store(vec![make_tool_msg("call-1", &stub)], store);
+        let live = mgr.collect_live_observation_ids();
+        assert!(live.contains(&id), "tool stub must keep observation live");
+    }
+
+    #[test]
+    fn gc_keeps_assistant_summary_reference() {
+        let (store, id) = store_with_one(&"y".repeat(500));
+        let mgr = manager_with_store(
+            vec![make_msg(
+                "assistant",
+                &format!("Important evidence remains in {id}"),
+            )],
+            store,
+        );
+        let live = mgr.collect_live_observation_ids();
+        assert!(live.contains(&id), "assistant text ref must keep live");
+    }
+
+    #[test]
+    fn gc_keeps_user_reference() {
+        let (store, id) = store_with_one(&"z".repeat(500));
+        let mgr = manager_with_store(
+            vec![make_msg("user", &format!("Please inspect {id} again"))],
+            store,
+        );
+        let live = mgr.collect_live_observation_ids();
+        assert!(live.contains(&id), "user text ref must keep live");
+    }
+
+    #[test]
+    fn gc_keeps_tool_argument_reference() {
+        let (store, id) = store_with_one(&"w".repeat(500));
+        let args = format!("{{\"id\":\"{id}\",\"offset\":6000}}");
+        let msg = ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some("read".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("call-read".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "observation_read".into(),
+                    arguments: args,
+                },
+            }],
+            tool_call_id: None,
+        };
+        let mgr = manager_with_store(vec![msg], store);
+        let live = mgr.collect_live_observation_ids();
+        assert!(
+            live.contains(&id),
+            "observation_read args must keep pagination source live"
+        );
+    }
+
+    #[test]
+    fn gc_keeps_provider_state_reference() {
+        let (store, id) = store_with_one(&"v".repeat(500));
+        let output = vec![serde_json::json!({
+            "type": "reasoning",
+            "summary": [{"text": format!("evidence {id} here")}]
+        })];
+        let msg = ChatMessage {
+            provider_state: Some(crate::features::openai_subscription::ProviderState {
+                version: 1,
+                account: "test".into(),
+                model: "m".into(),
+                output,
+            }),
+            role: "assistant".into(),
+            content: Some("done".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        let mgr = manager_with_store(vec![msg], store);
+        let live = mgr.collect_live_observation_ids();
+        assert!(live.contains(&id), "provider_state string must keep live");
+    }
+
+    #[test]
+    fn gc_ignores_unknown_id() {
+        let (store, _) = store_with_one(&"u".repeat(500));
+        let mgr = manager_with_store(
+            vec![make_msg("user", "Please inspect obs-999999 again")],
+            store,
+        );
+        let live = mgr.collect_live_observation_ids();
+        assert!(
+            !live.contains("obs-999999"),
+            "unknown ids must never enter the live set"
+        );
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn gc_does_not_mark_through_observation_content() {
+        let mut store = ObservationStore::new();
+        let dead = store
+            .insert("c-dead".into(), "fs_read".into(), "dead-body".into(), 100)
+            .expect("dead");
+        let holder = store
+            .insert(
+                "c-holder".into(),
+                "fs_read".into(),
+                format!("See {dead}"),
+                100,
+            )
+            .expect("holder");
+        // Canonical history references only the holder stub; the dead id
+        // appears solely inside another observation's content.
+        let stub_holder = crate::llm::observation::observation_stub("fs_read", 100, &holder);
+        let mut mgr = manager_with_store(vec![make_tool_msg("c-holder", &stub_holder)], store);
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 1);
+        assert!(mgr.observations_snapshot().contains(&holder));
+        assert!(!mgr.observations_snapshot().contains(&dead));
+    }
+
+    #[test]
+    fn gc_compaction_shaped_history_removes_dropped_stub() {
+        // Old history has stubs for A and B; after compaction only B's stub
+        // survives in the recent tail.
+        let mut store = ObservationStore::new();
+        let obs_a = store
+            .insert("call-a".into(), "fs_read".into(), "A".repeat(500), 600)
+            .expect("A");
+        let obs_b = store
+            .insert("call-b".into(), "fs_read".into(), "B".repeat(500), 600)
+            .expect("B");
+        let stub_a = crate::llm::observation::observation_stub("fs_read", 500, &obs_a);
+        let stub_b = crate::llm::observation::observation_stub("fs_read", 500, &obs_b);
+        let old_history = vec![
+            make_msg("user", "task"),
+            make_assistant_with_tool_calls("call-a", "read a"),
+            make_tool_msg("call-a", &stub_a),
+            make_assistant_with_tool_calls("call-b", "read b"),
+            make_tool_msg("call-b", &stub_b),
+        ];
+        let mut mgr = manager_with_store(old_history, store);
+        // Simulate post-compaction canonical history: summary + tail with B.
+        let compacted_tail = vec![
+            make_msg("user", "Summary of old work"),
+            make_assistant_with_tool_calls("call-b", "read b"),
+            make_tool_msg("call-b", &stub_b),
+        ];
+        mgr.messages = compacted_tail;
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 1, "report: {report:?}");
+        let snap = mgr.observations_snapshot();
+        assert!(!snap.contains(&obs_a), "dropped stub must be collected");
+        assert!(snap.contains(&obs_b), "tail stub must survive");
+        // next_id keeps moving forward.
+        assert!(snap.next_id() >= 2);
+    }
+
+    #[test]
+    fn gc_keeps_observation_referenced_only_by_summary() {
+        let mut store = ObservationStore::new();
+        let obs_a = store
+            .insert("call-a".into(), "fs_read".into(), "A".repeat(500), 600)
+            .expect("A");
+        // Recent tail has no stub, but the summary text keeps the id.
+        let mut mgr = manager_with_store(
+            vec![
+                make_msg(
+                    "user",
+                    &format!("Summary: use {obs_a} if the exact prior output is required."),
+                ),
+                make_msg("user", "recent question"),
+            ],
+            store,
+        );
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 0);
+        assert!(mgr.observations_snapshot().contains(&obs_a));
+    }
+
+    #[test]
+    fn gc_restore_heals_legacy_dead_entries() {
+        let mut store = ObservationStore::new();
+        let live = store
+            .insert("call-live".into(), "fs_read".into(), "L".repeat(500), 600)
+            .expect("live");
+        let dead = store
+            .insert("call-dead".into(), "fs_read".into(), "D".repeat(500), 600)
+            .expect("dead");
+        let stub_live = crate::llm::observation::observation_stub("fs_read", 500, &live);
+        let mut mgr = test_manager(vec![
+            make_msg("user", "task"),
+            make_tool_msg("call-live", &stub_live),
+        ]);
+        mgr.restore_observations(store, BTreeSet::new());
+        let snap = mgr.observations_snapshot();
+        assert!(snap.contains(&live));
+        assert!(!snap.contains(&dead), "restore must GC dead entries");
+    }
+
+    #[test]
+    fn gc_with_observations_path_shares_restore_contract() {
+        let mut store = ObservationStore::new();
+        let live = store
+            .insert("call-live".into(), "fs_read".into(), "L".repeat(500), 600)
+            .expect("live");
+        let dead = store
+            .insert("call-dead".into(), "fs_read".into(), "D".repeat(500), 600)
+            .expect("dead");
+        let stub_live = crate::llm::observation::observation_stub("fs_read", 500, &live);
+        let messages = vec![
+            make_msg("user", "task"),
+            make_tool_msg("call-live", &stub_live),
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        let mgr = HistoryManager::with_observations(
+            client,
+            messages,
+            None,
+            fs,
+            config,
+            store,
+            BTreeSet::new(),
+        );
+        let snap = mgr.observations_snapshot();
+        assert!(snap.contains(&live));
+        assert!(!snap.contains(&dead));
+    }
+
+    #[test]
+    fn gc_never_touches_unseen_tool_results() {
+        let (store, id) = store_with_one(&"q".repeat(500));
+        let stub = crate::llm::observation::observation_stub("fs_read", 500, &id);
+        let mut mgr = manager_with_store(
+            vec![make_msg("user", "task"), make_tool_msg("call-1", &stub)],
+            store,
+        );
+        mgr.unseen_tool_results.insert("call-pending".into());
+        let unseen_before = mgr.unseen_snapshot();
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(mgr.unseen_snapshot(), unseen_before);
+        // Even when GC removes something, unseen stays intact.
+        mgr.messages = vec![make_msg("user", "fresh")];
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 1);
+        assert_eq!(mgr.unseen_snapshot(), unseen_before);
+    }
+
+    #[test]
+    fn gc_live_entry_paged_read_stays_lossless() {
+        let content = "日本語🎉".repeat(300);
+        let (store, id) = store_with_one(&content);
+        let stub = crate::llm::observation::observation_stub("fs_read", content.len(), &id);
+        let mut mgr = manager_with_store(vec![make_tool_msg("call-1", &stub)], store);
+        let report = mgr.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 0);
+        let snap = mgr.observations_snapshot();
+        let mut assembled = String::new();
+        let mut offset = 0usize;
+        loop {
+            let page = snap.read_paged(&id, offset, 37).expect("page");
+            assembled.push_str(&page.page);
+            match page.next_cursor {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(assembled, content);
+    }
+
+    #[test]
+    fn gc_clear_resets_messages_observations_and_unseen() {
+        let (store, id) = store_with_one(&"c".repeat(500));
+        let stub = crate::llm::observation::observation_stub("fs_read", 500, &id);
+        let mut mgr = manager_with_store(vec![make_tool_msg("call-1", &stub)], store);
+        mgr.unseen_tool_results.insert("call-pending".into());
+        mgr.clear();
+        assert!(mgr.is_empty());
+        assert!(mgr.observations_snapshot().is_empty());
+        assert_eq!(mgr.unseen_count(), 0);
     }
 }
