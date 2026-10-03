@@ -863,6 +863,7 @@ mod tests {
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
+            subagent: Default::default(),
         };
 
         let executor = Executor::new(cfg).await;
@@ -908,6 +909,7 @@ mod tests {
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
+            subagent: Default::default(),
         };
 
         let mut executor = Executor::new(cfg).await.expect("Failed to create executor");

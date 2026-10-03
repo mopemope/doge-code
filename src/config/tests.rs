@@ -691,3 +691,55 @@ fn dangling_symlink_candidate_is_error_not_missing() {
         "error must include symlink path, got: {err}"
     );
 }
+
+#[test]
+fn test_subagent_zero_rejected_by_config_loaders_without_mutation() {
+    let dir = TempDir::new().expect("tempdir");
+    let global = dir.path().join("user.toml");
+    fs::create_dir(dir.path().join(".doge")).expect("mkdir");
+    let project = dir.path().join(".doge/config.toml");
+    for field in [
+        "max_iterations",
+        "max_tool_calls",
+        "max_elapsed_ms",
+        "max_total_tokens",
+    ] {
+        let text = format!("[subagent]\n{field}=0\n");
+        fs::write(&global, &text).expect("global");
+        fs::write(&project, &text).expect("project");
+        let error = load_file_config_from_candidates(Some(&global), &[]).expect_err("reject zero");
+        assert!(format!("{error:#}").contains(field));
+        assert!(load_project_config(dir.path()).is_err());
+        assert_eq!(fs::read_to_string(&global).expect("read"), text);
+        assert_eq!(fs::read_to_string(&project).expect("read"), text);
+    }
+}
+
+#[test]
+fn test_subagent_global_project_field_wise_loading() {
+    let dir = TempDir::new().expect("tempdir");
+    let global = dir.path().join("user.toml");
+    fs::create_dir(dir.path().join(".doge")).expect("mkdir");
+    fs::write(
+        &global,
+        "[subagent]\nmax_iterations=8\nmax_tool_calls=12\nmax_total_tokens=5000",
+    )
+    .expect("write");
+    fs::write(
+        dir.path().join(".doge/config.toml"),
+        "[subagent]\nmax_iterations=2\nmax_elapsed_ms=1000",
+    )
+    .expect("write");
+    let user = load_file_config_from_candidates(Some(&global), &[]).expect("user");
+    let project = load_project_config(dir.path()).expect("project");
+    let merged = merge_subagent(user.subagent.as_ref(), project.subagent.as_ref()).expect("merge");
+    assert_eq!(
+        (
+            merged.max_iterations,
+            merged.max_tool_calls,
+            merged.max_elapsed_ms,
+            merged.max_total_tokens
+        ),
+        (2, 12, 1000, Some(5000))
+    );
+}

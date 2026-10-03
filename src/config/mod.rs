@@ -29,3 +29,6 @@ mod tests;
 #[cfg(test)]
 #[path = "test.rs"]
 mod test;
+
+pub mod subagent;
+pub use subagent::*;
