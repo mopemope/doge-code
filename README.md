@@ -298,11 +298,46 @@ All finite LLM-facing process tools use the same managed process lifecycle: boun
 - `execute_shell`: Persistent shell session for stateful command execution (escape hatch for persistent cwd/env/builtins; disable with `[execution] allow_shell = false`)
 - `doc_generate`: Generate documentation for a symbol or file via LLM
 - `run_workflow`: Run a predefined workflow from `.doge/workflows/`
-- `task`: Delegate focused research to an isolated read-only sub-agent that returns only a concise summary (keeps large investigations out of the main context)
+- `task`: Delegate focused research to an isolated read-only sub-agent with iteration, tool-call, elapsed-time, cumulative-token, and request-context budgets. Budget exhaustion returns `ok=true`, `status="partial"`, a stable `stop_reason`, and bounded evidence/files; cancellation and research provider failures remain errors.
 - `tool_search`: Discover and activate deferred built-in/MCP tools on demand (see Tool Search below)
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
 - `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
 - `observation_read`: Retrieve an offloaded historical tool result (`obs-*`) without re-running the original tool
+
+### Read-only sub-agent budgets
+
+`[subagent]` merges field by field: runtime defaults, user configuration, then
+project configuration. Explicit zero values are startup errors. Example policy:
+
+```toml
+[subagent]
+max_iterations = 40
+max_tool_calls = 64
+max_elapsed_ms = 180000
+# Optional: omit to derive a finite budget from the selected model's effective
+# compaction limit, including configured context windows and model overrides.
+# max_total_tokens = 100000
+```
+
+These example values match the current defaults. `task` inputs remain
+`description` and `prompt`; the model cannot raise these limits. The request
+context ceiling also uses the model's effective compaction limit and applies
+even with `[context_budget] mode = "off"`. Each successful LLM request charges
+`max(reported total tokens, estimated prompt tokens)`; absent or ambiguous usage
+uses the local estimate without inventing provider usage. Cached tokens still
+count in full. A response may exceed the remaining budget; no further research
+request is started once exhausted.
+
+Elapsed time uses a monotonic clock at safe boundaries before requests and tool
+dispatch. An operation already running is allowed to finish, so this is not a
+hard wall-clock timeout. Over-budget tool batches are skipped in full. At most
+one tools-free finalization request runs if context, remaining tokens, elapsed
+time, and cancellation permit it; otherwise bounded local evidence provides the
+partial summary. Finalization is charged but does not increment research
+iterations. Reports contain at most 32 paths and a 4,000-character summary,
+with `files_examined_truncated` indicating omitted or shortened paths. The entire
+serialized `task` output stays within 6,000 characters, accounting for JSON
+escaping; paths may be omitted and the summary shortened further to fit.
 
 ## Directive-to-Evidence Traceability
 

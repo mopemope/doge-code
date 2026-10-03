@@ -23,7 +23,7 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/config/context_budget.rs` | Preflight governor config (`[context_budget] mode = auto/observe/off`) |
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see `docs/tool-output-contract.md`) |
 | `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
-| `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context) |
+| `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context); `subagent/budget.rs` tracks finite resources, `subagent/evidence.rs` preserves bounded partial findings |
 | `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
 | `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
@@ -88,6 +88,26 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 
 ## Configuration & Secrets
 
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `model`/`base_url`/`project_instructions_file`/`resume`/`auto_compact_prompt_token_threshold`, `[llm]`, `[context_budget]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[tool_routing]`, `[reasoning]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Loading is read-only and fail-closed: missing config uses runtime `Default`s without creating files, existing invalid config is a startup error without mutation, and `DOGE_CODE_CONFIG` is authoritative when set. Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
+- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `model`/`base_url`/`project_instructions_file`/`resume`/`auto_compact_prompt_token_threshold`, `[llm]`, `[context_budget]`, `[subagent]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[tool_routing]`, `[reasoning]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Loading is read-only and fail-closed: missing config uses runtime `Default`s without creating files, existing invalid config is a startup error without mutation, and `DOGE_CODE_CONFIG` is authoritative when set. Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
 - Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
 - Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
+
+## Read-only worker resource contract
+
+`[subagent]` is user/admin configuration, merged default <- user <- project per
+field and rejecting explicit zeros at startup. Each worker has an independent
+`ContextBudgetGovernor`, including provider-specific Responses measurement, even
+when main context optimization is off. The selected model's existing effective
+compaction limit supplies both the request ceiling and the automatic cumulative
+token budget. Usage snapshots attribute exactly one provider usage record;
+missing or ambiguous usage falls back to local estimates. Cached/reasoning usage
+is never discounted or added twice. Only main last-request telemetry is restored;
+session usage totals keep worker requests.
+
+Budgets are checked before starting new operations; elapsed time uses monotonic
+safe boundaries and never drops an active tool solely on expiry. Oversized tool
+batches execute no prefix and skipped calls receive paired synthetic outputs.
+Budget/context stops return partial success with typed stable reasons. One
+budget-checked, tools-free finalization may run, then bounded local evidence is
+used on failure. Cancellation and non-context research provider errors propagate.
+No worker persistence, Observation Store, or LLM compaction is introduced.

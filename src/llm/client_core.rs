@@ -13,6 +13,14 @@ use crate::llm::types::{ChatMessage, ChoiceMessage, Usage};
 
 mod network;
 
+/// Session totals used for conservative serial-request attribution. No estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageTotalsSnapshot {
+    pub total_tokens: u64,
+    pub prompt_tokens: u64,
+    pub record_count: u64,
+}
+
 #[derive(Clone)]
 pub struct OpenAIClient {
     pub(crate) subscription: Option<crate::features::openai_subscription::auth::AuthHandle>,
@@ -27,6 +35,8 @@ pub struct OpenAIClient {
     /// Cumulative total tokens across the whole session (never reset by
     /// per-request tracking; only cleared explicitly via `clear_totals`).
     pub total_tokens_used: Arc<AtomicU64>,
+    /// Monotonic usage records; never populated from local token estimates.
+    pub usage_record_count: Arc<AtomicU64>,
     /// Cumulative prompt tokens across the whole session.
     pub total_prompt_tokens_used: Arc<AtomicU64>,
     /// Last request's reasoning tokens (from `completion_tokens_details`).
@@ -92,6 +102,7 @@ impl OpenAIClient {
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
+            usage_record_count: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -203,6 +214,16 @@ impl OpenAIClient {
             .fetch_add(tokens as u64, Ordering::Relaxed);
     }
 
+    /// Snapshot provider totals for serial-request attribution. The record
+    /// count is monotonic and is not reset with session totals.
+    pub fn usage_totals_snapshot(&self) -> UsageTotalsSnapshot {
+        UsageTotalsSnapshot {
+            total_tokens: self.get_total_tokens_used(),
+            prompt_tokens: self.get_total_prompt_tokens_used(),
+            record_count: self.usage_record_count.load(Ordering::Relaxed),
+        }
+    }
+
     /// Record one response's [`Usage`], including optional reasoning details.
     /// A present `reasoning_tokens` field (even `0`) marks usage as seen;
     /// an absent field leaves `reasoning_usage_seen` untouched.
@@ -224,6 +245,18 @@ impl OpenAIClient {
         }
         self.prompt_cache_counters
             .record(usage.prompt_tokens_details.as_ref());
+        let mut count = self.usage_record_count.load(Ordering::Relaxed);
+        loop {
+            match self.usage_record_count.compare_exchange_weak(
+                count,
+                count.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => count = current,
+            }
+        }
     }
 
     /// Last request's prompt-cache usage. `None` fields mean the provider did
@@ -609,6 +642,30 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_totals_snapshot_counts_records_without_estimates() {
+        let client = OpenAIClient::new("https://example.invalid/v1", "fixture").expect("client");
+        let before = client.usage_totals_snapshot();
+        assert_eq!(before.record_count, 0);
+        let usage: Usage = serde_json::from_value(serde_json::json!({"total_tokens":150,"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":80},"completion_tokens_details":{"reasoning_tokens":20}})).expect("usage");
+        client.record_usage(&usage);
+        let after = client.usage_totals_snapshot();
+        assert_eq!(
+            after,
+            UsageTotalsSnapshot {
+                total_tokens: 150,
+                prompt_tokens: 100,
+                record_count: 1
+            }
+        );
+        client.set_tokens(1);
+        client.set_prompt_tokens(1);
+        client.restore_last_prompt_cache_usage(Default::default());
+        assert_eq!(client.usage_totals_snapshot(), after);
+        assert_eq!(client.get_total_cached_prompt_tokens(), 80);
+        assert_eq!(client.get_total_reasoning_tokens_used(), 20);
+    }
+
+    #[test]
     fn endpoint_normalization() {
         let c = OpenAIClient {
             subscription: None,
@@ -619,6 +676,7 @@ mod tests {
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
+            usage_record_count: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -635,6 +693,7 @@ mod tests {
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
+            usage_record_count: Arc::new(AtomicU64::new(0)),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),

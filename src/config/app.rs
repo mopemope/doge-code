@@ -10,6 +10,7 @@ use super::mcp::{
     validate_mcp_server_names,
 };
 use super::reasoning::{ReasoningConfig, merge_reasoning};
+use super::subagent::{SubagentConfig, merge_subagent};
 use super::tool_routing::{ToolRoutingConfig, merge_tool_routing};
 use super::watch::WatchConfig;
 use crate::utils::get_git_repository_root;
@@ -70,6 +71,7 @@ pub struct AppConfig {
     /// Preflight context governor (`[context_budget]`). Measures the current
     /// request footprint before sending; never evicts tools or observations.
     pub context_budget: ContextBudgetConfig,
+    pub subagent: SubagentConfig,
 }
 
 impl Default for AppConfig {
@@ -102,6 +104,7 @@ impl Default for AppConfig {
             tool_routing: ToolRoutingConfig::default(),
             reasoning: ReasoningConfig::default(),
             context_budget: ContextBudgetConfig::default(),
+            subagent: SubagentConfig::default(),
         }
     }
 }
@@ -299,6 +302,7 @@ impl AppConfig {
         let reasoning =
             merge_reasoning(file_cfg.reasoning.as_ref(), project_cfg.reasoning.as_ref());
 
+        let subagent = merge_subagent(file_cfg.subagent.as_ref(), project_cfg.subagent.as_ref())?;
         let context_budget = merge_context_budget(
             file_cfg.context_budget.as_ref(),
             project_cfg.context_budget.as_ref(),
@@ -368,6 +372,7 @@ impl AppConfig {
             tool_routing,
             reasoning,
             context_budget,
+            subagent,
         };
         if config.provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
             && config.get_context_window_size().is_none()

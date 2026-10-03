@@ -1,34 +1,35 @@
-//! Isolated sub-agent loop for the `task` tool.
-//!
-//! Runs a bounded agent loop restricted to read-only tools with its own
-//! message history, so exploration traffic never enters the main context.
-//! The main agent receives only a condensed summary.
-
-use anyhow::{Result, anyhow};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
-
+//! Ephemeral read-only worker: measure, bound, finalize, preserve evidence.
+use crate::llm::client_core::OpenAIClient;
+use crate::llm::context_budget::{ContextBudgetGovernor, RequestFootprint};
 use crate::llm::message_utils::truncate_tool_output;
 use crate::llm::tool_execution::dispatch::dispatch_subagent_tool_call;
 use crate::llm::tool_runtime::ToolRuntime;
-use crate::llm::types::ChatMessage;
+use crate::llm::types::{ChatMessage, ToolCall, ToolDef};
 use crate::tools::budget::head_truncate;
 use crate::tools::task::{
-    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_MAX_ITERS, SUBAGENT_SUMMARY_BUDGET_CHARS,
-    subagent_system_prompt,
+    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_SUMMARY_BUDGET_CHARS, subagent_system_prompt,
 };
+use anyhow::{Result, anyhow};
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
+mod budget;
+mod evidence;
+use budget::SubagentBudgetTracker;
+pub use budget::{SubagentRunStatus, SubagentStopReason};
+use evidence::SubagentEvidenceLedger;
 
-/// A completed sub-agent run.
 pub struct SubagentRun {
     pub summary: String,
     pub files_examined: Vec<String>,
+    pub files_examined_truncated: bool,
     pub iterations: usize,
     pub tool_calls: usize,
+    pub status: SubagentRunStatus,
+    pub stop_reason: Option<SubagentStopReason>,
 }
 
-/// Run the sub-agent loop and return its summary.
 pub async fn run_subagent(
-    client: &crate::llm::client_core::OpenAIClient,
+    client: &OpenAIClient,
     model: &str,
     runtime: &ToolRuntime<'_>,
     description: &str,
@@ -36,223 +37,350 @@ pub async fn run_subagent(
     cancel: Option<CancellationToken>,
     project_dir: &str,
 ) -> Result<SubagentRun> {
-    let cancel_token = cancel.unwrap_or_default();
-
-    let messages: Vec<ChatMessage> = vec![
-        ChatMessage {
-            provider_state: None,
-            role: "system".into(),
-            content: Some(subagent_system_prompt(project_dir)),
-            tool_calls: vec![],
-            tool_call_id: None,
-        },
-        ChatMessage {
-            provider_state: None,
-            role: "user".into(),
-            content: Some(format!(
-                "Task description: {description}\n\nTask instructions:\n{prompt}"
-            )),
-            tool_calls: vec![],
-            tool_call_id: None,
-        },
+    let messages = vec![
+        message("system", subagent_system_prompt(project_dir)),
+        message(
+            "user",
+            format!("Task description: {description}\n\nTask instructions:\n{prompt}"),
+        ),
     ];
-
-    let tools = subagent_tool_defs(runtime);
-    let mut files_examined: Vec<String> = Vec::new();
-    let mut tool_calls_count = 0usize;
-    let mut iterations = 0usize;
-
-    // The sub-agent shares the main loop's client, whose per-request token
-    // counters are overwritten by every response. Snapshot them here and
-    // restore on every exit path so the main loop's next proactive-compaction
-    // / stale-clearing check still sees the main conversation's usage.
-    // (Session totals accumulate independently via `add_total_tokens`.)
-    let saved_tokens = client.get_tokens_used();
-    let saved_prompt_tokens = client.get_prompt_tokens_used();
-    let saved_reasoning_tokens = client.get_reasoning_tokens_used();
-    let saved_cache_usage = client.last_prompt_cache_usage();
-
-    let result = run_subagent_inner(
-        client,
-        model,
-        runtime,
-        messages,
-        tools,
-        cancel_token,
-        &mut files_examined,
-        &mut tool_calls_count,
-        &mut iterations,
-    )
-    .await;
-
-    client.set_tokens(saved_tokens);
-    client.set_prompt_tokens(saved_prompt_tokens);
-    client.set_reasoning_tokens(saved_reasoning_tokens);
-    // Session totals (`total_cached_tokens`, `total_cache_write_tokens`,
-    // `total_prompt_tokens_used`) intentionally keep accumulating: sub-agent
-    // LLM traffic is part of session cost. Only the last-request view is
-    // restored.
-    client.restore_last_prompt_cache_usage(saved_cache_usage);
-    result
+    // Restore only the main last-request view on every returned exit path.
+    // Provider session totals (including cache/reasoning) keep worker traffic.
+    let _last_request = LastRequestGuard::new(client);
+    run_subagent_inner(client, model, runtime, messages, cancel.unwrap_or_default()).await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The parent agent selects on cancellation around dispatch and may drop this
+/// future without letting it return. Restore only last-request telemetry on Drop.
+struct LastRequestGuard<'a> {
+    client: &'a OpenAIClient,
+    tokens: u32,
+    prompt_tokens: u32,
+    reasoning_tokens: u32,
+    cache: crate::llm::prompt_cache::PromptCacheUsageSnapshot,
+}
+
+impl<'a> LastRequestGuard<'a> {
+    fn new(client: &'a OpenAIClient) -> Self {
+        Self {
+            client,
+            tokens: client.get_tokens_used(),
+            prompt_tokens: client.get_prompt_tokens_used(),
+            reasoning_tokens: client.get_reasoning_tokens_used(),
+            cache: client.last_prompt_cache_usage(),
+        }
+    }
+}
+
+impl Drop for LastRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.client.set_tokens(self.tokens);
+        self.client.set_prompt_tokens(self.prompt_tokens);
+        self.client.set_reasoning_tokens(self.reasoning_tokens);
+        self.client.restore_last_prompt_cache_usage(self.cache);
+    }
+}
+
+fn message(role: &str, content: String) -> ChatMessage {
+    ChatMessage {
+        provider_state: None,
+        role: role.into(),
+        content: Some(content),
+        tool_calls: vec![],
+        tool_call_id: None,
+    }
+}
+
+fn check_cancel(token: &CancellationToken) -> Result<()> {
+    if token.is_cancelled() {
+        return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
+    }
+    Ok(())
+}
+
+fn measure(
+    governor: &ContextBudgetGovernor,
+    client: &OpenAIClient,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+) -> Result<RequestFootprint> {
+    if let Some(account) = client.account_label() {
+        governor.measure_subscription(account, model, messages, tools, 0)
+    } else {
+        governor.measure(messages, tools)
+    }
+}
+
+fn synthetic_results(
+    messages: &mut Vec<ChatMessage>,
+    calls: &[ToolCall],
+    reason: SubagentStopReason,
+) {
+    for call in calls {
+        let mut result = message("tool", serde_json::json!({"ok":false,"error":{"kind":"subagent_budget_exhausted","reason":reason,"message":"Research stopped before executing this read-only tool call."}}).to_string());
+        result.tool_call_id = call.id.clone();
+        messages.push(result);
+    }
+}
+
 async fn run_subagent_inner(
-    client: &crate::llm::client_core::OpenAIClient,
+    client: &OpenAIClient,
     model: &str,
     runtime: &ToolRuntime<'_>,
     mut messages: Vec<ChatMessage>,
-    tools: Vec<crate::llm::types::ToolDef>,
-    cancel_token: CancellationToken,
-    files_examined: &mut Vec<String>,
-    tool_calls_count: &mut usize,
-    iterations: &mut usize,
+    cancel: CancellationToken,
 ) -> Result<SubagentRun> {
-    // Independent controller: same config as the main agent, but isolated
-    // state. A sub-agent failure never changes the main loop's phase
-    // directly; only the `task` ToolOutput failure does (as Recovery).
-    let mut reasoning_controller =
-        crate::llm::reasoning::ReasoningController::new(runtime.fs.config.reasoning.clone());
-    let reasoning_mode = runtime.fs.config.reasoning.mode;
-    loop {
-        *iterations += 1;
-        if *iterations > SUBAGENT_MAX_ITERS {
-            warn!(
-                iterations = *iterations,
-                "subagent hit max iterations; returning partial summary"
-            );
-            return Ok(SubagentRun {
-                summary: "Sub-agent stopped: reached its iteration limit before finishing. Partial results may be incomplete.".to_string(),
-                files_examined: std::mem::take(files_examined),
-                iterations: *iterations,
-                tool_calls: *tool_calls_count,
-            });
-        }
+    let cfg = &runtime.fs.config;
+    // Use the selected worker model, the existing override table and configured
+    // window. Off disables main optimization, never worker safety measurement.
+    let mut model_cfg = (**cfg).clone();
+    model_cfg.model = model.to_string();
+    let context_limit = u64::from(model_cfg.get_effective_compaction_limit());
+    let mut tracker = SubagentBudgetTracker::new(cfg.subagent.clone(), context_limit);
+    debug!(
+        max_iterations = cfg.subagent.max_iterations,
+        max_tool_calls = cfg.subagent.max_tool_calls,
+        max_elapsed_ms = cfg.subagent.max_elapsed_ms,
+        effective_total_token_budget = tracker.total_limit,
+        effective_context_limit = context_limit,
+        "subagent resource budgets"
+    );
+    let mut governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
+    let mut ledger = SubagentEvidenceLedger::default();
+    let tools = subagent_tool_defs(runtime);
+    let mut reasoning = crate::llm::reasoning::ReasoningController::new(cfg.reasoning.clone());
 
-        let msg = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
+    let mut observed_files_count = 0usize;
+    let result = async {
+        let reason = 'research: loop {
+            check_cancel(&cancel)?;
+            let footprint = measure(&governor, client, model, &messages, &tools)?;
+            let estimate = governor.estimate(footprint).prompt_tokens;
+            if let Some(reason) = tracker.request_stop(estimate, true) {
+                break reason;
             }
-            res = crate::llm::tool_execution::requests::chat_tools_once(
+            tracker.record_research_request();
+            let before = client.usage_totals_snapshot();
+            let response = crate::llm::tool_execution::requests::chat_tools_once(
                 client,
                 model,
                 &messages,
                 &tools,
-                reasoning_controller.current_effort(),
-                reasoning_mode,
-                Some(cancel_token.clone()),
+                reasoning.current_effort(),
+                cfg.reasoning.mode,
+                Some(cancel.clone()),
                 None,
-            ) => res,
+            )
+            .await;
+            check_cancel(&cancel)?;
+            let msg = match response {
+                Ok(msg) => msg,
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                        Some(crate::llm::LlmErrorKind::ContextLengthExceeded)
+                    ) =>
+                {
+                    break SubagentStopReason::ProviderContextExceeded;
+                }
+                Err(error) => return Err(error.context("subagent research failed")),
+            };
+            if let Some(prompt_tokens) =
+                tracker.charge(estimate, before, client.usage_totals_snapshot())
+            {
+                governor.observe_actual(footprint, prompt_tokens);
+            }
+            if msg.tool_calls.is_empty() {
+                return Ok(finish(
+                    summarize_final(msg.content.as_deref().unwrap_or("")),
+                    None,
+                    &tracker,
+                    ledger,
+                ));
+            }
+            messages.push(ChatMessage {
+                provider_state: msg.provider_state.clone(),
+                role: "assistant".into(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: None,
+            });
+            // A tool-cap overflow skips the entire batch. No prefix execution.
+            if let Some(reason) = tracker.batch_stop(msg.tool_calls.len()) {
+                synthetic_results(&mut messages, &msg.tool_calls, reason);
+                break reason;
+            }
+            let mut observations = Vec::new();
+            for (index, tc) in msg.tool_calls.iter().enumerate() {
+                check_cancel(&cancel)?;
+                // Safe boundary only: elapsed expiry never drops an active tool.
+                if let Some(reason) = tracker.elapsed_stop() {
+                    synthetic_results(&mut messages, &msg.tool_calls[index..], reason);
+                    break 'research reason;
+                }
+                let name = tc.function.name.as_str();
+                if !SUBAGENT_ALLOWED_TOOLS.contains(&name) {
+                    let mut output = message("tool", serde_json::json!({"error":"Only read-only tools are available to the sub-agent."}).to_string());
+                    output.tool_call_id = tc.id.clone();
+                    messages.push(output);
+                    observations.push(crate::llm::reasoning::ToolObservation::new(name, false));
+                    continue;
+                }
+                tracker.record_tool_call();
+                let dispatch = Box::pin(dispatch_subagent_tool_call(runtime, tc));
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled)),
+                    result = dispatch => result,
+                };
+                let (success, content) = match result {
+                    Ok(output) => {
+                        ledger.record(name, output.is_success, &output.result_summary);
+                        ledger.record_files(name, &output);
+                        observed_files_count = ledger.file_count();
+                        (
+                            output.is_success,
+                            truncate_tool_output(serde_json::to_string(&output.value)?, name),
+                        )
+                    }
+                    Err(error) if matches!(error.downcast_ref::<crate::llm::LlmErrorKind>(), Some(crate::llm::LlmErrorKind::Cancelled)) => return Err(error),
+                    Err(error) => {
+                        let bounded = head_truncate(&error.to_string(), 240).text;
+                        ledger.record(name, false, &bounded);
+                        (
+                            false,
+                            truncate_tool_output(
+                                serde_json::json!({"error":bounded}).to_string(),
+                                name,
+                            ),
+                        )
+                    }
+                };
+                observations.push(crate::llm::reasoning::ToolObservation::new(name, success));
+                let mut output = message("tool", content);
+                output.tool_call_id = tc.id.clone();
+                messages.push(output);
+            }
+            reasoning.observe_tool_batch(crate::llm::reasoning::ToolBatchObservation::new(
+                observations,
+                false,
+                false,
+            ));
         };
 
-        let msg = msg.map_err(|e| {
-            // Context exhaustion inside the sub-agent should surface, but keep
-            // the error message scoped to the sub-agent for the main loop.
-            anyhow!("subagent research failed: {e}")
-        })?;
-
-        if msg.tool_calls.is_empty() {
-            let summary = summarize_final(msg.content.as_deref().unwrap_or(""));
-            return Ok(SubagentRun {
-                summary,
-                files_examined: std::mem::take(files_examined),
-                iterations: *iterations,
-                tool_calls: *tool_calls_count,
-            });
-        }
-
-        messages.push(ChatMessage {
-            provider_state: msg.provider_state.clone(),
-            role: "assistant".into(),
-            content: msg.content.clone(),
-            tool_calls: msg.tool_calls.clone(),
-            tool_call_id: None,
-        });
-
-        let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
-        for tc in msg.tool_calls {
-            let tool_name = tc.function.name.as_str();
-            if !SUBAGENT_ALLOWED_TOOLS.contains(&tool_name) {
-                debug!(tool = tool_name, "subagent tool blocked");
-                messages.push(ChatMessage {
-            provider_state: None,
-                    role: "tool".into(),
-                    content: Some(
-                        serde_json::json!({
-                            "error": format!(
-                                "tool '{}' is not available to the sub-agent; only read-only tools are allowed",
-                                tool_name
-                            )
-                        })
-                        .to_string(),
-                    ),
-                    tool_calls: vec![],
-                    tool_call_id: tc.id.clone(),
-                });
-                batch_observations.push(crate::llm::reasoning::ToolObservation::new(
-                    tool_name.to_string(),
-                    false,
-                ));
-                continue;
+        check_cancel(&cancel)?;
+        messages.push(message("user", format!("Research resource budget has been reached ({}). Do not call tools. Return the best partial result from evidence already collected. Use exactly these sections: Facts, Files, Recommendation. Explicitly identify unknown or incomplete items.", reason.as_str())));
+        let footprint = measure(&governor, client, model, &messages, &[])?;
+        let estimate = governor.estimate(footprint).prompt_tokens;
+        let mut summary = None;
+        if tracker.request_stop(estimate, false).is_none() {
+            check_cancel(&cancel)?;
+            tracker.finalization_attempted = true;
+            let before = client.usage_totals_snapshot();
+            let result = crate::llm::tool_execution::requests::chat_tools_once(
+                client,
+                model,
+                &messages,
+                &[],
+                reasoning.current_effort(),
+                cfg.reasoning.mode,
+                Some(cancel.clone()),
+                None,
+            )
+            .await;
+            check_cancel(&cancel)?;
+            match result {
+                Ok(msg) => {
+                    tracker.charge(estimate, before, client.usage_totals_snapshot());
+                    // Provider violations never trigger tool dispatch in finalization.
+                    if msg.tool_calls.is_empty()
+                        && msg.content.as_deref().is_some_and(|s| !s.trim().is_empty())
+                    {
+                        tracker.finalization_succeeded = true;
+                        summary = Some(summarize_final(msg.content.as_deref().unwrap_or("")));
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                        Some(crate::llm::LlmErrorKind::Cancelled)
+                    ) =>
+                {
+                    return Err(error);
+                }
+                Err(_) => {
+                    debug!("subagent finalization failed; preserving local evidence");
+                }
             }
-
-            *tool_calls_count += 1;
-            // Boxed to break the async-recursion cycle:
-            // dispatch_tool_call -> task handler -> run_subagent -> dispatch_tool_call.
-            let dispatch_fut = Box::pin(dispatch_subagent_tool_call(runtime, &tc));
-            let res = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
-                }
-                res = dispatch_fut => res,
-            };
-
-            let tool_message_content = match &res {
-                Ok(output) => {
-                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
-                        tool_name.to_string(),
-                        output.is_success,
-                    ));
-                    record_examined_files(tool_name, output, files_examined);
-                    let json_str = serde_json::to_string(&output.value).unwrap_or_else(|_e| {
-                        "{\"error\":\"failed to serialize tool result\"}".to_string()
-                    });
-                    truncate_tool_output(json_str, tool_name)
-                }
-                Err(e) => {
-                    batch_observations.push(crate::llm::reasoning::ToolObservation::new(
-                        tool_name.to_string(),
-                        false,
-                    ));
-                    warn!(tool = tool_name, error = %e, "subagent tool failed");
-                    let err_json = serde_json::json!({ "error": e.to_string() });
-                    truncate_tool_output(err_json.to_string(), tool_name)
-                }
-            };
-
-            messages.push(ChatMessage {
-                provider_state: None,
-                role: "tool".into(),
-                content: Some(tool_message_content),
-                tool_calls: vec![],
-                tool_call_id: tc.id.clone(),
-            });
         }
-        reasoning_controller.observe_tool_batch(crate::llm::reasoning::ToolBatchObservation::new(
-            batch_observations,
-            false,
-            false,
-        ));
+        Ok(finish(
+            summary.unwrap_or_else(|| ledger.fallback(reason)),
+            Some(reason),
+            &tracker,
+            ledger,
+        ))
+    }.await;
+    if let Err(error) = &result {
+        let cancelled = matches!(
+            error.downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(crate::llm::LlmErrorKind::Cancelled)
+        );
+        debug!(
+            status = if cancelled { "cancelled" } else { "failed" },
+            stop_reason = "none",
+            research_iterations = tracker.research_iterations,
+            executed_tool_calls = tracker.executed_tool_calls,
+            charged_tokens = tracker.charged_tokens,
+            reported_usage_requests = tracker.reported_usage_requests,
+            estimated_usage_requests = tracker.estimated_usage_requests,
+            elapsed_ms = tracker.started_at.elapsed().as_millis(),
+            files_examined_count = observed_files_count,
+            finalization_attempted = tracker.finalization_attempted,
+            finalization_succeeded = tracker.finalization_succeeded,
+            "subagent finished"
+        );
+    }
+    result
+}
+
+fn finish(
+    summary: String,
+    stop_reason: Option<SubagentStopReason>,
+    tracker: &SubagentBudgetTracker,
+    ledger: SubagentEvidenceLedger,
+) -> SubagentRun {
+    let status = if stop_reason.is_some() {
+        SubagentRunStatus::Partial
+    } else {
+        SubagentRunStatus::Completed
+    };
+    debug!(
+        ?status,
+        ?stop_reason,
+        research_iterations = tracker.research_iterations,
+        executed_tool_calls = tracker.executed_tool_calls,
+        charged_tokens = tracker.charged_tokens,
+        reported_usage_requests = tracker.reported_usage_requests,
+        estimated_usage_requests = tracker.estimated_usage_requests,
+        elapsed_ms = tracker.started_at.elapsed().as_millis(),
+        files_examined_count = ledger.file_count(),
+        finalization_attempted = tracker.finalization_attempted,
+        finalization_succeeded = tracker.finalization_succeeded,
+        "subagent finished"
+    );
+    SubagentRun {
+        summary,
+        files_examined: ledger.files,
+        files_examined_truncated: ledger.files_truncated,
+        iterations: tracker.research_iterations,
+        tool_calls: tracker.executed_tool_calls,
+        status,
+        stop_reason,
     }
 }
 
-/// Build the read-only tool subset for the sub-agent from the runtime's
-/// full catalog definitions. The `SUBAGENT_ALLOWED_TOOLS` contract is
-/// enforced here and again at dispatch; deferred main-run state never leaks
-/// extra tools into the sub-agent.
-fn subagent_tool_defs(runtime: &ToolRuntime<'_>) -> Vec<crate::llm::types::ToolDef> {
+fn subagent_tool_defs(runtime: &ToolRuntime<'_>) -> Vec<ToolDef> {
     runtime
         .tool_catalog
         .all_tool_defs()
@@ -261,131 +389,13 @@ fn subagent_tool_defs(runtime: &ToolRuntime<'_>) -> Vec<crate::llm::types::ToolD
         .collect()
 }
 
-/// Track files touched by read/list/search tools for the run report.
-fn record_examined_files(
-    tool_name: &str,
-    output: &crate::llm::tool_execution::dispatch::ToolOutput,
-    files: &mut Vec<String>,
-) {
-    let extract_path =
-        |v: &serde_json::Value| -> Option<String> { v.as_str().map(|s| s.to_string()) };
-    let push_unique = |files: &mut Vec<String>, path: Option<String>| {
-        if let Some(p) = path
-            && !files.contains(&p)
-        {
-            files.push(p);
-        }
-    };
-
-    match tool_name {
-        "fs_read" => push_unique(
-            files,
-            output
-                .value
-                .get("result")
-                .and_then(|r| r.get("path"))
-                .and_then(extract_path),
-        ),
-        "find_file" => {
-            if let Some(list) = output.value.get("files").and_then(|v| v.as_array()) {
-                for item in list.iter().take(10) {
-                    push_unique(files, extract_path(item));
-                }
-            }
-        }
-        "search_text" => {
-            if let Some(list) = output.value.get("results").and_then(|v| v.as_array()) {
-                for item in list.iter().take(10) {
-                    push_unique(files, item.get("path").and_then(extract_path));
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Trim and normalize the sub-agent's final answer.
 fn summarize_final(content: &str) -> String {
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return "Sub-agent returned an empty summary.".to_string();
+        return "Sub-agent returned an empty summary.".into();
     }
     head_truncate(trimmed, SUBAGENT_SUMMARY_BUDGET_CHARS).text
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llm::types::{ToolCall, ToolCallFunction};
-
-    fn make_call(name: &str, id: &str) -> ToolCall {
-        ToolCall {
-            id: Some(id.to_string()),
-            r#type: "function".to_string(),
-            function: ToolCallFunction {
-                name: name.to_string(),
-                arguments: "{}".to_string(),
-            },
-        }
-    }
-
-    #[test]
-    fn test_summarize_final_trims_long_output() {
-        let long = "fact ".repeat(5_000);
-        let summary = summarize_final(&long);
-        assert!(summary.chars().count() <= SUBAGENT_SUMMARY_BUDGET_CHARS);
-        assert!(summary.contains("output truncated"));
-    }
-
-    #[test]
-    fn test_summarize_final_empty() {
-        assert_eq!(
-            summarize_final("   "),
-            "Sub-agent returned an empty summary."
-        );
-    }
-
-    #[test]
-    fn test_record_examined_files_fs_read() {
-        let output = crate::llm::tool_execution::dispatch::ToolOutput {
-            value: serde_json::json!({"ok": true, "result": {"path": "/tmp/a.rs"}}),
-            is_success: true,
-            result_summary: String::new(),
-        };
-        let mut files = Vec::new();
-        record_examined_files("fs_read", &output, &mut files);
-        assert_eq!(files, vec!["/tmp/a.rs".to_string()]);
-        // Duplicates are not added twice.
-        record_examined_files("fs_read", &output, &mut files);
-        assert_eq!(files.len(), 1);
-    }
-
-    #[test]
-    fn test_record_examined_files_search_results() {
-        let output = crate::llm::tool_execution::dispatch::ToolOutput {
-            value: serde_json::json!({
-                "ok": true,
-                "results": [
-                    {"path": "/tmp/x.rs", "line": 1, "text": "hit"},
-                    {"path": "/tmp/y.rs", "line": 2, "text": "hit"}
-                ]
-            }),
-            is_success: true,
-            result_summary: String::new(),
-        };
-        let mut files = Vec::new();
-        record_examined_files("search_text", &output, &mut files);
-        assert_eq!(
-            files,
-            vec!["/tmp/x.rs".to_string(), "/tmp/y.rs".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_tool_call_blocked_message_shape() {
-        // Sanity-check the JSON error payload used for blocked tools.
-        let payload = serde_json::json!({"error": "tool 'execute_bash' is not available to the sub-agent; only read-only tools are allowed"});
-        assert!(payload["error"].as_str().unwrap().contains("read-only"));
-        let _ = make_call("execute_bash", "call_1");
-    }
-}
+mod tests;

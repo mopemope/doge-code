@@ -8,6 +8,7 @@ use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
 use super::mcp::{PartialLocalMcpServerConfig, PartialMcpServerConfig};
 use super::reasoning::PartialReasoningConfig;
+use super::subagent::PartialSubagentConfig;
 use super::tool_routing::PartialToolRoutingConfig;
 
 use super::watch::PartialWatchConfig;
@@ -42,6 +43,7 @@ pub struct FileConfig {
     pub tool_routing: Option<PartialToolRoutingConfig>,
     pub reasoning: Option<PartialReasoningConfig>,
     pub context_budget: Option<PartialContextBudgetConfig>,
+    pub subagent: Option<PartialSubagentConfig>,
 }
 
 /// Configuration load contract (v1):
@@ -235,13 +237,22 @@ fn normalize_path_for_error(path: &Path) -> String {
 }
 
 fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
-    toml::from_str::<FileConfig>(raw).with_context(|| {
+    let cfg = toml::from_str::<FileConfig>(raw).with_context(|| {
         format!(
             "failed to parse {} {}",
             source.describe(),
             normalize_path_for_error(&source.path)
         )
-    })
+    })?;
+    if let Some(subagent) = &cfg.subagent {
+        subagent.validate().with_context(|| {
+            format!(
+                "invalid subagent configuration in {}",
+                normalize_path_for_error(&source.path)
+            )
+        })?;
+    }
+    Ok(cfg)
 }
 
 /// Explicit `DOGE_CODE_CONFIG` path, if set to a non-empty value.
