@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -12,6 +11,7 @@ use super::reasoning::PartialReasoningConfig;
 use super::tool_routing::PartialToolRoutingConfig;
 
 use super::watch::PartialWatchConfig;
+use std::collections::HashMap;
 
 #[derive(Clone, Default, serde::Deserialize, PartialEq)]
 pub struct FileConfig {
@@ -44,8 +44,51 @@ pub struct FileConfig {
     pub context_budget: Option<PartialContextBudgetConfig>,
 }
 
-pub fn get_default_config_content() -> String {
-    r#"# Doge-Code Configuration
+/// Configuration load contract (v1):
+///
+/// - Missing config → runtime `Default` implementations, no filesystem mutation.
+/// - Existing + valid config → parse, merge, success.
+/// - Existing + invalid/unreadable config → startup error, file untouched.
+/// - `DOGE_CODE_CONFIG` set → that path alone is authoritative (no fallback).
+///
+/// Loading is a read path. It never creates, repairs, rewrites, deletes, or
+/// renames user configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigSourceKind {
+    ExplicitEnvironment,
+    User,
+    System,
+    Project,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSource {
+    path: PathBuf,
+    kind: ConfigSourceKind,
+}
+
+impl ConfigSource {
+    fn describe(&self) -> &'static str {
+        match self.kind {
+            ConfigSourceKind::ExplicitEnvironment => "explicit configuration",
+            ConfigSourceKind::User => "user configuration",
+            ConfigSourceKind::System => "system configuration",
+            ConfigSourceKind::Project => "project configuration",
+        }
+    }
+}
+
+/// Byte-exact content of the legacy auto-generated default config.
+///
+/// Previous dgc versions wrote this template to the global config path on
+/// first launch. It is invalid TOML (`project_instructions_file = null`) and
+/// carries stale defaults (e.g. `max_retries = 100`, stale `[rag]` section)
+/// that have drifted from the runtime `Default` implementations.
+///
+/// This constant exists solely for exact-match compatibility detection of
+/// untouched legacy files. It is never written to disk and never used as a
+/// source of runtime defaults.
+const LEGACY_GENERATED_DEFAULT: &str = r#"# Doge-Code Configuration
 # This file contains the default configuration for doge-code
 
 # OpenAI-compatible API settings
@@ -166,107 +209,248 @@ address = "127.0.0.1:8000"
 # enabled = true
 # transport = "stdio"
 # address = "server --foo bar"
-"#.to_string()
+"#;
+
+/// Returns true only for a byte-exact (modulo CRLF normalization) match with
+/// the known legacy auto-generated default content.
+///
+/// Substring or field-level heuristics are deliberately rejected: a
+/// user-edited file that merely contains `project_instructions_file = null`,
+/// `max_retries = 100`, or `[rag]` must not be classified as legacy.
+pub(crate) fn is_legacy_generated_default(raw: &str) -> bool {
+    fn normalize(input: &str) -> String {
+        input.replace("\r\n", "\n")
+    }
+    normalize(raw) == normalize(LEGACY_GENERATED_DEFAULT)
 }
 
-pub fn load_file_config() -> Result<FileConfig> {
+/// Test-only accessor for the exact legacy fixture bytes.
+#[cfg(test)]
+pub(crate) fn legacy_generated_default_content() -> &'static str {
+    LEGACY_GENERATED_DEFAULT
+}
+
+fn normalize_path_for_error(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
+    toml::from_str::<FileConfig>(raw).with_context(|| {
+        format!(
+            "failed to parse {} {}",
+            source.describe(),
+            normalize_path_for_error(&source.path)
+        )
+    })
+}
+
+/// Explicit `DOGE_CODE_CONFIG` path, if set to a non-empty value.
+///
+/// An empty value is treated as unset to avoid surprising startup failures
+/// from inherited empty environment entries.
+fn explicit_config_path() -> Option<PathBuf> {
+    std::env::var("DOGE_CODE_CONFIG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+/// Implicit global candidates in precedence order:
+///
+/// `XDG_CONFIG_HOME` (or `HOME/.config`) first, then each `XDG_CONFIG_DIRS`
+/// entry. The order is unchanged from previous versions; only the
+/// missing-vs-broken semantics are now explicit.
+///
+/// Empty `XDG_CONFIG_HOME`/`HOME` values are treated as unset: otherwise
+/// `Path::new("").join(...)` would produce a relative candidate that could
+/// accidentally match a repo-local file.
+fn implicit_candidate_paths() -> Vec<ConfigSource> {
     use std::env;
 
-    fn candidate_paths() -> Vec<PathBuf> {
-        let mut v = Vec::new();
-        if let Ok(p) = env::var("DOGE_CODE_CONFIG") {
-            v.push(PathBuf::from(p));
-        }
-        if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
-            v.push(Path::new(&xdg_home).join("doge-code/config.toml"));
-        } else if let Ok(home) = env::var("HOME") {
-            v.push(Path::new(&home).join(".config/doge-code/config.toml"));
-        }
-        if let Ok(dirs) = env::var("XDG_CONFIG_DIRS") {
-            for d in dirs.split(':') {
-                if !d.is_empty() {
-                    v.push(Path::new(d).join("doge-code/config.toml"));
-                }
-            }
-        }
-        v
+    let mut sources = Vec::new();
+    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME")
+        && !xdg_home.is_empty()
+    {
+        sources.push(ConfigSource {
+            path: Path::new(&xdg_home).join("doge-code/config.toml"),
+            kind: ConfigSourceKind::User,
+        });
+    } else if let Ok(home) = env::var("HOME")
+        && !home.is_empty()
+    {
+        sources.push(ConfigSource {
+            path: Path::new(&home).join(".config/doge-code/config.toml"),
+            kind: ConfigSourceKind::User,
+        });
     }
-
-    let candidate_paths = candidate_paths();
-
-    for p in &candidate_paths {
-        if p.exists() {
-            let s = fs::read_to_string(p)
-                .with_context(|| format!("read config file: {}", p.display()))?;
-            match toml::from_str::<FileConfig>(&s) {
-                Ok(cfg) => {
-                    info!(path=%p.display(), "loaded config file");
-                    return Ok(cfg);
-                }
-                Err(e) => {
-                    warn!(path=%p.display(), error=%e.to_string(), "parse config failed");
-                    continue;
-                }
+    if let Ok(dirs) = env::var("XDG_CONFIG_DIRS") {
+        for dir in dirs.split(':') {
+            if !dir.is_empty() {
+                sources.push(ConfigSource {
+                    path: Path::new(dir).join("doge-code/config.toml"),
+                    kind: ConfigSourceKind::System,
+                });
             }
         }
     }
+    sources
+}
 
-    if let Some(first_path) = candidate_paths.first() {
-        if let Some(parent) = first_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create config directory: {}", parent.display())
-            })?;
-        }
+fn handle_legacy_file(source: &ConfigSource) {
+    warn!(
+        path = %source.path.display(),
+        kind = source.describe(),
+        "Detected an untouched legacy auto-generated config with invalid/stale defaults; ignoring it and using current runtime defaults. Replace or remove the file to customize configuration."
+    );
+}
 
-        fs::write(first_path, get_default_config_content()).with_context(|| {
-            format!(
-                "failed to write default config file: {}",
-                first_path.display()
-            )
-        })?;
+/// True when a failed read means the path is genuinely absent.
+///
+/// `read_to_string` reports `NotFound` both for absent paths and for
+/// dangling symlinks, so consult metadata without following symlinks: if the
+/// metadata itself is missing, the candidate is absent; otherwise the entry
+/// exists but cannot be read and must be an error (fail-closed).
+fn is_truly_missing(path: &Path, read_err: &std::io::Error) -> bool {
+    read_err.kind() == std::io::ErrorKind::NotFound && path.symlink_metadata().is_err()
+}
 
-        info!(path=%first_path.display(), "created default config file");
+/// Test-convenience wrapper: kinds are approximated by position (first =
+/// user, rest = system) because injected paths carry no origin metadata.
+/// The production path (`load_file_config`) calls `load_from_sources`
+/// directly with the true kinds from `implicit_candidate_paths()`.
+#[cfg(test)]
+pub(crate) fn load_file_config_from_candidates(
+    explicit: Option<&Path>,
+    implicit: &[PathBuf],
+) -> Result<FileConfig> {
+    let sources: Vec<ConfigSource> = implicit
+        .iter()
+        .enumerate()
+        .map(|(index, path)| ConfigSource {
+            path: path.clone(),
+            kind: if index == 0 {
+                ConfigSourceKind::User
+            } else {
+                ConfigSourceKind::System
+            },
+        })
+        .collect();
+    load_from_sources(explicit, &sources)
+}
 
-        let s = fs::read_to_string(first_path)
-            .with_context(|| format!("read newly created config file: {}", first_path.display()))?;
-        match toml::from_str::<FileConfig>(&s) {
-            Ok(cfg) => {
-                info!(path=%first_path.display(), "loaded newly created config file");
-                return Ok(cfg);
+/// Core loader over resolved [`ConfigSource`]s.
+///
+/// - `explicit` is authoritative when `Some`: missing/unreadable/invalid is
+///   an error and implicit candidates are never consulted.
+/// - Each implicit candidate: genuinely missing → next candidate; present
+///   but unreadable/invalid → error (no fallback to lower-priority files).
+///   Missing is determined by the read itself (plus a symlink-aware
+///   metadata probe) rather than a prior `exists()` check, so dangling
+///   symlinks and unreadable parent directories are not misclassified as
+///   missing, and there is no exists-then-read TOCTOU.
+/// - Untouched legacy auto-generated content is treated as missing (warn and
+///   continue for implicit candidates; warn and use defaults for explicit).
+/// - No filesystem mutation is performed.
+fn load_from_sources(explicit: Option<&Path>, implicit: &[ConfigSource]) -> Result<FileConfig> {
+    if let Some(explicit_path) = explicit {
+        let source = ConfigSource {
+            path: explicit_path.to_path_buf(),
+            kind: ConfigSourceKind::ExplicitEnvironment,
+        };
+        let raw = match fs::read_to_string(&source.path) {
+            Ok(raw) => raw,
+            Err(e) if is_truly_missing(&source.path, &e) => {
+                anyhow::bail!(
+                    "explicit configuration file not found {} (DOGE_CODE_CONFIG is authoritative; no fallback is attempted)",
+                    normalize_path_for_error(&source.path)
+                );
             }
             Err(e) => {
-                warn!(path=%first_path.display(), error=%e.to_string(), "parse newly created config failed, using defaults");
-                return Ok(FileConfig::default());
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to read {} {}",
+                        source.describe(),
+                        normalize_path_for_error(&source.path)
+                    )
+                });
             }
+        };
+        if is_legacy_generated_default(&raw) {
+            handle_legacy_file(&source);
+            return Ok(FileConfig::default());
         }
+        let cfg = parse_config_str(&raw, &source)?;
+        info!(path=%source.path.display(), "loaded config file");
+        return Ok(cfg);
+    }
+
+    for source in implicit {
+        let raw = match fs::read_to_string(&source.path) {
+            Ok(raw) => raw,
+            Err(e) if is_truly_missing(&source.path, &e) => continue,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to read {} {}",
+                        source.describe(),
+                        normalize_path_for_error(&source.path)
+                    )
+                });
+            }
+        };
+        if is_legacy_generated_default(&raw) {
+            handle_legacy_file(source);
+            continue;
+        }
+        let cfg = parse_config_str(&raw, source)?;
+        info!(path=%source.path.display(), "loaded config file");
+        return Ok(cfg);
     }
 
     Ok(FileConfig::default())
 }
 
+pub fn load_file_config() -> Result<FileConfig> {
+    if let Some(explicit) = explicit_config_path() {
+        return load_from_sources(Some(&explicit), &[]);
+    }
+    let implicit = implicit_candidate_paths();
+    load_from_sources(None, &implicit)
+}
+
 pub fn load_project_config(project_root: &Path) -> Result<FileConfig> {
     let project_config_path = project_root.join(".doge").join("config.toml");
+    let source = ConfigSource {
+        path: project_config_path,
+        kind: ConfigSourceKind::Project,
+    };
 
-    if project_config_path.exists() {
-        let s = fs::read_to_string(&project_config_path).with_context(|| {
-            format!(
-                "read project config file: {}",
-                project_config_path.display()
-            )
-        })?;
-        match toml::from_str::<FileConfig>(&s) {
-            Ok(cfg) => {
-                info!(path=%project_config_path.display(), "loaded project config file");
-                Ok(cfg)
-            }
-            Err(e) => {
-                warn!(path=%project_config_path.display(), error=%e.to_string(), "parse project config failed");
-                Ok(FileConfig::default())
-            }
+    let raw = match fs::read_to_string(&source.path) {
+        Ok(raw) => raw,
+        Err(e) if is_truly_missing(&source.path, &e) => {
+            return Ok(FileConfig::default());
         }
-    } else {
-        Ok(FileConfig::default())
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "failed to read {} {}",
+                    source.describe(),
+                    normalize_path_for_error(&source.path)
+                )
+            });
+        }
+    };
+    // Defensive: the legacy template was only ever auto-generated at the
+    // global path, but a verbatim copy pasted into `.doge/config.toml` is
+    // still an untouched app-generated file rather than a user-owned broken
+    // config, so it receives the same warn-and-default treatment.
+    if is_legacy_generated_default(&raw) {
+        handle_legacy_file(&source);
+        return Ok(FileConfig::default());
     }
+    let cfg = parse_config_str(&raw, &source)?;
+    info!(path=%source.path.display(), "loaded project config file");
+    Ok(cfg)
 }
 
 impl std::fmt::Debug for FileConfig {

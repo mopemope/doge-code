@@ -161,8 +161,9 @@ impl AppConfig {
         let project_root = std::env::current_dir().context("resolve current dir")?;
         let git_root = get_git_repository_root(&project_root);
 
-        let project_cfg = load_project_config(&project_root).unwrap_or_default();
-        let file_cfg = load_file_config().unwrap_or_default();
+        let project_cfg =
+            load_project_config(&project_root).context("load project configuration")?;
+        let file_cfg = load_file_config().context("load user configuration")?;
 
         let provider = resolve_provider(
             cli.provider,
