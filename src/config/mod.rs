@@ -25,3 +25,7 @@ pub use loading::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod test;

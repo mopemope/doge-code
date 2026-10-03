@@ -1,6 +1,5 @@
 use crate::config::*;
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
 use tempfile::TempDir;
 
@@ -244,60 +243,6 @@ fn test_local_mcp_config_parses_toml() {
 }
 
 #[test]
-fn test_load_file_config_creates_default() {
-    let temp_dir = TempDir::new().unwrap();
-    let original_home = env::var("HOME").ok();
-    let original_xdg_config_home = env::var("XDG_CONFIG_HOME").ok();
-
-    // Set up test environment
-    unsafe {
-        std::env::set_var("HOME", temp_dir.path());
-        let config_home = temp_dir.path().join(".config");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-    }
-
-    // Remove any existing config file to test creation
-    let config_path = temp_dir
-        .path()
-        .join(".config")
-        .join("doge-code")
-        .join("config.toml");
-
-    // Load config (this should create the file)
-    let result = load_file_config();
-    assert!(result.is_ok());
-
-    // Check that the config file was created
-    assert!(
-        config_path.exists(),
-        "Config file should be created at {:?}",
-        config_path
-    );
-
-    // Check that the file contains content
-    let content = fs::read_to_string(&config_path).unwrap();
-    assert!(!content.is_empty(), "Config file should not be empty");
-    assert!(
-        content.contains("# Doge-Code Configuration"),
-        "Config should contain comment header"
-    );
-
-    // Restore original environment
-    unsafe {
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(xdg_home) = original_xdg_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", xdg_home);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-    }
-}
-
-#[test]
 fn test_execution_merge_project_wins() {
     let file = PartialExecutionConfig {
         mode: Some(ExecutionMode::Allowlist),
@@ -475,4 +420,274 @@ fn test_context_budget_config_parses_toml() {
     assert_eq!(budget.mode.as_deref(), Some("observe"));
     let resolved = merge_context_budget(None, Some(&budget));
     assert_eq!(resolved.mode, ContextBudgetMode::Observe);
+}
+
+// --- Configuration contract v1 regression tests ---
+//
+// Loading is a read path: missing config uses runtime defaults without
+// filesystem mutation, existing invalid config fails without overwrite, and
+// `DOGE_CODE_CONFIG` (injected explicit path) is authoritative.
+
+#[test]
+fn missing_global_config_uses_defaults_without_creating_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing_one = temp_dir.path().join("one").join("config.toml");
+    let missing_two = temp_dir.path().join("two").join("config.toml");
+
+    let cfg = load_file_config_from_candidates(None, &[missing_one.clone(), missing_two.clone()])
+        .expect("missing config uses defaults");
+    assert_eq!(cfg, FileConfig::default());
+
+    assert!(
+        !missing_one.exists(),
+        "missing config must not create {:?}",
+        missing_one
+    );
+    assert!(
+        !missing_two.exists(),
+        "missing config must not create {:?}",
+        missing_two
+    );
+    assert!(
+        !temp_dir.path().join("one").exists(),
+        "missing config must not create parent directories"
+    );
+}
+
+#[test]
+fn invalid_global_config_fails_without_overwrite() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let broken = "[llm\nmax_retries = ???\n";
+    fs::write(&config_path, broken).unwrap();
+    let before = fs::read(&config_path).unwrap();
+
+    let result = load_file_config_from_candidates(None, std::slice::from_ref(&config_path));
+    assert!(
+        result.is_err(),
+        "invalid config must fail, got {:?}",
+        result.ok()
+    );
+    let err = format!("{:#}", result.expect_err("invalid config must fail"));
+    assert!(
+        err.contains(&config_path.display().to_string()),
+        "error must include path, got: {err}"
+    );
+    assert!(
+        !err.contains("???"),
+        "error must not dump raw config contents, got: {err}"
+    );
+
+    let after = fs::read(&config_path).unwrap();
+    assert_eq!(before, after, "invalid config file must not be overwritten");
+}
+
+#[test]
+fn explicit_config_missing_is_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing_explicit = temp_dir.path().join("explicit-missing.toml");
+    let fallback = temp_dir.path().join("fallback.toml");
+    fs::write(&fallback, "model = \"fallback-model\"\n").unwrap();
+
+    let result =
+        load_file_config_from_candidates(Some(&missing_explicit), std::slice::from_ref(&fallback));
+    assert!(
+        result.is_err(),
+        "explicit missing path must error without fallback"
+    );
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert!(
+        err.contains(&missing_explicit.display().to_string()),
+        "error must include explicit path, got: {err}"
+    );
+}
+
+#[test]
+fn explicit_config_invalid_does_not_fall_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let explicit_path = temp_dir.path().join("explicit.toml");
+    let fallback_path = temp_dir.path().join("fallback.toml");
+    fs::write(&explicit_path, "[llm\nmax_retries = ???\n").unwrap();
+    fs::write(&fallback_path, "model = \"fallback-model\"\n").unwrap();
+    let before_explicit = fs::read(&explicit_path).unwrap();
+    let before_fallback = fs::read(&fallback_path).unwrap();
+
+    let result = load_file_config_from_candidates(
+        Some(&explicit_path),
+        std::slice::from_ref(&fallback_path),
+    );
+    assert!(
+        result.is_err(),
+        "explicit invalid config must error without using fallback"
+    );
+
+    assert_eq!(
+        fs::read(&explicit_path).unwrap(),
+        before_explicit,
+        "explicit file must not be overwritten"
+    );
+    assert_eq!(
+        fs::read(&fallback_path).unwrap(),
+        before_fallback,
+        "fallback file must not be touched"
+    );
+}
+
+#[test]
+fn invalid_implicit_high_priority_does_not_fall_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let high = temp_dir.path().join("high.toml");
+    let low = temp_dir.path().join("low.toml");
+    fs::write(&high, "[llm\nmax_retries = ???\n").unwrap();
+    fs::write(&low, "model = \"low-model\"\n").unwrap();
+    let before_high = fs::read(&high).unwrap();
+
+    let result = load_file_config_from_candidates(None, &[high.clone(), low.clone()]);
+    assert!(
+        result.is_err(),
+        "broken high-priority candidate must fail, not fall back"
+    );
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert!(
+        err.contains(&high.display().to_string()),
+        "error must include high-priority path, got: {err}"
+    );
+    assert_eq!(
+        fs::read(&high).unwrap(),
+        before_high,
+        "broken candidate must not be overwritten"
+    );
+}
+
+#[test]
+fn absent_high_priority_falls_through_to_next() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing = temp_dir.path().join("missing.toml");
+    let low = temp_dir.path().join("low.toml");
+    fs::write(&low, "model = \"low-model\"\n").unwrap();
+
+    let cfg = load_file_config_from_candidates(None, &[missing, low.clone()])
+        .expect("missing high-priority candidate falls through");
+    assert_eq!(cfg.model.as_deref(), Some("low-model"));
+}
+
+#[test]
+fn explicit_valid_config_loads_without_consulting_implicit() {
+    let temp_dir = TempDir::new().unwrap();
+    let explicit_path = temp_dir.path().join("explicit.toml");
+    let implicit_path = temp_dir.path().join("implicit.toml");
+    fs::write(&explicit_path, "model = \"explicit-model\"\n").unwrap();
+    fs::write(&implicit_path, "model = \"implicit-model\"\n").unwrap();
+
+    let cfg = load_file_config_from_candidates(
+        Some(&explicit_path),
+        std::slice::from_ref(&implicit_path),
+    )
+    .expect("explicit valid config loads");
+    assert_eq!(cfg.model.as_deref(), Some("explicit-model"));
+}
+
+#[test]
+fn legacy_exact_match_uses_current_defaults_without_mutation() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let legacy = crate::config::loading::legacy_generated_default_content();
+    assert!(
+        crate::config::loading::is_legacy_generated_default(legacy),
+        "fixture must be recognized as legacy"
+    );
+    // CRLF normalization is the only permitted equivalence.
+    let crlf = legacy.replace('\n', "\r\n");
+    assert!(
+        crate::config::loading::is_legacy_generated_default(&crlf),
+        "CRLF variant must be recognized as legacy"
+    );
+    fs::write(&config_path, legacy).unwrap();
+    let before = fs::read(&config_path).unwrap();
+
+    let cfg = load_file_config_from_candidates(None, std::slice::from_ref(&config_path))
+        .expect("untouched legacy config is ignored with current defaults");
+    assert_eq!(cfg, FileConfig::default());
+
+    assert_eq!(
+        fs::read(&config_path).unwrap(),
+        before,
+        "legacy file must not be rewritten, deleted, or renamed"
+    );
+
+    // Current runtime defaults apply, not stale template values.
+    let mut llm = LlmConfig::default();
+    if let Some(partial) = &cfg.llm {
+        llm.apply_partial(partial);
+    }
+    assert_eq!(llm.max_retries, LlmConfig::default().max_retries);
+    assert_eq!(llm.max_retries, 3);
+}
+
+#[test]
+fn modified_legacy_invalid_config_is_error_without_mutation() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let legacy = crate::config::loading::legacy_generated_default_content();
+    let mut modified = legacy.to_string();
+    modified.push_str("# user touched\n");
+    assert!(
+        !crate::config::loading::is_legacy_generated_default(&modified),
+        "edited legacy content must not be classified as untouched"
+    );
+    fs::write(&config_path, &modified).unwrap();
+    let before = fs::read(&config_path).unwrap();
+
+    let result = load_file_config_from_candidates(None, std::slice::from_ref(&config_path));
+    assert!(
+        result.is_err(),
+        "edited legacy invalid config must fail, not be silently ignored"
+    );
+
+    assert_eq!(
+        fs::read(&config_path).unwrap(),
+        before,
+        "user-edited file must not be overwritten"
+    );
+}
+
+#[test]
+fn missing_config_resolves_retry_defaults_from_runtime() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing = temp_dir.path().join("missing.toml");
+    let cfg = load_file_config_from_candidates(None, std::slice::from_ref(&missing))
+        .expect("missing config loads defaults");
+
+    let mut llm = LlmConfig::default();
+    if let Some(partial) = &cfg.llm {
+        llm.apply_partial(partial);
+    }
+    assert_eq!(llm.max_retries, LlmConfig::default().max_retries);
+    assert_eq!(llm.max_retries, 3);
+    assert_ne!(
+        llm.max_retries, 100,
+        "stale template max_retries=100 must never apply on fresh installs"
+    );
+}
+
+#[test]
+fn dangling_symlink_candidate_is_error_not_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("nonexistent-target.toml");
+    let link = temp_dir.path().join("link.toml");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    #[cfg(not(unix))]
+    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+    let result = load_file_config_from_candidates(None, std::slice::from_ref(&link));
+    assert!(
+        result.is_err(),
+        "dangling symlink must fail, not be skipped as missing"
+    );
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert!(
+        err.contains(&link.display().to_string()),
+        "error must include symlink path, got: {err}"
+    );
 }
