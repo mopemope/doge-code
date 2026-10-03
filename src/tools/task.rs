@@ -9,10 +9,6 @@ use serde_json::json;
 
 pub const TASK_TOOL_NAME: &str = "task";
 
-/// Hard iteration bound for a single sub-agent run. Sub-agent work should be
-/// focused; 40 iterations is ample for exploration tasks.
-pub const SUBAGENT_MAX_ITERS: usize = 40;
-
 /// Character budget for the summary returned to the main agent.
 pub const SUBAGENT_SUMMARY_BUDGET_CHARS: usize = 4_000;
 
@@ -85,7 +81,14 @@ mod tests {
         let required = def.function.parameters["required"]
             .as_array()
             .expect("required array");
-        assert_eq!(required.len(), 2);
+        assert_eq!(required, &vec![json!("description"), json!("prompt")]);
+        let keys: Vec<_> = def.function.parameters["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["description", "prompt"]);
         assert!(
             def.function.parameters["properties"]
                 .get("prompt")

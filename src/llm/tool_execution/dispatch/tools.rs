@@ -25,21 +25,56 @@ pub async fn task(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result
     )
     .await?;
 
-    let value = json!({
-        "ok": true,
-        "summary": run.summary,
-        "files_examined": run.files_examined,
-        "iterations": run.iterations,
-        "tool_calls": run.tool_calls,
-    });
+    let value = bounded_task_value(&run)?;
     Ok(ToolOutput {
         value: value.clone(),
         is_success: true,
         result_summary: format!(
-            "Sub-agent '{}' finished in {} iterations ({} tool calls)",
-            params.description, run.iterations, run.tool_calls
+            "Sub-agent '{}' {:?} in {} iterations ({} tool calls, stop: {:?})",
+            params.description, run.status, run.iterations, run.tool_calls, run.stop_reason
         ),
     })
+}
+
+/// Bound serialized JSON at the source while preserving status/reason fields.
+/// Individual character caps do not cover JSON escaping or combined file lists.
+fn bounded_task_value(
+    run: &crate::llm::tool_execution::subagent::SubagentRun,
+) -> Result<serde_json::Value> {
+    let mut value = json!({
+        "ok": true,
+        "summary": run.summary,
+        "status": run.status,
+        "stop_reason": run.stop_reason,
+        "files_examined_truncated": run.files_examined_truncated,
+        "files_examined": run.files_examined,
+        "iterations": run.iterations,
+        "tool_calls": run.tool_calls,
+    });
+    let mut summary_budget = run.summary.chars().count();
+    while serde_json::to_string(&value)?.chars().count()
+        > crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS
+    {
+        if let Some(files) = value["files_examined"].as_array_mut()
+            && !files.is_empty()
+        {
+            files.pop();
+            value["files_examined_truncated"] = json!(true);
+            continue;
+        }
+        // The fixed metadata plus a short summary always fit the tool budget.
+        // Keep the shared truncation marker rather than dropping the summary.
+        summary_budget = summary_budget.saturating_div(2).max(80);
+        value["summary"] =
+            json!(crate::tools::budget::head_truncate(&run.summary, summary_budget).text);
+        anyhow::ensure!(
+            summary_budget > 80
+                || serde_json::to_string(&value)?.chars().count()
+                    <= crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS,
+            "task metadata exceeds output budget"
+        );
+    }
+    Ok(value)
 }
 
 pub async fn execute_process(
@@ -872,5 +907,43 @@ pub async fn observation_read(
                 result_summary: e.to_string(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod task_output_tests {
+    use super::*;
+    use crate::llm::tool_execution::subagent::{
+        SubagentRun, SubagentRunStatus, SubagentStopReason,
+    };
+
+    #[test]
+    fn test_serialized_task_budget_preserves_partial_metadata() {
+        let run = SubagentRun {
+            summary: "fact\n\"\\".repeat(500),
+            files_examined: (0..32)
+                .map(|i| format!("path-{i}-{}", "\"\\".repeat(140)))
+                .collect(),
+            files_examined_truncated: false,
+            iterations: 2,
+            tool_calls: 3,
+            status: SubagentRunStatus::Partial,
+            stop_reason: Some(SubagentStopReason::ToolCallBudget),
+        };
+        let value = bounded_task_value(&run).expect("bounded output");
+        let serialized = serde_json::to_string(&value).expect("serialize");
+        assert!(serialized.chars().count() <= crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS);
+        assert_eq!(
+            crate::llm::message_utils::truncate_tool_output(serialized.clone(), "task"),
+            serialized
+        );
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["status"], "partial");
+        assert_eq!(value["stop_reason"], "tool_call_budget");
+        assert_eq!(value["files_examined_truncated"], true);
+        assert!(value["files_examined"].as_array().expect("files").len() < 32);
+        assert_eq!(value["iterations"], 2);
+        assert_eq!(value["tool_calls"], 3);
+        assert!(!value["summary"].as_str().expect("summary").is_empty());
     }
 }
