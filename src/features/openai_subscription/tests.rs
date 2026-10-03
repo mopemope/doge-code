@@ -412,6 +412,79 @@ async fn mock_client(
     client.subscription = Some(handle);
     (server, temp, client)
 }
+
+#[tokio::test]
+async fn subscription_refusal_and_malformed_mutation_share_preflight() -> Result<()> {
+    let tool_defs = vec![crate::tools::write::tool_def()];
+    for refused in [false, true] {
+        let call = json!({"type":"function_call","id":"fc","call_id":"call","namespace":"dgc","name":"fs_write","arguments":"{\"path\":\"/fixture/keep.txt\"}","status":"completed"});
+        let mut output = vec![call];
+        if refused {
+            output.push(json!({"type":"message","id":"refusal","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"declined"}]}));
+        }
+        let wire = format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed","response":response(output)})
+        );
+        let (_server, _credentials, client) = mock_client(wire).await;
+        let error = crate::llm::tool_execution::requests::chat_tools_once(
+            &client,
+            "test-model",
+            &[user("fixture")],
+            &tool_defs,
+            None,
+            crate::config::ReasoningMode::Off,
+            Some(CancellationToken::new()),
+            None,
+        )
+        .await
+        .expect_err("invalid mutation must not reach dispatch");
+        assert_eq!(
+            error.downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(&if refused {
+                crate::llm::LlmErrorKind::Incomplete
+            } else {
+                crate::llm::LlmErrorKind::Client
+            })
+        );
+        assert_eq!(
+            client.get_total_tokens_used(),
+            16,
+            "provider-reported generation remains accounted"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscription_context_overflow_keeps_raw_error_and_common_recovery_type() -> Result<()> {
+    let wire = "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"fixture overflow\"}}}\n\n".to_string();
+    let (_server, _credentials, client) = mock_client(wire).await;
+    let error = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "test-model",
+        &[user("fixture")],
+        &[],
+        None,
+        crate::config::ReasoningMode::Off,
+        Some(CancellationToken::new()),
+        None,
+    )
+    .await
+    .expect_err("overflow");
+    assert_eq!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(&crate::llm::LlmErrorKind::ContextLengthExceeded)
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<ProviderError>()
+            .expect("raw provider error")
+            .code,
+        "context_length_exceeded"
+    );
+    Ok(())
+}
 #[tokio::test]
 async fn tools_path_uses_responses_with_no_api_key() -> Result<()> {
     let wire = format!(

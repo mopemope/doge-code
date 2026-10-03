@@ -189,57 +189,38 @@ impl Executor {
         Ok(())
     }
 
-    /// Explicit failure-path history handling (no delta guessing).
-    /// Subscription turns: the Responses checkpoint already persisted
-    /// completed and interrupted results, so restore the outer buffer from
-    /// the session. API-key turns: keep the failed user instruction in the
-    /// conversation and persist it.
-    async fn restore_history_after_failure(&self, instruction: &str) {
-        let is_subscription = self
-            .client
+    /// Restore the provider-independent checkpoint, including interrupted calls.
+    async fn restore_history_after_failure(&self) -> Result<()> {
+        let manager = self
+            .tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
             .as_ref()
-            .is_some_and(|client| client.is_subscription());
-        if is_subscription {
-            let persisted = (|| -> Result<Vec<crate::llm::types::ChatMessage>> {
-                let session = self
-                    .tools
-                    .get_session_manager_wrapper()
-                    .get_session_manager()
-                    .clone()
-                    .and_then(|manager| {
-                        manager
-                            .lock()
-                            .ok()
-                            .and_then(|mgr| mgr.current_session.clone())
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("No current session"))?;
-                Ok(crate::llm::durable_conversation_messages(
-                    session.conversation_messages()?,
-                ))
-            })();
-            match persisted {
-                Ok(messages) => {
-                    let mut history = self.conversation_history.lock().await;
-                    history.replace(messages);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not restore Responses checkpoint");
-                }
-            }
-        } else {
-            {
-                let mut history = self.conversation_history.lock().await;
-                history.push_user(instruction);
-            }
-            if let Err(e) = self.persist_outer_history().await {
-                tracing::warn!(error = %e, "failed to persist failed exec instruction");
-            }
-        }
+            .context("No session manager for failure recovery")?;
+        let messages = {
+            let session_manager = crate::utils::safe_std_lock(manager, "session_manager")?;
+            let session = session_manager
+                .current_session
+                .as_ref()
+                .context("No current session for failure recovery")?;
+            crate::llm::durable_conversation_messages(session.conversation_messages()?)
+        };
+        self.conversation_history.lock().await.replace(messages);
+        Ok(())
     }
 
     /// Runs the executor with the given instruction.
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
     pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
+        self.run_with_cancel(instruction, json, None).await
+    }
+
+    pub async fn run_with_cancel(
+        &mut self,
+        instruction: &str,
+        json: bool,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
         // Build this turn's request from the durable snapshot. The outer
         // history stays untouched until the canonical result commits.
         let msgs = self.build_request_messages(instruction).await;
@@ -275,7 +256,7 @@ impl Executor {
             &self.tools,
             msgs,
             None,
-            None, // No cancellation token for now
+            cancel,
             &self.cfg,
             None, // No TuiExecutor for exec mode
             attribution,
@@ -289,13 +270,20 @@ impl Executor {
             .map(|c| c.get_total_prompt_tokens_used())
             .unwrap_or(0);
 
+        let res = match res {
+            Ok((updated_messages, final_msg)) => {
+                match self.commit_canonical_history(&updated_messages).await {
+                    Ok(()) => Ok((updated_messages, final_msg)),
+                    Err(error) => Err(error.context("failed to persist exec conversation history")),
+                }
+            }
+            Err(error) => Err(error),
+        };
+
         match res {
             Ok((updated_messages, final_msg)) => {
                 // Canonical result: replace the outer buffer and persist the
                 // whole durable conversation (never a count-based delta).
-                if let Err(e) = self.commit_canonical_history(&updated_messages).await {
-                    tracing::error!(?e, "Failed to persist exec conversation history");
-                }
 
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
@@ -358,7 +346,9 @@ impl Executor {
                 }
             }
             Err(e) => {
-                self.restore_history_after_failure(instruction).await;
+                if let Err(recovery_error) = self.restore_history_after_failure().await {
+                    tracing::error!(%recovery_error, "could not restore canonical checkpoint");
+                }
                 tracing::error!("LLM execution failed: {}", e);
                 if json {
                     let output = serde_json::json!({
@@ -387,6 +377,7 @@ impl Executor {
                         tracing::warn!("Failed to send desktop notification: {}", e);
                     }
                 }
+                return Err(e);
             }
         }
 
@@ -691,7 +682,9 @@ impl Executor {
                 Ok(final_msg.content)
             }
             Err(e) => {
-                self.restore_history_after_failure(instruction).await;
+                if let Err(recovery_error) = self.restore_history_after_failure().await {
+                    tracing::error!(%recovery_error, "could not restore canonical checkpoint");
+                }
                 Err(e)
             }
         }

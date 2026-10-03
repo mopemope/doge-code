@@ -58,6 +58,7 @@ pub async fn dispatch_tool_call(runtime: &ToolRuntime<'_>, call: &ToolCall) -> R
         });
     }
 
+    super::arguments::validate_builtin_arguments(name, &args_val)?;
     dispatch_inner(runtime, name, &args_val).await
 }
 
@@ -76,6 +77,7 @@ pub async fn dispatch_subagent_tool_call(
     let name = call.function.name.as_str();
     let args_val: serde_json::Value = serde_json::from_str(&call.function.arguments)
         .map_err(|e| anyhow!("invalid tool args: {e}"))?;
+    super::arguments::validate_builtin_arguments(name, &args_val)?;
     dispatch_inner(runtime, name, &args_val).await
 }
 

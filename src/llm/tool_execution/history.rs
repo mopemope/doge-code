@@ -72,10 +72,10 @@ impl HistoryManager {
         }
     }
 
-    /// Save completed Responses tool batches before the next network request.
+    /// Save canonical tool history for every provider before the next operation.
     /// Failed/cancelled turns retain pending results instead of reverting to old UI history.
-    pub fn checkpoint_subscription(&self) -> Result<()> {
-        if !self.client.is_subscription() || self.messages.is_empty() {
+    pub fn checkpoint(&self) -> Result<()> {
+        if self.messages.is_empty() {
             return Ok(());
         }
         let Some(manager) = self
@@ -883,8 +883,8 @@ impl HistoryManager {
     }
 
     pub fn into_messages(mut self) -> Vec<ChatMessage> {
-        if let Err(error) = self.checkpoint_subscription() {
-            warn!(%error, "could not checkpoint Responses history before transfer");
+        if let Err(error) = self.checkpoint() {
+            warn!(%error, "could not checkpoint canonical history before transfer");
         }
         std::mem::take(&mut self.messages)
     }
@@ -1066,17 +1066,7 @@ impl HistoryManager {
         protected_suffix: &[ChatMessage],
         compacted: ChatMessage,
     ) -> Vec<ChatMessage> {
-        const TAIL_BUDGET_CHARS: usize = 8_000;
-        const MAX_SYSTEM_MESSAGES: usize = 8;
-        const MAX_SYSTEM_MESSAGE_CHARS: usize = 4_000;
-
-        let mut new_history: Vec<ChatMessage> = Self::prune_system_messages(
-            prefix.iter().filter(|m| m.role == "system"),
-            MAX_SYSTEM_MESSAGES,
-            MAX_SYSTEM_MESSAGE_CHARS,
-        );
-        new_history.push(compacted);
-        new_history.extend(Self::tail_messages(prefix, TAIL_BUDGET_CHARS));
+        let mut new_history = Self::merge_compacted_history(prefix, compacted);
         new_history.extend(protected_suffix.iter().cloned());
         new_history
     }
@@ -1098,11 +1088,20 @@ impl HistoryManager {
         const MAX_SYSTEM_MESSAGES: usize = 8;
         const MAX_SYSTEM_MESSAGE_CHARS: usize = 4_000;
 
-        let mut new_history: Vec<ChatMessage> = Self::prune_system_messages(
-            original.iter().filter(|m| m.role == "system"),
-            MAX_SYSTEM_MESSAGES,
+        // The first system message is the complete authority/project prompt.
+        // Its rules must survive byte-for-byte; only dynamic interventions
+        // are subject to warning deduplication and size/count limits.
+        let authority = original.iter().position(|m| m.role == "system");
+        let mut new_history: Vec<ChatMessage> = authority
+            .map(|index| vec![original[index].clone()])
+            .unwrap_or_default();
+        new_history.extend(Self::prune_system_messages(
+            original.iter().enumerate().filter_map(|(index, message)| {
+                (message.role == "system" && Some(index) != authority).then_some(message)
+            }),
+            MAX_SYSTEM_MESSAGES.saturating_sub(new_history.len()),
             MAX_SYSTEM_MESSAGE_CHARS,
-        );
+        ));
         new_history.push(compacted);
         new_history.extend(Self::tail_messages(original, TAIL_BUDGET_CHARS));
         new_history
@@ -1220,8 +1219,8 @@ impl HistoryManager {
 
 impl Drop for HistoryManager {
     fn drop(&mut self) {
-        if let Err(error) = self.checkpoint_subscription() {
-            warn!(%error, "could not checkpoint Responses history on exit");
+        if let Err(error) = self.checkpoint() {
+            warn!(%error, "could not checkpoint canonical history on exit");
         }
     }
 }
@@ -1280,6 +1279,45 @@ mod tests {
         let client =
             crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
         HistoryManager::new(client, messages, None, fs, config)
+    }
+
+    #[test]
+    fn test_compaction_preserves_authority_and_project_rules_across_repeated_merges() {
+        let authority = format!(
+            "{}\nAGENTS: never overwrite manual work",
+            "日本語 system authority\n".repeat(800)
+        );
+        let mut messages = vec![make_msg("system", &authority), make_msg("user", "task")];
+        for i in 0..3 {
+            messages.push(make_msg(
+                "system",
+                &format!("warning-{i}: {}", "dynamic".repeat(1000)),
+            ));
+            messages =
+                HistoryManager::merge_compacted_history(&messages, make_msg("user", "summary"));
+            assert_eq!(messages[0].content.as_deref(), Some(authority.as_str()));
+            let protected = vec![
+                make_assistant_with_tool_calls("unseen", "pending"),
+                make_tool_msg("unseen", "exact unseen"),
+            ];
+            let merged = HistoryManager::merge_compacted_with_protected_suffix(
+                &messages,
+                &protected,
+                make_msg("user", "summary"),
+            );
+            assert_eq!(merged[0].content.as_deref(), Some(authority.as_str()));
+            assert_eq!(
+                merged.last().and_then(|message| message.content.as_deref()),
+                Some("exact unseen")
+            );
+            assert!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == "system")
+                    .count()
+                    <= 8
+            );
+        }
     }
 
     #[test]

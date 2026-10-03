@@ -250,13 +250,15 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
 
         debug!("llm chat_once response");
 
-        let body: Result<ChatResponse, _> = serde_json::from_str(&response_text);
+        let mut parsed_response_text = response_text.as_str();
+        let body: Result<ChatResponse, _> = serde_json::from_str(parsed_response_text);
         let body = match body {
             Ok(b) => Ok(b),
             Err(e) => {
                 // Try to extract JSON from text if direct parsing failed
                 if let Some(extracted) = extract_json_from_text(&response_text) {
                     debug!("Extracted JSON from response text");
+                    parsed_response_text = extracted;
                     serde_json::from_str::<ChatResponse>(extracted).map_err(|e2| {
                         anyhow::anyhow!(
                             "Failed to parse extracted JSON: {} (original error: {})",
@@ -277,8 +279,20 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                     client.record_usage(usage);
                 }
 
-                if let Some(msg) = body.choices.into_iter().next().map(|c| c.message) {
-                    return Ok(msg);
+                if let Some(choice) = body.choices.into_iter().next() {
+                    crate::llm::types::validate_completion(choice.finish_reason.as_deref(), false)?;
+                    anyhow::ensure!(choice.message.role == "assistant", LlmErrorKind::Client);
+                    // Refusal is optional on compatible endpoints; explicit
+                    // refusal must never become replacement file content.
+                    if serde_json::from_str::<serde_json::Value>(parsed_response_text)
+                        .ok()
+                        .and_then(|v| v.pointer("/choices/0/message/refusal").cloned())
+                        .is_some_and(|value| !value.is_null())
+                    {
+                        return Err(anyhow::anyhow!(LlmErrorKind::Incomplete)
+                            .context("provider refused the response"));
+                    }
+                    return Ok(choice.message);
                 }
                 return Err(anyhow::anyhow!(LlmErrorKind::Client).context("no choices returned"));
             }

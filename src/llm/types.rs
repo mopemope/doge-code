@@ -68,6 +68,20 @@ pub struct ChoiceMessage {
 pub struct Choice {
     pub index: usize,
     pub message: ChoiceMessage,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// Some compatible endpoints omit finish_reason. Preserve that compatibility,
+/// but never accept an explicitly incomplete or mismatched generation.
+pub(crate) fn validate_completion(reason: Option<&str>, has_tools: bool) -> anyhow::Result<()> {
+    match reason {
+        None => Ok(()),
+        Some("stop") if !has_tools => Ok(()),
+        Some("tool_calls") if has_tools => Ok(()),
+        _ => Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Incomplete)
+            .context("provider did not return a complete response")),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -113,6 +127,22 @@ pub struct ChatResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_completion_gate_rejects_incomplete_and_mismatched_responses() {
+        for reason in ["length", "content_filter", "", "unknown"] {
+            assert!(validate_completion(Some(reason), false).is_err());
+            assert!(validate_completion(Some(reason), true).is_err());
+        }
+        assert!(validate_completion(Some("stop"), false).is_ok());
+        assert!(validate_completion(Some("tool_calls"), true).is_ok());
+        assert!(validate_completion(Some("stop"), true).is_err());
+        assert!(validate_completion(Some("tool_calls"), false).is_err());
+        assert!(
+            validate_completion(None, true).is_ok(),
+            "legacy compatible endpoint"
+        );
+    }
 
     #[test]
     fn tool_call_function_defaults_arguments_to_empty_object() {

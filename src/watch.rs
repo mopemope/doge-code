@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -17,6 +18,61 @@ use crate::llm::types::ChatMessage;
 use crate::utils;
 
 use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct WatchEntry {
+    active: bool,
+    finished: Option<Instant>,
+}
+
+type WatchEntries = Arc<Mutex<HashMap<PathBuf, WatchEntry>>>;
+
+/// Release single-flight ownership even after errors or a dropped task.
+struct WatchReservation {
+    entries: WatchEntries,
+    path: PathBuf,
+}
+
+impl WatchReservation {
+    fn acquire(entries: &WatchEntries, path: &Path, rate_limit: Duration) -> Result<Option<Self>> {
+        let mut locked = utils::safe_std_lock(entries, "watch_reservations")?;
+        let entry = locked.entry(path.to_path_buf()).or_default();
+        if entry.active
+            || entry
+                .finished
+                .is_some_and(|time| time.elapsed() < rate_limit)
+        {
+            return Ok(None);
+        }
+        entry.active = true;
+        Ok(Some(Self {
+            entries: entries.clone(),
+            path: path.to_path_buf(),
+        }))
+    }
+}
+
+impl Drop for WatchReservation {
+    fn drop(&mut self) {
+        if let Ok(mut entries) = self.entries.lock()
+            && let Some(entry) = entries.get_mut(&self.path)
+        {
+            entry.active = false;
+            entry.finished = Some(Instant::now());
+        }
+    }
+}
+
+fn watch_tools(cfg: &AppConfig) -> Result<crate::tools::FsTools> {
+    let store = crate::session::SessionStore::new(cfg.project_root.join(".doge/sessions"))?;
+    let mut manager = crate::session::SessionManager::with_store(store);
+    manager.create_session(Some("watch".into()))?;
+    Ok(crate::tools::FsTools::new(
+        Arc::new(tokio::sync::RwLock::new(None)),
+        Arc::new(cfg.clone()),
+    )
+    .with_session_manager(Arc::new(Mutex::new(manager))))
+}
 
 // doge: Please translate the Japanese code comments in this file to English.
 pub async fn run_watch_mode(cfg: AppConfig) -> Result<()> {
@@ -30,7 +86,8 @@ pub async fn run_watch_mode(cfg: AppConfig) -> Result<()> {
     let model = cfg.model.clone();
 
     // Use Arc<Mutex<>> for thread-safe access to file processing tracking
-    let last_processed = Arc::new(Mutex::new(HashMap::<PathBuf, Instant>::new()));
+    let last_processed: WatchEntries = Arc::new(Mutex::new(HashMap::new()));
+    let tools = watch_tools(&cfg)?;
 
     let (tx, rx) = channel();
 
@@ -73,6 +130,7 @@ pub async fn run_watch_mode(cfg: AppConfig) -> Result<()> {
                             model.clone(),
                             last_processed_clone.clone(),
                             cfg_clone.clone(),
+                            tools.clone(),
                         );
                         tokio::spawn(async move {
                             if let Err(e) = debounce_task.await {
@@ -229,15 +287,19 @@ async fn write_watch_backup(
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs();
-    let backup_file_name = format!("{}.bak.{}", file_name, timestamp);
+    let backup_file_name = format!("{}.bak.{}.{}", file_name, timestamp, uuid::Uuid::now_v7());
     let backup_path = backup_dir.join(backup_file_name);
 
     fs::create_dir_all(&backup_dir)
         .await
         .with_context(|| format!("create backup directory {}", backup_dir.display()))?;
-    fs::write(&backup_path, original_content)
-        .await
-        .with_context(|| format!("write backup {}", backup_path.display()))?;
+    let mut backup = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)
+        .await?;
+    backup.write_all(original_content.as_bytes()).await?;
+    backup.sync_all().await?;
 
     let keep = cfg.watch_config.backup_keep.unwrap_or(5);
     if keep > 0 {
@@ -288,39 +350,24 @@ async fn debounce_file_change(
     path: PathBuf,
     llm_client: OpenAIClient,
     model: String,
-    last_processed: Arc<Mutex<HashMap<PathBuf, Instant>>>,
+    last_processed: WatchEntries,
     cfg: AppConfig,
+    tools: crate::tools::FsTools,
 ) -> Result<()> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("watch target {}", path.display()))?;
+    let rate_limit = Duration::from_millis(cfg.watch_config.rate_limit_duration_ms.unwrap_or(2000));
+    let Some(_reservation) = WatchReservation::acquire(&last_processed, &path, rate_limit)? else {
+        info!(file = %path.display(), "watch event coalesced; current edits remain protected");
+        return Ok(());
+    };
     // Use debounce delay from configuration
     let debounce_delay = cfg.watch_config.debounce_delay_ms.unwrap_or(500);
     // Small delay to allow for more changes to accumulate
     sleep(Duration::from_millis(debounce_delay)).await;
 
-    // Check rate limiting to avoid excessive API calls
-    let rate_limit_duration = cfg.watch_config.rate_limit_duration_ms.unwrap_or(2000);
-    {
-        let last_processed_lock = utils::safe_std_lock(&*last_processed, "last_processed")?;
-        if let Some(last_time) = last_processed_lock.get(&path)
-            && last_time.elapsed() < Duration::from_millis(rate_limit_duration)
-        {
-            // Use configurable rate limit
-            info!("Rate limited: skipping processing for {:?}", path);
-            return Ok(());
-        }
-    }
-
-    // Actually handle the file change
-    if let Err(e) = handle_file_change(&llm_client, &model, path.clone(), &cfg).await {
-        error!("Error handling file change: {}", e);
-    } else {
-        // Update the last processed time
-        {
-            let mut last_processed_lock = utils::safe_std_lock(&*last_processed, "last_processed")?;
-            last_processed_lock.insert(path, Instant::now());
-        }
-    }
-
-    Ok(())
+    handle_file_change(&llm_client, &model, path, &cfg, &tools).await
 }
 
 async fn handle_file_change(
@@ -328,18 +375,15 @@ async fn handle_file_change(
     model: &str,
     path: PathBuf,
     cfg: &AppConfig,
+    tools: &crate::tools::FsTools,
 ) -> Result<()> {
     if !path.is_file() {
         return Ok(());
     }
 
-    let content = match fs::read_to_string(&path).await {
-        Ok(content) => content,
-        Err(e) => {
-            warn!("Failed to read file {}: {}", path.display(), e);
-            return Ok(());
-        }
-    };
+    crate::tools::scope::ensure_in_scope(&path, cfg, &[])?;
+    let before = crate::tools::mutation::read_text_snapshot_async(&path).await?;
+    let content = before.content_or_empty().to_owned();
 
     // Use AI comment pattern from configuration (as a literal string, not regex)
     let ai_comment_pattern = cfg
@@ -371,10 +415,7 @@ async fn handle_file_change(
                     return Ok(());
                 }
 
-                if let Some(backup_path) = write_watch_backup(&path, &content, cfg).await? {
-                    info!("Backup saved to {}", backup_path.display());
-                }
-                fs::write(&path, new_content).await?;
+                commit_watch_candidate(&path, &before, &new_content, cfg, tools).await?;
                 info!("File {} updated.", path.display());
 
                 Notification::new()
@@ -388,6 +429,52 @@ async fn handle_file_change(
         }
     }
 
+    Ok(())
+}
+
+async fn commit_watch_candidate(
+    path: &Path,
+    before: &crate::tools::mutation::MutationSnapshot,
+    candidate: &str,
+    cfg: &AppConfig,
+    tools: &crate::tools::FsTools,
+) -> Result<()> {
+    use crate::tools::mutation::{
+        MutationTargetReceipt, build_receipt, commit_text_candidate, mutation_changed,
+    };
+    if !mutation_changed(before, candidate) {
+        return Ok(());
+    }
+    // Reject an already stale response before creating its backup. The shared
+    // writer repeats the check immediately before commit.
+    let current = crate::tools::mutation::read_text_snapshot_async(path).await?;
+    anyhow::ensure!(
+        current.state_matches(before),
+        "watch conflict: file changed while model was pending; manual edits preserved; save again to retry"
+    );
+    if let Some(backup_path) = write_watch_backup(path, before.content_or_empty(), cfg).await? {
+        info!("Backup saved to {}", backup_path.display());
+    }
+    let after = commit_text_candidate(path, before, candidate).await?;
+    let receipt = build_receipt(
+        crate::provenance::ChangeKind::FileWrite,
+        path.to_path_buf(),
+        before.clone(),
+        after,
+        MutationTargetReceipt::File,
+    );
+    let report = tools
+        .finalize_mutation(
+            receipt,
+            crate::tools::FinalizeMutationOptions {
+                record_undo: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    for warning in report.warnings {
+        warn!(%warning, "watch mutation tracking warning");
+    }
     Ok(())
 }
 
@@ -448,4 +535,164 @@ async fn execute_llm_task(
     }
     // Otherwise, return the whole content
     Ok(result_content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::mutation::read_text_snapshot_async;
+
+    fn fixture() -> (tempfile::TempDir, AppConfig, crate::tools::FsTools) {
+        let temp = tempfile::tempdir().expect("watch fixture");
+        let cfg = AppConfig {
+            project_root: temp.path().canonicalize().expect("root"),
+            ..Default::default()
+        };
+        let tools = watch_tools(&cfg).expect("watch tools");
+        (temp, cfg, tools)
+    }
+
+    #[test]
+    fn test_single_flight_releases_on_drop_and_limits_feedback_events() {
+        let entries = WatchEntries::default();
+        let path = Path::new("fixture.rs");
+        let reservation = WatchReservation::acquire(&entries, path, Duration::ZERO)
+            .expect("acquire")
+            .expect("owner");
+        assert!(
+            WatchReservation::acquire(&entries, path, Duration::ZERO)
+                .expect("duplicate")
+                .is_none()
+        );
+        drop(reservation);
+        assert!(
+            WatchReservation::acquire(&entries, path, Duration::from_secs(60))
+                .expect("feedback")
+                .is_none()
+        );
+        assert!(
+            WatchReservation::acquire(&entries, path, Duration::ZERO)
+                .expect("retry")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_conflict_preserves_manual_edit_without_backup_or_tracking() -> Result<()> {
+        let (_temp, cfg, tools) = fixture();
+        let path = cfg.project_root.join("source.rs");
+        fs::write(&path, "original").await?;
+        let before = read_text_snapshot_async(&path).await?;
+        fs::write(&path, "manual edit during inference").await?;
+        let error = commit_watch_candidate(&path, &before, "stale candidate", &cfg, &tools)
+            .await
+            .expect_err("stale response");
+        assert!(error.to_string().contains("manual edits preserved"));
+        assert_eq!(
+            fs::read_to_string(&path).await?,
+            "manual edit during inference"
+        );
+        assert!(tools.undo_stack.read().await.is_empty());
+        assert!(!resolve_backup_root(&cfg).expect("backup root").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watch_commit_tracks_change_and_supports_undo_noop_is_untracked() -> Result<()> {
+        let (_temp, cfg, tools) = fixture();
+        let path = cfg.project_root.join("source.rs");
+        fs::write(&path, "original").await?;
+        let before = read_text_snapshot_async(&path).await?;
+        commit_watch_candidate(&path, &before, "original", &cfg, &tools).await?;
+        assert!(tools.undo_stack.read().await.is_empty());
+        commit_watch_candidate(&path, &before, "candidate", &cfg, &tools).await?;
+        assert_eq!(fs::read_to_string(&path).await?, "candidate");
+        let entry = tools
+            .undo_stack
+            .read()
+            .await
+            .peek_last()
+            .expect("undo receipt");
+        assert!(entry.change_id.is_some(), "committed provenance");
+        crate::tools::undo::undo(&tools).await?;
+        assert_eq!(fs::read_to_string(&path).await?, "original");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watch_backups_are_unique_within_same_timestamp() -> Result<()> {
+        let (_temp, mut cfg, _tools) = fixture();
+        cfg.watch_config.backup_keep = Some(10);
+        let path = cfg.project_root.join("source.rs");
+        fs::write(&path, "fixture").await?;
+        let first = write_watch_backup(&path, "first", &cfg)
+            .await?
+            .expect("first backup");
+        let second = write_watch_backup(&path, "second", &cfg)
+            .await?
+            .expect("second backup");
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(first).await?, "first");
+        assert_eq!(fs::read_to_string(second).await?, "second");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watch_text_completion_length_cannot_become_replacement() -> Result<()> {
+        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+        let (_temp, cfg, tools) = fixture();
+        let path = cfg.project_root.join("source.rs");
+        let source = "// AI!: update\nfn original() {}\n";
+        fs::write(&path, source).await?;
+        let server = ServerBuilder::new()
+            .bind_addr(([127, 0, 0, 1], 0).into())
+            .run()?;
+        server.expect(Expectation::matching(request::method_path("POST", "/v1/chat/completions")).times(1)
+            .respond_with(json_encoded(serde_json::json!({"choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"fn partial() {}"}}]}))));
+        let client = OpenAIClient::new(server.url_str("/v1"), "fixture-only")?;
+        assert!(
+            handle_file_change(&client, "fixture", path.clone(), &cfg, &tools)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).await?, source);
+        assert!(tools.undo_stack.read().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watch_refusal_in_extracted_json_preserves_source() -> Result<()> {
+        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+        for fenced in [false, true] {
+            let (_temp, cfg, tools) = fixture();
+            let path = cfg.project_root.join("source.rs");
+            let original = "// AI!: update\nfn original() {}\n";
+            fs::write(&path, original).await?;
+            let server = ServerBuilder::new()
+                .bind_addr(([127, 0, 0, 1], 0).into())
+                .run()?;
+            let json = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"fn replacement() {}","refusal":"declined"}}]}).to_string();
+            let body = if fenced {
+                format!("```json\n{json}\n```")
+            } else {
+                format!("Fixture prefix\n{json}")
+            };
+            server.expect(
+                Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                    .times(1)
+                    .respond_with(status_code(200).body(body)),
+            );
+            let client = OpenAIClient::new(server.url_str("/v1"), "fixture-only")?;
+            let error = handle_file_change(&client, "fixture", path.clone(), &cfg, &tools)
+                .await
+                .expect_err("refusal must not become a replacement");
+            assert_eq!(
+                error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(&crate::llm::LlmErrorKind::Incomplete)
+            );
+            assert_eq!(fs::read_to_string(&path).await?, original);
+            assert!(tools.undo_stack.read().await.is_empty());
+        }
+        Ok(())
+    }
 }
