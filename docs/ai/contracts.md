@@ -33,6 +33,16 @@ Seen historical results should be offloaded through the Observation Store
 before conversation compaction. Never replace an unseen tool result with a
 non-recoverable clearing stub merely to satisfy a local token estimate.
 
+Observation GC is reachability-based, never capacity eviction. After
+successful compaction and after Observation Store restore, retain only the
+observations still referenced by canonical messages (every role's content,
+`tool_calls[*].function.arguments`, and `provider_state.output` string leaves,
+matched against known store ids). Observation content is never a GC root,
+unknown `obs-*` strings never enter the live set, and `unseen_tool_results`
+is untouched. Never rewind `next_id`, never reuse removed ids, and never
+evict reachable entries for capacity. Empty snapshots are valid state changes
+and must be persisted so GC'd entries do not resurrect after restart.
+
 ## Prompt Cache Telemetry
 
 Prompt-cache metrics are observational only.

@@ -55,6 +55,21 @@ pub struct Observation {
     pub original_message_json_bytes: usize,
 }
 
+/// GC result for unreachable observations (runtime telemetry only).
+///
+/// Never converted to tokens; reports exact entry/byte deltas so tests,
+/// tracing, and future evaluation observe precisely what was reclaimed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservationGcReport {
+    pub before_entries: usize,
+    pub after_entries: usize,
+    pub removed_entries: usize,
+
+    pub before_content_bytes: usize,
+    pub after_content_bytes: usize,
+    pub removed_content_bytes: usize,
+}
+
 /// Conversation-owned bounded store of offloaded tool results.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObservationStore {
@@ -103,6 +118,33 @@ impl ObservationStore {
     /// unique across the conversation lifetime.
     pub fn remove(&mut self, id: &str) -> bool {
         self.entries.remove(id).is_some()
+    }
+
+    /// Mark-and-sweep primitive: retain only `live_ids`, drop everything
+    /// else. The store knows no history semantics; the caller (HistoryManager
+    /// + canonical messages) decides the live set.
+    ///
+    /// `next_id` is never rewound and removed ids are never reused.
+    pub fn retain_referenced(&mut self, live_ids: &BTreeSet<String>) -> ObservationGcReport {
+        let before_entries = self.entries.len();
+        let before_content_bytes = self.stored_content_bytes();
+        let mut removed_content_bytes = 0usize;
+        for (id, obs) in self.entries.iter() {
+            if !live_ids.contains(id) {
+                removed_content_bytes = removed_content_bytes.saturating_add(obs.content.len());
+            }
+        }
+        self.entries.retain(|id, _| live_ids.contains(id));
+        let after_entries = self.entries.len();
+        let after_content_bytes = self.stored_content_bytes();
+        ObservationGcReport {
+            before_entries,
+            after_entries,
+            removed_entries: before_entries.saturating_sub(after_entries),
+            before_content_bytes,
+            after_content_bytes,
+            removed_content_bytes,
+        }
     }
 
     /// Allocate the next conversation-local opaque id without inserting.
@@ -490,5 +532,81 @@ mod tests {
         let v = serde_json::json!({});
         let store: ObservationStore = serde_json::from_value(v).unwrap();
         assert!(store.is_empty());
+    }
+
+    fn insert_content(store: &mut ObservationStore, call: &str, content: &str) -> String {
+        store
+            .insert(call.into(), "fs_read".into(), content.into(), 100)
+            .expect("insert")
+    }
+
+    #[test]
+    fn gc_removes_unreferenced_entries() {
+        let mut store = ObservationStore::new();
+        let obs1 = insert_content(&mut store, "c1", "content-one");
+        let obs2 = insert_content(&mut store, "c2", "content-two");
+        let obs3 = insert_content(&mut store, "c3", "content-three");
+        let obs2_bytes = store.get(&obs2).expect("obs2").content.len();
+        let live: BTreeSet<String> = [obs1.clone(), obs3.clone()].into_iter().collect();
+        let report = store.retain_referenced(&live);
+        assert!(store.contains(&obs1));
+        assert!(!store.contains(&obs2));
+        assert!(store.contains(&obs3));
+        assert_eq!(report.before_entries, 3);
+        assert_eq!(report.after_entries, 2);
+        assert_eq!(report.removed_entries, 1);
+        assert_eq!(report.removed_content_bytes, obs2_bytes);
+        assert_eq!(
+            report.before_content_bytes,
+            report.after_content_bytes + report.removed_content_bytes
+        );
+    }
+
+    #[test]
+    fn gc_never_reuses_ids() {
+        let mut store = ObservationStore::new();
+        let first = insert_content(&mut store, "c1", "aaa");
+        assert_eq!(first, "obs-000001");
+        let second = insert_content(&mut store, "c2", "bbb");
+        assert_eq!(second, "obs-000002");
+        let live: BTreeSet<String> = [second.clone()].into_iter().collect();
+        let report = store.retain_referenced(&live);
+        assert_eq!(report.removed_entries, 1);
+        let third = insert_content(&mut store, "c3", "ccc");
+        assert_eq!(third, "obs-000003", "GC must not rewind next_id");
+    }
+
+    #[test]
+    fn gc_empty_live_set_removes_all_entries() {
+        let mut store = ObservationStore::new();
+        insert_content(&mut store, "c1", "aaa");
+        insert_content(&mut store, "c2", "bbb");
+        let next_before = store.next_id();
+        let report = store.retain_referenced(&BTreeSet::new());
+        assert_eq!(report.removed_entries, 2);
+        assert!(store.is_empty());
+        assert_eq!(store.next_id(), next_before, "next_id must not rewind");
+        let again = insert_content(&mut store, "c3", "ccc");
+        assert_eq!(again, "obs-000003");
+    }
+
+    #[test]
+    fn gc_preserves_all_live_entries() {
+        let mut store = ObservationStore::new();
+        let a = insert_content(&mut store, "c1", "alpha");
+        let b = insert_content(&mut store, "c2", "beta");
+        let before_bytes = store.stored_content_bytes();
+        let before_next = store.next_id();
+        let live: BTreeSet<String> = [a.clone(), b.clone()].into_iter().collect();
+        let report = store.retain_referenced(&live);
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(report.removed_content_bytes, 0);
+        assert_eq!(report.before_entries, 2);
+        assert_eq!(report.after_entries, 2);
+        assert_eq!(report.before_content_bytes, before_bytes);
+        assert_eq!(report.after_content_bytes, before_bytes);
+        assert_eq!(store.get(&a).unwrap().content, "alpha");
+        assert_eq!(store.get(&b).unwrap().content, "beta");
+        assert_eq!(store.next_id(), before_next);
     }
 }
