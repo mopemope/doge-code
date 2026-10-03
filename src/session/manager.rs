@@ -56,14 +56,52 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Resolve a (possibly partial) session ID and load it.
-    ///
-    /// Returns the loaded session data so callers can inspect or display it.
-    pub fn resolve_and_load_session(&mut self, id: &str) -> Result<SessionData> {
+    /// Load a session by (possibly partial) ID without making it current.
+    /// Used to decode/validate a resume/switch target before committing, so
+    /// a malformed target can never leave `current_session` and the runtime
+    /// conversation pointing at different sessions.
+    pub fn peek_session(&self, id: &str) -> Result<SessionData> {
         let full_id = self.store.resolve_id_prefix(id)?;
-        let session = self.store.load(&full_id)?;
+        Ok(self.store.load(&full_id)?)
+    }
+
+    /// Validate a switch target's conversation, then commit it as current.
+    /// On decode failure the active session is left untouched (fail closed,
+    /// never a partial conversation). Returns the committed session plus its
+    /// decoded canonical messages.
+    pub fn switch_to_validated_session(
+        &mut self,
+        id: &str,
+    ) -> Result<(SessionData, Vec<crate::llm::types::ChatMessage>)> {
+        let session = self.peek_session(id)?;
+        let messages = session.conversation_messages()?;
         self.current_session = Some(session.clone());
-        Ok(session)
+        Ok((session, messages))
+    }
+
+    /// Validate the latest session (optionally skipping one ID, e.g. an
+    /// eagerly-created empty session) and commit it as current. Returns
+    /// `None` when no session exists. Decode failure leaves the active
+    /// session untouched.
+    pub fn load_latest_validated_excluding(
+        &mut self,
+        exclude_id: Option<&str>,
+    ) -> Result<Option<(SessionData, Vec<crate::llm::types::ChatMessage>)>> {
+        let summaries = self.store.list_with_stats()?;
+        let target = summaries
+            .iter()
+            .map(|s| &s.meta.id)
+            .find(|id| Some(id.as_str()) != exclude_id)
+            .cloned();
+        match target {
+            Some(id) => {
+                let session = self.store.load(&id)?;
+                let messages = session.conversation_messages()?;
+                self.current_session = Some(session.clone());
+                Ok(Some((session, messages)))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Get the current session ID, if any.
@@ -111,10 +149,12 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Clear the current session's conversation
+    /// Clear the current session's conversation plus the conversation-owned
+    /// Observation Store and unseen tool results. Session identity, metrics,
+    /// and provenance flags are preserved.
     pub fn clear_current_session_conversation(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
-            session.clear_conversation();
+            session.clear_conversation_context();
             self.store.save(session)?;
         }
         Ok(())
@@ -158,24 +198,23 @@ impl SessionManager {
             "Updating session with history"
         );
         if let Some(ref mut session) = self.current_session {
-            // Clear existing conversation
-            session.clear_conversation();
+            // Durable projection first: request-scoped system messages never
+            // persist; provider state, tool calls, and tool results survive.
+            let durable = crate::llm::durable_conversation_messages(history.iter().cloned());
 
-            // Find the first user prompt in the history to set session title if not set
-            let first_user_prompt = history
+            // Find the first user prompt in the durable history to set
+            // session title if not set
+            let first_user_prompt = durable
                 .iter()
                 .find(|m| {
                     m.role == "user" && m.content.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
                 })
                 .and_then(|m| m.content.clone());
 
-            // Add each message to the session conversation
-            for msg in history {
-                // Convert serde_json::Value to HashMap<String, serde_json::Value>
-                if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(msg) {
-                    session.add_conversation_entry(map.into_iter().collect());
-                }
-            }
+            // Atomically replace the stored conversation: every message is
+            // encoded before the stored payload is swapped, so a failure
+            // never leaves a partially rewritten conversation.
+            session.replace_conversation_messages(&durable)?;
 
             // If the session title is default (auto-generated) and we have a first user prompt, override it
             if session.meta.title_is_default

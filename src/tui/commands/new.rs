@@ -5,7 +5,6 @@ use crate::llm::OpenAIClient;
 use crate::session::SessionManager;
 use crate::tools::FsTools;
 use crate::tui::commands::core::TuiExecutor;
-use crate::tui::commands::prompt::build_system_prompt;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -57,52 +56,9 @@ impl TuiExecutor {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
-        let client = OpenAIClient::from_config(&cfg)?;
-        // Load system prompt
-        let sys_prompt = build_system_prompt(&cfg);
-        let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;
-        let mut history = crate::llm::ChatHistory::new(history_max_tokens, Some(sys_prompt));
-        history.append_system_once();
-
         // Initialize session manager
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
-
-        // Create a default session if none exists
-        {
-            let mut session_mgr = session_manager.lock().unwrap();
-            if session_mgr.current_session.is_none() {
-                session_mgr.create_session(None)?;
-            }
-        }
-
-        // Pass session manager to tools
-        let tools = tools.with_session_manager(session_manager.clone());
-
-        Ok(Self {
-            cfg: cfg.clone(),
-            tools,
-            repomap,
-            client,
-            history,
-            ui_tx: None, // This will be set by TuiApp later
-            jobs: JobManager::new(),
-            last_user_prompt: None,
-            deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),
-            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
-                cfg.get_context_window_size().unwrap_or(100_000) as usize,
-                None,
-            ))), // Initialize conversation history
-            session_manager,
-
-            custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
-                &cfg.project_root,
-            ),
-            hook_manager: {
-                let mut hook_manager = HookManager::default();
-                hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
-                hook_manager
-            },
-        })
+        Self::construct_with_session_manager(cfg, repomap, tools, session_manager)
     }
 
     pub fn new_with_repomap(
@@ -121,15 +77,25 @@ impl TuiExecutor {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
 
-        let client = OpenAIClient::from_config(&cfg)?;
-        // Load system prompt
-        let sys_prompt = build_system_prompt(&cfg);
-        let history_max_tokens = cfg.get_context_window_size().unwrap_or(12_000) as usize;
-        let mut history = crate::llm::ChatHistory::new(history_max_tokens, Some(sys_prompt));
-        history.append_system_once();
-
         // Initialize session manager
         let session_manager = Arc::new(Mutex::new(SessionManager::new()?));
+        Self::construct_with_session_manager(cfg, repomap, tools, session_manager)
+    }
+
+    /// Shared tail of both constructors, also usable by tests with an
+    /// isolated session store. Ensures a current session exists, wires it
+    /// into the tools, and starts with an empty durable conversation buffer
+    /// (system prompt injection is `run_agent_loop`'s per-turn job).
+    pub(crate) fn construct_with_session_manager(
+        cfg: crate::config::AppConfig,
+        repomap: Arc<RwLock<Option<RepoMap>>>,
+        tools: FsTools,
+        session_manager: Arc<Mutex<SessionManager>>,
+    ) -> Result<Self> {
+        let client = OpenAIClient::from_config(&cfg)?;
+        // The durable conversation buffer owns no system prompt and no token
+        // budget: `run_agent_loop` injects the default system prompt per turn,
+        // and context reduction lives in HistoryManager / the governor.
 
         // Create a default session if none exists
         {
@@ -147,15 +113,11 @@ impl TuiExecutor {
             tools,
             repomap,
             client,
-            history,
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
             last_user_prompt: None,
             deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),
-            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new(
-                cfg.get_context_window_size().unwrap_or(100_000) as usize,
-                None,
-            ))), // Initialize conversation history
+            conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new())), // Initialize conversation history
             session_manager,
 
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(

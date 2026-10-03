@@ -85,7 +85,11 @@ impl HistoryManager {
         else {
             return Ok(());
         };
-        let (mut messages, observations, mut unseen) = self.persistable();
+        let (persisted, observations, mut unseen) = self.persistable();
+        // Durable projection only: request-scoped system messages never
+        // persist. Provider state, assistant function calls, function call
+        // outputs, and unseen-result protection are preserved untouched.
+        let mut messages = crate::llm::durable_conversation_messages(persisted);
         let answered: BTreeSet<_> = messages
             .iter()
             .filter(|m| m.role == "tool")

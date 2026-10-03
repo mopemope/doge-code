@@ -72,54 +72,37 @@ impl Executor {
 
         let client = OpenAIClient::from_config(&cfg)?;
 
-        // Initialize conversation history with model-aware context sizing.
-        // Fall back to a large default if no model context size is known.
-        let max_tokens = cfg.get_context_window_size().unwrap_or(100_000) as usize;
-        let conversation_history =
-            Arc::new(tokio::sync::Mutex::new(ChatHistory::new(max_tokens, None)));
+        // Initialize the durable conversation buffer. It owns no system
+        // prompt and no token budget; context reduction lives in
+        // HistoryManager / the Context Budget Governor.
+        let conversation_history = Arc::new(tokio::sync::Mutex::new(ChatHistory::new()));
 
         // If resume is requested, load the specified (or latest) session and
-        // populate history. Prefixes are resolved via resolve_and_load_session.
+        // populate history. Targets are decoded and validated before they
+        // become current: a malformed target fails loudly instead of
+        // committing a session whose conversation cannot be restored.
         if let Some(resume_id) = cfg.resume.as_deref() {
-            let (conversation_to_resume, session_id) = {
+            let resumed = {
                 let mut session_mgr = session_manager
                     .lock()
                     .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
                 match resume_id {
-                    "latest" => {
-                        session_mgr.load_latest_session()?;
-                        match &session_mgr.current_session {
-                            Some(session) => (
-                                Some(session.conversation.clone()),
-                                Some(session.meta.id.clone()),
-                            ),
-                            None => (None, None),
-                        }
-                    }
-                    id => {
-                        let session = session_mgr.resolve_and_load_session(id)?;
-                        (
-                            Some(session.conversation.clone()),
-                            Some(session.meta.id.clone()),
-                        )
-                    }
+                    "latest" => session_mgr.load_latest_validated_excluding(None)?,
+                    id => Some(
+                        session_mgr
+                            .switch_to_validated_session(id)
+                            .with_context(|| format!("Failed to resume session '{id}'"))?,
+                    ),
                 }
             };
 
-            match (conversation_to_resume, session_id) {
-                (Some(conversation), Some(id)) => {
-                    info!("Resuming session: {}", id);
+            match resumed {
+                Some((session, messages)) => {
+                    info!("Resuming session: {}", session.meta.id);
                     let mut history = conversation_history.lock().await;
-                    for entry in conversation {
-                        if let Ok(value) = serde_json::to_value(entry)
-                            && let Ok(msg) =
-                                serde_json::from_value::<crate::llm::types::ChatMessage>(value)
-                        {
-                            history.append_message(msg);
-                        }
-                    }
+                    history.replace(crate::llm::durable_conversation_messages(messages));
                 }
-                (None, None) => {
+                None => {
                     // "latest" with no pre-existing sessions: start fresh.
                     info!("No sessions to resume; starting a new session");
                     let mut session_mgr = session_manager
@@ -127,7 +110,6 @@ impl Executor {
                         .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
                     session_mgr.create_session(None)?;
                 }
-                _ => unreachable!("conversation and session id are always set together"),
             }
         }
 
@@ -145,40 +127,16 @@ impl Executor {
         })
     }
 
-    /// Runs the executor with the given instruction.
-    /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
-    pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
-        // ... existing code ...
-        // Build initial messages with system prompt and user instruction
-        let mut msgs = Vec::new();
-
-        // Load system prompt
+    /// Build one turn's request without mutating the outer history:
+    /// default system prompt + durable conversation snapshot + the current
+    /// user instruction.
+    async fn build_request_messages(
+        &self,
+        instruction: &str,
+    ) -> Vec<crate::llm::types::ChatMessage> {
+        let snapshot = self.conversation_history.lock().await.snapshot();
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
-        // Note: With SmartChatHistory, we usually inject system prompt into it.
-        // But run_agent_loop expects raw messages?
-        // Actually, run_agent_loop takes `messages: Vec<ChatMessage>`.
-        // So we build logic here.
-
-        let mut history_guard: tokio::sync::MutexGuard<'_, ChatHistory> =
-            self.conversation_history.lock().await;
-        // Build messages explicitly to help inference
-        let history_msgs = history_guard.build_messages();
-        msgs.extend(history_msgs);
-        // Inject system prompt into history if not present?
-        // history_guard.system_prompt is private? No, we set it in new.
-        // But we didn't set it in new().
-        // Let's set it now.
-        // Actually, cleaner to just use append_system_once but we can't change the field.
-        // Let's just create a temporary vector for this run since exec is stateless for history mostly?
-        // "Add existing conversation history (should be empty for exec mode...)"
-
-        // Wait, if it's purely one-shot, we can just push to history.
-        // But ChatHistory handles system prompt specially.
-        // For now, let's just use the history messages + system prompt.
-
-        // Actually, I should probably configure ChatHistory with system prompt in `run` if possible?
-        // Or just prepend system prompt manually to the list passed to run_agent_loop.
-
+        let mut msgs = Vec::with_capacity(snapshot.len() + 2);
         msgs.push(llm::types::ChatMessage {
             provider_state: None,
             role: "system".into(),
@@ -186,9 +144,7 @@ impl Executor {
             tool_calls: vec![],
             tool_call_id: None,
         });
-
-        // Extended above
-
+        msgs.extend(snapshot);
         msgs.push(llm::types::ChatMessage {
             provider_state: None,
             role: "user".into(),
@@ -196,10 +152,97 @@ impl Executor {
             tool_calls: vec![],
             tool_call_id: None,
         });
+        msgs
+    }
 
-        // We update history with user message for consistency, though exec is one-shot.
-        history_guard.append_user(instruction);
-        drop(history_guard); // Free lock before loop
+    /// Commit the agent loop's canonical result: project to durable messages,
+    /// replace the outer buffer as-is, and persist the whole durable
+    /// conversation to the session. Never a count/index-based delta, so a
+    /// compacted (shorter, reordered) history commits exactly.
+    async fn commit_canonical_history(
+        &self,
+        updated_messages: &[crate::llm::types::ChatMessage],
+    ) -> Result<()> {
+        let durable = crate::llm::durable_conversation_messages(updated_messages.iter().cloned());
+        {
+            let mut history = self.conversation_history.lock().await;
+            history.replace(durable);
+        }
+        self.persist_outer_history().await
+    }
+
+    /// Persist the current outer conversation to the session store so a later
+    /// `--resume` sees exactly this conversation.
+    async fn persist_outer_history(&self) -> Result<()> {
+        let snapshot = self.conversation_history.lock().await.snapshot();
+        if let Some(manager) = self
+            .tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .clone()
+        {
+            let mut sm = manager
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
+            sm.update_current_session_with_history(&snapshot)?;
+        }
+        Ok(())
+    }
+
+    /// Explicit failure-path history handling (no delta guessing).
+    /// Subscription turns: the Responses checkpoint already persisted
+    /// completed and interrupted results, so restore the outer buffer from
+    /// the session. API-key turns: keep the failed user instruction in the
+    /// conversation and persist it.
+    async fn restore_history_after_failure(&self, instruction: &str) {
+        let is_subscription = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.is_subscription());
+        if is_subscription {
+            let persisted = (|| -> Result<Vec<crate::llm::types::ChatMessage>> {
+                let session = self
+                    .tools
+                    .get_session_manager_wrapper()
+                    .get_session_manager()
+                    .clone()
+                    .and_then(|manager| {
+                        manager
+                            .lock()
+                            .ok()
+                            .and_then(|mgr| mgr.current_session.clone())
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("No current session"))?;
+                Ok(crate::llm::durable_conversation_messages(
+                    session.conversation_messages()?,
+                ))
+            })();
+            match persisted {
+                Ok(messages) => {
+                    let mut history = self.conversation_history.lock().await;
+                    history.replace(messages);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not restore Responses checkpoint");
+                }
+            }
+        } else {
+            {
+                let mut history = self.conversation_history.lock().await;
+                history.push_user(instruction);
+            }
+            if let Err(e) = self.persist_outer_history().await {
+                tracing::warn!(error = %e, "failed to persist failed exec instruction");
+            }
+        }
+    }
+
+    /// Runs the executor with the given instruction.
+    /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
+    pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
+        // Build this turn's request from the durable snapshot. The outer
+        // history stays untouched until the canonical result commits.
+        let msgs = self.build_request_messages(instruction).await;
 
         // Missing client means the agent never starts: record no directive
         // (matches TUI busy/missing-key semantics).
@@ -248,59 +291,10 @@ impl Executor {
 
         match res {
             Ok((updated_messages, final_msg)) => {
-                // Update conversation history with new interactions
-                {
-                    let mut history_guard = self.conversation_history.lock().await;
-
-                    // We sent `msgs` in. `updated_messages` contains `msgs` + new messages.
-                    // We need to find where the new messages start.
-                    // The initial len was `msgs.len()`.
-                    // But wait, `run_agent_loop` might compact history?
-                    // If compaction happened, `updated_messages` might look totally different.
-                    // Ideally, we should just trust `updated_messages` as the new truth?
-                    // But `ChatHistory` optimizes storage.
-                    // For now, let's append the *delta*.
-                    // The safest way given compaction possibilities is to check if the history was compacted.
-                    // But for `exec` mode, let's assume standard appending for now as compaction handles its own history replacement if implemented deep.
-                    // Actually, `run_agent_loop` logic handles compaction internally on the `messages` vec.
-                    // So `updated_messages` IS the current valid state of the conversation.
-
-                    // Ideally we would replace `ChatHistory`'s content, but it might be easier to just append the difference
-                    // if we assume no compaction for short workflows, OR we leverage `set_messages` if it exists.
-                    // `ChatHistory` usually doesn't expose internal vec replacement easily to avoid invalid states.
-                    // Let's iterate and append new messages.
-                    // Original count:
-                    // Note: `msgs` was consumed/cloned. We don't have the original `msgs` count variable easily available after await unless we saved it.
-                    // But wait, we pushed System + User.
-                    // Let's assume we want to capture the Assistant steps + Result.
-
-                    // Check if we can identify new messages.
-                    // A simple heuristic: append messages that are NOT in the original set?
-                    // Or, simpler: we know we added 2 messages (System + User).
-                    // So anything after index `initial_msg_count` are new.
-
-                    // Note: `msgs` is moved into `run_agent_loop`. We can't query it.
-                    // But we know how many we added?
-                    // We took `history_msgs` + System + User.
-                    // Let's just blindly append the *last* few messages? No.
-
-                    // Correct approach:
-                    // 1. We know `history_guard` has the *old* history + user prompt (we appended it).
-                    // 2. `updated_messages` has *old* history + user prompt + system prompt(maybe) + new steps.
-                    // We generally just want to append the *assistant* responses and *tool* outputs.
-
-                    let existing_count = history_guard.build_messages().len();
-                    // Verify if `updated_messages` contains the pre-existing ones.
-                    // If `updated_messages` is shorter, compaction likely happened.
-
-                    if updated_messages.len() > existing_count {
-                        // Append the delta
-                        for msg in updated_messages.iter().skip(existing_count) {
-                            // Skip system prompt if it was injected internally and duplicates?
-                            // Just appending is safer to preserve the agent's view.
-                            history_guard.append_message(msg.clone());
-                        }
-                    }
+                // Canonical result: replace the outer buffer and persist the
+                // whole durable conversation (never a count-based delta).
+                if let Err(e) = self.commit_canonical_history(&updated_messages).await {
+                    tracing::error!(?e, "Failed to persist exec conversation history");
                 }
 
                 // Execute hooks after the agent loop completes
@@ -364,6 +358,7 @@ impl Executor {
                 }
             }
             Err(e) => {
+                self.restore_history_after_failure(instruction).await;
                 tracing::error!("LLM execution failed: {}", e);
                 if json {
                     let output = serde_json::json!({
@@ -660,34 +655,9 @@ impl Executor {
             return Err(anyhow::anyhow!("OPENAI_API_KEY not set"));
         }
 
-        let mut msgs = Vec::new();
-        let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
-
-        {
-            let history_guard = self.conversation_history.lock().await;
-            msgs.extend(history_guard.build_messages());
-        }
-
-        msgs.push(llm::types::ChatMessage {
-            provider_state: None,
-            role: "system".into(),
-            content: Some(sys_prompt),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-
-        msgs.push(llm::types::ChatMessage {
-            provider_state: None,
-            role: "user".into(),
-            content: Some(instruction.to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-
-        {
-            let mut history_guard = self.conversation_history.lock().await;
-            history_guard.append_user(instruction);
-        }
+        // Request from the durable snapshot; the outer history is untouched
+        // until the canonical result commits.
+        let msgs = self.build_request_messages(instruction).await;
 
         let attribution = match crate::tools::provenance::record_directive_observed(
             &self.tools,
@@ -703,7 +673,7 @@ impl Executor {
             }
         };
 
-        let (updated_messages, final_msg) = llm::run_agent_loop(
+        let res = llm::run_agent_loop(
             self.client.as_ref().expect("LLM client is not initialized"),
             &self.cfg.model,
             &self.tools,
@@ -714,19 +684,17 @@ impl Executor {
             None,
             attribution,
         )
-        .await?;
-
-        {
-            let mut history_guard = self.conversation_history.lock().await;
-            let existing_count = history_guard.build_messages().len();
-            if updated_messages.len() > existing_count {
-                for msg in updated_messages.iter().skip(existing_count) {
-                    history_guard.append_message(msg.clone());
-                }
+        .await;
+        match res {
+            Ok((updated_messages, final_msg)) => {
+                self.commit_canonical_history(&updated_messages).await?;
+                Ok(final_msg.content)
+            }
+            Err(e) => {
+                self.restore_history_after_failure(instruction).await;
+                Err(e)
             }
         }
-
-        Ok(final_msg.content)
     }
 
     /// Add a hook to be executed after each instruction
@@ -743,7 +711,7 @@ impl Executor {
     pub async fn with_history(self, messages: Vec<llm::types::ChatMessage>) -> Self {
         {
             let mut history = self.conversation_history.lock().await;
-            history.overwrite_messages(messages);
+            history.replace(crate::llm::durable_conversation_messages(messages));
         }
         self
     }
@@ -1171,6 +1139,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_executor_resume_malformed_fails_closed() {
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let seeded_id = seed_typed_session(&project_root, &[exec_msg("user", Some("ok"))]);
+        // Corrupt one entry on disk.
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to open store");
+        let mut session = store.load(&seeded_id).expect("load");
+        let mut bad = HashMap::new();
+        bad.insert("role".to_string(), serde_json::json!(123));
+        session.add_conversation_entry(bad);
+        store.save(&session).expect("save corrupt");
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            resume: Some(seeded_id),
+            ..Default::default()
+        };
+        match Executor::new(cfg).await {
+            Ok(_) => panic!("malformed entry must fail resume, never partially load"),
+            Err(err) => assert!(
+                format!("{err:?}").contains("index 1"),
+                "error chain must name the entry index: {err:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
     async fn test_executor_resume_unknown_id_fails() {
         let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let cfg = AppConfig {
@@ -1250,4 +1246,261 @@ mod tests {
     // - Mocking the OpenAIClient to simulate successful LLM responses.
     // - Mocking the FsTools to simulate tool calls.
     // However, mocking these components would require more complex setup or dependency injection.
+
+    fn exec_msg(role: &str, content: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: role.to_string(),
+            content: content.map(str::to_string),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    fn tool_invocation_msg(id: &str) -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: Some(id.to_string()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "fs_read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+            tool_call_id: None,
+        }
+    }
+
+    fn tool_result_msg(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: "tool".into(),
+            content: Some(content.to_string()),
+            tool_calls: vec![],
+            tool_call_id: Some(id.to_string()),
+        }
+    }
+
+    /// Seed a session with fully typed messages (tool pairs, order kept).
+    fn seed_typed_session(project_root: &Path, messages: &[ChatMessage]) -> String {
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to create session store");
+        let mut session = store.create().expect("Failed to create session");
+        session
+            .replace_conversation_messages(messages)
+            .expect("Failed to seed conversation");
+        store.save(&session).expect("Failed to save session");
+        session.meta.id
+    }
+
+    fn assistant_done_response() -> serde_json::Value {
+        serde_json::json!({
+            "id": "test",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "done"}}
+            ]
+        })
+    }
+
+    fn start_server() -> Option<httptest::Server> {
+        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
+            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
+            return None;
+        }
+        // Fail loudly on bind errors: silently skipping would turn these
+        // into vacuous green tests with zero coverage.
+        Some(
+            httptest::ServerBuilder::new()
+                .run()
+                .expect("httptest server must start"),
+        )
+    }
+
+    fn exec_cfg_with_server(project_root: &Path, server: &httptest::Server) -> AppConfig {
+        AppConfig {
+            project_root: project_root.to_path_buf(),
+            api_key: Some("test-key".to_string()),
+            base_url: format!("{}/", server.url_str("")),
+            model: "gpt-test".to_string(),
+            no_repomap: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exec_resume_restores_exact_history() {
+        // A saved tool-call pair must reach the next turn in order, not just
+        // as a bag containing one user message.
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let seeded = vec![
+            exec_msg("user", Some("read the file")),
+            tool_invocation_msg("call-a"),
+            tool_result_msg("call-a", "file body"),
+            exec_msg("assistant", Some("got it")),
+        ];
+        let seeded_id = seed_typed_session(&project_root, &seeded);
+
+        let cfg = AppConfig {
+            project_root: project_root.clone(),
+            resume: Some(seeded_id),
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
+        let restored = executor.conversation_history.lock().await.snapshot();
+        assert_eq!(restored.len(), 4, "exact history must be restored");
+        assert_eq!(restored[0].content.as_deref(), Some("read the file"));
+        assert_eq!(
+            restored[1]
+                .tool_calls
+                .first()
+                .and_then(|tc| tc.id.as_deref()),
+            Some("call-a")
+        );
+        assert_eq!(restored[2].tool_call_id.as_deref(), Some("call-a"));
+        assert_eq!(restored[2].content.as_deref(), Some("file body"));
+        assert_eq!(restored[3].content.as_deref(), Some("got it"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_success_replaces_history_after_compaction_shape_change() {
+        // The canonical result may be shorter than the input (compaction).
+        // Committing must replace as-is; count-based deltas would drop it.
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let cfg = AppConfig {
+            project_root: temp_dir.path().to_path_buf(),
+            no_repomap: true,
+            ..Default::default()
+        };
+        let executor = Executor::new(cfg).await.expect("Failed to create executor");
+        {
+            let mut history = executor.conversation_history.lock().await;
+            history.replace(vec![
+                exec_msg("user", Some("old 1")),
+                exec_msg("assistant", Some("old 2")),
+                tool_invocation_msg("call-old"),
+                tool_result_msg("call-old", "old output"),
+                exec_msg("user", Some("old 3")),
+            ]);
+        }
+        // Simulated post-compaction canonical result: shorter, reordered.
+        let compacted = vec![
+            exec_msg("user", Some("summary of old work")),
+            exec_msg("assistant", Some("fresh answer")),
+        ];
+        executor
+            .commit_canonical_history(&compacted)
+            .await
+            .expect("commit");
+        let committed = executor.conversation_history.lock().await.snapshot();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].content.as_deref(), Some("summary of old work"));
+        assert_eq!(committed[1].content.as_deref(), Some("fresh answer"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_success_persists_updated_history_without_duplication() {
+        use httptest::{Expectation, matchers::*, responders::*};
+        let Some(server) = start_server() else { return };
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(1)
+                .respond_with(json_encoded(assistant_done_response())),
+        );
+
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let cfg = exec_cfg_with_server(&project_root, &server);
+        let mut executor = Executor::new(cfg).await.expect("Failed to create executor");
+        executor
+            .run("remember alpha", true)
+            .await
+            .expect("exec run");
+
+        // In-memory canonical state: exactly one user message, no system
+        // residue, no duplicated instruction.
+        let snapshot = executor.conversation_history.lock().await.snapshot();
+        assert!(
+            snapshot.iter().all(|m| m.role != "system"),
+            "request-scoped system messages must not persist"
+        );
+        let user_msgs: Vec<_> = snapshot.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(user_msgs.len(), 1, "current instruction must appear once");
+        assert_eq!(user_msgs[0].content.as_deref(), Some("remember alpha"));
+        assert!(
+            snapshot
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.as_deref() == Some("done"))
+        );
+
+        // Reopen the store: the updated conversation must be persisted.
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to open store");
+        let summaries = store.list_with_stats().expect("Failed to list sessions");
+        assert_eq!(summaries.len(), 1);
+        let saved = store
+            .load(&summaries[0].meta.id)
+            .expect("Failed to load session");
+        let messages = saved.conversation_messages().expect("decode");
+        assert_eq!(messages.len(), snapshot.len());
+        assert_eq!(messages[0].content.as_deref(), Some("remember alpha"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_resume_continues_and_persists_second_turn() {
+        use httptest::{Expectation, matchers::*, responders::*};
+        let Some(server) = start_server() else { return };
+        // Two turns against one stub endpoint.
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("remember alpha")),
+            ])
+            .times(..)
+            .respond_with(json_encoded(assistant_done_response())),
+        );
+
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+        let project_root = temp_dir.path().to_path_buf();
+        let mut first = Executor::new(exec_cfg_with_server(&project_root, &server))
+            .await
+            .expect("first executor");
+        first.run("remember alpha", true).await.expect("first run");
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))
+            .expect("Failed to open store");
+        let session_id = store.list_with_stats().expect("list").remove(0).meta.id;
+
+        // Second process resumes the same session: the first instruction
+        // must be part of the resumed history and the request.
+        let mut second = Executor::new(AppConfig {
+            resume: Some(session_id.clone()),
+            ..exec_cfg_with_server(&project_root, &server)
+        })
+        .await
+        .expect("second executor");
+        let resumed = second.conversation_history.lock().await.snapshot();
+        assert!(
+            resumed
+                .iter()
+                .any(|m| m.role == "user" && m.content.as_deref() == Some("remember alpha")),
+            "resumed history must contain the first instruction"
+        );
+        second
+            .run("what did I ask previously?", true)
+            .await
+            .expect("second run");
+
+        let saved = store.load(&session_id).expect("reload");
+        let messages = saved.conversation_messages().expect("decode");
+        let users: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(users.len(), 2, "both turns persisted exactly once");
+        assert_eq!(users[0].content.as_deref(), Some("remember alpha"));
+        assert_eq!(
+            users[1].content.as_deref(),
+            Some("what did I ask previously?")
+        );
+    }
 }

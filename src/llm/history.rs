@@ -1,339 +1,312 @@
 use crate::llm::types::ChatMessage;
-use tracing::debug;
 
-#[derive(Debug, Clone)]
+/// Durable conversation buffer: a canonical ordered message container.
+///
+/// This type owns no token budgeting, no system-prompt injection, and no
+/// lossy trimming. Context reduction (token estimates, stale-result
+/// offloading, compaction) belongs to `HistoryManager` / the Context Budget
+/// Governor / the Observation Store (`src/llm/context_budget.rs`,
+/// `src/llm/tool_execution/history.rs`, `src/llm/observation.rs`,
+/// `src/llm/compact_history.rs`).
+///
+/// Invariants:
+/// - `push`/`append`/`replace` never delete, reorder, or summarize messages.
+/// - Tool-call invocations and their `tool` results are kept exactly as
+///   pushed; this container never splits the protocol pairing.
+/// - Messages carrying `provider_state` (ChatGPT subscription / Responses
+///   opaque items, encrypted reasoning) are preserved byte-identically.
+#[derive(Debug, Clone, Default)]
 pub struct ChatHistory {
     messages: Vec<ChatMessage>,
-    max_tokens: usize,
-    system_added: bool,
-    system_prompt: Option<String>,
 }
 
 impl ChatHistory {
-    pub fn new(max_tokens: usize, system_prompt: Option<String>) -> Self {
+    pub fn new() -> Self {
         Self {
             messages: Vec::new(),
-            max_tokens,
-            system_added: false,
-            system_prompt,
         }
     }
 
-    pub fn append_system_once(&mut self) {
-        if self.system_added {
-            return;
-        }
-        if let Some(sys) = self.system_prompt.clone() {
-            self.messages.insert(
-                0,
-                ChatMessage {
-                    provider_state: None,
-                    role: "system".into(),
-                    content: Some(sys),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-            );
-            self.system_added = true;
-        }
+    pub fn from_messages(messages: Vec<ChatMessage>) -> Self {
+        Self { messages }
     }
 
-    #[allow(dead_code)]
-    pub fn append_user(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage {
+    /// Borrow-free snapshot of the canonical ordered conversation.
+    pub fn snapshot(&self) -> Vec<ChatMessage> {
+        self.messages.clone()
+    }
+
+    /// Replace the entire conversation with the canonical result.
+    /// Never deletes selectively: the caller passes the full new truth
+    /// (e.g. the history returned by `run_agent_loop`, which may be shorter
+    /// after compaction).
+    pub fn replace(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
+    }
+
+    pub fn push_user(&mut self, content: impl Into<String>) {
+        self.push_message(ChatMessage {
             provider_state: None,
             role: "user".into(),
             content: Some(content.into()),
             tool_calls: vec![],
             tool_call_id: None,
         });
-        self.smart_trim();
     }
 
-    #[allow(dead_code)]
+    /// Append one message exactly as given. No trimming, no reordering,
+    /// no protocol-pair adjustment.
+    pub fn push_message(&mut self, msg: ChatMessage) {
+        self.messages.push(msg);
+    }
+
+    pub fn append_user(&mut self, content: impl Into<String>) {
+        self.push_user(content);
+    }
+
     pub fn append_assistant(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage {
+        self.push_message(ChatMessage {
             provider_state: None,
             role: "assistant".into(),
             content: Some(content.into()),
             tool_calls: vec![],
             tool_call_id: None,
         });
-        self.smart_trim();
     }
 
-    /// Appends a generic message (e.g. tool output)
+    /// Appends a generic message (e.g. tool output) exactly as given.
     pub fn append_message(&mut self, msg: ChatMessage) {
-        if msg.role == "system" {
-            // Only add system prompt if not already set, or replace it?
-            // For restoration, we might want to ensure it's at index 0.
-            // append_system_once handles index 0.
-            self.append_system_once();
-            // Note: msg.content might differ from stored system_prompt.
-            // If we are restoring history, we should trust the message.
-            // But append_system_once uses self.system_prompt.
-            // Let's just push generic if it's not the initial system prompt?
-            // Or better: ensure system prompt is always index 0.
-            if !self.system_added {
-                self.messages.insert(0, msg);
-                self.system_added = true;
-            }
-        } else {
-            self.messages.push(msg);
-        }
-        self.smart_trim();
+        self.push_message(msg);
     }
 
-    #[allow(dead_code)]
     pub fn build_messages(&self) -> Vec<ChatMessage> {
-        self.messages.clone()
+        self.snapshot()
     }
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.system_added = false;
     }
 
-    /// Overwrites the current history with the provided messages.
+    /// Overwrites the current history with the provided messages, exactly.
     /// This is useful for transferring context between executors.
     pub fn overwrite_messages(&mut self, messages: Vec<ChatMessage>) {
-        self.messages = messages;
-        // Check if system prompt is present in the beginning
-        if let Some(first) = self.messages.first()
-            && first.role == "system"
-        {
-            self.system_added = true;
-        }
-        self.smart_trim();
+        self.replace(messages);
     }
 
-    /// Estimates tokens for a message including content and tool calls.
-    /// Uses a heuristic of 4 chars per token.
-    fn estimate_tokens(msg: &ChatMessage) -> usize {
-        let mut count = 0;
-        if let Some(c) = &msg.content
-            && !c.is_empty()
-        {
-            count += c.len().div_ceil(4);
-        }
-
-        // Add tokens for tool calls overhead
-        for tool in &msg.tool_calls {
-            count += tool.function.name.len().div_ceil(4);
-            count += tool.function.arguments.len().div_ceil(4);
-            // Extra constant overhead for JSON structure
-            count += 10;
-        }
-
-        // Add tokens for tool_call_id (if present, usually in tool response)
-        if let Some(id) = &msg.tool_call_id {
-            count += id.len().div_ceil(4);
-        }
-
-        // Base message overhead
-        count + 3
+    pub fn len(&self) -> usize {
+        self.messages.len()
     }
 
-    /// Trims messages to stay within max_tokens using a smart eviction strategy.
-    /// Priority for retention:
-    /// 1. System Prompt (Index 0) - Always kept
-    /// 2. Last 3 messages (Recent context) - Pinned
-    /// 3. User/Assistant conversation - Standard priority
-    /// 4. Tool outputs (role="tool") - First to go
-    fn smart_trim(&mut self) {
-        // Responses turns carry ordered opaque items. Only HistoryManager may
-        // compact them with tool pairing and unseen-result protection.
-        if self.messages.iter().any(|m| m.provider_state.is_some()) {
-            return;
-        }
-
-        let mut total_tokens: usize = self.messages.iter().map(Self::estimate_tokens).sum();
-
-        if total_tokens <= self.max_tokens {
-            return;
-        }
-
-        debug!("Trimming history: {} > {}", total_tokens, self.max_tokens);
-
-        while total_tokens > self.max_tokens && self.messages.len() > 1 {
-            // Find the best candidate to remove.
-            // We never remove the system message (index 0).
-            // We try to preserve the last few messages.
-
-            let len = self.messages.len();
-            // Define protected window (e.g., last 2 messages)
-            let protected_start = len.saturating_sub(2);
-
-            let mut best_index = None;
-            let mut lowest_score = i32::MAX;
-
-            // Scan candidates between index 1 and protected_start
-            // If protected_start <= 1, we just remove index 1 (FIFO fallback)
-            let scan_end = if protected_start > 1 {
-                protected_start
-            } else {
-                1
-            };
-
-            // If we have very few messages, we might be forced to eat into "protected" if specific checks fail,
-            // but loop condition handles empty details.
-            if len <= 2 {
-                // Only system + 1 message left? Or system + user?
-                // We shouldn't remove system. If len=2 (sys, msg), we might have to remove msg if it's too huge.
-                best_index = Some(1);
-            } else {
-                // Scoring loop: Lower score = Higher chance of eviction
-                for i in 1..scan_end {
-                    let msg = &self.messages[i];
-                    let score = match msg.role.as_str() {
-                        "tool" => 10,                                    // Ephemeral tool output
-                        "assistant" if !msg.tool_calls.is_empty() => 20, // Tool call invocation
-                        "assistant" => 50,                               // Normal answer
-                        "user" => 60,                                    // User instruction
-                        _ => 40,                                         // Other?
-                    };
-
-                    if score < lowest_score {
-                        lowest_score = score;
-                        best_index = Some(i);
-                    }
-                }
-
-                // If scanned range was empty or no candidate found (shouldn't happen),
-                // fallback to FIFO (index 1)
-                if best_index.is_none() {
-                    best_index = Some(1);
-                }
-            }
-
-            if let Some(idx) = best_index {
-                let removed = self.messages.remove(idx);
-                let freed = Self::estimate_tokens(&removed);
-                debug!(
-                    "Evicted message at index {} (role: {}), freed {} tokens",
-                    idx, removed.role, freed
-                );
-                total_tokens = total_tokens.saturating_sub(freed);
-            } else {
-                break; // Should not happen
-            }
-        }
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
     }
+}
+
+/// Project the request-independent durable conversation from a canonical
+/// history: everything except request-scoped `role == "system"` messages
+/// (default system prompt, shell-output context, plan injection,
+/// `RuntimeContext` overlay, loop interventions).
+///
+/// This is the single choke point for durable persistence. Callers (TUI
+/// success path, `exec` success path, subscription checkpoint, session
+/// persistence) must not implement their own system-message filtering.
+/// Ordering, `provider_state`, `tool_calls`, and `tool_call_id` are preserved
+/// exactly; only `system` roles are dropped.
+pub fn durable_conversation_messages(
+    messages: impl IntoIterator<Item = ChatMessage>,
+) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .filter(|msg| msg.role != "system")
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn trims_by_smart_priority() {
-        // Setup: Max 100 tokens.
-        // 1. System (kept)
-        // 2. User "Task"
-        // 3. Assistant "Tool Call"
-        // 4. Tool "Huge Output" (Target for eviction)
-        // 5. Assistant "Result"
-        let mut h = ChatHistory::new(50, Some("sys".into())); // Small limit to force trim
-        h.append_system_once();
-
-        let tool_call_msg = ChatMessage {
+    fn tool_call_msg(id: &str) -> ChatMessage {
+        ChatMessage {
             provider_state: None,
             role: "assistant".into(),
             content: None,
             tool_calls: vec![crate::llm::types::ToolCall {
-                id: Some("call_1".into()),
+                id: Some(id.into()),
                 r#type: "function".into(),
                 function: crate::llm::types::ToolCallFunction {
-                    name: "ls".into(),
+                    name: "fs_read".into(),
                     arguments: "{}".into(),
                 },
             }],
             tool_call_id: None,
-        };
+        }
+    }
 
-        // Manual push to control roles
-        h.messages.push(ChatMessage {
-            provider_state: None,
-            role: "system".into(),
-            content: Some("sys".into()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-        h.messages.push(ChatMessage {
-            provider_state: None,
-            role: "user".into(),
-            content: Some("Do work".into()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-        h.messages.push(tool_call_msg);
-
-        // Big tool output
-        h.messages.push(ChatMessage {
+    fn tool_result_msg(id: &str, content: String) -> ChatMessage {
+        ChatMessage {
             provider_state: None,
             role: "tool".into(),
-            content: Some("A".repeat(200)), // ~50 tokens alone
+            content: Some(content),
             tool_calls: vec![],
-            tool_call_id: Some("call_1".into()),
-        });
+            tool_call_id: Some(id.into()),
+        }
+    }
 
-        // Add padding messages to ensure the tool message is not in the protected last 2
-        h.messages.push(ChatMessage {
-            provider_state: None,
-            role: "assistant".into(),
-            content: Some("ok".into()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-        h.messages.push(ChatMessage {
-            provider_state: None,
-            role: "user".into(),
-            content: Some("next".into()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
+    /// P0 regression: the durable conversation buffer must never split a
+    /// tool-call invocation from its tool result. Appending a very large
+    /// tool result must keep both sides of the pair intact.
+    #[test]
+    fn durable_pair_survives_large_tool_result() {
+        let mut h = ChatHistory::new();
+        h.push_user("do work");
+        h.append_message(tool_call_msg("call-1"));
+        h.append_message(tool_result_msg("call-1", "A".repeat(20_000)));
+        h.append_assistant("done");
+        h.append_user("next");
 
-        // Trigger trim
-        h.smart_trim();
-
-        // Expectation: The "tool" message (role: tool) should be evicted first.
-        let roles: Vec<&str> = h.messages.iter().map(|m| m.role.as_str()).collect();
-        assert!(roles.contains(&"system"));
-        assert!(roles.contains(&"user")); // User intent preserved
-        assert!(!roles.contains(&"tool")); // Tool output evicted
+        let invocation = h.build_messages().iter().any(|m| {
+            m.role == "assistant"
+                && m.tool_calls
+                    .iter()
+                    .any(|tc| tc.id.as_deref() == Some("call-1"))
+        });
+        let result = h
+            .build_messages()
+            .iter()
+            .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-1"));
+        assert!(
+            invocation && result,
+            "tool-call invocation and its result must stay paired"
+        );
     }
 
     #[test]
-    fn keeps_system_first() {
-        let mut h = ChatHistory::new(10, Some("sys".into()));
-        h.append_system_once();
-        h.append_user("12345678");
-        h.append_assistant("abcdefgh");
-        let msgs = h.build_messages();
-        assert_eq!(msgs.first().unwrap().role, "system");
-    }
-
-    #[test]
-    fn estimate_includes_tool_calls() {
-        let msg = ChatMessage {
+    fn parallel_tool_calls_stay_paired_and_ordered() {
+        let mut h = ChatHistory::new();
+        h.push_user("batch");
+        h.append_message(ChatMessage {
             provider_state: None,
             role: "assistant".into(),
-            content: Some("Thinking...".into()),
-            tool_calls: vec![crate::llm::types::ToolCall {
-                id: Some("123".into()),
-                r#type: "function".into(),
-                function: crate::llm::types::ToolCallFunction {
-                    name: "test_tool".into(),              // 9 chars
-                    arguments: "{\"key\":\"val\"}".into(), // 13 chars
+            content: None,
+            tool_calls: vec![
+                crate::llm::types::ToolCall {
+                    id: Some("call-a".into()),
+                    r#type: "function".into(),
+                    function: crate::llm::types::ToolCallFunction {
+                        name: "fs_read".into(),
+                        arguments: "{\"path\":\"a\"}".into(),
+                    },
                 },
-            }],
+                crate::llm::types::ToolCall {
+                    id: Some("call-b".into()),
+                    r#type: "function".into(),
+                    function: crate::llm::types::ToolCallFunction {
+                        name: "fs_read".into(),
+                        arguments: "{\"path\":\"b\"}".into(),
+                    },
+                },
+            ],
             tool_call_id: None,
+        });
+        h.append_message(tool_result_msg("call-a", "content-a".into()));
+        h.append_message(tool_result_msg("call-b", "content-b".into()));
+
+        let ids: Vec<_> = h
+            .snapshot()
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["call-a".to_string(), "call-b".to_string()]);
+    }
+
+    #[test]
+    fn provider_state_messages_preserved_exactly() {
+        let state = crate::features::openai_subscription::ProviderState {
+            version: 1,
+            account: "test-account".into(),
+            model: "test-model".into(),
+            output: vec![serde_json::json!({"type": "reasoning", "id": "rs_1"})],
         };
-        let tokens = ChatHistory::estimate_tokens(&msg);
-        // Content: "Thinking..." (11) -> 3
-        // Tool: "test_tool" (9) -> 3, args (13) -> 4, overhead 10 -> 17
-        // Base overhead: 3
-        // Total ~23
-        assert!(tokens > 10);
+        let mut h = ChatHistory::new();
+        h.push_message(ChatMessage {
+            provider_state: Some(state),
+            role: "assistant".into(),
+            content: Some("answer".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+        let snapshot = h.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        let round_tripped: ChatMessage =
+            serde_json::from_value(serde_json::to_value(&snapshot[0]).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            round_tripped.provider_state.as_ref().expect("state").output,
+            snapshot[0].provider_state.as_ref().expect("state").output
+        );
+    }
+
+    #[test]
+    fn replace_accepts_shorter_canonical_history() {
+        let mut h = ChatHistory::new();
+        for i in 0..10 {
+            h.push_user(format!("message {i}"));
+        }
+        // Compaction may return fewer messages in a new order; the canonical
+        // result replaces the buffer as-is, never via index/count deltas.
+        let compacted = vec![h.snapshot()[9].clone()];
+        h.replace(compacted.clone());
+        assert_eq!(h.len(), 1);
+        assert_eq!(
+            h.snapshot()[0].content.as_deref(),
+            compacted[0].content.as_deref()
+        );
+    }
+
+    #[test]
+    fn durable_filter_strips_system_only() {
+        let messages = vec![
+            ChatMessage {
+                provider_state: None,
+                role: "system".into(),
+                content: Some("default prompt".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                provider_state: None,
+                role: "user".into(),
+                content: Some("hi".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            tool_call_msg("call-1"),
+            tool_result_msg("call-1", "output".into()),
+            ChatMessage {
+                provider_state: None,
+                role: "system".into(),
+                content: Some("loop intervention".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ];
+        let durable = durable_conversation_messages(messages);
+        assert_eq!(durable.len(), 3);
+        assert!(durable.iter().all(|m| m.role != "system"));
+        assert_eq!(durable[0].role, "user");
+        assert_eq!(durable[2].tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    #[test]
+    fn container_basics() {
+        let mut h = ChatHistory::from_messages(vec![]);
+        assert!(h.is_empty());
+        assert_eq!(h.len(), 0);
+        h.push_user("hello");
+        assert!(!h.is_empty());
+        assert_eq!(h.len(), 1);
+        h.clear();
+        assert!(h.is_empty());
     }
 }
