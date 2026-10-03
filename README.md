@@ -730,6 +730,12 @@ base_url = "https://api.anthropic.com"
 context_window_size = 200000
 # Token threshold for auto compaction
 auto_compact_prompt_token_threshold = 250000
+# Retry policy (single source of truth for all LLM requests):
+# max_retries = additional retries after the first attempt (max_attempts = max_retries + 1)
+max_retries = 3
+retry_base_ms = 1000
+retry_jitter_ms = 500
+respect_retry_after = true
 
 # Resume the most recently updated session at startup (CLI --resume overrides)
 resume = false

@@ -9,6 +9,11 @@ use tracing::{debug, info, warn};
 
 use crate::llm::LlmErrorKind;
 use crate::llm::client_core::OpenAIClient;
+use crate::llm::retry::{
+    RequestAttemptFailure, RetryDelayDecision, cancel_aware_sleep, classify_transport,
+    compute_retry_delay, extract_provider_code, is_context_length_exceeded_code, kind_for_status,
+    max_attempts, parse_retry_after, should_retry,
+};
 use crate::llm::types::{ChatMessage, Usage};
 
 // Stream types
@@ -119,9 +124,10 @@ impl OpenAIClient {
 
         let cancel_token = cancel.unwrap_or_default();
 
-        // Only retry establishing the stream, not mid-stream reads
+        // Only retry establishing the stream, not mid-stream reads.
+        // Mid-stream read failures never replay the request.
         let mut attempt = 1usize;
-        let max_attempts = self.llm_cfg.max_retries.saturating_add(1);
+        let total_attempts = max_attempts(self.llm_cfg.max_retries);
         let resp = loop {
             let fut = self
                 .inner
@@ -141,47 +147,103 @@ impl OpenAIClient {
 
             match resp_res {
                 Err(e) => {
-                    if attempt < max_attempts {
-                        let wait = self.backoff_delay(attempt, None);
-                        warn!(attempt, err=%e, wait_ms=%wait.as_millis(), "retrying stream establish after error");
-                        tokio::select! {
-                            biased;
-                            _ = cancel_token.cancelled() => {
-                                info!("chat_stream cancelled during retry sleep");
-                                return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
-                            }
-                            _ = tokio::time::sleep(wait) => {}
-                        }
-                        attempt += 1;
-                        continue;
+                    let kind = if e.is_timeout() {
+                        LlmErrorKind::Timeout
                     } else {
-                        return Err(anyhow::Error::new(e).context("send chat request (stream)"));
+                        classify_transport(&e)
+                    };
+                    let failure = RequestAttemptFailure::new(
+                        kind.clone(),
+                        None,
+                        None,
+                        None,
+                        anyhow::anyhow!(kind).context(format!("send chat request (stream): {e}")),
+                    );
+                    if !should_retry(&failure) || attempt >= total_attempts {
+                        if attempt >= total_attempts && should_retry(&failure) {
+                            return Err(failure.source.context(format!(
+                                "LLM request failed after {total_attempts} attempts"
+                            )));
+                        }
+                        return Err(failure.source);
                     }
+                    let delay = match compute_retry_delay(&self.llm_cfg, attempt, None) {
+                        RetryDelayDecision::Decline => {
+                            return Err(failure
+                                .source
+                                .context(format!("LLM request failed after {attempt} attempts")));
+                        }
+                        RetryDelayDecision::Sleep(d) => d,
+                    };
+                    warn!(attempt, total_attempts, err=%e, wait_ms=%delay.as_millis() as u64, "retrying stream establish after error");
+                    if cancel_aware_sleep(delay, &cancel_token).await {
+                        info!("chat_stream cancelled during retry sleep");
+                        return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                    }
+                    attempt += 1;
+                    continue;
                 }
                 Ok(resp) => {
                     if !resp.status().is_success() {
                         let status = resp.status();
-                        let text = resp.text().await.unwrap_or_default();
-                        // Retry even in case of timeout
-                        if attempt < max_attempts
-                            && (status.is_server_error()
-                                || status.as_u16() == 429
-                                || status.as_u16() == 408)
-                        {
-                            let wait = self.backoff_delay(attempt, None);
-                            info!(attempt, status=%status.as_u16(), wait_ms=%wait.as_millis(), "retrying stream establish after HTTP error");
-                            tokio::select! {
-                                biased;
-                                _ = cancel_token.cancelled() => {
-                                    info!("chat_stream cancelled during retry sleep");
-                                    return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
-                                }
-                                _ = tokio::time::sleep(wait) => {}
+                        let retry_after = parse_retry_after(resp.headers());
+                        let text = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                info!("chat_stream cancelled during error body read");
+                                return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
                             }
-                            attempt += 1;
-                            continue;
+                            res = resp.text() => res.unwrap_or_default(),
+                        };
+                        let trimmed = text.trim().to_owned();
+                        let provider_code = extract_provider_code(&trimmed);
+                        if status.as_u16() == 401 || status.as_u16() == 403 {
+                            return Err(anyhow::anyhow!(LlmErrorKind::Authentication)
+                                .context(format!("chat error: {status}")));
                         }
-                        anyhow::bail!("chat error: {} - {}", status, text);
+                        if status.as_u16() == 400
+                            && let Some(code) = provider_code.as_deref()
+                            && is_context_length_exceeded_code(code)
+                        {
+                            return Err(anyhow::anyhow!(LlmErrorKind::ContextLengthExceeded));
+                        }
+                        let kind = kind_for_status(status);
+                        let detail: String = trimmed.chars().take(500).collect();
+                        let failure = RequestAttemptFailure::new(
+                            kind.clone(),
+                            Some(status),
+                            retry_after,
+                            provider_code,
+                            anyhow::anyhow!(kind)
+                                .context(format!("chat error: {status} - {detail}")),
+                        );
+                        if !should_retry(&failure) || attempt >= total_attempts {
+                            if attempt >= total_attempts && should_retry(&failure) {
+                                return Err(failure.source.context(format!(
+                                    "LLM request failed after {total_attempts} attempts"
+                                )));
+                            }
+                            return Err(failure.source);
+                        }
+                        let delay = match compute_retry_delay(
+                            &self.llm_cfg,
+                            attempt,
+                            failure.retry_after,
+                        ) {
+                            RetryDelayDecision::Decline => {
+                                return Err(failure.source.context(format!(
+                                    "LLM request failed after {attempt} attempts"
+                                )));
+                            }
+                            RetryDelayDecision::Sleep(d) => d,
+                        };
+                        info!(attempt, total_attempts, status=%status.as_u16(), wait_ms=%delay.as_millis() as u64, "retrying stream establish after HTTP error");
+                        if cancel_aware_sleep(delay, &cancel_token).await {
+                            info!("chat_stream cancelled during retry sleep");
+                            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+                        }
+                        attempt += 1;
+                        continue;
                     }
                     break resp;
                 }
@@ -280,5 +342,247 @@ impl OpenAIClient {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone)]
+    struct ScriptedStreamResponse {
+        status: u16,
+        body: String,
+        content_type: String,
+        retry_after: Option<String>,
+    }
+
+    async fn spawn_scripted_stream_server(
+        script: Vec<ScriptedStreamResponse>,
+        counter: Arc<AtomicUsize>,
+    ) -> String {
+        use axum::{
+            Router,
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::post,
+        };
+        let script = Arc::new(script);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let script = script.clone();
+                move |_headers: HeaderMap, _body: axum::body::Bytes| async move {
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let s = script
+                        .get(n)
+                        .or(script.last())
+                        .expect("empty script")
+                        .clone();
+                    let status =
+                        StatusCode::from_u16(s.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    let mut headers = HeaderMap::new();
+                    if let Some(ra) = s.retry_after {
+                        headers.insert("retry-after", ra.parse().unwrap());
+                    }
+                    headers.insert("content-type", s.content_type.parse().unwrap());
+                    (status, headers, s.body).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/")
+    }
+
+    fn stream_test_client(base_url: String, max_retries: usize) -> OpenAIClient {
+        use crate::config::LlmConfig;
+        OpenAIClient::new(base_url, "x")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                max_retries,
+                retry_base_ms: 1,
+                retry_jitter_ms: 0,
+                respect_retry_after: true,
+                timeout_ms: 5_000,
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 5_000,
+                read_idle_timeout_ms: 5_000,
+                ..LlmConfig::default()
+            })
+    }
+
+    fn sse_done_body(text: &str) -> String {
+        let chunk = serde_json::json!({
+            "id": "test",
+            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]
+        });
+        format!("data: {}\n\ndata: [DONE]\n\n", chunk)
+    }
+
+    fn stream_messages() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some("hi".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }]
+    }
+
+    #[tokio::test]
+    async fn stream_establishment_503_retries() {
+        use futures::StreamExt;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_stream_server(
+            vec![
+                ScriptedStreamResponse {
+                    status: 503,
+                    body: "busy".into(),
+                    content_type: "application/json".into(),
+                    retry_after: Some("0".into()),
+                },
+                ScriptedStreamResponse {
+                    status: 200,
+                    body: sse_done_body("hi"),
+                    content_type: "text/event-stream".into(),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = stream_test_client(url, 3);
+        let mut stream = client
+            .chat_stream("gpt", &stream_messages(), None)
+            .await
+            .expect("establishment retry");
+        let mut collected = String::new();
+        while let Some(item) = stream.next().await {
+            collected.push_str(&item.expect("chunk"));
+        }
+        assert!(collected.contains("hi"));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stream_establishment_permanent_400_fails_fast() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_stream_server(
+            vec![ScriptedStreamResponse {
+                status: 400,
+                body: r#"{"error":{"code":"invalid_request_error"}}"#.into(),
+                content_type: "application/json".into(),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = stream_test_client(url, 3);
+        let err = match client.chat_stream("gpt", &stream_messages(), None).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(!format!("{err:?}").contains("100"));
+    }
+
+    #[tokio::test]
+    async fn stream_no_replay_after_start() {
+        use futures::StreamExt;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_stream_server(
+            vec![ScriptedStreamResponse {
+                status: 200,
+                body: sse_done_body("hello"),
+                content_type: "text/event-stream".into(),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = stream_test_client(url, 3);
+        let mut stream = client
+            .chat_stream("gpt", &stream_messages(), None)
+            .await
+            .expect("stream");
+        while let Some(item) = stream.next().await {
+            let _ = item.expect("chunk");
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "stream start must not replay the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_cancel_during_establishment_backoff() {
+        use tokio_util::sync::CancellationToken;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_stream_server(
+            vec![ScriptedStreamResponse {
+                status: 503,
+                body: "busy".into(),
+                content_type: "application/json".into(),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        use crate::config::LlmConfig;
+        let client = OpenAIClient::new(url, "x")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                max_retries: 3,
+                retry_base_ms: 30_000,
+                retry_jitter_ms: 0,
+                respect_retry_after: true,
+                timeout_ms: 5_000,
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 5_000,
+                read_idle_timeout_ms: 5_000,
+                ..LlmConfig::default()
+            });
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let watch = counter.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if watch.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            canceller.cancel();
+        });
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.chat_stream("gpt", &stream_messages(), Some(token)),
+        )
+        .await
+        .expect("cancel must be fast");
+        let err = match res {
+            Ok(_) => panic!("expected Cancelled"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<LlmErrorKind>(),
+                Some(LlmErrorKind::Cancelled)
+            ),
+            "must be Cancelled, got {err:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

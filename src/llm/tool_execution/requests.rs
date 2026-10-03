@@ -4,12 +4,16 @@ use crate::llm::chat_with_tools::{ChatResponseWithTools, ChoiceMessageWithTools}
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::message_utils::clean_json_text;
 use crate::llm::reasoning::resolve_reasoning_hint;
+use crate::llm::retry::{
+    self, RequestAttemptFailure, RetryDelayDecision, classify_transport, compute_retry_delay,
+    extract_provider_code, is_context_length_exceeded_code, kind_for_status, max_attempts,
+    parse_retry_after, should_retry,
+};
 use crate::llm::types::{ChatMessage, ToolDef};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use std::ops::Mul;
 use std::sync::mpsc::Sender;
-use tokio::time::{Duration, sleep};
+use std::time::Duration;
 use tracing::{debug, error, warn};
 
 #[derive(Debug, Serialize)]
@@ -59,83 +63,102 @@ pub async fn chat_tools_once(
         !messages.iter().any(|m| m.provider_state.is_some()),
         "Responses history cannot be sent through another provider; start a new session"
     );
-    const MAX_RETRIES: u64 = 100;
-    const MAX_TIMEOUT_RETRIES: u64 = 20;
-    let mut last_error = anyhow!("Failed after {} retries", MAX_RETRIES);
-    let mut timeout_retries = 0u64;
+    // Single source of truth: `[llm] max_retries` = additional retries after
+    // the first attempt. No separate timeout budget.
+    let total_attempts = max_attempts(client.llm_cfg.max_retries);
+    let cancel_token = cancel.unwrap_or_default();
+    let mut last_failure: Option<RequestAttemptFailure> = None;
 
-    for attempt in 1..=MAX_RETRIES {
-        match chat_tools_once_inner(
+    for attempt in 1..=total_attempts {
+        match chat_tools_once_attempt(
             client,
             model,
             messages,
             tools,
             reasoning_effort,
             reasoning_mode,
-            cancel.clone(),
+            Some(cancel_token.clone()),
         )
         .await
         {
             Ok(result) => return Ok(result),
-            Err(e) => {
-                last_error = e;
-                // Check if the error is a timeout
-                let is_timeout = last_error.to_string().contains("timed out")
-                    || matches!(
-                        last_error.downcast_ref::<LlmErrorKind>(),
-                        Some(LlmErrorKind::Timeout)
-                    );
-
-                // If it's a timeout, limit retries
-                if is_timeout {
-                    timeout_retries += 1;
-                    if timeout_retries > MAX_TIMEOUT_RETRIES {
-                        error!("Timeout error occurred: {:?}", &last_error);
-                        break;
+            Err(failure) => {
+                let is_last = attempt >= total_attempts;
+                if !should_retry(&failure) || is_last {
+                    if matches!(failure.kind, LlmErrorKind::Cancelled) {
+                        return Err(failure.source);
                     }
-                } else if attempt >= MAX_RETRIES {
-                    error!("Error occurred: {:?}", &last_error);
-                    break;
-                } else if matches!(
-                    last_error.downcast_ref::<LlmErrorKind>(),
-                    Some(LlmErrorKind::Deserialize)
-                ) {
-                    error!("Deserialization error, not retrying: {:?}", &last_error);
-                    break;
-                } else if matches!(
-                    last_error.downcast_ref::<LlmErrorKind>(),
-                    Some(LlmErrorKind::Authentication)
-                ) {
-                    error!("Authentication error, not retrying: {:?}", &last_error);
-                    break;
+                    error!(
+                        attempt,
+                        total_attempts,
+                        kind = ?failure.kind,
+                        status = failure.status.map(|s| s.as_u16()),
+                        "llm chat_tools_once not retrying"
+                    );
+                    if is_last && should_retry(&failure) {
+                        return Err(failure.source.context(format!(
+                            "LLM request failed after {total_attempts} attempts"
+                        )));
+                    }
+                    return Err(failure.source);
                 }
 
-                // Exponential backoff with jitter
-                let delay_ms = (2_u64.mul(attempt) * 1000).min(60_000);
-                let jitter = rand::random::<u64>() % 5000;
-                let total_delay = Duration::from_millis(delay_ms + jitter);
+                let decision = compute_retry_delay(&client.llm_cfg, attempt, failure.retry_after);
+                let delay = match decision {
+                    RetryDelayDecision::Decline => {
+                        error!(
+                            attempt,
+                            total_attempts,
+                            kind = ?failure.kind,
+                            status = failure.status.map(|s| s.as_u16()),
+                            "llm chat_tools_once declining retry (Retry-After too large)"
+                        );
+                        return Err(failure
+                            .source
+                            .context(format!("LLM request failed after {attempt} attempts")));
+                    }
+                    RetryDelayDecision::Sleep(d) => d,
+                };
+
                 warn!(
-                    attempt = attempt,
-                    delay_ms = delay_ms + jitter,
+                    attempt,
+                    total_attempts,
+                    kind = ?failure.kind,
+                    status = failure.status.map(|s| s.as_u16()),
+                    provider_code = failure.provider_code.as_deref().unwrap_or(""),
+                    wait_ms = delay.as_millis() as u64,
+                    retry_after_present = failure.retry_after.is_some(),
                     "Retrying chat_tools_once after error"
                 );
                 if let Some(ref tx) = ui_tx {
                     let _ = tx.send(format!(
-                        "::status:waiting:Retrying request (Attempt {}/{})...",
-                        attempt + 1,
-                        MAX_RETRIES
+                        "::status:waiting:Retrying request (attempt {}/{})...",
+                        attempt.saturating_add(1),
+                        total_attempts
                     ));
                 }
-                sleep(total_delay).await;
+                last_failure = Some(failure);
+                if retry::cancel_aware_sleep(delay, &cancel_token).await {
+                    warn!("chat_tools_once cancelled during retry sleep");
+                    return Err(anyhow!(LlmErrorKind::Cancelled));
+                }
             }
         }
     }
 
-    Err(last_error)
+    Err(last_failure
+        .map(|f| {
+            f.source.context(format!(
+                "LLM request failed after {total_attempts} attempts"
+            ))
+        })
+        .unwrap_or_else(|| anyhow!("LLM request failed")))
 }
 
+/// Exactly one HTTP attempt. No hidden retry inside: the caller
+/// ([`chat_tools_once`]) owns retry orchestration, counting and backoff.
 #[allow(clippy::too_many_arguments)]
-async fn chat_tools_once_inner(
+async fn chat_tools_once_attempt(
     client: &OpenAIClient,
     model: &str,
     messages: &[ChatMessage],
@@ -143,12 +166,10 @@ async fn chat_tools_once_inner(
     reasoning_effort: Option<ReasoningEffort>,
     reasoning_mode: ReasoningMode,
     cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Result<ChoiceMessageWithTools> {
+) -> Result<ChoiceMessageWithTools, RequestAttemptFailure> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
     let url = client.endpoint();
-    // Provider gating lives at the HTTP boundary: the agent loop decides the
-    // policy effort, this layer decides whether it may be serialized.
     let resolved =
         resolve_reasoning_hint(&client.base_url, model, &reasoning_mode, reasoning_effort);
     let reasoning_effort_str = resolved.map(|e| e.as_api_str());
@@ -177,114 +198,235 @@ async fn chat_tools_once_inner(
     );
     headers.insert("X-Title", "Doge-Code".parse().unwrap());
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-    headers.insert(
-        AUTHORIZATION,
-        format!("Bearer {}", client.api_key)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid API key: {}", e))?,
-    );
-
-    // if let Ok(payload) = serde_json::to_string_pretty(&req) {
-    //     debug!(payload=%payload, endpoint=%url, "sending chat.completions (tools) payload");
-    // }
-    // if let Ok(messages) = serde_json::to_string_pretty(&req.messages) {
-    //     debug!(messages=%messages, endpoint=%url, "sending chat.completions (tools) messages");
-    // }
+    let auth_value = match format!("Bearer {}", client.api_key).parse() {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Client,
+                None,
+                None,
+                None,
+                anyhow!(LlmErrorKind::Client).context(format!("Invalid API key: {e}")),
+            ));
+        }
+    };
+    headers.insert(AUTHORIZATION, auth_value);
 
     let cancel_token = cancel.unwrap_or_default();
     let req_builder = client.inner.post(&url).headers(headers).json(&req);
 
-    // Set timeout for the request
     let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
     let resp_fut = tokio::time::timeout(timeout_duration, req_builder.send());
 
-    let resp_result = tokio::select! {
+    let resp = tokio::select! {
         biased;
         _ = cancel_token.cancelled() => {
             warn!("chat_tools_once cancelled before send");
-            return Err(anyhow!(LlmErrorKind::Cancelled));
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Cancelled,
+                None,
+                None,
+                None,
+                anyhow!(LlmErrorKind::Cancelled),
+            ));
         }
         res = resp_fut => {
             match res {
-                Ok(Ok(resp)) => Ok(resp),
-                Ok(Err(e)) => Err(anyhow::Error::new(e).context("send chat request (tools)")),
-                Err(_) => Err(anyhow!(LlmErrorKind::Timeout)),
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    let kind = if e.is_timeout() {
+                        LlmErrorKind::Timeout
+                    } else {
+                        classify_transport(&e)
+                    };
+                    return Err(RequestAttemptFailure::new(
+                        kind.clone(),
+                        None,
+                        None,
+                        None,
+                        anyhow!(kind).context(format!("send chat request (tools): {e}")),
+                    ));
+                }
+                Err(_) => {
+                    return Err(RequestAttemptFailure::new(
+                        LlmErrorKind::Timeout,
+                        None,
+                        None,
+                        None,
+                        anyhow!(LlmErrorKind::Timeout)
+                            .context("send chat request (tools) timed out"),
+                    ));
+                }
             }
         }
-    };
-
-    let resp = match resp_result {
-        Ok(resp) => resp,
-        Err(e) => return Err(e),
     };
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default().trim().to_owned();
-        error!(status=%status.as_u16(), body=%text, "llm chat_tools_once non-success status");
+        let retry_after = parse_retry_after(resp.headers());
+        let text = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                warn!("chat_tools_once cancelled during error body read");
+                return Err(RequestAttemptFailure::new(
+                    LlmErrorKind::Cancelled,
+                    Some(status),
+                    retry_after,
+                    None,
+                    anyhow!(LlmErrorKind::Cancelled),
+                ));
+            }
+            res = resp.text() => res.unwrap_or_default(),
+        };
+        let trimmed = text.trim().to_owned();
+        let provider_code = extract_provider_code(&trimmed);
+        // Never log full bodies or prompts; status + structured code only.
+        error!(
+            status = status.as_u16(),
+            provider_code = provider_code.as_deref().unwrap_or(""),
+            "llm chat_tools_once non-success status"
+        );
 
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(anyhow!(LlmErrorKind::Authentication)
-                .context(format!("chat (tools) auth error: {} - {}", status, text)));
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Authentication,
+                Some(status),
+                retry_after,
+                provider_code,
+                anyhow!(LlmErrorKind::Authentication)
+                    .context(format!("chat (tools) auth error: {status}")),
+            ));
         }
 
-        // Check if the error is due to context length exceeded
         if status.as_u16() == 400
-            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(code) = json
-                .get("error")
-                .and_then(|e| e.get("code"))
-                .and_then(|c| c.as_str())
-            && code == "context_length_exceeded"
+            && let Some(code) = provider_code.as_deref()
+            && is_context_length_exceeded_code(code)
         {
-            return Err(anyhow!(LlmErrorKind::ContextLengthExceeded));
+            // Must reach the agent loop untouched for reactive compaction.
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::ContextLengthExceeded,
+                Some(status),
+                None,
+                provider_code,
+                anyhow!(LlmErrorKind::ContextLengthExceeded),
+            ));
         }
 
-        return Err(anyhow!("chat (tools) error: {} - {}", status, text));
+        let kind = kind_for_status(status);
+        let detail: String = trimmed.chars().take(500).collect();
+        return Err(RequestAttemptFailure::new(
+            kind.clone(),
+            Some(status),
+            retry_after,
+            provider_code,
+            anyhow!(kind).context(format!("chat (tools) error: {status} - {detail}")),
+        ));
     }
 
-    // Set timeout for reading the response body
     let response_text_fut = tokio::time::timeout(timeout_duration, resp.text());
 
-    let response_text_result: Result<String, anyhow::Error> = tokio::select! {
+    let response_text: String = tokio::select! {
         biased;
         _ = cancel_token.cancelled() => {
             warn!("chat_tools_once cancelled during body read");
-            Err(anyhow!(LlmErrorKind::Cancelled))
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Cancelled,
+                None,
+                None,
+                None,
+                anyhow!(LlmErrorKind::Cancelled),
+            ));
         }
         res = response_text_fut => {
             match res {
-                Ok(Ok(text)) => Ok(text),
-                Ok(Err(e)) => Err(anyhow::Error::new(e).context("read chat response body (tools)")),
-                Err(_) => Err(anyhow!(LlmErrorKind::Timeout)),
+                Ok(Ok(text)) => text.trim().to_owned(),
+                Ok(Err(e)) => {
+                    let kind = classify_transport(&e);
+                    return Err(RequestAttemptFailure::new(
+                        kind.clone(),
+                        None,
+                        None,
+                        None,
+                        anyhow!(kind).context(format!("read chat response body (tools): {e}")),
+                    ));
+                }
+                Err(_) => {
+                    return Err(RequestAttemptFailure::new(
+                        LlmErrorKind::Timeout,
+                        None,
+                        None,
+                        None,
+                        anyhow!(LlmErrorKind::Timeout)
+                            .context("read chat response body (tools) timed out"),
+                    ));
+                }
             }
         }
     };
 
-    let response_text: String = match response_text_result {
-        Ok(text) => text.trim().to_owned(),
-        Err(e) => return Err(e),
+    debug!(
+        response_len = response_text.len(),
+        "llm chat_tools_once response"
+    );
+    let cleaned_text = clean_json_text(&response_text);
+    let body: ChatResponseWithTools = match serde_json::from_str(&cleaned_text) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Deserialize,
+                None,
+                None,
+                None,
+                anyhow!(LlmErrorKind::Deserialize).context(format!("parse chat response: {e}")),
+            ));
+        }
     };
 
-    debug!(response_body=%response_text, "llm chat_tools_once response");
-    // Clean JSON text (remove markdown code blocks if present)
-    let cleaned_text = clean_json_text(&response_text);
-    let body: ChatResponseWithTools = serde_json::from_str(&cleaned_text)
-        .map_err(|e| anyhow!(LlmErrorKind::Deserialize).context(e))?;
-
-    // Track token usage if available (including reasoning details when present).
+    // Success-only usage accounting: exactly one record per successful
+    // response, never for failed attempts.
     if let Some(usage) = &body.usage {
         client.record_usage(usage);
     }
 
-    let msg = body
-        .choices
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no choices"))?;
+    let msg = match body.choices.into_iter().next() {
+        Some(m) => m,
+        None => {
+            return Err(RequestAttemptFailure::new(
+                LlmErrorKind::Client,
+                None,
+                None,
+                None,
+                anyhow!(LlmErrorKind::Client).context("no choices"),
+            ));
+        }
+    };
 
     debug!("llm response message {:?}", msg);
     Ok(msg.message)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn chat_tools_once_inner(
+    client: &OpenAIClient,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_mode: ReasoningMode,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Result<ChoiceMessageWithTools> {
+    chat_tools_once_attempt(
+        client,
+        model,
+        messages,
+        tools,
+        reasoning_effort,
+        reasoning_mode,
+        cancel,
+    )
+    .await
+    .map_err(|failure| failure.source)
 }
 
 #[cfg(test)]
@@ -773,5 +915,521 @@ mod tests {
         .await
         .expect("fixed low request");
         assert_eq!(msg.content.as_deref(), Some("done"));
+    }
+
+    // --- Retry contract v1 regression tests (HTTP fixtures) ---
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone)]
+    struct ScriptedToolResponse {
+        status: u16,
+        body: serde_json::Value,
+        retry_after: Option<String>,
+    }
+
+    async fn spawn_scripted_tool_server(
+        script: Vec<ScriptedToolResponse>,
+        counter: Arc<AtomicUsize>,
+    ) -> String {
+        use axum::{
+            Router,
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::post,
+        };
+        let script = Arc::new(script);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let script = script.clone();
+                move |_headers: HeaderMap, _body: axum::body::Bytes| async move {
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let s = script
+                        .get(n)
+                        .or(script.last())
+                        .expect("empty script")
+                        .clone();
+                    let status =
+                        StatusCode::from_u16(s.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    let mut headers = HeaderMap::new();
+                    if let Some(ra) = s.retry_after {
+                        headers.insert("retry-after", ra.parse().unwrap());
+                    }
+                    headers.insert("content-type", "application/json".parse().unwrap());
+                    let body = serde_json::to_string(&s.body).unwrap_or_default();
+                    (status, headers, body).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/")
+    }
+
+    fn tool_retry_client(base_url: String, max_retries: usize) -> OpenAIClient {
+        use crate::config::LlmConfig;
+        OpenAIClient::new(base_url, "test-key")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                max_retries,
+                retry_base_ms: 1,
+                retry_jitter_ms: 0,
+                respect_retry_after: true,
+                timeout_ms: 5_000,
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 5_000,
+                read_idle_timeout_ms: 5_000,
+                ..LlmConfig::default()
+            })
+    }
+
+    fn error_body(code: &str) -> serde_json::Value {
+        serde_json::json!({"error":{"code":code,"message":"test error"}})
+    }
+
+    #[tokio::test]
+    async fn tool_request_max_retries_zero_sends_once() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 500,
+                body: serde_json::json!({"error":"oops"}),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 0);
+        let err = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "max_retries=0 must send exactly once"
+        );
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("100"),
+            "must not mention hard-coded 100 retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_max_retries_two_sends_at_most_three() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![
+                ScriptedToolResponse {
+                    status: 500,
+                    body: serde_json::json!({"error":"oops"}),
+                    retry_after: None,
+                },
+                ScriptedToolResponse {
+                    status: 500,
+                    body: serde_json::json!({"error":"oops"}),
+                    retry_after: None,
+                },
+                ScriptedToolResponse {
+                    status: 200,
+                    body: assistant_done_response(),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 2);
+        let msg = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("retry then success");
+        assert_eq!(msg.content.as_deref(), Some("done"));
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn tool_request_permanent_400_no_retry() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 400,
+                body: error_body("invalid_request_error"),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let _ = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "permanent 400 must not retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_context_overflow_typed_no_retry() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 400,
+                body: error_body("context_length_exceeded"),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let err = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(
+                err.downcast_ref::<LlmErrorKind>(),
+                Some(LlmErrorKind::ContextLengthExceeded)
+            ),
+            "must preserve typed ContextLengthExceeded for reactive compaction, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_auth_no_retry() {
+        for status in [401u16, 403] {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let url = spawn_scripted_tool_server(
+                vec![ScriptedToolResponse {
+                    status,
+                    body: serde_json::json!({"error":"auth"}),
+                    retry_after: None,
+                }],
+                counter.clone(),
+            )
+            .await;
+            let client = tool_retry_client(url, 3);
+            let err = chat_tools_once(
+                &client,
+                "gpt-test",
+                &user_message(),
+                &[],
+                None,
+                ReasoningMode::Off,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                1,
+                "status {status} must not retry"
+            );
+            assert!(
+                matches!(
+                    err.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Authentication)
+                ),
+                "status {status} must be Authentication, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_request_temporary_429_retries() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![
+                ScriptedToolResponse {
+                    status: 429,
+                    body: error_body("slow_down"),
+                    retry_after: Some("0".into()),
+                },
+                ScriptedToolResponse {
+                    status: 200,
+                    body: assistant_done_response(),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let msg = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("transient 429 must retry");
+        assert_eq!(msg.content.as_deref(), Some("done"));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn tool_request_permanent_quota_429_no_retry() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 429,
+                body: error_body("project_spend_limit_exceeded"),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let _ = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "quota 429 must not retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_503_retries_with_retry_after() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![
+                ScriptedToolResponse {
+                    status: 503,
+                    body: serde_json::json!({"error":"busy"}),
+                    retry_after: Some("0".into()),
+                },
+                ScriptedToolResponse {
+                    status: 200,
+                    body: assistant_done_response(),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let msg = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("503 must retry");
+        assert_eq!(msg.content.as_deref(), Some("done"));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn tool_request_cancel_during_retry_delay() {
+        use tokio_util::sync::CancellationToken;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 500,
+                body: serde_json::json!({"error":"oops"}),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        use crate::config::LlmConfig;
+        let client = OpenAIClient::new(url, "test-key")
+            .unwrap()
+            .with_llm_config(LlmConfig {
+                max_retries: 3,
+                retry_base_ms: 30_000,
+                retry_jitter_ms: 0,
+                respect_retry_after: true,
+                timeout_ms: 5_000,
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 5_000,
+                read_idle_timeout_ms: 5_000,
+                ..LlmConfig::default()
+            });
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let watch_counter = counter.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if watch_counter.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            canceller.cancel();
+        });
+        let messages = user_message();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            chat_tools_once(
+                &client,
+                "gpt-test",
+                &messages,
+                &[],
+                None,
+                ReasoningMode::Off,
+                Some(token),
+                None,
+            ),
+        )
+        .await
+        .expect("cancel must finish quickly, not after 30s sleep");
+        let err = res.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<LlmErrorKind>(),
+                Some(LlmErrorKind::Cancelled)
+            ),
+            "must be Cancelled, got {err:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "no second request after cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_exhaustion_message_uses_attempts() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 500,
+                body: serde_json::json!({"error":"oops"}),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 1);
+        let err = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "max_retries=1 -> 2 attempts"
+        );
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("2 attempts"),
+            "must report attempts, got {msg}"
+        );
+        assert!(!msg.contains("100"), "must not mention 100");
+    }
+
+    #[tokio::test]
+    async fn tool_request_success_records_usage_once() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![
+                ScriptedToolResponse {
+                    status: 500,
+                    body: serde_json::json!({"error":"oops"}),
+                    retry_after: None,
+                },
+                ScriptedToolResponse {
+                    status: 200,
+                    body: assistant_done_response_with_usage(Some(10)),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 3);
+        let _ = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("success");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        // Usage from the single successful response only; failed attempts
+        // carry no usage. Double counting would show 300.
+        assert_eq!(client.get_total_tokens_used(), 150);
     }
 }

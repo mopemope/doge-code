@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::LlmConfig;
-use crate::llm::LlmErrorKind;
 use crate::llm::prompt_cache::{
     PromptCacheCounters, PromptCacheSessionUsage, PromptCacheUsageSnapshot,
 };
@@ -352,32 +351,6 @@ impl OpenAIClient {
             });
         }
         crate::llm::client_core::network::chat_once_request(self, req, cancel).await
-    }
-
-    #[allow(dead_code)]
-    fn should_retry(&self, kind: LlmErrorKind) -> bool {
-        // borrow kind to avoid move
-        matches!(
-            kind,
-            LlmErrorKind::RateLimited
-                | LlmErrorKind::Server
-                | LlmErrorKind::Network
-                | LlmErrorKind::Timeout
-        )
-    }
-
-    pub(crate) fn backoff_delay(&self, attempt: usize, retry_after_secs: Option<u64>) -> Duration {
-        if self.llm_cfg.respect_retry_after
-            && let Some(secs) = retry_after_secs
-        {
-            return Duration::from_secs(secs);
-        }
-        let base = self.llm_cfg.retry_base_ms;
-        let exp = base.saturating_mul(1u64 << (attempt as u32 - 1));
-        let jitter = self.llm_cfg.retry_jitter_ms as i64;
-        let half = jitter / 2;
-        let rnd = fastrand::i64(-half..=half).max(0) as u64;
-        Duration::from_millis(exp.saturating_add(rnd))
     }
 }
 
