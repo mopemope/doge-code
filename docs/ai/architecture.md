@@ -88,6 +88,6 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 
 ## Configuration & Secrets
 
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `project_instructions_file`, `[llm]`, `[project]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
+- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `model`/`base_url`/`project_instructions_file`/`resume`/`auto_compact_prompt_token_threshold`, `[llm]`, `[context_budget]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[tool_routing]`, `[reasoning]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Loading is read-only and fail-closed: missing config uses runtime `Default`s without creating files, existing invalid config is a startup error without mutation, and `DOGE_CODE_CONFIG` is authoritative when set. Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
 - Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
 - Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.

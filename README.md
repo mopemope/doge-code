@@ -80,11 +80,10 @@ cargo build --release
 ### Configuration
 Create `.doge/config.toml` in your project directory:
 ```toml
-[llm]
-model = "claude-3-5-sonnet-20241022"
-base_url = "https://api.anthropic.com"
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
 
-# Top-level key (not under [project])
+# Top-level key (not under [llm])
 project_instructions_file = "PROJECT.md"
 ```
 
@@ -717,19 +716,23 @@ mode = "auto"  # auto / observe / off
 
 ### Environment Variables
 - `OPENAI_API_KEY`: API key
-- `OPENAI_BASE_URL`: API base URL (default: OpenAI)
-- `OPENAI_MODEL`: Model name (default: gpt-4)
-- `DOGE_CODE_CONFIG`: Configuration file path
+- `OPENAI_BASE_URL`: API base URL (default: `https://api.openai.com/v1`)
+- `OPENAI_MODEL`: Model name (default: `gpt-4o-mini`)
+- `DOGE_CODE_CONFIG`: Explicit global config path. When set, that path alone
+  is authoritative: a missing, unreadable, or invalid file is a startup error
+  and no other config candidate is consulted.
 
 ### Configuration File (`.doge/config.toml`)
 ```toml
-[llm]
-model = ""
-base_url = "https://api.anthropic.com"
-# Context window size (auto-detected if not specified)
-context_window_size = 200000
-# Token threshold for auto compaction
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+project_instructions_file = "PROJECT.md"
+resume = false
 auto_compact_prompt_token_threshold = 250000
+
+[llm]
+# Context window size (auto-detected if not specified)
+context_window_size = 128000
 # Retry policy (single source of truth for all LLM requests):
 # max_retries = additional retries after the first attempt (max_attempts = max_retries + 1)
 max_retries = 3
@@ -737,17 +740,8 @@ retry_base_ms = 1000
 retry_jitter_ms = 500
 respect_retry_after = true
 
-# Resume the most recently updated session at startup (CLI --resume overrides)
-resume = false
-
-# Top-level key: project instructions file (AGENTS.md is used if unset)
-project_instructions_file = "PROJECT.md"
-
 [context_budget]
 mode = "auto"  # auto / observe / off
-
-[project]
-exclude_patterns = ["target/", "node_modules/", "*.log"]
 
 # Local MCP HTTP listener (Doge-Code's own server)
 [mcp_server]
