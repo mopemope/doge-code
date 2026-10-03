@@ -249,14 +249,12 @@ pub(crate) fn spawn_agent_turn(
                     });
                 }
                 if let Ok(mut history) = conversation_history.lock() {
-                    let new_messages: Vec<_> = updated_messages
-                        .into_iter()
-                        .filter(|msg| msg.role != "system")
-                        .collect();
-                    history.clear();
-                    for msg in new_messages {
-                        history.append_message(msg);
-                    }
+                    // Canonical result: the agent loop's returned history is
+                    // the new truth (compaction may have shortened/reordered
+                    // it), projected to durable messages. Never a
+                    // count/index-based delta.
+                    let durable = crate::llm::durable_conversation_messages(updated_messages);
+                    history.replace(durable);
                     let mut sm = session_manager.lock().unwrap();
                     let msgs_vec = history.build_messages();
                     if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
@@ -284,9 +282,8 @@ pub(crate) fn spawn_agent_turn(
                         let mut sm = session_manager.lock().unwrap();
                         if client.is_subscription() {
                             if let Some(session) = &sm.current_session {
-                                match serde_json::to_value(&session.conversation)
-                                    .and_then(serde_json::from_value::<Vec<crate::llm::ChatMessage>>) {
-                                    Ok(messages) => history.overwrite_messages(messages.into_iter().filter(|m| m.role != "system").collect()),
+                                match session.conversation_messages() {
+                                    Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
                                     Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
                                 }
                             }
@@ -320,9 +317,8 @@ pub(crate) fn spawn_agent_turn(
                         let mut sm = session_manager.lock().unwrap();
                         if client.is_subscription() {
                             if let Some(session) = &sm.current_session {
-                                match serde_json::to_value(&session.conversation)
-                                    .and_then(serde_json::from_value::<Vec<crate::llm::ChatMessage>>) {
-                                    Ok(messages) => history.overwrite_messages(messages.into_iter().filter(|m| m.role != "system").collect()),
+                                match session.conversation_messages() {
+                                    Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
                                     Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
                                 }
                             }

@@ -57,13 +57,8 @@ impl TuiExecutor {
                 } else {
                     None
                 };
-                match self
-                    .session_manager
-                    .lock()
-                    .unwrap()
-                    .create_session(initial_prompt)
-                {
-                    Ok(()) => {
+                match self.start_new_session(ui, initial_prompt) {
+                    Ok(_) => {
                         if let Some(info) =
                             self.session_manager.lock().unwrap().current_session_info()
                         {
@@ -81,38 +76,20 @@ impl TuiExecutor {
                     return Ok(());
                 }
                 let id = args[1];
-                let session_after_switch = {
-                    let mut session_manager = self.session_manager.lock().unwrap();
-                    match session_manager.resolve_and_load_session(id) {
-                        Ok(session) => session,
-                        Err(e) => {
-                            ui.push_log(format!("Failed to switch session: {}", e));
-                            return Ok(());
-                        }
+                match self.switch_to_session(id) {
+                    Ok(session_after_switch) => {
+                        ui.clear_log();
+                        ui.push_log(format!(
+                            "Switched to session: {} ({})",
+                            session_format::short_id(&session_after_switch.meta.id),
+                            session_after_switch.meta.title
+                        ));
+                        self.publish_plan_list();
                     }
-                };
-
-                ui.clear_log();
-                ui.push_log(format!(
-                    "Switched to session: {} ({})",
-                    session_format::short_id(&session_after_switch.meta.id),
-                    session_after_switch.meta.title
-                ));
-
-                {
-                    let mut history = self.conversation_history.lock().unwrap();
-                    history.clear();
-                    for entry in &session_after_switch.conversation {
-                        let map: serde_json::Map<_, _> = entry.clone().into_iter().collect();
-                        if let Ok(msg) = serde_json::from_value::<crate::llm::types::ChatMessage>(
-                            serde_json::Value::Object(map),
-                        ) {
-                            history.append_message(msg);
-                        }
+                    Err(e) => {
+                        ui.push_log(format!("Failed to switch session: {}", e));
                     }
                 }
-
-                self.publish_plan_list();
             }
             "save" => {
                 // This is implicitly handled when history is updated.
@@ -163,12 +140,7 @@ impl TuiExecutor {
                     ui.push_log("No session loaded.");
                 }
             }
-            "clear" => match self
-                .session_manager
-                .lock()
-                .unwrap()
-                .clear_current_session_conversation()
-            {
+            "clear" => match self.clear_runtime_conversation() {
                 Ok(()) => ui.push_log("Cleared current session conversation."),
                 Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },

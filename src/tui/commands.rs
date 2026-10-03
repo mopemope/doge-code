@@ -4,5 +4,6 @@ pub mod handlers;
 pub mod new;
 pub mod prompt;
 pub mod session;
+pub mod session_state;
 
 pub use self::core::{CommandHandler, TuiExecutor};

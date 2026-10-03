@@ -380,43 +380,23 @@ async fn run_tui(
 
     let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
         Ok(exec) => {
-            // If resume is requested, load the specified (or latest) session.
+            // If resume is requested, hydrate both the SessionManager and the
+            // runtime conversation from the same saved session.
             if let Some(resume_id) = cfg.resume.as_deref() {
-                let mut session_manager =
-                    utils::safe_std_lock(&exec.session_manager, "session_manager")?;
-                // The executor eagerly created an empty session for this run;
-                // drop it once we successfully resume a different session.
-                let fresh_id = session_manager.current_session_id();
-                let result = match resume_id {
-                    "latest" => {
-                        let loaded =
-                            session_manager.load_latest_session_excluding(fresh_id.as_deref())?;
-                        if loaded {
-                            println!(
-                                "Resumed session {}",
-                                session_manager.get_current_session_id()?
-                            );
-                            if let Some(fid) = fresh_id {
-                                let _ = session_manager.delete_session(&fid);
-                            }
-                        } else {
-                            println!("No sessions to resume; starting a new session");
-                        }
-                        Ok(())
+                match exec.resume_session(resume_id) {
+                    Ok(crate::tui::commands::session_state::ResumeOutcome::Resumed {
+                        session_id,
+                    }) => {
+                        println!("Resumed session {}", session_id);
                     }
-                    id => session_manager.resolve_and_load_session(id).map(|session| {
-                        println!("Resumed session {}", session.meta.id);
-                        if Some(session.meta.id.as_str()) != fresh_id.as_deref()
-                            && let Some(fid) = fresh_id
-                        {
-                            let _ = session_manager.delete_session(&fid);
-                        }
-                    }),
-                };
-                if let Err(e) = result {
-                    eprintln!("Failed to resume session '{}': {}", resume_id, e);
-                    eprintln!("Hint: run `dgc session list` to see available sessions.");
-                    std::process::exit(1);
+                    Ok(crate::tui::commands::session_state::ResumeOutcome::NoPreviousSession) => {
+                        println!("No sessions to resume; starting a new session");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to resume session '{}': {}", resume_id, e);
+                        eprintln!("Hint: run `dgc session list` to see available sessions.");
+                        std::process::exit(1);
+                    }
                 }
             }
             //            app.push_log("Repomap initialization completed.");

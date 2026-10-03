@@ -5,14 +5,9 @@ use crate::tui::view::TuiApp;
 /// This separation improves modularity by isolating command logic.
 pub fn handle_clear(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.clear_log();
-    // Clear conversation history
-    if let Ok(mut history) = executor.conversation_history.lock() {
-        history.clear();
-    }
-
-    // Create new session to reset tokens and metrics
-    let mut sm = executor.session_manager.lock().unwrap();
-    if let Err(e) = sm.create_session(None) {
+    // Fresh session with no carried-over conversation: the shared helper
+    // clears the runtime buffer and turn metadata, then creates the session.
+    if let Err(e) = executor.start_new_session(ui, None) {
         ui.push_log(format!("Failed to create new session: {}", e));
         return;
     }
