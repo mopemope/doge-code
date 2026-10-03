@@ -28,14 +28,17 @@ const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
 /// History messages flow back to the TUI/session via the return value;
 /// observations persist via the session store so restarts and resumes keep
 /// `obs-*` retrieval working. Failures are warnings only.
+///
+/// Empty snapshots are valid state changes (e.g. after observation GC) and
+/// must always be written: skipping them would resurrect previously GC'd
+/// entries on the next restart. No session manager means no-op via the
+/// existing wrapper.
 fn persist_history_and_observations(
     history: &crate::llm::tool_execution::history::HistoryManager,
     fs: &FsTools,
 ) -> Vec<ChatMessage> {
     let (messages, store, unseen) = history.persistable();
-    if (!store.is_empty() || !unseen.is_empty())
-        && let Err(e) = fs.update_session_with_observations(store, unseen)
-    {
+    if let Err(e) = fs.update_session_with_observations(store, unseen) {
         warn!(error = %e, "failed to persist observation store");
     }
     messages
@@ -1811,5 +1814,86 @@ mod tests {
         assert_eq!(items[0]["id"], "step-1");
         // Full content reaches the TUI (unlike the compact LLM result).
         assert_eq!(items[0]["content"], "first");
+    }
+
+    #[test]
+    fn test_gc_empty_store_persists_and_does_not_resurrect() {
+        use crate::llm::observation::ObservationStore;
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join(".doge/sessions");
+        let store = crate::session::SessionStore::new(store_path.clone()).expect("session store");
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::session::SessionManager::with_store(store),
+        ));
+        {
+            let mut mgr = manager.lock().expect("session lock");
+            mgr.create_session(None).expect("create session");
+        }
+        let session_id = {
+            let mgr = manager.lock().expect("session lock");
+            mgr.current_session_id().expect("session id")
+        };
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(cfg.clone()),
+        )
+        .with_session_manager(manager.clone());
+
+        // Legacy disk state: one dead observation with no live reference.
+        let mut dead = ObservationStore::new();
+        dead.insert(
+            "call-dead".into(),
+            "fs_read".into(),
+            "dead-body".repeat(50),
+            600,
+        )
+        .expect("dead insert");
+        assert!(!dead.is_empty());
+        {
+            let mut mgr = manager.lock().expect("session lock");
+            mgr.update_current_session_with_observations(dead.clone(), BTreeSet::new())
+                .expect("seed dead");
+        }
+
+        // Runtime history has no reference to the dead id.
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        let messages = vec![ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some("fresh task".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut history = crate::llm::tool_execution::history::HistoryManager::new(
+            client,
+            messages,
+            None,
+            fs.clone(),
+            cfg,
+        );
+        history.restore_observations(dead, BTreeSet::new());
+        assert!(
+            history.observations_snapshot().is_empty(),
+            "restore GC must collect the unreferenced entry"
+        );
+
+        // Empty snapshot must still be persisted (no skip).
+        let _ = persist_history_and_observations(&history, &fs);
+
+        // Reopen the store like a process restart: the entry must not return.
+        let reopened_store = crate::session::SessionStore::new(store_path).expect("reopen store");
+        let restored = reopened_store.load(&session_id).expect("load session");
+        assert!(
+            restored.observations.is_empty(),
+            "GC'd observation resurrected after restart"
+        );
+        assert!(restored.unseen_tool_results.is_empty());
     }
 }
