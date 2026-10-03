@@ -249,6 +249,7 @@ impl Executor {
             }
         };
 
+        let usage_before = client_ref.usage_snapshot();
         // Call run_agent_loop
         let res = llm::run_agent_loop(
             client_ref,
@@ -263,6 +264,10 @@ impl Executor {
         )
         .await;
 
+        let usage = client_ref
+            .usage_snapshot()
+            .difference(&usage_before)
+            .report();
         // Get token usage after the agent loop completes
         let tokens_used = self
             .client
@@ -315,6 +320,7 @@ impl Executor {
                         "success": true,
                         "response": response,
                         "tokens_used": tokens_used,
+                        "usage": usage,
                         "tools_called": tools_called,
                         "conversation_length": updated_messages.len()
                     });
@@ -354,7 +360,8 @@ impl Executor {
                     let output = serde_json::json!({
                         "success": false,
                         "error": e.to_string(),
-                        "tokens_used": tokens_used
+                        "tokens_used": tokens_used,
+                        "usage": usage
                     });
                     println!(
                         "{}",

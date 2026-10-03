@@ -13,6 +13,11 @@ fn typed<T: DeserializeOwned>(arguments: &Value) -> Result<()> {
 pub(super) fn validate_builtin_arguments(name: &str, arguments: &Value) -> Result<()> {
     ensure!(arguments.is_object(), "tool arguments must be an object");
     let check = match name {
+        "find_file" => {
+            typed::<crate::tools::find_file::FindFileArgs>(arguments)?;
+            serde_json::from_value::<crate::tools::find_file::FindFileOptions>(arguments.clone())?
+                .validate()
+        }
         "fs_write" => typed::<crate::tools::write::FsWriteArgs>(arguments),
         "edit" => typed::<crate::tools::edit::EditParams>(arguments),
         "apply_patch" => typed::<crate::tools::apply_patch::ApplyPatchParams>(arguments),

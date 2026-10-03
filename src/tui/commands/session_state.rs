@@ -12,6 +12,14 @@ pub enum ResumeOutcome {
 }
 
 impl TuiExecutor {
+    pub(crate) fn ensure_session_idle(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.jobs.foreground_id().is_none(),
+            "a foreground job still owns this session; wait for /jobs to show completion before switching or clearing"
+        );
+        Ok(())
+    }
+
     /// Replace the runtime conversation with canonical messages.
     pub fn replace_conversation_from_messages(&self, messages: Vec<ChatMessage>) {
         if let Ok(mut history) = self.conversation_history.lock() {
@@ -24,6 +32,7 @@ impl TuiExecutor {
     /// conversation together. The session id and metrics are preserved; the
     /// next turn cannot resurrect the old conversation.
     pub fn clear_runtime_conversation(&self) -> Result<()> {
+        self.ensure_session_idle()?;
         {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
             sm.clear_current_session_conversation()?;
@@ -43,6 +52,7 @@ impl TuiExecutor {
         ui: &mut TuiApp,
         initial_prompt: Option<String>,
     ) -> Result<String> {
+        self.ensure_session_idle()?;
         let new_id = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
             sm.create_session(initial_prompt)?;
@@ -72,6 +82,7 @@ impl TuiExecutor {
     /// `current_session` and the runtime conversation diverged. Repeated
     /// switches always replace, never merge.
     pub fn switch_to_session(&self, id: &str) -> Result<SessionData> {
+        self.ensure_session_idle()?;
         // Validate-then-commit under the session lock only; the runtime
         // conversation lock is taken afterwards, never together with it.
         let (session, messages) = {
@@ -89,6 +100,7 @@ impl TuiExecutor {
     /// resumes that session. Unknown ids and malformed targets are errors,
     /// never silent partial restores.
     pub fn resume_session(&self, resume_id: &str) -> Result<ResumeOutcome> {
+        self.ensure_session_idle()?;
         let prepared = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
             let fresh_id = sm.current_session_id();
@@ -373,5 +385,65 @@ mod tests {
         let restored = runtime_messages(&executor);
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content.as_deref(), Some("healthy"));
+    }
+
+    #[tokio::test]
+    async fn session_mutations_wait_for_foreground_release_without_clearing_ui() {
+        use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, WorkspaceAccess};
+        let (mut executor, _dir) = test_executor();
+        persist_runtime(&executor, &[user_msg("keep history")]);
+        executor.replace_conversation_from_messages(vec![user_msg("keep history")]);
+        let id = current_session_id(&executor);
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let blocker = executor
+            .jobs
+            .spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::Write,
+                    "finishing fixture",
+                ),
+                |_| async move {
+                    let _ = wait.await;
+                    JobRunOutcome::Completed
+                },
+            )
+            .expect("blocker");
+        let mut ui = TuiApp::new("test", None, "dark").expect("ui");
+        ui.push_log("keep log");
+        ui.tokens_prompt_used = 321;
+        assert!(executor.start_new_session(&mut ui, None).is_err());
+        assert!(executor.switch_to_session(&id).is_err());
+        assert!(executor.resume_session(&id).is_err());
+        assert!(executor.clear_runtime_conversation().is_err());
+        for command in ["new", "clear", "delete", "switch"] {
+            assert!(executor.handle_session_command(command, &mut ui).is_err());
+        }
+        crate::tui::commands::handlers::slash_commands::clear::handle_clear(&mut executor, &mut ui);
+        assert_eq!(ui.tokens_prompt_used, 321);
+        assert!(ui.log.iter().any(
+            |entry| matches!(entry, crate::tui::state::LogEntry::Plain(text) if text == "keep log")
+        ));
+        assert_eq!(current_session_id(&executor), id);
+        assert_eq!(
+            runtime_messages(&executor)[0].content.as_deref(),
+            Some("keep history")
+        );
+        release.send(()).expect("release");
+        for _ in 0..100 {
+            if executor.jobs.foreground_id().is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            executor.jobs.foreground_id().is_none(),
+            "job {blocker} released"
+        );
+        executor
+            .start_new_session(&mut ui, None)
+            .expect("new after release");
+        assert_ne!(current_session_id(&executor), id);
     }
 }

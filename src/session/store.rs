@@ -2,11 +2,21 @@ use crate::session::data::{SessionData, SessionMeta, SessionSummary};
 use crate::session::error::SessionError;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use tracing::error;
 
 /// Maximum number of sessions to keep
 const MAX_SESSIONS: usize = 100;
+/// Shared save/read limit, including recoverable observations.
+const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
+
+fn validate_id(id: &str) -> Result<(), SessionError> {
+    if id.is_empty() || id == "." || id == ".." || id.contains(['/', '\\', '\0']) {
+        return Err(SessionError::InvalidId(id.to_owned()));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -76,42 +86,28 @@ impl SessionStore {
     }
 
     fn read_session_file(&self, path: &std::path::Path) -> Result<String, SessionError> {
-        if !self.read_only {
-            return fs::read_to_string(path).map_err(SessionError::ReadError);
-        }
         use std::io::Read;
-        const LIMIT: u64 = 16 * 1024 * 1024;
-        let file = {
-            let absolute = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                env::current_dir()
-                    .map_err(SessionError::ReadError)?
-                    .join(path)
-            };
-            let anchor = absolute
-                .ancestors()
-                .last()
-                .ok_or_else(|| SessionError::InvalidId("unsafe session path".into()))?;
-            let relative = absolute
-                .strip_prefix(anchor)
-                .ok()
-                .and_then(|p| p.to_str())
-                .ok_or_else(|| SessionError::InvalidId("unsafe session path".into()))?;
-            crate::features::verification_snapshot::open_relative(anchor, relative)
-                .map_err(SessionError::ReadError)?
-        };
+        // The configured store root may use a normal alias (e.g. /var on
+        // macOS). Below this explicit canonical anchor, follow no symlinks.
+        let anchor = self.root.canonicalize().map_err(SessionError::ReadError)?;
+        let relative = path
+            .strip_prefix(&self.root)
+            .ok()
+            .and_then(|p| p.to_str())
+            .ok_or_else(|| SessionError::InvalidId("unsafe session path".into()))?;
+        let file = crate::features::verification_snapshot::open_relative(&anchor, relative)
+            .map_err(SessionError::ReadError)?;
         let meta = file.metadata().map_err(SessionError::ReadError)?;
-        if !meta.is_file() || meta.len() > LIMIT {
+        if !meta.is_file() || meta.len() > MAX_SESSION_BYTES {
             return Err(SessionError::ReadError(std::io::Error::other(
                 "unsafe or oversized session metadata",
             )));
         }
         let mut bytes = Vec::new();
-        file.take(LIMIT + 1)
+        file.take(MAX_SESSION_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(SessionError::ReadError)?;
-        if bytes.len() as u64 > LIMIT {
+        if bytes.len() as u64 > MAX_SESSION_BYTES {
             return Err(SessionError::ReadError(std::io::Error::other(
                 "session metadata exceeds read limit",
             )));
@@ -155,7 +151,7 @@ impl SessionStore {
                 Err(_) => continue,
             };
             scanned_entries += 1;
-            if self.read_only && scanned_entries > 10_000 {
+            if scanned_entries > 10_000 {
                 return Err(SessionError::ReadError(std::io::Error::other(
                     "session inventory exceeds read limit",
                 )));
@@ -165,32 +161,35 @@ impl SessionStore {
                 continue;
             }
             let session_p = p.join("session.json");
-            if self.read_only && (p.is_symlink() || session_p.is_symlink()) {
+            if p.is_symlink() || session_p.is_symlink() {
                 return Err(SessionError::InvalidId(
                     "symlink in session inventory".into(),
                 ));
             }
-            let text = self.read_session_file(&session_p);
-            if self.read_only {
-                if let Ok(s) = &text {
-                    scanned_bytes += s.len();
-                    if scanned_bytes > 128 * 1024 * 1024 {
-                        return Err(SessionError::ReadError(std::io::Error::other(
-                            "session inventory bytes exceed read limit",
-                        )));
-                    }
-                } else if session_p.exists()
-                    && let Err(error) = text
-                {
-                    return Err(error);
-                }
+            // Incomplete directories without metadata are not sessions. A
+            // present corrupt/unsafe file is an explicit inventory error.
+            if !session_p.exists() {
+                continue;
             }
-            if let Ok(s) = text
-                && let Ok(session_data) =
-                    serde_json::from_str::<SessionData>(&s).map_err(SessionError::ParseError)
-            {
-                out.push(session_data.summary());
+            let text = self.read_session_file(&session_p)?;
+            scanned_bytes += text.len();
+            if scanned_bytes > 128 * 1024 * 1024 {
+                return Err(SessionError::ReadError(std::io::Error::other(
+                    "session inventory bytes exceed read limit",
+                )));
             }
+            let session_data: SessionData = serde_json::from_str(&text)?;
+            let directory_id = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| SessionError::InvalidId("non-UTF8 session directory".into()))?;
+            validate_id(&directory_id)?;
+            if session_data.meta.id != directory_id {
+                return Err(SessionError::InvalidId(
+                    "session metadata ID differs from its directory".into(),
+                ));
+            }
+            out.push(session_data.summary());
         }
         // Sort by updated_at in descending order (most recently active first).
         // updated_at is stored as an RFC3339 string; try to parse it for
@@ -217,27 +216,18 @@ impl SessionStore {
 
         self.save(&data)?; // Save the session using the save method
 
-        // Clean up old sessions if we exceed the limit
-        cleanup_old_sessions(self)?;
-
         Ok(data)
     }
 
     /// Load session data by specifying the session ID.
     pub fn load(&self, id: &str) -> Result<SessionData, SessionError> {
-        // Validate ID format if necessary
-        if id.is_empty() {
-            return Err(SessionError::InvalidId(id.to_string()));
-        }
+        validate_id(id)?;
         let dir = self.root.join(id);
-        if !dir.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
+        if dir.is_symlink() {
+            return Err(SessionError::InvalidId("symlink session directory".into()));
         }
-
-        if self.read_only
-            && (id == "." || id == ".." || id.contains(['/', '\\']) || dir.is_symlink())
-        {
-            return Err(SessionError::InvalidId(id.to_string()));
+        if !dir.exists() {
+            return Err(SessionError::NotFound(id.to_owned()));
         }
         // Load the entire session data from a single JSON file
         let session_file = dir.join("session.json");
@@ -245,6 +235,11 @@ impl SessionStore {
         let session_data: SessionData =
             serde_json::from_str(&session_s).map_err(SessionError::ParseError)?;
 
+        if session_data.meta.id != id {
+            return Err(SessionError::InvalidId(
+                "session metadata ID differs from its directory".into(),
+            ));
+        }
         Ok(session_data)
     }
 
@@ -252,22 +247,66 @@ impl SessionStore {
     /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
         self.ensure_writable()?;
-        let dir = self.session_dir(&data.meta.id);
-        fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
-
-        // Save the entire session data as a single JSON file
-        let session_file = dir.join("session.json");
+        validate_id(&data.meta.id)?;
         let json_data = serde_json::to_string_pretty(data)?;
-        fs::write(&session_file, &json_data).map_err(|e| {
-            error!(
-                ?e,
-                "Failed to write session data to file: {:?}", session_file
-            );
-            SessionError::WriteError(e)
-        })?;
-
-        // Clean up old sessions if we exceed the limit
-        cleanup_old_sessions(self)?;
+        if json_data.len() as u64 > MAX_SESSION_BYTES {
+            return Err(SessionError::WriteError(std::io::Error::other(
+                "session metadata exceeds 16 MiB; previous checkpoint retained",
+            )));
+        }
+        let anchor = self.root.canonicalize().map_err(SessionError::WriteError)?;
+        let dir = anchor.join(&data.meta.id);
+        if dir.is_symlink() {
+            return Err(SessionError::InvalidId("symlink session directory".into()));
+        }
+        fs::create_dir_all(&dir).map_err(SessionError::CreateDirError)?;
+        let session_file = dir.join("session.json");
+        let permissions = match fs::symlink_metadata(&session_file) {
+            Ok(meta)
+                if meta.is_file()
+                    && !meta.file_type().is_symlink()
+                    && !meta.permissions().readonly() =>
+            {
+                Some(meta.permissions())
+            }
+            Ok(_) => {
+                return Err(SessionError::WriteError(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "unsafe or read-only session metadata",
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(SessionError::WriteError(e)),
+        };
+        let mut candidate =
+            tempfile::NamedTempFile::new_in(&dir).map_err(SessionError::WriteError)?;
+        candidate
+            .write_all(json_data.as_bytes())
+            .map_err(SessionError::WriteError)?;
+        if let Some(permissions) = permissions {
+            candidate
+                .as_file()
+                .set_permissions(permissions)
+                .map_err(SessionError::WriteError)?;
+        }
+        candidate
+            .as_file()
+            .sync_all()
+            .map_err(SessionError::WriteError)?;
+        candidate
+            .persist(&session_file)
+            .map_err(|e| SessionError::WriteError(e.error))?;
+        #[cfg(unix)]
+        fs::File::open(&dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| {
+                SessionError::WriteError(std::io::Error::other(format!(
+                    "session replaced, but directory sync failed: {e}"
+                )))
+            })?;
+        if let Err(error) = cleanup_old_sessions(self, Some(&data.meta.id)) {
+            tracing::warn!(%error, "session checkpoint saved; retention cleanup skipped");
+        }
 
         Ok(())
     }
@@ -275,10 +314,11 @@ impl SessionStore {
     /// Delete session data by specifying the session ID.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
         self.ensure_writable()?;
-        if id.is_empty() {
-            return Err(SessionError::InvalidId(id.to_string()));
-        }
+        validate_id(id)?;
         let dir = self.root.join(id);
+        if dir.is_symlink() {
+            return Err(SessionError::InvalidId("symlink session directory".into()));
+        }
         match fs::remove_dir_all(&dir) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(SessionError::DeleteError(e));
@@ -350,7 +390,27 @@ fn default_store_dir() -> Result<PathBuf, SessionError> {
 }
 
 /// Clean up old sessions if we exceed the maximum limit
-fn cleanup_old_sessions(store: &SessionStore) -> Result<(), SessionError> {
+fn cleanup_old_sessions(store: &SessionStore, protected: Option<&str>) -> Result<(), SessionError> {
+    // Most checkpoints need no retention work. Count directory entries without
+    // reading every historical conversation, and never delete unknown metadata.
+    let mut directories = 0usize;
+    for (index, entry) in fs::read_dir(&store.root)
+        .map_err(SessionError::ReadError)?
+        .enumerate()
+    {
+        if index >= 10_000 {
+            return Err(SessionError::ReadError(std::io::Error::other(
+                "session inventory exceeds read limit",
+            )));
+        }
+        let entry = entry.map_err(SessionError::ReadError)?;
+        if entry.file_type().map_err(SessionError::ReadError)?.is_dir() {
+            directories += 1;
+        }
+    }
+    if directories <= MAX_SESSIONS {
+        return Ok(());
+    }
     let mut sessions = store.list()?;
     // Cleanup is based on creation date (oldest sessions are removed first),
     // independent of the update-ordered listing.
@@ -370,7 +430,12 @@ fn cleanup_old_sessions(store: &SessionStore) -> Result<(), SessionError> {
 
         // The sessions are sorted by creation date in descending order (newest first)
         // So we need to delete from the end of the vector (oldest sessions)
-        for session_meta in sessions.iter().skip(MAX_SESSIONS) {
+        for session_meta in sessions
+            .iter()
+            .rev()
+            .filter(|s| Some(s.id.as_str()) != protected)
+            .take(excess_count)
+        {
             store.delete(&session_meta.id)?;
         }
 
@@ -742,5 +807,149 @@ mod tests {
             MAX_SESSIONS,
             "Should still limit sessions to MAX_SESSIONS"
         );
+    }
+
+    #[test]
+    fn writable_store_rejects_unsafe_ids_and_mismatched_metadata() {
+        let root = tempdir().expect("fixture");
+        let store = SessionStore::new(root.path()).expect("store");
+        let session = store.create().expect("session");
+        for id in ["../outside", "/absolute", "..", ".", "bad\\id", "bad\0id"] {
+            assert!(store.load(id).is_err());
+            assert!(store.delete(id).is_err());
+            let mut bad = session.clone();
+            bad.meta.id = id.into();
+            assert!(store.save(&bad).is_err());
+        }
+        let mut wrong = session.clone();
+        wrong.meta.id = "../outside".into();
+        fs::write(
+            store.session_dir(&session.meta.id).join("session.json"),
+            serde_json::to_vec(&wrong).expect("encode"),
+        )
+        .expect("fixture");
+        assert!(store.load(&session.meta.id).is_err());
+        assert!(store.list().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_store_refuses_links_and_readonly_replacement() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempdir().expect("fixture");
+        let outside = tempdir().expect("outside fixture");
+        let store = SessionStore::new(root.path()).expect("store");
+        let mut session = store.create().expect("session");
+        let path = store.session_dir(&session.meta.id).join("session.json");
+        let old = fs::read(&path).expect("bytes");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).expect("permissions");
+        session.meta.title = "updated".into();
+        assert!(store.save(&session).is_err());
+        assert_eq!(fs::read(&path).expect("bytes"), old);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
+        fs::remove_file(&path).expect("fixture");
+        let target = outside.path().join("target.json");
+        fs::write(&target, &old).expect("fixture");
+        symlink(&target, &path).expect("link");
+        assert!(store.save(&session).is_err());
+        assert!(store.load(&session.meta.id).is_err());
+        assert_eq!(fs::read(&target).expect("outside"), old);
+        symlink(outside.path(), root.path().join("linked")).expect("dir link");
+        assert!(store.load("linked").is_err());
+    }
+
+    #[test]
+    fn capacity_failure_preserves_previous_checkpoint_and_limits_reads() {
+        let root = tempdir().expect("fixture");
+        let store = SessionStore::new(root.path()).expect("store");
+        let mut session = store.create().expect("session");
+        let path = store.session_dir(&session.meta.id).join("session.json");
+        let old = fs::read(&path).expect("bytes");
+        session.meta.title = "x".repeat(MAX_SESSION_BYTES as usize);
+        assert!(store.save(&session).is_err());
+        assert_eq!(fs::read(&path).expect("bytes"), old);
+        assert_eq!(
+            fs::read_dir(path.parent().expect("dir"))
+                .expect("dir")
+                .count(),
+            1
+        );
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("fixture");
+        file.set_len(MAX_SESSION_BYTES + 1)
+            .expect("sparse oversized fixture");
+        assert!(store.load(&session.meta.id).is_err());
+    }
+
+    #[test]
+    fn retention_keeps_resumed_session_and_preserves_unknown_inventory() {
+        let root = tempdir().expect("fixture");
+        let store = SessionStore::new(root.path()).expect("store");
+        let mut old = store.create().expect("old");
+        old.meta.created_at = "2000-01-01T00:00:00Z".into();
+        store.save(&old).expect("old");
+        for _ in 0..100 {
+            let session = SessionData::new();
+            let dir = store.session_dir(&session.meta.id);
+            fs::create_dir(&dir).expect("fixture");
+            fs::write(
+                dir.join("session.json"),
+                serde_json::to_vec(&session).expect("encode"),
+            )
+            .expect("fixture");
+        }
+        old.meta.title = "resumed".into();
+        store.save(&old).expect("protected save");
+        assert_eq!(
+            store.load(&old.meta.id).expect("old retained").meta.title,
+            "resumed"
+        );
+        assert_eq!(store.list().expect("list").len(), MAX_SESSIONS);
+        let corrupt = root.path().join("corrupt");
+        fs::create_dir(&corrupt).expect("fixture");
+        fs::write(corrupt.join("session.json"), "broken").expect("fixture");
+        store
+            .save(&old)
+            .expect("valid checkpoint succeeds despite retention failure");
+        assert_eq!(
+            fs::read_to_string(corrupt.join("session.json")).expect("preserved"),
+            "broken"
+        );
+        assert!(store.list().is_err());
+    }
+
+    #[test]
+    fn atomic_replacement_never_exposes_partial_json_to_reader() {
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempdir().expect("fixture");
+        let store = SessionStore::new(root.path()).expect("store");
+        let mut session = store.create().expect("session");
+        let path = store.session_dir(&session.meta.id).join("session.json");
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+        let reader_done = done.clone();
+        let reader_barrier = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            let mut reads = 0;
+            while !reader_done.load(Ordering::Relaxed) {
+                let _: SessionData =
+                    serde_json::from_slice(&fs::read(&path).expect("read")).expect("complete JSON");
+                reads += 1;
+            }
+            reads
+        });
+        barrier.wait();
+        for i in 0..10 {
+            session.meta.title = format!("{i}:{}", "x".repeat(16_000));
+            store.save(&session).expect("save");
+        }
+        done.store(true, Ordering::Relaxed);
+        assert!(reader.join().expect("reader") > 0);
     }
 }

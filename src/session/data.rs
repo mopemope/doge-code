@@ -113,6 +113,9 @@ pub struct SessionSummary {
 pub struct SessionData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_binding: Option<String>,
+    /// Provider-reported subtotals. None means legacy history was unmeasured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::llm::usage_ledger::UsageLedger>,
     pub meta: SessionMeta,
     /// Last updated timestamp (RFC3339 string)
     #[serde(
@@ -166,6 +169,7 @@ impl SessionData {
         };
         Self {
             inference_binding: None,
+            usage: Some(Default::default()),
             meta,
             timestamp: now,
             conversation: Vec::new(),

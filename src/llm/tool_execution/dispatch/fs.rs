@@ -202,14 +202,28 @@ pub async fn fs_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Re
 }
 
 pub async fn find_file(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
+    let options = serde_json::from_value::<crate::tools::find_file::FindFileOptions>(args.clone())?;
     let args = serde_json::from_value::<crate::tools::find_file::FindFileArgs>(args.clone())?;
-    match runtime.fs.find_file(&args.filename).await {
+    match runtime
+        .fs
+        .find_file_with_options(&args.filename, options)
+        .await
+    {
         Ok(res) => {
             let value = serde_json::to_value(&res)?;
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: true,
-                result_summary: format!("Found {} files", res.files.len()),
+                result_summary: format!(
+                    "Found {} of {} files{}",
+                    res.returned,
+                    res.total_matches,
+                    if res.truncated {
+                        " (more available)"
+                    } else {
+                        ""
+                    }
+                ),
             })
         }
         Err(e) => Err(anyhow!("{e}")),

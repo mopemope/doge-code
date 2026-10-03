@@ -37,6 +37,8 @@ pub struct OpenAIClient {
     pub total_tokens_used: Arc<AtomicU64>,
     /// Monotonic usage records; never populated from local token estimates.
     pub usage_record_count: Arc<AtomicU64>,
+    /// Process-lifetime ledger shared by clones, independent of UI resets.
+    pub(crate) usage_ledger: Arc<std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>>,
     /// Cumulative prompt tokens across the whole session.
     pub total_prompt_tokens_used: Arc<AtomicU64>,
     /// Last request's reasoning tokens (from `completion_tokens_details`).
@@ -103,6 +105,7 @@ impl OpenAIClient {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             usage_record_count: Arc::new(AtomicU64::new(0)),
+            usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -232,7 +235,26 @@ impl OpenAIClient {
     /// state to "not reported" without touching the ever-seen flags.
     /// This is the single source of truth for all request paths
     /// (`chat_tools_once`, `chat_once_request`, compaction, sub-agent).
+    pub fn usage_snapshot(&self) -> crate::llm::usage_ledger::UsageLedger {
+        *self
+            .usage_ledger
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub(crate) fn record_request_attempt(&self) {
+        let mut ledger = self
+            .usage_ledger
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        ledger.attempts = ledger.attempts.saturating_add(1);
+    }
+
     pub fn record_usage(&self, usage: &Usage) {
+        self.usage_ledger
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .record(usage);
         self.set_tokens(usage.total_tokens);
         self.set_prompt_tokens(usage.prompt_tokens);
         self.add_total_tokens(usage.total_tokens, usage.prompt_tokens);
@@ -677,6 +699,7 @@ mod tests {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             usage_record_count: Arc::new(AtomicU64::new(0)),
+            usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -694,6 +717,7 @@ mod tests {
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             usage_record_count: Arc::new(AtomicU64::new(0)),
+            usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),

@@ -129,12 +129,15 @@ impl OpenAIClient {
         let mut attempt = 1usize;
         let total_attempts = max_attempts(self.llm_cfg.max_retries);
         let resp = loop {
-            let fut = self
+            let request = self
                 .inner
                 .post(url.clone())
                 .headers(headers.clone())
-                .json(&req)
-                .send();
+                .json(&req);
+            let fut = async {
+                self.record_request_attempt();
+                request.send().await
+            };
 
             let resp_res = tokio::select! {
                 biased;

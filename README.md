@@ -302,7 +302,7 @@ to Git commands, with a 10-second timeout per command.
 - `fs_read`: Read files with optional summary mode for large files
 - `fs_write`: Create or overwrite files
 - `fs_list`: List directory contents with pagination
-- `find_file`: Search files by glob pattern
+- `find_file`: Search files by glob or substring, with complete paths and bounded cursor pages (`cursor`, `page_size`, `response_budget_chars`)
 - `execute_process`: Run a program directly without a shell (preferred for builds, tests, git)
 - `execute_bash`: Shell escape hatch — use only when pipes/redirects/builtins are genuinely required (disable with `[execution] allow_shell = false`)
 
@@ -548,6 +548,42 @@ dgc session delete 0198abcd
 ```
 
 In the TUI, `/session list` shows the same table with the current session marked, and `/session switch <id>` accepts ID prefixes as well.
+
+Session checkpoints replace `session.json` atomically using a private sibling
+temporary file, with a shared 16 MiB save/read limit. A failure before replacement
+keeps the old file intact; a directory-sync failure after replacement is reported
+as such. IDs must be single path components, stored IDs must match their directory,
+and session/metadata symlinks are rejected. Malformed sessions are preserved and
+reported rather than silently skipped during listing or latest-session selection.
+The retention limit is 100 sessions and excludes the checkpoint being saved. If
+safe retention inventory fails, the checkpoint succeeds with a warning and no
+sessions are removed. Keep the store in a trusted directory: there is no cross-process
+writer lock or guarantee against concurrent adversarial directory replacement.
+
+While a foreground job owns the session, TUI session creation, switching, deletion,
+resume and clearing wait for the job to release it, including its final checkpoint.
+A final save failure marks the job failed and keeps the updated in-memory history
+available for a save retry; it does not claim durable completion.
+
+`exec --json` includes a `usage` object with inference attempts, usage-report count,
+provider-reported prompt/completion/total subtotals, and optional reasoning/cache
+subtotals. The legacy `tokens_used` field remains the reported prompt subtotal.
+`unknown_usage_attempts` counts sent attempts without usage, including failed
+retries; a subtotal of zero does not assert zero billing. Missing optional metrics
+remain `null`, while explicitly reported zero remains zero. Session usage adds each
+checkpoint delta once and survives resume; legacy sessions mark their historical
+usage unknown. This covers agent turns and their internal summaries/subagents using
+the shared client. Manual jobs such as `/compact` and `/edit-symbol`, independent
+`doc_generate` clients, and usage lost before a forced process kill are outside
+this durable accounting scope. `all_tracked_attempts_reported` refers only to the
+tracked attempts, never complete provider billing or remaining plan quota.
+
+`find_file` sorts and deduplicates complete paths and budgets the entire serialized
+JSON to at most 6,000 characters (at most 200 paths). Use `next_cursor` with the same
+query to continue; `returned`, `total_matches` and `truncated` describe the page.
+An insufficient budget for even one path is an error. A filesystem change between
+pages can shift offsets; the directory walk itself has no hard memory/time cap.
+
 
 ### Claude Desktop Integration
 1. Start MCP server: `dgc mcp-server 127.0.0.1:8000`

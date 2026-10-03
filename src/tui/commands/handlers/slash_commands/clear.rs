@@ -4,6 +4,10 @@ use crate::tui::view::TuiApp;
 /// Delegate /clear to the dedicated handler.
 /// This separation improves modularity by isolating command logic.
 pub fn handle_clear(executor: &mut TuiExecutor, ui: &mut TuiApp) {
+    if let Err(error) = executor.ensure_session_idle() {
+        ui.push_log(error.to_string());
+        return;
+    }
     ui.clear_log();
     // Fresh session with no carried-over conversation: the shared helper
     // clears the runtime buffer and turn metadata, then creates the session.

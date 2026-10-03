@@ -411,7 +411,7 @@ async fn test_real_provider_errors_remain_errors() {
 #[tokio::test]
 async fn test_main_telemetry_restoration_and_cached_charge() {
     use crate::llm::types::Usage;
-    let mut response = assistant(vec![make_call("find_file", "find")], None);
+    let mut response = assistant(vec![read_only_call()], None);
     response["usage"] = serde_json::json!({"total_tokens":20000,"prompt_tokens":10000,"completion_tokens":10000,"prompt_tokens_details":{"cached_tokens":8000,"cache_write_tokens":1000},"completion_tokens_details":{"reasoning_tokens":1000}});
     let (client, requests, server) = fixture(vec![(200, response)]).await;
     client.record_usage(&serde_json::from_value::<Usage>(serde_json::json!({"total_tokens":120,"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":10}})).expect("usage"));
@@ -444,6 +444,8 @@ async fn test_main_telemetry_restoration_and_cached_charge() {
     assert_eq!(after.record_count - before.record_count, 1);
     assert_eq!(client.get_total_cached_prompt_tokens(), 8060);
     assert_eq!(client.get_total_cache_write_tokens(), 1010);
+    assert_eq!(client.usage_snapshot().usage_records, 2);
+    assert_eq!(client.usage_snapshot().total_tokens, 20120);
     server.abort();
 }
 

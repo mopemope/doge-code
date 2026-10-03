@@ -78,7 +78,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 info!("chat_once cancelled before send");
                 return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
             }
-            res = req_builder.send() => res,
+            res = async { client.record_request_attempt(); req_builder.send().await } => res,
         };
 
         // Transport failure: no HTTP status.
