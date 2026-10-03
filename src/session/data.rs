@@ -1,3 +1,6 @@
+use crate::llm::observation::ObservationStore;
+use crate::llm::types::ChatMessage;
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
@@ -283,6 +286,64 @@ impl SessionData {
         self.provenance_record_failures = self.provenance_record_failures.saturating_add(1);
         self.timestamp = Utc::now().to_rfc3339();
     }
+
+    /// Decode the persisted conversation to typed messages, preserving save
+    /// order exactly.
+    ///
+    /// Fails closed: a single undecodable entry aborts the whole load with
+    /// the entry index in the error. Callers must never `skip` malformed
+    /// entries and resume a partial conversation — dropping one side of a
+    /// tool-call / tool-result pair breaks the provider protocol.
+    /// `provider_state`, `tool_calls`, and `tool_call_id` round-trip untouched.
+    pub fn conversation_messages(&self) -> Result<Vec<ChatMessage>> {
+        self.conversation
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let value = serde_json::Value::Object(entry.clone().into_iter().collect());
+                serde_json::from_value(value).with_context(|| {
+                    format!("failed to decode saved conversation entry at index {index}")
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically replace the persisted conversation with typed messages.
+    ///
+    /// Every message is serialized first; the stored `conversation` is only
+    /// swapped after all encodings succeed, so a failure never leaves a
+    /// partially rewritten conversation behind.
+    pub fn replace_conversation_messages(&mut self, messages: &[ChatMessage]) -> Result<()> {
+        let mut encoded = Vec::with_capacity(messages.len());
+        for (index, msg) in messages.iter().enumerate() {
+            let value = serde_json::to_value(msg)
+                .with_context(|| format!("failed to encode conversation message {index}"))?;
+            match value {
+                serde_json::Value::Object(map) => {
+                    encoded.push(map.into_iter().collect());
+                }
+                _ => anyhow::bail!("conversation message {index} did not encode to an object"),
+            }
+        }
+        self.conversation = encoded;
+        self.timestamp = Utc::now().to_rfc3339();
+        Ok(())
+    }
+
+    /// Clear the whole conversation-owned context: persisted messages plus
+    /// the Observation Store and unseen tool results that belong to the same
+    /// conversation.
+    ///
+    /// Session identity and cumulative state are preserved: id, title,
+    /// inference binding, token/request/tool statistics, changed files, and
+    /// provenance flags. (A full "new session" reset is `create_session`,
+    /// not this function.)
+    pub fn clear_conversation_context(&mut self) {
+        self.conversation.clear();
+        self.observations = ObservationStore::new();
+        self.unseen_tool_results.clear();
+        self.timestamp = Utc::now().to_rfc3339();
+    }
 }
 
 #[cfg(test)]
@@ -510,5 +571,150 @@ mod tests {
         let data: SessionData = serde_json::from_value(legacy).unwrap();
         assert!(!data.provenance_incomplete);
         assert_eq!(data.provenance_record_failures, 0);
+    }
+
+    fn typed_msg(role: &str, content: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: role.to_string(),
+            content: content.map(str::to_string),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_conversation_round_trip_preserves_order_and_ids() {
+        let mut session_data = SessionData::new();
+        let messages = vec![
+            typed_msg("user", Some("first")),
+            ChatMessage {
+                provider_state: None,
+                role: "assistant".into(),
+                content: None,
+                tool_calls: vec![
+                    crate::llm::types::ToolCall {
+                        id: Some("call-a".into()),
+                        r#type: "function".into(),
+                        function: crate::llm::types::ToolCallFunction {
+                            name: "fs_read".into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                    crate::llm::types::ToolCall {
+                        id: Some("call-b".into()),
+                        r#type: "function".into(),
+                        function: crate::llm::types::ToolCallFunction {
+                            name: "fs_read".into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                ],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                provider_state: None,
+                role: "tool".into(),
+                content: Some("content-a".into()),
+                tool_calls: vec![],
+                tool_call_id: Some("call-a".into()),
+            },
+            ChatMessage {
+                provider_state: None,
+                role: "tool".into(),
+                content: Some("content-b".into()),
+                tool_calls: vec![],
+                tool_call_id: Some("call-b".into()),
+            },
+        ];
+        session_data
+            .replace_conversation_messages(&messages)
+            .expect("replace");
+        let loaded = session_data.conversation_messages().expect("decode");
+        assert_eq!(loaded.len(), 4);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[1].tool_calls.len(), 2);
+        assert_eq!(loaded[2].tool_call_id.as_deref(), Some("call-a"));
+        assert_eq!(loaded[3].tool_call_id.as_deref(), Some("call-b"));
+    }
+
+    #[test]
+    fn test_conversation_round_trip_preserves_provider_state() {
+        let mut session_data = SessionData::new();
+        let state = crate::features::openai_subscription::ProviderState {
+            version: 1,
+            account: "acc".into(),
+            model: "m".into(),
+            output: vec![serde_json::json!({"type": "reasoning", "id": "rs_1"})],
+        };
+        session_data
+            .replace_conversation_messages(&[ChatMessage {
+                provider_state: Some(state),
+                role: "assistant".into(),
+                content: Some("answer".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }])
+            .expect("replace");
+        let loaded = session_data.conversation_messages().expect("decode");
+        let output = &loaded[0]
+            .provider_state
+            .as_ref()
+            .expect("provider state survives session round-trip")
+            .output;
+        assert_eq!(
+            output,
+            &vec![serde_json::json!({"type": "reasoning", "id": "rs_1"})]
+        );
+    }
+
+    #[test]
+    fn test_conversation_malformed_entry_fails_closed() {
+        let mut session_data = SessionData::new();
+        session_data
+            .replace_conversation_messages(&[typed_msg("user", Some("first"))])
+            .expect("replace");
+        // One undecodable entry between valid ones: role must be a string.
+        let mut bad = HashMap::new();
+        bad.insert("role".to_string(), serde_json::json!(123));
+        session_data.add_conversation_entry(bad);
+        let mut tool = HashMap::new();
+        tool.insert("role".to_string(), serde_json::json!("tool"));
+        tool.insert("content".to_string(), serde_json::json!("out"));
+        tool.insert("tool_call_id".to_string(), serde_json::json!("call-1"));
+        session_data.add_conversation_entry(tool);
+        let err = session_data
+            .conversation_messages()
+            .expect_err("malformed entry must fail, never partially load");
+        assert!(
+            err.to_string().contains("index 1"),
+            "error must name the entry index: {err}"
+        );
+    }
+
+    #[test]
+    fn test_clear_conversation_context_keeps_identity_and_metrics() {
+        let mut session_data = SessionData::new();
+        session_data.set_initial_prompt("remember this title prompt for the session");
+        session_data
+            .replace_conversation_messages(&[typed_msg("user", Some("hi"))])
+            .expect("replace");
+        session_data.increment_token_count(7);
+        session_data.increment_requests();
+        session_data.add_changed_file(std::path::PathBuf::from("src/lib.rs"));
+        session_data.unseen_tool_results.insert("call-1".into());
+        let id = session_data.meta.id.clone();
+        let title = session_data.meta.title.clone();
+
+        session_data.clear_conversation_context();
+
+        assert!(session_data.conversation.is_empty());
+        assert!(session_data.observations.is_empty());
+        assert!(session_data.unseen_tool_results.is_empty());
+        assert_eq!(session_data.meta.id, id);
+        assert_eq!(session_data.meta.title, title);
+        assert_eq!(session_data.token_count, 7);
+        assert_eq!(session_data.requests, 1);
+        assert_eq!(session_data.changed_files.len(), 1);
     }
 }

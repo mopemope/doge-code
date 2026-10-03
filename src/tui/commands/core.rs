@@ -48,8 +48,6 @@ pub struct TuiExecutor {
     pub(crate) tools: FsTools,
     pub(crate) repomap: Arc<RwLock<Option<RepoMap>>>,
     pub(crate) client: Option<OpenAIClient>,
-    #[allow(dead_code)]
-    pub(crate) history: crate::llm::ChatHistory,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) jobs: JobManager,
     pub(crate) last_user_prompt: Option<String>,
