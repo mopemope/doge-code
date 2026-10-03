@@ -14,7 +14,9 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "execute_process".to_string(),
             description: "Executes a program directly WITHOUT a shell (preferred for builds, tests, git, and other single-program commands). `program` is the executable name and `args` are passed as-is; shell syntax (pipes, redirects, `&&`, `$()`) is NOT interpreted. Use `execute_bash` only when shell syntax is genuinely required, and `execute_shell` for persistent shell state.".to_string(),
-            strict: Some(true),
+            // Optional fields and dynamic env maps are intentionally handled
+            // by typed runtime validation, outside OpenAI's strict subset.
+            strict: Some(false),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -56,7 +58,7 @@ mod tests {
     fn test_tool_def_schema() {
         let def = tool_def();
         assert_eq!(def.function.name, "execute_process");
-        assert_eq!(def.function.strict, Some(true));
+        assert_eq!(def.function.strict, Some(false));
         let params = &def.function.parameters;
         assert_eq!(params["additionalProperties"], false);
         let required = params["required"].as_array().expect("required");

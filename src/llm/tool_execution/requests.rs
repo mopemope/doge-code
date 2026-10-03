@@ -48,7 +48,7 @@ pub async fn chat_tools_once(
             &reasoning_mode,
             reasoning_effort,
         );
-        return crate::features::openai_subscription::responses::infer(
+        let message = crate::features::openai_subscription::responses::infer(
             client,
             auth,
             model,
@@ -57,7 +57,19 @@ pub async fn chat_tools_once(
             effort,
             cancel.unwrap_or_default(),
         )
-        .await;
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::features::openai_subscription::ProviderError>()
+                .is_some_and(|provider| is_context_length_exceeded_code(&provider.code))
+            {
+                error.context(LlmErrorKind::ContextLengthExceeded)
+            } else {
+                error
+            }
+        })?;
+        validate_tool_message(&message, tools)?;
+        return Ok(message);
     }
     anyhow::ensure!(
         !messages.iter().any(|m| m.provider_state.is_some()),
@@ -401,8 +413,56 @@ async fn chat_tools_once_attempt(
         }
     };
 
+    let validation = (|| -> Result<()> {
+        crate::llm::types::validate_completion(
+            msg.finish_reason.as_deref(),
+            !msg.message.tool_calls.is_empty(),
+        )?;
+        validate_tool_message(&msg.message, tools)
+    })();
+    if let Err(error) = validation {
+        let kind = error
+            .downcast_ref::<LlmErrorKind>()
+            .cloned()
+            .unwrap_or(LlmErrorKind::Client);
+        return Err(RequestAttemptFailure::new(kind, None, None, None, error));
+    }
     debug!("llm response message {:?}", msg);
     Ok(msg.message)
+}
+
+/// One preflight for both provider protocols, before any batch sibling executes.
+fn validate_tool_message(message: &ChoiceMessageWithTools, tools: &[ToolDef]) -> Result<()> {
+    if message.refusal.is_some() {
+        return Err(anyhow!(LlmErrorKind::Incomplete).context("provider refused the response"));
+    }
+    let validation = (|| -> Result<()> {
+        anyhow::ensure!(
+            message.role == "assistant",
+            "response must have assistant role"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for call in &message.tool_calls {
+            anyhow::ensure!(
+                call.r#type == "function"
+                    && call
+                        .id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty() && ids.insert(id)),
+                "invalid tool-call batch"
+            );
+            anyhow::ensure!(
+                tools
+                    .iter()
+                    .any(|tool| tool.function.name == call.function.name),
+                "tool-call batch requested a tool outside the active catalog"
+            );
+            let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+            super::arguments::validate_builtin_arguments(&call.function.name, &arguments)?;
+        }
+        Ok(())
+    })();
+    validation.map_err(|error| error.context(LlmErrorKind::Client))
 }
 
 #[cfg(test)]

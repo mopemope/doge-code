@@ -97,7 +97,7 @@ async fn test_provider_context_overflow_fallback() {
 
 #[tokio::test]
 async fn test_exact_iteration_limit_with_finalization() {
-    let (client, requests, server) = fixture(vec![(200, serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"blocked","type":"function","function":{"name":"execute_bash","arguments":"{}"}}]}}]}))]).await;
+    let (client, requests, server) = fixture(vec![(200, serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"blocked","type":"function","function":{"name":"fs_list","arguments":"{\"path\":\"/fixture\"}"}}]}}]}))]).await;
     let result = fixture_run(
         &client,
         crate::config::AppConfig {
@@ -116,10 +116,17 @@ async fn test_exact_iteration_limit_with_finalization() {
         result.stop_reason,
         Some(SubagentStopReason::IterationBudget)
     );
-    assert_eq!(result.tool_calls, 0);
+    assert_eq!(result.tool_calls, 2);
     assert_eq!(requests.lock().expect("requests").len(), 3);
     assert!(requests.lock().expect("requests")[2].get("tools").is_none());
     server.abort();
+}
+
+// Budget/cancellation fixtures use a catalog-visible read-only operation.
+fn read_only_call() -> ToolCall {
+    let mut call = make_call("fs_list", "read-fixture");
+    call.function.arguments = serde_json::json!({"path":"/fixture"}).to_string();
+    call
 }
 
 fn make_call(name: &str, id: &str) -> ToolCall {
@@ -194,7 +201,12 @@ fn test_tool_call_blocked_message_shape() {
 }
 
 fn assistant(calls: Vec<ToolCall>, content: Option<&str>) -> serde_json::Value {
-    serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":content,"tool_calls":calls}}]})
+    let reason = if calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    serde_json::json!({"choices":[{"index":0,"finish_reason":reason,"message":{"role":"assistant","content":content,"tool_calls":calls}}]})
 }
 
 fn limits() -> crate::config::AppConfig {
@@ -323,7 +335,7 @@ async fn test_context_preflight_enforced_with_mode_off() {
 
 #[tokio::test]
 async fn test_token_preflight_and_remaining_budget_blocks_next_request() {
-    let response = assistant(vec![make_call("execute_bash", "blocked")], None);
+    let response = assistant(vec![read_only_call()], None);
     let (client, requests, server) = fixture(vec![(200, response)]).await;
     let cfg = crate::config::AppConfig {
         subagent: crate::config::SubagentConfig {
@@ -341,11 +353,8 @@ async fn test_token_preflight_and_remaining_budget_blocks_next_request() {
 
 #[tokio::test]
 async fn test_cancelled_at_boundary_and_during_research_is_error() {
-    let (client, requests, server) = fixture(vec![(
-        200,
-        assistant(vec![make_call("execute_bash", "blocked")], None),
-    )])
-    .await;
+    let (client, requests, server) =
+        fixture(vec![(200, assistant(vec![read_only_call()], None))]).await;
     let token = CancellationToken::new();
     token.cancel();
     let error = fixture_run(&client, limits(), Some(token))
@@ -487,11 +496,8 @@ async fn test_task_output_completed_and_partial_shape() {
 
 #[tokio::test]
 async fn test_usage_missing_does_not_reuse_main_counters() {
-    let (client, requests, server) = fixture(vec![(
-        200,
-        assistant(vec![make_call("execute_bash", "blocked")], None),
-    )])
-    .await;
+    let (client, requests, server) =
+        fixture(vec![(200, assistant(vec![read_only_call()], None))]).await;
     client.set_tokens(999_999);
     client.set_prompt_tokens(999_999);
     let before = client.usage_totals_snapshot();
@@ -630,10 +636,7 @@ async fn test_cancellation_during_finalization_is_not_partial() {
     let mut final_response = assistant(vec![], Some("must not be returned"));
     final_response["_fixture_delay_ms"] = serde_json::json!(1000);
     let (client, requests, server) = fixture(vec![
-        (
-            200,
-            assistant(vec![make_call("execute_bash", "blocked")], None),
-        ),
+        (200, assistant(vec![read_only_call()], None)),
         (200, final_response),
     ])
     .await;
@@ -664,7 +667,7 @@ async fn test_cancellation_during_finalization_is_not_partial() {
 
 #[tokio::test]
 async fn test_review_dropped_future_restores_main_telemetry() {
-    let mut research = assistant(vec![make_call("execute_bash", "blocked")], None);
+    let mut research = assistant(vec![read_only_call()], None);
     research["usage"] = serde_json::json!({"total_tokens":150,"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":80,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":20}});
     let mut finalization = assistant(vec![], Some("unused"));
     finalization["_fixture_delay_ms"] = serde_json::json!(1000);

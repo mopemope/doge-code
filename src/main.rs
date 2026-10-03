@@ -481,7 +481,31 @@ async fn run_exec(
     json: bool,
 ) -> anyhow::Result<()> {
     let mut executor = crate::exec::Executor::new(cfg).await?;
-    executor.run(instruction, json).await
+    let cancel = tokio_util::sync::CancellationToken::new();
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let signal = async {
+        #[cfg(unix)]
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await
+    };
+    let run = executor.run_with_cancel(instruction, json, Some(cancel.clone()));
+    tokio::pin!(run);
+    tokio::select! {
+        biased;
+        signal_result = signal => {
+            signal_result?;
+            cancel.cancel();
+            // Keep polling the agent so managed children are reaped and
+            // canonical interruption history is saved before CLI exit.
+            run.await
+        }
+        result = &mut run => result,
+    }
 }
 
 impl std::fmt::Debug for Cli {

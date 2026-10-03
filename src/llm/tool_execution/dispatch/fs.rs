@@ -169,8 +169,9 @@ pub async fn search_text(
 }
 
 pub async fn fs_write(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let params: crate::tools::write::FsWriteArgs = serde_json::from_value(args.clone())?;
+    let path = params.path.as_str();
+    let content = params.content.as_str();
     match runtime
         .fs
         .fs_write_with_attribution(path, content, &runtime.attribution)

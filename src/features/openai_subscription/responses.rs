@@ -167,6 +167,7 @@ pub fn completed(
         .and_then(Value::as_array)
         .context("Responses output missing")?;
     let mut text = String::new();
+    let mut refusal = None;
     let mut tool_calls = Vec::new();
     let mut ids = std::collections::HashSet::new();
     for item in output {
@@ -178,9 +179,14 @@ pub fn completed(
                         match part.get("type").and_then(Value::as_str) {
                             Some("output_text") => text
                                 .push_str(part.get("text").and_then(Value::as_str).unwrap_or("")),
-                            Some("refusal") => text.push_str(
-                                part.get("refusal").and_then(Value::as_str).unwrap_or(""),
-                            ),
+                            Some("refusal") => {
+                                refusal = Some(
+                                    part.get("refusal")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_owned(),
+                                )
+                            }
                             _ => bail!("unsupported Responses message content"),
                         }
                     }
@@ -228,6 +234,7 @@ pub fn completed(
     }).transpose()?;
     Ok((
         ChoiceMessageWithTools {
+            refusal,
             role: "assistant".into(),
             content: Some(text),
             tool_calls,

@@ -28,6 +28,12 @@ pub fn tool_def() -> ToolDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWriteArgs {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsWriteResult {
     pub success: bool,
     pub changed: bool,
