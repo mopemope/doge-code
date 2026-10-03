@@ -648,11 +648,21 @@ impl FsTools {
     /// let result = fs_tools.find_file("main").await?;
     /// ```
     pub async fn find_file(&self, filename: &str) -> Result<find_file::FindFileResult> {
-        find_file::find_file(
+        self.find_file_with_options(filename, find_file::FindFileOptions::default())
+            .await
+    }
+
+    pub async fn find_file_with_options(
+        &self,
+        filename: &str,
+        options: find_file::FindFileOptions,
+    ) -> Result<find_file::FindFileResult> {
+        find_file::find_file_with_options(
             find_file::FindFileArgs {
                 filename: filename.to_string(),
             },
             &self.config,
+            options,
         )
         .await
     }

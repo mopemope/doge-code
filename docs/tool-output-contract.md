@@ -82,7 +82,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 | `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars |
 | `apply_patch` | unified diff only (no full-content echo), diff capped at 6,000 chars |
 | `edit` | diff capped at 6,000 chars (`diff_truncated` flag) |
-| `find_file` | 200 paths per response, `total_matches` + `truncated` for overflow |
+| `find_file` | Whole serialized JSON budget (default/cap 6,000 chars), at most 200 complete paths; stable sort/dedup, 0-based `cursor` and `next_cursor`, `returned`, `total_matches`, `truncated`, `applied_budget_chars`, `warnings`; one-path budget failure is an error. MCP emits the same compact JSON. |
 | `fs_list` | budget 6,000 chars incl. per-entry JSON overhead; budget cuts resume at `cursor + entries.len()` (no skipped entries) |
 | `read_memory` | content capped at 6,000 chars |
 | `task` | summary capped at 4,000 chars; serialized output capped at 6,000 chars, preserving status/reason and marking omitted paths |

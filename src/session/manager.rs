@@ -192,6 +192,23 @@ impl SessionManager {
         observations: Option<crate::llm::observation::ObservationStore>,
         unseen: Option<std::collections::BTreeSet<String>>,
     ) -> Result<()> {
+        self.update_current_session_with_history_observations_and_usage(
+            history,
+            observations,
+            unseen,
+            None,
+            || {},
+        )
+    }
+
+    pub fn update_current_session_with_history_observations_and_usage(
+        &mut self,
+        history: &[crate::llm::types::ChatMessage],
+        observations: Option<crate::llm::observation::ObservationStore>,
+        unseen: Option<std::collections::BTreeSet<String>>,
+        usage_delta: Option<crate::llm::usage_ledger::UsageLedger>,
+        usage_applied: impl FnOnce(),
+    ) -> Result<()> {
         debug!(
             history_len = history.len(),
             has_current_session = self.current_session.is_some(),
@@ -234,6 +251,20 @@ impl SessionManager {
                 session.unseen_tool_results = unseen_set;
             }
 
+            if let Some(delta) = usage_delta {
+                let usage = session
+                    .usage
+                    .get_or_insert(crate::llm::usage_ledger::UsageLedger {
+                        historical_usage_unknown: true,
+                        ..Default::default()
+                    });
+                usage.add(&delta);
+                session.token_count = session.token_count.saturating_add(delta.total_tokens);
+                session.requests = session.requests.saturating_add(delta.attempts);
+            }
+            // Called only after history encoding and usage application succeed.
+            // Disk failure leaves this complete payload in memory for retry.
+            usage_applied();
             if let Err(e) = self.store.save(session) {
                 tracing_error!(?e, "Failed to save session data");
                 return Err(e.into());

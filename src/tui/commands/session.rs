@@ -26,6 +26,10 @@ impl TuiExecutor {
             return Ok(());
         }
 
+        if matches!(args[0], "new" | "switch" | "delete" | "clear") {
+            self.ensure_session_idle()?;
+        }
+
         match args[0] {
             "list" => {
                 let current_id = self.current_session_id();

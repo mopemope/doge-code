@@ -228,7 +228,10 @@ async fn chat_tools_once_attempt(
     let req_builder = client.inner.post(&url).headers(headers).json(&req);
 
     let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
-    let resp_fut = tokio::time::timeout(timeout_duration, req_builder.send());
+    let resp_fut = tokio::time::timeout(timeout_duration, async {
+        client.record_request_attempt();
+        req_builder.send().await
+    });
 
     let resp = tokio::select! {
         biased;

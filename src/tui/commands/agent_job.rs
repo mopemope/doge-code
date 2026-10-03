@@ -56,6 +56,52 @@ fn busy_message(active: &crate::jobs::JobSnapshot) -> String {
     )
 }
 
+/// HistoryManager checkpoints already charge usage exactly once. Persist the
+/// final projection without re-adding cumulative token counters.
+fn persist_agent_turn_history(
+    history: &std::sync::Mutex<crate::llm::ChatHistory>,
+    manager: &std::sync::Mutex<crate::session::SessionManager>,
+    updated: Option<Vec<crate::llm::ChatMessage>>,
+) -> anyhow::Result<()> {
+    let mut history = crate::utils::safe_std_lock(history, "conversation_history")?;
+    let mut manager = crate::utils::safe_std_lock(manager, "session_manager")?;
+    let messages = match updated {
+        Some(messages) => messages,
+        None => manager
+            .current_session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session to restore"))?
+            .conversation_messages()?,
+    };
+    anyhow::ensure!(
+        manager.current_session.is_some(),
+        "no active session to save"
+    );
+    let durable = crate::llm::durable_conversation_messages(messages);
+    manager.update_current_session_with_history_observations_and_usage(
+        &durable,
+        None,
+        None,
+        None,
+        || history.overwrite_messages(durable.clone()),
+    )
+}
+
+fn persistence_failure(
+    ui_tx: &Option<std::sync::mpsc::Sender<String>>,
+    error: &anyhow::Error,
+) -> JobRunOutcome {
+    let message = format!("Could not save session checkpoint: {error}");
+    tracing::error!(%error, "agent turn checkpoint failed");
+    if let Some(tx) = ui_tx {
+        let _ = tx.send(message.clone());
+        let _ = tx.send("::status:error".into());
+    }
+    JobRunOutcome::Failed {
+        message: crate::jobs::types::bound_error(&message),
+    }
+}
+
 /// Shared AgentTurn spawn path for plain prompts, `/quick`, and custom
 /// commands. A fast foreground pre-check runs first so a busy rejection
 /// returns before message building or history updates; the authoritative
@@ -174,12 +220,6 @@ pub(crate) fn spawn_agent_turn(
         if let Some(tx) = &ui_tx {
             let _ = tx.send("::status:sending".into());
         }
-        {
-            let mut sm = session_manager.lock().unwrap();
-            if let Err(e) = sm.update_current_session_with_request_count() {
-                tracing::error!(?e, "Failed to update session with request count");
-            }
-        }
         // Record the observed directive after the job started but before any
         // LLM call. Only an explicitly observed user directive records a new
         // event, using the caller-supplied raw bytes (never synthesized text)
@@ -248,21 +288,12 @@ pub(crate) fn spawn_agent_turn(
                         None => "::update_remaining_tokens".to_string(),
                     });
                 }
-                if let Ok(mut history) = conversation_history.lock() {
-                    // Canonical result: the agent loop's returned history is
-                    // the new truth (compaction may have shortened/reordered
-                    // it), projected to durable messages. Never a
-                    // count/index-based delta.
-                    let durable = crate::llm::durable_conversation_messages(updated_messages);
-                    history.replace(durable);
-                    let mut sm = session_manager.lock().unwrap();
-                    let msgs_vec = history.build_messages();
-                    if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
-                        tracing::error!(?e, "Failed to update session with conversation history");
-                    }
-                    if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
-                        tracing::error!(?e, "Failed to update session with token count");
-                    }
+                if let Err(error) = persist_agent_turn_history(
+                    &conversation_history,
+                    &session_manager,
+                    Some(updated_messages),
+                ) {
+                    return persistence_failure(&ui_tx, &error);
                 }
                 JobRunOutcome::Completed
             }
@@ -278,29 +309,10 @@ pub(crate) fn spawn_agent_turn(
                             "::tokens:prompt:{tokens_used},total:{total_tokens}"
                         ));
                     }
-                    if let Ok(mut history) = conversation_history.lock() {
-                        let mut sm = session_manager.lock().unwrap();
-                        {
-                            if let Some(session) = &sm.current_session {
-                                match session.conversation_messages() {
-                                    Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
-                                    Err(error) => tracing::error!(%error, "could not restore canonical checkpoint"),
-                                }
-                            }
-                        }
-                        let msgs_vec = history.build_messages();
-                        if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
-                            tracing::error!(
-                                ?e,
-                                "Failed to update session with conversation history on cancel"
-                            );
-                        }
-                        if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
-                            tracing::error!(
-                                ?e,
-                                "Failed to update session with token count on cancel"
-                            );
-                        }
+                    if let Err(error) =
+                        persist_agent_turn_history(&conversation_history, &session_manager, None)
+                    {
+                        return persistence_failure(&ui_tx, &error);
                     }
                     JobRunOutcome::Cancelled
                 } else {
@@ -311,29 +323,10 @@ pub(crate) fn spawn_agent_turn(
                             "::tokens:prompt:{tokens_used},total:{total_tokens}"
                         ));
                     }
-                    if let Ok(mut history) = conversation_history.lock() {
-                        let mut sm = session_manager.lock().unwrap();
-                        {
-                            if let Some(session) = &sm.current_session {
-                                match session.conversation_messages() {
-                                    Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
-                                    Err(error) => tracing::error!(%error, "could not restore canonical checkpoint"),
-                                }
-                            }
-                        }
-                        let msgs_vec = history.build_messages();
-                        if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
-                            tracing::error!(
-                                ?e,
-                                "Failed to update session with conversation history on error"
-                            );
-                        }
-                        if let Err(e) = sm.update_current_session_with_token_count(total_tokens) {
-                            tracing::error!(
-                                ?e,
-                                "Failed to update session with token count on error"
-                            );
-                        }
+                    if let Err(error) =
+                        persist_agent_turn_history(&conversation_history, &session_manager, None)
+                    {
+                        return persistence_failure(&ui_tx, &error);
                     }
                     JobRunOutcome::Failed {
                         message: crate::jobs::types::bound_error(&e.to_string()),
@@ -948,5 +941,73 @@ mod tests {
         );
         assert_eq!(ui.last_observed_seq, 1);
         executor.jobs.cancel(inner_id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_final_save_keeps_ui_and_session_history_together() {
+        use std::os::unix::fs::PermissionsExt;
+        let (executor, _dir) = test_executor_with_client();
+        let path = {
+            let manager = executor.session_manager.lock().expect("manager");
+            manager
+                .store
+                .session_dir(&manager.current_session_id().expect("id"))
+                .join("session.json")
+        };
+        let before = std::fs::read(&path).expect("before");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .expect("permissions");
+        let updated = vec![crate::llm::ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some("new canonical history".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let error = persist_agent_turn_history(
+            &executor.conversation_history,
+            &executor.session_manager,
+            Some(updated.clone()),
+        )
+        .expect_err("save refused");
+        assert_eq!(std::fs::read(&path).expect("after"), before);
+        assert_eq!(
+            executor
+                .conversation_history
+                .lock()
+                .expect("history")
+                .snapshot()[0]
+                .content,
+            updated[0].content
+        );
+        assert_eq!(
+            executor
+                .session_manager
+                .lock()
+                .expect("manager")
+                .current_session
+                .as_ref()
+                .expect("session")
+                .conversation_messages()
+                .expect("messages")[0]
+                .content,
+            updated[0].content
+        );
+        assert!(matches!(
+            persistence_failure(&None, &error),
+            JobRunOutcome::Failed { .. }
+        ));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions");
+        persist_agent_turn_history(
+            &executor.conversation_history,
+            &executor.session_manager,
+            None,
+        )
+        .expect("retry");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("valid JSON");
+        assert_eq!(persisted["requests"], 0);
     }
 }

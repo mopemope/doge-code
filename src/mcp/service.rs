@@ -97,6 +97,9 @@ pub struct FsListParams {
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FindFileParams {
     pub filename: String,
+    pub cursor: Option<usize>,
+    pub page_size: Option<usize>,
+    pub response_budget_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -534,15 +537,24 @@ impl DogeMcpService {
         &self,
         Parameters(params): Parameters<FindFileParams>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::find_file::find_file(
+        match crate::tools::find_file::find_file_with_options(
             crate::tools::find_file::FindFileArgs {
                 filename: params.filename,
             },
             &self.state.config,
+            crate::tools::find_file::FindFileOptions {
+                cursor: params.cursor,
+                page_size: params.page_size,
+                response_budget_chars: params.response_budget_chars,
+            },
         )
         .await
         {
-            Ok(result) => self.format_json_result(result),
+            Ok(result) => serde_json::to_string(&result)
+                .map(|text| CallToolResult::success(vec![ContentBlock::text(text)]))
+                .map_err(|error| {
+                    McpError::internal_error("Serialization error", Some(json!(error.to_string())))
+                }),
             Err(e) => {
                 Ok(self.format_tool_error("Failed to find files", Some(json!(e.to_string()))))
             }

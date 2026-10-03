@@ -143,10 +143,55 @@ mod tests {
         let service = test_service(tmp.path());
         let params = crate::mcp::service::FindFileParams {
             filename: "nonexistent-xyz-123.txt".to_string(),
+            cursor: None,
+            page_size: None,
+            response_budget_chars: None,
         };
 
         let result = service.find_file(Parameters(params)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn find_file_mcp_pages_obey_serialized_budget() {
+        let root = tempfile::tempdir().expect("root");
+        for i in 0..120 {
+            std::fs::write(
+                root.path()
+                    .join(format!("match_{i:03}_{}.txt", "a".repeat(70))),
+                "fixture",
+            )
+            .expect("file");
+        }
+        let service = test_service(root.path());
+        let mut cursor = 0;
+        let mut paths = std::collections::BTreeSet::new();
+        loop {
+            let result = service
+                .find_file(Parameters(crate::mcp::service::FindFileParams {
+                    filename: "match_".into(),
+                    cursor: Some(cursor),
+                    page_size: Some(200),
+                    response_budget_chars: Some(1100),
+                }))
+                .await
+                .expect("page");
+            let ContentBlock::Text(text) = &result.content[0] else {
+                panic!("text");
+            };
+            assert!(text.text.chars().count() <= 1100);
+            let page: serde_json::Value = serde_json::from_str(&text.text).expect("JSON");
+            assert_eq!(page["total_matches"], 120);
+            for path in page["files"].as_array().expect("files") {
+                assert!(paths.insert(path.as_str().expect("path").to_owned()));
+            }
+            let Some(next) = page["next_cursor"].as_u64() else {
+                break;
+            };
+            assert!(next as usize > cursor);
+            cursor = next as usize;
+        }
+        assert_eq!(paths.len(), 120);
     }
 
     #[tokio::test]

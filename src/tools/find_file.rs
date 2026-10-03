@@ -28,7 +28,7 @@
 use crate::config::{AppConfig, IGNORE_FILE};
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::utils::get_git_repository_root;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use glob::glob;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,12 +39,15 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "find_file".to_string(),
-            description: "Finds files by filename or glob pattern (e.g., '*.rs', 'src/**/*.ts'). Searches recursively from project root.".to_string(),
+            description: "Find files by filename or glob pattern. Results are sorted and budgeted; use next_cursor with the same filename to retrieve remaining matches.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "The filename or pattern to search for. This can be a full filename (e.g., `main.rs`), a partial name (e.g., `main`), or a glob pattern (e.g., `*.rs`, `src/**/*.rs`). The search is performed recursively from the project root."}
+                    "filename": {"type": "string", "description": "Filename, substring, or glob relative to project root (e.g. src/**/*.rs)."},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Offset from next_cursor; repeat the same filename."},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum complete paths in this page (default 200)."},
+                    "response_budget_chars": {"type": "integer", "minimum": 512, "description": "Serialized JSON character budget, capped at 6000 (default 6000)."}
                 },
                 "required": ["filename"]
             }),
@@ -55,6 +58,25 @@ pub fn tool_def() -> ToolDef {
 /// Maximum number of matching paths returned. Beyond this, `truncated` is set
 /// and `total_matches` keeps counting so the model can narrow the pattern.
 pub const MAX_RESULTS: usize = 200;
+const MAX_RESPONSE_CHARS: usize = 6000;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FindFileOptions {
+    pub cursor: Option<usize>,
+    pub page_size: Option<usize>,
+    pub response_budget_chars: Option<usize>,
+}
+
+impl FindFileOptions {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.page_size != Some(0), "page_size must be at least 1");
+        ensure!(
+            self.response_budget_chars.is_none_or(|n| n >= 512),
+            "response_budget_chars must be at least 512"
+        );
+        Ok(())
+    }
+}
 
 /// Arguments for the `find_file` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +106,69 @@ pub struct FindFileResult {
     #[serde(default)]
     pub total_matches: usize,
     /// Whether results were cut off by the per-response cap.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub truncated: bool,
+    pub returned: usize,
+    pub cursor: usize,
+    pub next_cursor: Option<usize>,
+    pub applied_budget_chars: usize,
+    pub warnings: Vec<String>,
+}
+
+fn page_matches(mut files: Vec<String>, options: &FindFileOptions) -> Result<FindFileResult> {
+    files.sort();
+    files.dedup();
+    let total_matches = files.len();
+    let cursor = options.cursor.unwrap_or(0);
+    ensure!(
+        cursor <= total_matches,
+        "cursor exceeds current match count; restart the search"
+    );
+    let budget = options
+        .response_budget_chars
+        .unwrap_or(MAX_RESPONSE_CHARS)
+        .min(MAX_RESPONSE_CHARS);
+    let page_size = options.page_size.unwrap_or(MAX_RESULTS).min(MAX_RESULTS);
+    let mut result = FindFileResult {
+        files: Vec::new(),
+        total_matches,
+        truncated: false,
+        returned: 0,
+        cursor,
+        next_cursor: None,
+        applied_budget_chars: budget,
+        warnings: Vec::new(),
+    };
+    fn continuation(result: &mut FindFileResult) {
+        result.returned = result.files.len();
+        let next = result.cursor + result.returned;
+        result.truncated = next < result.total_matches;
+        result.next_cursor = result.truncated.then_some(next);
+        result.warnings = if result.truncated {
+            vec!["More matches remain; repeat the same filename with next_cursor. Results may change if the workspace changes.".into()]
+        } else {
+            Vec::new()
+        };
+    }
+    for path in files.into_iter().skip(cursor).take(page_size) {
+        result.files.push(path);
+        continuation(&mut result);
+        if serde_json::to_string(&result)?.chars().count() > budget {
+            result.files.pop();
+            continuation(&mut result);
+            break;
+        }
+    }
+    continuation(&mut result);
+    ensure!(
+        !result.files.is_empty() || !result.truncated,
+        "budget cannot fit the next complete path; increase response_budget_chars up to 6000 or narrow the search"
+    );
+    ensure!(
+        serde_json::to_string(&result)?.chars().count() <= budget,
+        "budget cannot fit search metadata"
+    );
+    Ok(result)
 }
 
 /// Finds files in the project based on a filename or pattern.
@@ -105,6 +188,15 @@ pub struct FindFileResult {
 /// - `Ok(FindFileResult)`: A struct with a list of matching file paths.
 /// - `Err(anyhow::Error)`: An error if the search could not be completed.
 pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFileResult> {
+    find_file_with_options(args, config, FindFileOptions::default()).await
+}
+
+pub async fn find_file_with_options(
+    args: FindFileArgs,
+    config: &AppConfig,
+    options: FindFileOptions,
+) -> Result<FindFileResult> {
+    options.validate()?;
     // If the filename is an absolute non-glob path and it's a file, return
     // it directly, but only when it is in scope. Outside-scope hits yield
     // no matches rather than leaking file existence. Scope is checked
@@ -117,18 +209,10 @@ pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFil
         args.filename.contains('*') || args.filename.contains('?') || args.filename.contains('[');
     if path.is_absolute() && !looks_like_glob {
         if crate::tools::scope::ensure_in_project_scope(path, config).is_err() {
-            return Ok(FindFileResult {
-                files: Vec::new(),
-                total_matches: 0,
-                truncated: false,
-            });
+            return page_matches(Vec::new(), &options);
         }
         if path.is_file() {
-            return Ok(FindFileResult {
-                files: vec![args.filename],
-                total_matches: 1,
-                truncated: false,
-            });
+            return page_matches(vec![args.filename], &options);
         }
     }
 
@@ -205,21 +289,7 @@ pub async fn find_file(args: FindFileArgs, config: &AppConfig) -> Result<FindFil
         }
     }
 
-    let total_matches = files.len();
-    if total_matches > MAX_RESULTS {
-        files.truncate(MAX_RESULTS);
-        return Ok(FindFileResult {
-            files,
-            total_matches,
-            truncated: true,
-        });
-    }
-
-    Ok(FindFileResult {
-        files,
-        total_matches,
-        truncated: false,
-    })
+    page_matches(files, &options)
 }
 
 #[cfg(test)]
@@ -342,7 +412,8 @@ mod tests {
         };
         let result = find_file(args, &config).await.unwrap();
 
-        assert_eq!(result.files.len(), MAX_RESULTS);
+        assert!(!result.files.is_empty() && result.files.len() <= MAX_RESULTS);
+        assert_eq!(result.next_cursor, Some(result.files.len()));
         assert_eq!(result.total_matches, MAX_RESULTS + 50);
         assert!(result.truncated);
     }
@@ -451,5 +522,103 @@ mod tests {
             .unwrap();
         assert_eq!(result.files.len(), 1);
         assert!(result.files[0].ends_with("aliased.txt"));
+    }
+
+    #[tokio::test]
+    async fn budgeted_pages_recover_every_path_without_truncation() {
+        let root = create_temp_dir();
+        let mut expected = Vec::new();
+        for i in 0..120 {
+            let path = root
+                .path()
+                .join(format!("match_{i:04}_{}\".rs", "日本語".repeat(18)));
+            fs::write(&path, "").expect("fixture");
+            expected.push(path.to_str().expect("UTF8").to_owned());
+        }
+        expected.sort();
+        let config = AppConfig {
+            project_root: root.path().to_owned(),
+            ..Default::default()
+        };
+        let mut cursor = 0;
+        let mut recovered = Vec::new();
+        loop {
+            let page = find_file_with_options(
+                FindFileArgs {
+                    filename: "match_".into(),
+                },
+                &config,
+                FindFileOptions {
+                    cursor: Some(cursor),
+                    response_budget_chars: Some(1100),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("page");
+            let serialized = serde_json::to_string(&page).expect("JSON");
+            assert!(serialized.chars().count() <= 1100);
+            assert_eq!(
+                crate::llm::truncate_tool_output(serialized.clone(), "find_file"),
+                serialized
+            );
+            assert_eq!(page.total_matches, 120);
+            assert_eq!(page.returned, page.files.len());
+            recovered.extend(page.files);
+            if let Some(next) = page.next_cursor {
+                assert!(next > cursor);
+                cursor = next;
+            } else {
+                assert!(!page.truncated);
+                break;
+            }
+        }
+        assert_eq!(recovered, expected);
+    }
+
+    #[test]
+    fn path_budget_never_returns_a_nonprogressing_page() {
+        let options = FindFileOptions {
+            response_budget_chars: Some(512),
+            ..Default::default()
+        };
+        assert!(page_matches(vec!["x".repeat(1000)], &options).is_err());
+        assert!(
+            FindFileOptions {
+                page_size: Some(0),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FindFileOptions {
+                response_budget_chars: Some(511),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            page_matches(
+                vec!["a".into()],
+                &FindFileOptions {
+                    cursor: Some(2),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        let page = page_matches(
+            vec!["b".into(), "a".into(), "a".into()],
+            &FindFileOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("page");
+        assert_eq!(page.files, ["a"]);
+        assert_eq!(page.total_matches, 2);
+        assert_eq!(page.next_cursor, Some(1));
     }
 }

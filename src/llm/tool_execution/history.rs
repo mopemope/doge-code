@@ -17,6 +17,8 @@ pub struct HistoryManager {
     config: crate::config::AppConfig,
     observations: SharedObservationStore,
     unseen_tool_results: BTreeSet<String>,
+    usage_checkpoint: std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>,
+    expected_session_id: Option<String>,
 }
 
 /// Structured compaction report: overall reclaimed bytes plus how much is
@@ -61,7 +63,15 @@ impl HistoryManager {
         fs_tools: crate::tools::FsTools,
         config: crate::config::AppConfig,
     ) -> Self {
+        let expected_session_id = fs_tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .as_ref()
+            .and_then(|manager| manager.lock().ok().and_then(|m| m.current_session_id()));
+        let usage_checkpoint = std::sync::Mutex::new(client.usage_snapshot());
         Self {
+            usage_checkpoint,
+            expected_session_id,
             messages,
             client,
             ui_tx,
@@ -110,12 +120,24 @@ impl HistoryManager {
                 tool_calls:vec![], tool_call_id:Some(id.clone()) });
             unseen.insert(id);
         }
-        crate::utils::safe_std_lock(manager, "session_manager")?
-            .update_current_session_with_history_and_observations(
-                &messages,
-                Some(observations),
-                Some(unseen),
-            )
+        let now = self.client.usage_snapshot();
+        let mut cursor = crate::utils::safe_std_lock(&self.usage_checkpoint, "usage_checkpoint")?;
+        let delta = now.difference(&cursor);
+        let mut manager = crate::utils::safe_std_lock(manager, "session_manager")?;
+        anyhow::ensure!(
+            self.expected_session_id.is_some()
+                && manager.current_session_id() == self.expected_session_id,
+            "active session changed during agent turn; checkpoint refused"
+        );
+        manager.update_current_session_with_history_observations_and_usage(
+            &messages,
+            Some(observations),
+            Some(unseen),
+            Some(delta),
+            || {
+                *cursor = now;
+            },
+        )
     }
 
     /// Restore a manager with a previously persisted observation store.
@@ -131,7 +153,15 @@ impl HistoryManager {
         observations: ObservationStore,
         unseen_tool_results: BTreeSet<String>,
     ) -> Self {
+        let expected_session_id = fs_tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .as_ref()
+            .and_then(|manager| manager.lock().ok().and_then(|m| m.current_session_id()));
+        let usage_checkpoint = std::sync::Mutex::new(client.usage_snapshot());
         let mut this = Self {
+            usage_checkpoint,
+            expected_session_id,
             messages,
             client,
             ui_tx,
@@ -2430,5 +2460,149 @@ mod tests {
         assert!(mgr.is_empty());
         assert!(mgr.observations_snapshot().is_empty());
         assert_eq!(mgr.unseen_count(), 0);
+    }
+
+    fn usage_history_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<std::sync::Mutex<crate::session::SessionManager>>,
+        OpenAIClient,
+        HistoryManager,
+    ) {
+        let root = tempfile::tempdir().expect("fixture");
+        let config = crate::config::AppConfig {
+            project_root: root.path().to_owned(),
+            ..Default::default()
+        };
+        let mut manager = crate::session::SessionManager::with_store(
+            crate::session::SessionStore::new(root.path().join("sessions")).expect("store"),
+        );
+        manager.create_session(None).expect("session");
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager));
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        )
+        .with_session_manager(manager.clone());
+        let client = OpenAIClient::new("http://127.0.0.1:1", "fixture").expect("client");
+        let history = HistoryManager::new(
+            client.clone(),
+            vec![make_msg("user", "fixture")],
+            None,
+            fs,
+            config,
+        );
+        (root, manager, client, history)
+    }
+
+    fn report_fixture_usage(client: &OpenAIClient) {
+        client.record_request_attempt();
+        client.record_usage(
+            &serde_json::from_value(
+                serde_json::json!({"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}),
+            )
+            .expect("usage"),
+        );
+    }
+
+    #[test]
+    fn checkpoint_usage_is_once_per_delta_and_never_moves_to_another_session() {
+        let (_root, manager, client, history) = usage_history_fixture();
+        report_fixture_usage(&client);
+        history.checkpoint().expect("first");
+        history.checkpoint().expect("repeat");
+        report_fixture_usage(&client);
+        history.checkpoint().expect("second");
+        {
+            let session = manager
+                .lock()
+                .expect("lock")
+                .current_session
+                .clone()
+                .expect("session");
+            assert_eq!(session.token_count, 300);
+            assert_eq!(session.requests, 2);
+            assert_eq!(session.usage.expect("usage").completion_tokens, 100);
+        }
+        let id = {
+            let mut manager = manager.lock().expect("lock");
+            manager.create_session(None).expect("new");
+            manager.current_session_id().expect("id")
+        };
+        let path = manager
+            .lock()
+            .expect("lock")
+            .store
+            .session_dir(&id)
+            .join("session.json");
+        let before = std::fs::read(&path).expect("before");
+        report_fixture_usage(&client);
+        assert!(history.checkpoint().is_err());
+        assert_eq!(std::fs::read(&path).expect("after"), before);
+        assert_eq!(
+            manager
+                .lock()
+                .expect("lock")
+                .current_session
+                .as_ref()
+                .expect("session")
+                .token_count,
+            0
+        );
+    }
+
+    #[test]
+    fn preapplication_failure_does_not_drop_usage_delta() {
+        let (_root, manager, client, history) = usage_history_fixture();
+        report_fixture_usage(&client);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = manager.lock().expect("lock");
+            panic!("fixture poison");
+        });
+        assert!(history.checkpoint().is_err());
+        manager.clear_poison();
+        history.checkpoint().expect("retry");
+        assert_eq!(
+            manager
+                .lock()
+                .expect("lock")
+                .current_session
+                .as_ref()
+                .expect("session")
+                .token_count,
+            150
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_disk_checkpoint_retries_without_double_charging_and_legacy_stays_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, manager, client, history) = usage_history_fixture();
+        let path = {
+            let mut manager = manager.lock().expect("lock");
+            let session = manager.current_session.as_mut().expect("session");
+            session.usage = None;
+            let id = session.meta.id.clone();
+            manager.store.session_dir(&id).join("session.json")
+        };
+        let before = std::fs::read(&path).expect("before");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .expect("permissions");
+        report_fixture_usage(&client);
+        assert!(history.checkpoint().is_err());
+        assert!(history.checkpoint().is_err());
+        assert_eq!(std::fs::read(&path).expect("after failure"), before);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions");
+        history.checkpoint().expect("retry");
+        let session = manager
+            .lock()
+            .expect("lock")
+            .current_session
+            .clone()
+            .expect("session");
+        assert_eq!(session.token_count, 150);
+        assert_eq!(session.requests, 1);
+        assert!(session.usage.expect("usage").historical_usage_unknown);
     }
 }

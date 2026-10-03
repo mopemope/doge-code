@@ -155,6 +155,10 @@ impl Project {
     }
 
     fn command(&self, server: &Server) -> Command {
+        self.command_prompt(server, "fixture request")
+    }
+
+    fn command_prompt(&self, server: &Server, prompt: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dgc"));
         command
             .current_dir(&self.root)
@@ -173,7 +177,7 @@ impl Project {
                 "--base-url",
                 &server.url,
                 "exec",
-                "fixture request",
+                prompt,
                 "--json",
             ]);
         command
@@ -695,4 +699,181 @@ fn cli_signals_reap_managed_process_and_preserve_unknown_outcome() {
         }
         assert!(retained, "interrupted call must be durable");
     }
+}
+
+fn response_with_usage(content: &str, calls: Vec<Value>, reason: &str) -> (u16, Value) {
+    let (status, mut value) = response(content, calls, reason);
+    value["usage"] = json!({"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":0}});
+    (status, value)
+}
+
+#[test]
+fn reported_usage_is_per_run_and_once_per_saved_session_across_resume() {
+    let project = Project::new(false);
+    std::fs::write(project.root.join("notes.txt"), "fixture").expect("file");
+    let server = Server::new(|n, _| {
+        if n == 1 {
+            response_with_usage(
+                "",
+                vec![call("read", "fs_read", json!({"path":"notes.txt"}))],
+                "tool_calls",
+            )
+        } else {
+            response_with_usage("done", vec![], "stop")
+        }
+    });
+    let first = project.command(&server).output().expect("first");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json = output_json(&first);
+    assert_eq!(first_json["tokens_used"], 200);
+    assert_eq!(first_json["usage"]["total_tokens"], 300);
+    assert_eq!(first_json["usage"]["attempts"], 2);
+    assert_eq!(first_json["usage"]["cached_tokens"], 0);
+    assert_eq!(first_json["usage"]["all_tracked_attempts_reported"], true);
+    let resumed = project
+        .command(&server)
+        .arg("--resume=latest")
+        .output()
+        .expect("resume");
+    assert!(resumed.status.success());
+    assert_eq!(output_json(&resumed)["usage"]["total_tokens"], 150);
+    let files: Vec<_> = std::fs::read_dir(project.root.join(".doge/sessions"))
+        .expect("sessions")
+        .map(|entry| entry.expect("entry").path().join("session.json"))
+        .collect();
+    assert_eq!(files.len(), 1);
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).expect("session")).expect("JSON");
+    assert_eq!(saved["token_count"], 450);
+    assert_eq!(saved["requests"], 3);
+    assert_eq!(saved["usage"]["total_tokens"], 450);
+    assert_eq!(saved["usage"]["attempts"], 3);
+    assert_eq!(saved["usage"]["usage_records"], 3);
+}
+
+#[test]
+fn failed_attempt_has_unknown_usage_and_invalid_completion_keeps_reported_usage() {
+    for reported in [false, true] {
+        let project = Project::new(false);
+        let server = Server::new(move |_, _| {
+            if reported {
+                response_with_usage("truncated", vec![], "length")
+            } else {
+                failure()
+            }
+        });
+        let output = project.command(&server).output().expect("CLI");
+        assert!(!output.status.success());
+        let result = output_json(&output);
+        assert_eq!(result["usage"]["attempts"], 1);
+        assert_eq!(result["usage"]["usage_records"], u64::from(reported));
+        assert_eq!(
+            result["usage"]["unknown_usage_attempts"],
+            u64::from(!reported)
+        );
+        assert_eq!(
+            result["usage"]["total_tokens"],
+            if reported { 150 } else { 0 }
+        );
+        let file = std::fs::read_dir(project.root.join(".doge/sessions"))
+            .expect("sessions")
+            .next()
+            .expect("one")
+            .expect("entry")
+            .path()
+            .join("session.json");
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(file).expect("session")).expect("JSON");
+        assert_eq!(saved["usage"]["attempts"], 1);
+        assert_eq!(saved["usage"]["usage_records"], u64::from(reported));
+    }
+}
+
+#[test]
+fn retry_tracks_unreported_failed_attempt_separately_from_success() {
+    let project = Project::new(false);
+    let config = std::fs::read_to_string(&project.config)
+        .expect("config")
+        .replace("max_retries=0", "max_retries=1");
+    std::fs::write(&project.config, config).expect("retry config");
+    let server = Server::new(|n, _| {
+        if n == 1 {
+            failure()
+        } else {
+            response_with_usage("done", vec![], "stop")
+        }
+    });
+    let output = project.command(&server).output().expect("CLI");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = output_json(&output);
+    assert_eq!(result["usage"]["attempts"], 2);
+    assert_eq!(result["usage"]["usage_records"], 1);
+    assert_eq!(result["usage"]["unknown_usage_attempts"], 1);
+    assert_eq!(result["usage"]["all_tracked_attempts_reported"], false);
+    assert_eq!(result["usage"]["total_tokens"], 150);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_checkpoint_preserves_existing_session_bytes_in_real_cli() {
+    use std::os::unix::process::CommandExt;
+    let project = Project::new(false);
+    let server = Server::new(|_, _| {
+        response_with_usage(&format!("done {}", "x".repeat(20_000)), vec![], "stop")
+    });
+    let first = project.command(&server).output().expect("first");
+    assert!(first.status.success());
+    let file = std::fs::read_dir(project.root.join(".doge/sessions"))
+        .expect("sessions")
+        .next()
+        .expect("one")
+        .expect("entry")
+        .path()
+        .join("session.json");
+    let before = std::fs::read(&file).expect("before");
+    let saved: Value = serde_json::from_slice(&before).expect("saved");
+    // The old payload greatly exceeds the limit; timestamp/provenance size
+    // fluctuations cannot allow an earlier checkpoint to succeed.
+    let limit = (before.len() / 2) as libc::rlim_t;
+    let mut command = project.command_prompt(
+        &server,
+        &format!("larger checkpoint {}", "x".repeat(20_000)),
+    );
+    command.arg(format!(
+        "--resume={}",
+        saved["meta"]["id"].as_str().expect("id")
+    ));
+    unsafe {
+        command.pre_exec(move || {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let limits = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: limit,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limits) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().expect("limited child");
+    assert!(!output.status.success());
+    assert!(
+        std::fs::read(&file).expect("after") == before,
+        "old checkpoint bytes retained"
+    );
+    assert!(output_json(&output)["error"].as_str().is_some());
+    assert_eq!(
+        server.requests.lock().expect("requests").len(),
+        1,
+        "failed checkpoint did not send a new inference request"
+    );
 }
