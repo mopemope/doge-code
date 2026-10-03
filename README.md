@@ -37,6 +37,26 @@ dgc exec "Add error handling to database connection function"
 ```
 Executes a single instruction and exits with results.
 
+Successful `exec` runs exit with code 0; failed or interrupted runs exit nonzero.
+With `--json`, stdout still contains `success:false` on an agent failure.
+SIGINT (Ctrl-C) and SIGTERM cancel the active turn and wait for managed process
+cleanup and conversation checkpointing before exit. Completed tool calls and
+results survive API-key and subscription failures and `--resume`; interrupted
+calls explicitly report an unknown outcome. Inspect the workspace before retrying
+such a call. This is recovery evidence, not automatic rollback or replay.
+Once a finite local mutation has started, cooperative cancellation waits for its commit and
+tracking to finish. Cancellation can therefore wait for filesystem I/O.
+
+Explicitly incomplete completions (`length`, `content_filter`), refusals, and
+invalid tool-call batches fail before tools execute. Compatible endpoints that
+omit `finish_reason` remain supported; absence is not proof of provider completion.
+Batch preflight checks assistant role, unique call IDs, advertised tool names and
+typed built-in mutation/process arguments. It is not a transaction that rolls
+back earlier valid operations after a later runtime failure, nor a full validator
+for arbitrary remote MCP schemas.
+The complete project/system authority prompt is retained during compaction, even
+when retaining it prevents further context reduction.
+
 #### 3. MCP Server Mode
 ```bash
 dgc mcp-server 127.0.0.1:8000
@@ -47,6 +67,18 @@ Starts MCP server for integration with Claude Desktop and other clients.
 ```bash
 dgc watch
 ```
+
+Only one operation per file runs at a time, including its debounce delay. A model
+response is committed only if the original file snapshot still matches; manual
+edits made while inference is pending are preserved and a conflict is reported.
+Processing-time events are coalesced, so save again after the reported conflict
+and rate-limit interval to request a fresh edit. Successful watch edits use the
+normal persistent change tracking and in-process undo bookkeeping, and enabled
+backups have unique names. Watch has no undo command; its undo stack is not
+restored by a separate exec/TUI/resumed process. Restore a watch backup manually
+after inspecting the current file.
+The snapshot check narrows the external-write race window; it is not an OS-level
+atomic compare-and-swap or a sandbox. Watch remains a mutating mode.
 Monitors file changes and automatically triggers LLM assistant.
 
 #### 5. Code Rewrite Mode
@@ -135,6 +167,11 @@ For catalog models whose context capacity dgc does not recognize, set
 `context_window_size` in the `[llm]` section to the documented model capacity.
 Local context estimates are approximate; encrypted reasoning is preserved as
 opaque state and its ciphertext length is not used as a token count.
+Automatic summarization of saved Responses state is currently unsupported: the
+compactor uses the Chat Completions text path, which rejects Responses history.
+Context overflow is classified correctly, but does not guarantee recovery for
+subscription sessions. Retain the saved evidence and start a new session if this
+boundary is reached.
 
 Credentials are stored in the user's platform configuration directory under
 `doge-code/openai-chatgpt/`, separately from project `.doge/` state. Unix directories

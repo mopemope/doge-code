@@ -325,6 +325,18 @@ pub async fn run_agent_loop(
     }
 
     let cancel_token = cancel.unwrap_or_default();
+    // Summarization is a read-only provider wait. Unlike managed process
+    // dispatch, dropping this future needs no process reaping; the current
+    // canonical history remains available to the checkpoint on cancellation.
+    macro_rules! cancellable_compaction {
+        ($operation:expr) => {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Err(anyhow!(LlmErrorKind::Cancelled)),
+                result = $operation => result,
+            }
+        };
+    }
     let mut runtime = ToolRuntime::build_with_attribution(
         fs,
         Some(client.clone()),
@@ -364,6 +376,8 @@ pub async fn run_agent_loop(
     // Session-local; no persistence needed.
     let mut previous_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
         None;
+
+    history.checkpoint()?;
 
     loop {
         iters += 1;
@@ -405,7 +419,7 @@ pub async fn run_agent_loop(
 
         if budget_mode == ContextBudgetMode::Off {
             // Legacy path only: previous-usage proactive check, no measuring.
-            match history.check_and_compact_proactive().await {
+            match cancellable_compaction!(history.check_and_compact_proactive()) {
                 Ok(true) => {
                     reasoning_controller.observe_compaction();
                 }
@@ -470,7 +484,7 @@ pub async fn run_agent_loop(
             if let Err(e) = observed {
                 warn!(error = %e, "context budget observe measurement failed");
             }
-            match history.check_and_compact_proactive().await {
+            match cancellable_compaction!(history.check_and_compact_proactive()) {
                 Ok(true) => {
                     reasoning_controller.observe_compaction();
                 }
@@ -644,7 +658,7 @@ pub async fn run_agent_loop(
                 // Heuristic-only Compact never compacts: best-effort send to
                 // avoid false-positive LLM compaction and cache destruction.
                 if should_compact_for_pressure(pressure, estimate.source) {
-                    match history.compact_for_budget_pressure().await {
+                    match cancellable_compaction!(history.compact_for_budget_pressure()) {
                         Ok(true) => {
                             reasoning_controller.observe_compaction();
                             match measure_current(history.as_slice(), use_overlay, overlay_bytes) {
@@ -769,7 +783,7 @@ pub async fn run_agent_loop(
                     if !reactive_guard.should_attempt() {
                         error!("context length exceeded after reactive compaction; not retrying");
                     } else {
-                        match history.compact_reactive().await {
+                        match cancellable_compaction!(history.compact_reactive()) {
                             Ok(true) => {
                                 info!("History compaction successful (reactive). Resuming.");
                                 reasoning_controller.observe_compaction();
@@ -812,7 +826,7 @@ pub async fn run_agent_loop(
 
                 let agent_error = AgentLoopError::Llm(e.to_string());
                 handle_agent_error(&agent_error, &ui_tx);
-                return Err(agent_error.into());
+                return Err(e.context(agent_error));
             }
         };
         // Calibrate before the sub-agent can overwrite the shared
@@ -968,6 +982,9 @@ pub async fn run_agent_loop(
             tool_calls: msg.tool_calls.clone(),
             tool_call_id: None,
         });
+        // Save pending calls before any side effect. Interrupted calls are
+        // durable unknown outcomes and are never silently replayed.
+        history.checkpoint()?;
 
         let mut loop_detected = false;
         let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
@@ -1041,14 +1058,46 @@ pub async fn run_agent_loop(
                 consecutive_plan_write_no_change_count = 0;
             }
 
-            let res = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    warn!("run_agent_loop cancelled before dispatch_tool_call");
-                    return Err(anyhow!(LlmErrorKind::Cancelled));
+            if cancel_token.is_cancelled() {
+                return Err(anyhow!(LlmErrorKind::Cancelled));
+            }
+            // Processes own cancellation and must finish tree cleanup/reaping.
+            // Local mutations must finish commit/readback/finalization once
+            // started; dropping them after rename would lose undo/provenance.
+            let res = if matches!(
+                tool_name,
+                "execute_process"
+                    | "execute_bash"
+                    | "execute_shell"
+                    | "run_workflow"
+                    | "fs_write"
+                    | "edit"
+                    | "apply_patch"
+                    | "undo"
+                    | "write_memory"
+                    | "plan_write"
+                    | "requirements_write"
+            ) {
+                crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, &tc).await
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        warn!("run_agent_loop cancelled before dispatch_tool_call");
+                        return Err(anyhow!(LlmErrorKind::Cancelled));
+                    }
+                    res = crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, &tc) => res,
                 }
-                res = crate::llm::tool_execution::dispatch::dispatch_tool_call(&runtime, &tc) => res,
             };
+
+            if let Err(error) = &res
+                && matches!(
+                    error.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Cancelled)
+                )
+            {
+                return Err(anyhow!(LlmErrorKind::Cancelled));
+            }
 
             // Extract success status and result summary from the structured output
             let (success, result_summary, output_value) = match &res {
@@ -1356,6 +1405,7 @@ File modification detected. You MUST now verify your changes:
 
             // tool message to feed back to the LLM
             history.push_tool_result(tc.id.clone(), tool_message_content);
+            history.checkpoint()?;
 
             // Loop Detection
             if tool_name == "plan_write" && success && plan_write_changed == Some(false) {
@@ -1435,7 +1485,7 @@ File modification detected. You MUST now verify your changes:
                 }
             }
         }
-        history.checkpoint_subscription()?;
+        history.checkpoint()?;
         // Aggregate the finished batch once (order-independent): the heaviest
         // phase wins, so a single failure escalates the next request to
         // Recovery while a clean batch decays back to Routine/Deliberative.

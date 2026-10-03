@@ -57,6 +57,8 @@ pub enum LlmErrorKind {
     Cancelled,
     #[error("context length exceeded")]
     ContextLengthExceeded,
+    #[error("incomplete model response")]
+    Incomplete,
     #[error("unknown error")]
     Unknown,
 }

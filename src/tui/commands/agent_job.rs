@@ -280,15 +280,13 @@ pub(crate) fn spawn_agent_turn(
                     }
                     if let Ok(mut history) = conversation_history.lock() {
                         let mut sm = session_manager.lock().unwrap();
-                        if client.is_subscription() {
+                        {
                             if let Some(session) = &sm.current_session {
                                 match session.conversation_messages() {
                                     Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
-                                    Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
+                                    Err(error) => tracing::error!(%error, "could not restore canonical checkpoint"),
                                 }
                             }
-                        } else {
-                            history.append_user(content_for_job.clone());
                         }
                         let msgs_vec = history.build_messages();
                         if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {
@@ -315,15 +313,13 @@ pub(crate) fn spawn_agent_turn(
                     }
                     if let Ok(mut history) = conversation_history.lock() {
                         let mut sm = session_manager.lock().unwrap();
-                        if client.is_subscription() {
+                        {
                             if let Some(session) = &sm.current_session {
                                 match session.conversation_messages() {
                                     Ok(messages) => history.overwrite_messages(crate::llm::durable_conversation_messages(messages)),
-                                    Err(error) => tracing::error!(%error, "could not restore Responses checkpoint"),
+                                    Err(error) => tracing::error!(%error, "could not restore canonical checkpoint"),
                                 }
                             }
-                        } else {
-                            history.append_user(content_for_job.clone());
                         }
                         let msgs_vec = history.build_messages();
                         if let Err(e) = sm.update_current_session_with_history(&msgs_vec) {

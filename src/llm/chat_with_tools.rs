@@ -19,6 +19,8 @@ pub struct ChatRequestWithTools {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoiceMessageWithTools {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_state: Option<crate::features::openai_subscription::ProviderState>,
     pub role: String,
     pub content: Option<String>,
@@ -30,6 +32,8 @@ pub struct ChoiceMessageWithTools {
 pub struct ChoiceWithTools {
     pub index: usize,
     pub message: ChoiceMessageWithTools,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
