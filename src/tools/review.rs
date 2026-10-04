@@ -427,7 +427,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn setup() -> (tempfile::TempDir, FsTools) {
-        let dir = tempfile::tempdir().unwrap();
+        // Keep every fixture path consistent with the canonical project root
+        // even when the platform's temp directory is a symlink (macOS /var).
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let config = crate::config::AppConfig {
             project_root: dir.path().canonicalize().unwrap(),
             ..Default::default()
