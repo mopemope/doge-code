@@ -97,10 +97,10 @@ impl TuiExecutor {
         // budget: `run_agent_loop` injects the default system prompt per turn,
         // and context reduction lives in HistoryManager / the governor.
 
-        // Create a default session if none exists
+        // Resolve startup resume before any new session can trigger retention.
         {
             let mut session_mgr = session_manager.lock().unwrap();
-            if session_mgr.current_session.is_none() {
+            if cfg.resume.is_none() && session_mgr.current_session.is_none() {
                 session_mgr.create_session(None)?;
             }
         }

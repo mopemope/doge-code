@@ -105,38 +105,15 @@ impl TuiExecutor {
                     ui.push_log("Usage: /session delete <id>");
                     return Ok(());
                 }
-                let id = args[1];
-                let resolved = {
-                    match self
-                        .session_manager
-                        .lock()
-                        .unwrap()
-                        .store
-                        .resolve_id_prefix(id)
-                    {
-                        Ok(full_id) => full_id,
-                        Err(e) => {
-                            ui.push_log(format!("Failed to delete session: {}", e));
-                            return Ok(());
-                        }
-                    }
-                };
-                match self
-                    .session_manager
-                    .lock()
-                    .unwrap()
-                    .delete_session(&resolved)
-                {
-                    Ok(()) => {
-                        ui.push_log(format!(
-                            "Deleted session: {}",
-                            session_format::short_id(&resolved)
-                        ));
-                        self.publish_plan_list();
-                    }
+                match self.delete_runtime_session(ui, args[1]) {
+                    Ok(resolved) => ui.push_log(format!(
+                        "Deleted session: {}",
+                        session_format::short_id(&resolved)
+                    )),
                     Err(e) => ui.push_log(format!("Failed to delete session: {}", e)),
                 }
             }
+
             "current" => {
                 if let Some(info) = self.session_manager.lock().unwrap().current_session_info() {
                     ui.push_log(info);
@@ -145,7 +122,15 @@ impl TuiExecutor {
                 }
             }
             "clear" => match self.clear_runtime_conversation() {
-                Ok(()) => ui.push_log("Cleared current session conversation."),
+                Ok(outcome) => {
+                    ui.push_log("Cleared current session conversation.");
+                    if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed {
+                        message,
+                    } = outcome
+                    {
+                        ui.push_log(format!("Warning: {message}"));
+                    }
+                }
                 Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },
             _ => {
