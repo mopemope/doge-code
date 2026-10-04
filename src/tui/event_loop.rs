@@ -1,9 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use serde::Deserialize;
-use std::fs;
-use std::io::ErrorKind;
-use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -29,32 +26,6 @@ impl TuiApp {
         let mut is_streaming = false; // track streaming state
         let mut last_spinner_update = Instant::now(); // Track last spinner update time
         loop {
-            // Process instruction queue if ready
-            let is_ready = matches!(self.status, Status::Ready | Status::Error);
-            if is_ready && let Some(instruction) = self.pending_instructions.pop_front() {
-                // If the user rejected a diff review, prepend a system note so the
-                // LLM knows its changes were reverted. Slash commands are passed
-                // through untouched (prepending would break `/` routing); `/reset`
-                // starts a fresh context, so the pending note is dropped with it.
-                if self.diff_rejected_pending && instruction.starts_with("/reset") {
-                    self.diff_rejected_pending = false;
-                }
-                if self.diff_rejected_pending && !instruction.starts_with('/') {
-                    self.diff_rejected_pending = false;
-                    let instruction_with_note = format!(
-                        "[SYSTEM NOTE] The user rejected the previous changes and the affected files were reverted to their pre-change state. Take this into account when proceeding.\n\n{}",
-                        instruction
-                    );
-                    // Keep the exact typed bytes as raw input; the system
-                    // note only augments the effective instruction so it can
-                    // never be persisted as user raw input.
-                    self.dispatch_augmented_user_prompt(&instruction, &instruction_with_note);
-                } else {
-                    self.dispatch(&instruction);
-                }
-                self.dirty = true;
-            }
-
             // Update spinner state for active statuses
             let should_update_spinner = matches!(self.status, Status::Thinking | Status::Running);
 
@@ -76,7 +47,22 @@ impl TuiApp {
                     self.last_heartbeat = Some(Instant::now());
                 }
 
-                for msg in drained {
+                for raw_message in drained {
+                    let (msg, scoped) =
+                        if let Some(rest) = raw_message.strip_prefix("::job_message:") {
+                            let Some((producer, message)) = rest.split_once(':') else {
+                                continue;
+                            };
+                            let Some(id) = crate::jobs::JobId::parse_arg(producer) else {
+                                continue;
+                            };
+                            if !self.accept_job_message(id) {
+                                continue;
+                            }
+                            (message.to_string(), true)
+                        } else {
+                            (raw_message, false)
+                        };
                     // Shell command outputs (bin)
                     if let Some(encoded) = msg.strip_prefix("::shell_output_bin:") {
                         use base64::{Engine as _, engine::general_purpose};
@@ -108,18 +94,49 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(json) = msg.strip_prefix("::diff_rejected:") {
+                        if let Ok(report) =
+                            serde_json::from_str::<crate::tools::review::RejectReport>(json)
+                        {
+                            let payload = self
+                                .handler
+                                .as_ref()
+                                .and_then(|h| h.review_payload(&report.id));
+                            self.apply_review_report(report, payload);
+                        }
+                        continue;
+                    }
+
                     // Diff review handling
                     if let Some(payload) = msg.strip_prefix("::diff_review:") {
                         if let Ok(payload) = serde_json::from_str::<DiffReviewPayload>(payload) {
+                            if let Some(id) = &payload.review_id
+                                && !self
+                                    .handler
+                                    .as_ref()
+                                    .is_some_and(|h| h.review_payload(id).is_some())
+                            {
+                                continue;
+                            }
                             let review_state = DiffReviewState::from_payload(payload);
                             let file_count = review_state.files.len();
+                            let notice = if review_state.rejectable {
+                                format!(
+                                    "[diff] Ready for review: {file_count} file(s) changed. Use a=accept, r=reject, q=dismiss."
+                                )
+                            } else {
+                                format!(
+                                    "[diff] View only: {} Use a=accept, q=dismiss.",
+                                    review_state
+                                        .reject_reason
+                                        .as_deref()
+                                        .unwrap_or("No turn-owned rollback capture.")
+                                )
+                            };
                             self.diff_review = Some(review_state);
                             self.diff_rejected_pending = false;
                             self.dirty = true;
-                            self.push_log(format!(
-                                "[diff] Ready for review: {} file(s) changed. Use a=accept, r=reject, q=dismiss.",
-                                file_count
-                            ));
+                            self.push_log(notice);
                         } else if let Ok(err_payload) =
                             serde_json::from_str::<DiffReviewError>(payload)
                         {
@@ -141,6 +158,8 @@ impl TuiApp {
                     // codebase emits this message anymore; view-only.
                     if let Some(output) = msg.strip_prefix("::diff_output:") {
                         let payload = DiffReviewPayload {
+                            review_id: None,
+                            reject_reason: None,
                             diff: output.to_string(),
                             files: vec![],
                             evidence: Vec::new(),
@@ -187,8 +206,14 @@ impl TuiApp {
                     // Handle status messages
                     if let Some(rest) = msg.strip_prefix("::status:") {
                         if let Some(content) = rest.strip_prefix("done:") {
+                            if !scoped && self.foreground_busy() {
+                                continue;
+                            }
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
+                            if self.foreground_busy() {
+                                continue;
+                            }
                             self.status = Status::Ready; // Was Done
                             self.detailed_status = None;
                             self.dirty = true;
@@ -207,8 +232,14 @@ impl TuiApp {
                         }
 
                         if let Some(content) = rest.strip_prefix("error:") {
+                            if !scoped && self.foreground_busy() {
+                                continue;
+                            }
                             self.finalize_and_append_llm_response(content);
                             is_streaming = false;
+                            if self.foreground_busy() {
+                                continue;
+                            }
                             self.status = Status::Error;
                             self.detailed_status = None;
                             self.dirty = true;
@@ -248,9 +279,15 @@ impl TuiApp {
 
                         match rest {
                             "done" => {
+                                if !scoped && self.foreground_busy() {
+                                    continue;
+                                }
                                 if is_streaming {
                                     self.finalize_and_append_llm_response("");
                                     is_streaming = false;
+                                }
+                                if self.foreground_busy() {
+                                    continue;
                                 }
                                 self.status = Status::Ready; // Was Done
                                 self.detailed_status = None;
@@ -268,9 +305,15 @@ impl TuiApp {
                                 continue;
                             }
                             "cancelled" => {
+                                if !scoped && self.foreground_busy() {
+                                    continue;
+                                }
                                 if is_streaming {
                                     self.finalize_and_append_llm_response("");
                                     is_streaming = false;
+                                }
+                                if self.foreground_busy() {
+                                    continue;
                                 }
                                 self.status = Status::Ready; // Was Cancelled
                                 self.detailed_status = None;
@@ -295,6 +338,9 @@ impl TuiApp {
                                 continue;
                             }
                             "idle" => {
+                                if self.foreground_busy() {
+                                    continue;
+                                }
                                 self.status = Status::Ready;
                                 self.detailed_status = None;
                                 self.dirty = true;
@@ -308,9 +354,15 @@ impl TuiApp {
                                 continue;
                             }
                             "error" => {
+                                if !scoped && self.foreground_busy() {
+                                    continue;
+                                }
                                 if is_streaming {
                                     self.finalize_and_append_llm_response("");
                                     is_streaming = false;
+                                }
+                                if self.foreground_busy() {
+                                    continue;
                                 }
                                 self.status = Status::Error;
                                 self.detailed_status = None;
@@ -443,6 +495,8 @@ impl TuiApp {
                 }
             }
 
+            self.dispatch_pending_instruction();
+
             // Timeout Check
             if (matches!(self.status, Status::Thinking | Status::Running))
                 && let Some(last_heartbeat) = self.last_heartbeat
@@ -551,6 +605,14 @@ impl TuiApp {
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
+                if self.diff_review.as_ref().is_some_and(|r| r.rejecting) {
+                    if key.code == KeyCode::Esc {
+                        self.dispatch("/cancel");
+                    } else {
+                        self.push_log("[diff] Rollback is running; Esc requests cancellation.");
+                    }
+                    return Ok(true);
+                }
                 self.dismiss_diff_review();
                 Ok(true)
             }
@@ -598,15 +660,129 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn accept_job_message(&self, id: crate::jobs::JobId) -> bool {
+        self.latest_agent_job_id == Some(id)
+            && self
+                .handler
+                .as_ref()
+                .and_then(|h| h.foreground_job_id())
+                .is_none_or(|active| active == id)
+    }
+
+    pub(crate) fn foreground_busy(&self) -> bool {
+        self.handler
+            .as_ref()
+            .is_some_and(|handler| handler.foreground_busy())
+    }
+
+    /// Called after draining completion messages. Ownership, not a cosmetic
+    /// status notice, determines when an accepted instruction may be consumed.
+    pub(crate) fn dispatch_pending_instruction(&mut self) {
+        if self.foreground_busy()
+            || (self.handler.is_none() && !matches!(self.status, Status::Ready | Status::Error))
+        {
+            return;
+        }
+        let Some(instruction) = self.pending_instructions.front().cloned() else {
+            return;
+        };
+        let previous_start = self.processing_start_time;
+        self.processing_start_time = Some(Instant::now());
+        let accepted = if let Some(mut handler) = self.handler.take() {
+            let accepted = if self.diff_rejected_pending && !instruction.starts_with('/') {
+                if handler.foreground_busy() {
+                    false
+                } else {
+                    self.queued_dispatch_rejected = false;
+                    let effective = format!(
+                        "[SYSTEM NOTE] The user rejected reviewed changes. Account for the restored files and any remaining conflicts.\n\n{instruction}"
+                    );
+                    handler.handle_augmented_user_prompt(&instruction, &effective, self);
+                    !self.queued_dispatch_rejected
+                }
+            } else {
+                handler.handle_queued(&instruction, self)
+            };
+            self.handler = Some(handler);
+            accepted
+        } else {
+            self.dispatch(&instruction);
+            true
+        };
+        if !accepted {
+            self.processing_start_time = previous_start;
+        }
+        if accepted {
+            self.last_elapsed_time = None;
+            self.pending_instructions.pop_front();
+            if !instruction.starts_with('/') || instruction.starts_with("/reset") {
+                self.diff_rejected_pending = false;
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn apply_review_report(
+        &mut self,
+        report: crate::tools::review::RejectReport,
+        payload: Option<DiffReviewPayload>,
+    ) {
+        if !self.diff_review.as_ref().is_some_and(|r| {
+            r.review_id.as_deref() == Some(report.id.as_str()) && r.reject_job_id == report.job_id
+        }) {
+            return;
+        }
+        self.push_log(format!(
+            "[diff] Restored {} mutation(s); {} pending.{}",
+            report.restored,
+            report.pending,
+            report
+                .error
+                .as_ref()
+                .map(|e| format!(" {e}"))
+                .unwrap_or_default()
+        ));
+        for warning in report.warnings {
+            self.push_log(format!("[diff][warning] {warning}"));
+        }
+        self.diff_rejected_pending |= report.restored > 0;
+        if report.pending == 0 && report.error.is_none() {
+            if let Some(handler) = &self.handler {
+                handler.dismiss_review(&report.id);
+            }
+            self.diff_review = None;
+        } else if let Some(payload) = payload {
+            self.diff_review = Some(DiffReviewState::from_payload(payload));
+        }
+        self.dirty = true;
+    }
+
     fn dismiss_diff_review(&mut self) {
-        if self.diff_review.take().is_some() {
+        if self.diff_review.as_ref().is_some_and(|r| r.rejecting) {
+            return;
+        }
+        if let Some(review) = self.diff_review.take() {
+            if let Some(id) = &review.review_id
+                && let Some(handler) = &self.handler
+            {
+                handler.dismiss_review(id);
+            }
             self.push_log("[diff] Closed diff preview. Changes remain applied.".to_string());
             self.dirty = true;
         }
     }
 
     fn accept_diff_review(&mut self) {
+        if self.diff_review.as_ref().is_some_and(|r| r.rejecting) {
+            self.push_log("[diff] Rollback is running; wait for its result.");
+            return;
+        }
         if let Some(review) = self.diff_review.take() {
+            if let Some(id) = &review.review_id
+                && let Some(handler) = &self.handler
+            {
+                handler.dismiss_review(id);
+            }
             let file_count = review.files.len();
             self.push_log(format!("[diff] Accepted {} file change(s).", file_count));
             self.dirty = true;
@@ -619,33 +795,26 @@ impl TuiApp {
         };
 
         if !review.rejectable {
-            self.push_log(
-                "[diff] This diff has no reliable file list (legacy payload); reject is unavailable."
-                    .to_string(),
-            );
+            self.push_log(format!(
+                "[diff] {}",
+                review
+                    .reject_reason
+                    .as_deref()
+                    .unwrap_or("No turn-owned rollback capture; view only.")
+            ));
             self.diff_review = Some(review);
             self.dirty = true;
             return Ok(());
         }
 
-        let paths: Vec<String> = review.file_paths();
-        let project_root = self.cfg.as_ref().map(|c| c.project_root.clone());
-
-        // On failure, keep the panel open so the user can retry; a failed
-        // revert must never propagate out of the event loop (that would
-        // terminate the whole TUI).
-        if let Err(e) = revert_paths(&paths, project_root.as_deref()) {
-            self.push_log(format!("[diff][error] Failed to revert changes: {}", e));
-            self.diff_review = Some(review);
-            self.dirty = true;
-            return Ok(());
+        let id = review.review_id.clone();
+        self.diff_review = Some(review);
+        if let Some(id) = id
+            && let Some(mut handler) = self.handler.take()
+        {
+            handler.reject_review(&id, self);
+            self.handler = Some(handler);
         }
-
-        self.diff_rejected_pending = true;
-        self.push_log(
-            "[diff] Rejected changes and restored the agent's modified files. The agent will be notified on your next instruction."
-                .to_string(),
-        );
         self.dirty = true;
         Ok(())
     }
@@ -727,137 +896,197 @@ impl TuiApp {
     }
 }
 
-fn revert_paths(paths: &[String], project_root: Option<&std::path::Path>) -> Result<()> {
-    let cwd = project_root.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
-
-    for path in paths {
-        if path.trim().is_empty() || path == "workspace" {
-            continue;
-        }
-
-        let tracked = Command::new("git")
-            .arg("ls-files")
-            .arg("--error-unmatch")
-            .arg(path)
-            .current_dir(&cwd)
-            .output()
-            .with_context(|| format!("checking tracking status for {}", path))?
-            .status
-            .success();
-
-        if tracked {
-            let output = Command::new("git")
-                .arg("restore")
-                .arg("--worktree")
-                .arg("--")
-                .arg(path)
-                .current_dir(&cwd)
-                .output()
-                .with_context(|| format!("running git restore for {}", path))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow::anyhow!(
-                    "git restore failed for {}: {}",
-                    path,
-                    stderr.trim()
-                ));
-            }
-        } else {
-            let full_path = cwd.join(path);
-            match fs::remove_file(&full_path) {
-                Ok(_) => {}
-                Err(e) => {
-                    if e.kind() == ErrorKind::IsADirectory {
-                        fs::remove_dir_all(&full_path)
-                            .with_context(|| format!("failed to remove directory {}", path))?;
-                    } else if e.kind() != ErrorKind::NotFound {
-                        return Err(anyhow::anyhow!("failed to remove {}: {}", path, e));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
+    use crate::{
+        jobs::{JobKind, JobManager, JobRunOutcome, JobScope, JobSpec, WorkspaceAccess},
+        tui::commands::core::CommandHandler,
+    };
+    use std::sync::{Arc, Mutex};
+    struct QueueHandler {
+        jobs: JobManager,
+        calls: Arc<Mutex<Vec<String>>>,
+        reject_once: bool,
+    }
+    impl CommandHandler for QueueHandler {
+        fn handle(&mut self, line: &str, _: &mut TuiApp) {
+            self.calls.lock().unwrap().push(line.into());
+        }
+        fn foreground_busy(&self) -> bool {
+            self.jobs.foreground_id().is_some()
+        }
+        fn handle_queued(&mut self, line: &str, ui: &mut TuiApp) -> bool {
+            if self.reject_once {
+                self.reject_once = false;
+                return false;
+            }
+            if self.foreground_busy() {
+                return false;
+            }
+            self.handle(line, ui);
+            true
+        }
+        fn get_custom_commands(&self) -> Vec<String> {
+            vec![]
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    #[tokio::test]
+    async fn queue_waits_for_cancel_cleanup_and_save_barriers_then_fifo_once() {
+        for outcome in [
+            JobRunOutcome::Completed,
+            JobRunOutcome::Cancelled,
+            JobRunOutcome::Failed {
+                message: "save failed".into(),
+            },
+        ] {
+            let jobs = JobManager::new();
+            let (release, held) = tokio::sync::oneshot::channel();
+            let (started, running) = tokio::sync::oneshot::channel();
+            let cancel = outcome != JobRunOutcome::Completed;
+            let id = jobs
+                .spawn(
+                    JobSpec::new(
+                        JobKind::AgentTurn,
+                        JobScope::Foreground,
+                        WorkspaceAccess::Write,
+                        "save/cleanup barrier",
+                    ),
+                    move |_ctx| async move {
+                        started.send(()).unwrap();
+                        let _ = held.await;
+                        outcome
+                    },
+                )
+                .unwrap();
+            running.await.unwrap(); // actual owner is now in cleanup/save
+            let calls = Arc::new(Mutex::new(vec![]));
+            let mut ui = TuiApp::new_for_test("queue", None, "default");
+            ui.handler = Some(Box::new(QueueHandler {
+                jobs: jobs.clone(),
+                calls: calls.clone(),
+                reject_once: false,
+            }));
+            ui.pending_instructions.extend(["A".into(), "B".into()]);
+            ui.status = Status::Ready;
+            let start = Instant::now();
+            ui.processing_start_time = Some(start);
+            if cancel {
+                jobs.cancel(id);
+            } // cosmetic cancelled/done can already have arrived
+            for _ in 0..3 {
+                ui.dispatch_pending_instruction();
+            }
+            assert_eq!(ui.pending_instructions, ["A", "B"]);
+            assert!(calls.lock().unwrap().is_empty());
+            assert_eq!(ui.processing_start_time, Some(start));
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while jobs.foreground_id().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
             .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            ui.dispatch_pending_instruction();
+            ui.dispatch_pending_instruction();
+            ui.dispatch_pending_instruction();
+            assert_eq!(*calls.lock().unwrap(), ["A", "B"]);
+            assert!(ui.pending_instructions.is_empty());
+        }
     }
-
-    fn init_repo(dir: &Path) {
-        run_git(dir, &["init", "-q"]);
-        run_git(dir, &["config", "user.email", "test@example.com"]);
-        run_git(dir, &["config", "user.name", "Test User"]);
+    #[test]
+    fn queue_reservation_race_retains_input_and_note_without_duplicate_dispatch() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mut ui = TuiApp::new_for_test("queue", None, "default");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: true,
+        }));
+        ui.pending_instructions.push_back("A".into());
+        let start = Instant::now();
+        ui.processing_start_time = Some(start);
+        ui.dispatch_pending_instruction();
+        assert_eq!(ui.pending_instructions, ["A"]);
+        assert_eq!(ui.processing_start_time, Some(start));
+        ui.dispatch_pending_instruction();
+        ui.dispatch_pending_instruction();
+        assert_eq!(*calls.lock().unwrap(), ["A"]);
+    }
+    #[test]
+    fn queue_ownership_overrides_stale_cosmetic_thinking_status() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mut ui = TuiApp::new_for_test("queue", None, "default");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        ui.status = Status::Thinking;
+        ui.pending_instructions.push_back("A".into());
+        ui.dispatch_pending_instruction();
+        assert_eq!(*calls.lock().unwrap(), ["A"]);
+        assert!(ui.pending_instructions.is_empty());
     }
 
     #[test]
-    fn test_revert_paths_restores_tracked_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        init_repo(root);
-
-        std::fs::write(root.join("foo.txt"), "original\n").unwrap();
-        run_git(root, &["add", "foo.txt"]);
-        run_git(root, &["commit", "-q", "-m", "init"]);
-        std::fs::write(root.join("foo.txt"), "modified\n").unwrap();
-
-        revert_paths(&["foo.txt".to_string()], Some(root)).unwrap();
-
-        let content = std::fs::read_to_string(root.join("foo.txt")).unwrap();
-        assert_eq!(content, "original\n");
+    fn stale_job_messages_are_rejected_before_stream_processing() {
+        let mut ui = TuiApp::new_for_test("scope", None, "default");
+        ui.latest_agent_job_id = Some(crate::jobs::JobId(9));
+        let start = Instant::now();
+        ui.processing_start_time = Some(start);
+        ui.llm_parsing_buffer = "new stream".into();
+        assert!(!ui.accept_job_message(crate::jobs::JobId(8)));
+        assert!(ui.accept_job_message(crate::jobs::JobId(9)));
+        assert_eq!(ui.llm_parsing_buffer, "new stream");
+        assert_eq!(ui.processing_start_time, Some(start));
+    }
+    #[test]
+    fn running_reject_keeps_panel_and_esc_requests_cancel() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mut ui = TuiApp::new_for_test("reject", None, "default");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        let payload = DiffReviewPayload {
+            review_id: Some("review".into()),
+            reject_reason: None,
+            diff: "diff --git a/a b/a\n+agent\n".into(),
+            files: vec!["a".into()],
+            evidence: vec![],
+            evidence_warnings: vec![],
+        };
+        let mut review = DiffReviewState::from_payload(payload);
+        review.rejectable = false;
+        review.rejecting = true;
+        ui.diff_review = Some(review);
+        for code in [KeyCode::Char('a'), KeyCode::Char('q'), KeyCode::Esc] {
+            ui.process_diff_review_key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+            assert!(ui.diff_review.as_ref().unwrap().rejecting);
+        }
+        assert_eq!(*calls.lock().unwrap(), ["/cancel"]);
     }
 
     #[test]
-    fn test_revert_paths_removes_untracked_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        init_repo(root);
-
-        std::fs::write(root.join("new_file.txt"), "created by agent\n").unwrap();
-        assert!(root.join("new_file.txt").exists());
-
-        revert_paths(&["new_file.txt".to_string()], Some(root)).unwrap();
-        assert!(!root.join("new_file.txt").exists());
-    }
-
-    #[test]
-    fn test_revert_paths_ignores_workspace_placeholder() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        init_repo(root);
-
-        // "workspace" is a synthetic placeholder and must not cause errors
-        revert_paths(&["workspace".to_string(), "".to_string()], Some(root)).unwrap();
-    }
-
-    #[test]
-    fn test_revert_paths_skips_missing_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        init_repo(root);
-
-        // A path that neither exists nor is tracked should be ignored, not error
-        revert_paths(&["does_not_exist.txt".to_string()], Some(root)).unwrap();
+    fn legacy_diff_without_capture_is_view_only() {
+        let payload = DiffReviewPayload {
+            review_id: None,
+            reject_reason: None,
+            diff: "diff --git a/user b/user\n-user\n+agent\n".into(),
+            files: vec!["user".into()],
+            evidence: vec![],
+            evidence_warnings: vec![],
+        };
+        let mut ui = TuiApp::new_for_test("review", None, "default");
+        ui.diff_review = Some(DiffReviewState::from_payload(payload));
+        ui.reject_diff_review().unwrap();
+        assert!(!ui.diff_review.unwrap().rejectable);
     }
 }

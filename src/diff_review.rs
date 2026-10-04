@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffReviewPayload {
+    #[serde(default)]
+    pub review_id: Option<String>,
+    #[serde(default)]
+    pub reject_reason: Option<String>,
     pub diff: String,
     pub files: Vec<String>,
     #[serde(default)]
@@ -239,6 +243,8 @@ pub fn enrich_diff_review_with_evidence(
         build_diff_review_evidence(project_root, events, plan_items, &payload.files);
     warnings.extend(payload.evidence_warnings.clone());
     DiffReviewPayload {
+        review_id: payload.review_id,
+        reject_reason: payload.reject_reason,
         diff: payload.diff,
         files: payload.files,
         evidence,
@@ -264,6 +270,8 @@ mod tests {
     #[test]
     fn test_evidence_roundtrip() {
         let payload = DiffReviewPayload {
+            review_id: None,
+            reject_reason: None,
             diff: "d".to_string(),
             files: vec!["a.txt".to_string()],
             evidence: vec![DiffFileEvidence {

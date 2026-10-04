@@ -587,11 +587,13 @@ mod tests {
             JobStatus::Cancelled
         );
 
-        // Cancellation is filtered by the hook: no signal ever arrives.
+        // Terminal completion releases the queue, but cancellation never starts a follow-up.
         let stray: Vec<String> = ui.inbox_rx.as_ref().unwrap().try_iter().collect();
         assert!(
-            !stray.iter().any(|m| m.starts_with("::job_completed:")),
-            "cancelled producer must emit no completion signal"
+            stray
+                .iter()
+                .any(|m| m == &format!("::job_completed:{producer}")),
+            "cancelled foreground must emit terminal completion"
         );
 
         // Even a direct handoff attempt is suppressed on Cancelled.
@@ -620,8 +622,10 @@ mod tests {
 
         let stray: Vec<String> = ui.inbox_rx.as_ref().unwrap().try_iter().collect();
         assert!(
-            !stray.iter().any(|m| m.starts_with("::job_completed:")),
-            "shutdown must emit no completion signal"
+            stray
+                .iter()
+                .any(|m| m == &format!("::job_completed:{producer}")),
+            "shutdown foreground must emit terminal completion"
         );
         executor.handle_deferred_followup(&producer.to_string(), &mut ui);
         assert_eq!(executor.jobs.foreground_id(), None);

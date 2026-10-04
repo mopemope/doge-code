@@ -30,6 +30,29 @@ use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
 // This allows each command to be tested independently and keeps dispatch.rs focused on routing.
 
 impl CommandHandler for TuiExecutor {
+    fn foreground_job_id(&self) -> Option<crate::jobs::JobId> {
+        self.jobs.foreground_id()
+    }
+    fn foreground_busy(&self) -> bool {
+        self.jobs.foreground_id().is_some()
+    }
+    fn handle_queued(&mut self, line: &str, ui: &mut TuiApp) -> bool {
+        if self.foreground_busy() {
+            return false;
+        }
+        ui.queued_dispatch_rejected = false;
+        self.handle(line, ui);
+        !ui.queued_dispatch_rejected
+    }
+    fn review_payload(&self, id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
+        self.tools.review_payload(id)
+    }
+    fn dismiss_review(&self, id: &str) {
+        self.tools.dismiss_review(id);
+    }
+    fn reject_review(&mut self, id: &str, ui: &mut TuiApp) {
+        self.start_review_reject(id, ui);
+    }
     fn handle(&mut self, line: &str, ui: &mut TuiApp) {
         // This function was extracted from the big handlers.rs for readability.
         if self.ui_tx.is_none() {
@@ -172,6 +195,37 @@ impl CommandHandler for TuiExecutor {
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
         if !self.handle_compact_completed(producer, ui) {
+            if let Some(id) = crate::jobs::JobId::parse_arg(producer)
+                && let Some(job) = self.jobs.get_snapshot(id)
+                && job.kind == crate::jobs::JobKind::DiffReject
+                && job.status.is_terminal()
+                && let Some(review) = ui
+                    .diff_review
+                    .as_ref()
+                    .filter(|r| r.rejecting && r.reject_job_id == Some(id))
+                && let Some(review_id) = review.review_id.clone()
+                && let Some(report) = self.tools.interrupted_review_report(&review_id, id)
+            {
+                let payload = self.tools.review_payload(&review_id);
+                ui.apply_review_report(report, payload);
+            }
+            if let Some(id) = crate::jobs::JobId::parse_arg(producer)
+                && let Some(job) = self.jobs.get_snapshot(id)
+                && job.status.is_terminal()
+                && self.jobs.foreground_id().is_none()
+            {
+                ui.status = if job.status == crate::jobs::JobStatus::Failed {
+                    crate::tui::state::Status::Error
+                } else {
+                    crate::tui::state::Status::Ready
+                };
+                ui.detailed_status = None;
+                if let Some(started) = ui.processing_start_time.take() {
+                    ui.last_elapsed_time = Some(crate::jobs::types::format_elapsed(
+                        started.elapsed().as_millis(),
+                    ));
+                }
+            }
             self.handle_deferred_followup(producer, ui);
         }
     }
