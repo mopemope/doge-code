@@ -273,6 +273,36 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Manual compaction is disk-first. Unlike agent checkpoints, failed saves
+    /// must leave the original in-memory payload available without a summary.
+    /// The caller holds the conversation lock and rechecks its runtime snapshot.
+    pub(crate) fn commit_compacted_history(
+        &mut self,
+        expected: &SessionData,
+        history: &[crate::llm::ChatMessage],
+        observations: crate::llm::observation::ObservationStore,
+        unseen: std::collections::BTreeSet<String>,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        let current = self
+            .current_session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no current session for compaction"))?;
+        anyhow::ensure!(
+            current.meta.id == expected.meta.id
+                && serde_json::to_value(current)? == serde_json::to_value(expected)?,
+            "session changed during compaction; summary discarded"
+        );
+        let mut candidate = current.clone();
+        let durable = crate::llm::durable_conversation_messages(history.iter().cloned());
+        candidate.replace_conversation_messages(&durable)?;
+        candidate.observations = observations;
+        candidate.unseen_tool_results = unseen;
+        candidate.timestamp = chrono::Utc::now().to_rfc3339();
+        let outcome = self.store.save_with_outcome(&candidate)?;
+        self.current_session = Some(candidate);
+        Ok(outcome)
+    }
+
     /// Persist only the Observation Store snapshot (history untouched).
     pub fn update_current_session_with_observations(
         &mut self,

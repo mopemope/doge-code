@@ -46,7 +46,16 @@ fn cancel_specific(executor: &mut TuiExecutor, ui: &mut TuiApp, id: JobId) {
     match executor.jobs.cancel(id) {
         CancelJobResult::Cancelled { id } => {
             // Only the foreground cancellation drives the global status UI.
-            if is_foreground && let Some(tx) = &executor.ui_tx {
+            // Compaction releases ownership before its identity-scoped completion
+            // updates the UI. Do not unlock the prompt queue while it is saving.
+            let is_compact = executor
+                .jobs
+                .get_snapshot(id)
+                .is_some_and(|job| job.kind == crate::jobs::JobKind::Compact);
+            if is_foreground
+                && !is_compact
+                && let Some(tx) = &executor.ui_tx
+            {
                 let _ = tx.send("::status:cancelled".into());
             }
             ui.push_log(format!("[Cancelled {id}]"));

@@ -95,11 +95,12 @@ impl TuiExecutor {
         if let Some(tx) = ui_tx {
             let hook: crate::jobs::manager::JobCompletionHook =
                 std::sync::Arc::new(move |completion: crate::jobs::JobCompletion| {
-                    if completion.outcome == crate::jobs::JobRunOutcome::Completed
-                        && matches!(
-                            completion.kind,
-                            crate::jobs::JobKind::Test | crate::jobs::JobKind::Lint
-                        )
+                    if completion.kind == crate::jobs::JobKind::Compact
+                        || (completion.outcome == crate::jobs::JobRunOutcome::Completed
+                            && matches!(
+                                completion.kind,
+                                crate::jobs::JobKind::Test | crate::jobs::JobKind::Lint
+                            ))
                     {
                         let _ = tx.send(format!("::job_completed:{}", completion.id));
                     }

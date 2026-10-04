@@ -84,7 +84,7 @@ impl CommandHandler for TuiExecutor {
             "/test" => handle_test(self, ui),
 
             "/cancel" => handle_cancel(self, ui),
-            line if line.starts_with("/cancel ") => {
+            line if line.split_whitespace().next() == Some("/cancel") => {
                 let args = line.strip_prefix("/cancel").unwrap_or("").trim();
                 handle_cancel_with_args(self, ui, Some(args));
             }
@@ -171,7 +171,9 @@ impl CommandHandler for TuiExecutor {
     }
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
-        self.handle_deferred_followup(producer, ui);
+        if !self.handle_compact_completed(producer, ui) {
+            self.handle_deferred_followup(producer, ui);
+        }
     }
 }
 

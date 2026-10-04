@@ -361,41 +361,80 @@ impl JobManager {
             .len()
     }
 
-    fn finish_job(&self, id: JobId, outcome: JobRunOutcome) {
-        let (snapshot, completion) = {
+    /// Serialize a short synchronous irreversible commit and terminalization
+    /// with cancellation/shutdown bookkeeping. No awaits or JobManager calls
+    /// are allowed in `commit`. A shutdown cannot report a saved commit as
+    /// cancelled or return while this commit is still mutating the session.
+    pub(crate) fn finish_synchronous_commit(
+        &self,
+        id: JobId,
+        commit: impl FnOnce() -> JobRunOutcome,
+    ) -> JobRunOutcome {
+        let (outcome, finished) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(mut record) = state.active.remove(&id) else {
-                return;
+            let Some(record) = state.active.get(&id) else {
+                return JobRunOutcome::Cancelled;
             };
-            let (status, error) = match &outcome {
-                JobRunOutcome::Completed => (JobStatus::Completed, None),
-                JobRunOutcome::Cancelled => (JobStatus::Cancelled, None),
-                JobRunOutcome::Failed { message } => {
-                    (JobStatus::Failed, Some(bound_error(message)))
-                }
+            let outcome = if record.status == JobStatus::Cancelling || record.token.is_cancelled() {
+                JobRunOutcome::Cancelled
+            } else {
+                commit()
             };
-            record.status = status;
-            record.error = error.clone();
-            if state.foreground_job == Some(id) {
-                state.foreground_job = None;
-            }
-            let mut terminal = record.snapshot();
-            // Ensure the terminal status/error rendered in history matches
-            // the outcome even though the record was removed from active.
-            terminal.status = status;
-            terminal.error = error;
-            state.recent.push_front(terminal.clone());
-            while state.recent.len() > crate::jobs::types::MAX_RECENT_JOBS {
-                state.recent.pop_back();
-            }
-            let completion = JobCompletion {
-                id: terminal.id,
-                kind: terminal.kind,
-                scope: terminal.scope,
-                outcome,
-            };
-            (terminal, completion)
+            let finished = Self::finish_locked(&mut state, id, outcome.clone());
+            (outcome, finished)
         };
+        if let Some((snapshot, completion)) = finished {
+            self.publish_completion(snapshot, completion);
+        }
+        outcome
+    }
+
+    fn finish_locked(
+        state: &mut JobState,
+        id: JobId,
+        outcome: JobRunOutcome,
+    ) -> Option<(JobSnapshot, JobCompletion)> {
+        let mut record = state.active.remove(&id)?;
+        let (status, error) = match &outcome {
+            JobRunOutcome::Completed => (JobStatus::Completed, None),
+            JobRunOutcome::Cancelled => (JobStatus::Cancelled, None),
+            JobRunOutcome::Failed { message } => (JobStatus::Failed, Some(bound_error(message))),
+        };
+        record.status = status;
+        record.error = error.clone();
+        if state.foreground_job == Some(id) {
+            state.foreground_job = None;
+        }
+        let mut terminal = record.snapshot();
+        // Ensure the terminal status/error rendered in history matches
+        // the outcome even though the record was removed from active.
+        terminal.status = status;
+        terminal.error = error;
+        state.recent.push_front(terminal.clone());
+        while state.recent.len() > crate::jobs::types::MAX_RECENT_JOBS {
+            state.recent.pop_back();
+        }
+        let completion = JobCompletion {
+            id: terminal.id,
+            kind: terminal.kind,
+            scope: terminal.scope,
+            outcome,
+        };
+        Some((terminal, completion))
+    }
+
+    fn finish_job(&self, id: JobId, outcome: JobRunOutcome) {
+        let finished = {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            Self::finish_locked(&mut state, id, outcome)
+        };
+        if let Some((snapshot, completion)) = finished {
+            self.publish_completion(snapshot, completion);
+        }
+    }
+
+    fn publish_completion(&self, snapshot: JobSnapshot, completion: JobCompletion) {
+        let id = snapshot.id;
         tracing::info!(
             job_id = %id,
             job_kind = %snapshot.kind,
