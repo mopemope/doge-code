@@ -548,6 +548,7 @@ mod tests {
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         }));

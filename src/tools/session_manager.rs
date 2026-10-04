@@ -42,27 +42,8 @@ impl SessionManagerWrapper {
     /// Update the current session with lines edited count
     pub fn update_session_with_lines_edited(&self, lines_edited: u64) -> Result<()> {
         if let Some(session_manager) = &self.session_manager {
-            // Clone the store outside the mutable borrow scope
-            let store = {
-                let session_mgr = session_manager.lock().unwrap();
-                session_mgr.store.clone()
-            };
-
-            // Update the session with lines edited
-            {
-                let mut session_mgr = session_manager.lock().unwrap();
-                if let Some(ref mut session) = session_mgr.current_session {
-                    session.increment_lines_edited(lines_edited);
-                }
-            }
-
-            // Save the session
-            if let Some(session_manager) = &self.session_manager {
-                let session_mgr = session_manager.lock().unwrap();
-                if let Some(ref session) = session_mgr.current_session {
-                    store.save(session)?;
-                }
-            }
+            let mut session_mgr = crate::utils::safe_std_lock(session_manager, "session_manager")?;
+            session_mgr.update_current_session_with_lines_edited(lines_edited)?;
         }
         Ok(())
     }

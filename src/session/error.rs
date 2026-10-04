@@ -2,6 +2,12 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SessionError {
+    #[error(
+        "Session {0} is already in use by another process; choose a different session or wait for its owner to exit"
+    )]
+    Busy(String),
+    #[error("Failed to acquire session ownership: {0}")]
+    LockError(std::io::Error),
     #[error("Session not found: {0}")]
     NotFound(String),
 

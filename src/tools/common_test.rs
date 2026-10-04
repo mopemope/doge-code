@@ -23,6 +23,7 @@ async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -51,6 +52,7 @@ async fn test_execute_bash_with_permissions_not_allowed() -> Result<()> {
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -81,6 +83,7 @@ async fn test_execute_bash_with_permissions_no_config() -> Result<()> {
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -242,6 +245,7 @@ async fn test_execute_bash_complex_allowed_command() -> Result<()> {
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -270,6 +274,7 @@ async fn test_execute_bash_with_empty_allowed_commands() -> Result<()> {
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -309,6 +314,7 @@ async fn test_plan_read_creates_session_if_missing() -> Result<()> {
     let store = SessionStore::new(project_root.join(".doge/sessions")).unwrap();
     let session_manager = Arc::new(Mutex::new(SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -345,6 +351,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
     let store = SessionStore::new(project_root.join(".doge/sessions")).unwrap();
     let session_manager = Arc::new(Mutex::new(SessionManager {
         save_state: Default::default(),
+        current_lease: None,
         store,
         current_session: None,
     }));
@@ -693,5 +700,73 @@ async fn test_execute_shell_large_output() -> Result<()> {
     assert!(res.stdout.contains("line 10000"));
     assert!(res.stdout.len() < 10_000);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn lease_edit_finalization_saves_lines_and_recovers_failed_checkpoint() -> Result<()> {
+    let dir = TempDir::new()?;
+    let root = dir.path().to_path_buf();
+    let cfg = Arc::new(AppConfig {
+        project_root: root.clone(),
+        ..Default::default()
+    });
+    let mut manager = SessionManager::with_store(SessionStore::new(root.join(".doge/sessions"))?);
+    manager.create_session(None)?;
+    let id = manager.current_session_id().unwrap();
+    let checkpoint = manager.store.session_dir(&id).join("session.json");
+    let manager = Arc::new(Mutex::new(manager));
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), cfg.clone())
+        .with_session_manager(manager.clone());
+    let file = root.join("a.txt");
+    std::fs::write(&file, "one\n")?;
+    let mut total = 0;
+    for (index, (old, new)) in [("one", "two"), ("two", "three")].into_iter().enumerate() {
+        let execution = crate::tools::edit::edit_with_receipt(
+            crate::tools::edit::EditParams {
+                file_path: file.to_str().unwrap().into(),
+                target_block: old.into(),
+                new_block: new.into(),
+                start_line: None,
+                end_line: None,
+                allow_multiple: None,
+            },
+            &cfg,
+        )
+        .await?;
+        let receipt = execution.receipt.unwrap();
+        total += (receipt.lines_added + receipt.lines_removed) as u64;
+        let before = std::fs::read(&checkpoint)?;
+        if index == 1 {
+            let mut permissions = std::fs::metadata(&checkpoint)?.permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&checkpoint, permissions)?;
+        }
+        let report = fs.finalize_mutation(receipt, Default::default()).await;
+        if index == 0 {
+            assert!(
+                report.warnings.is_empty(),
+                "normal edit warnings: {:?}",
+                report.warnings
+            );
+            assert_eq!(manager.lock().unwrap().store.load(&id)?.lines_edited, total);
+        } else {
+            assert!(report.warnings.iter().any(|w| w.contains("lines-edited")));
+            let mut sm = manager.lock().unwrap();
+            assert!(sm.has_unsaved_current_session());
+            assert_eq!(sm.current_session.as_ref().unwrap().lines_edited, total);
+            assert_eq!(std::fs::read(&checkpoint)?, before);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
+            }
+            sm.flush_current_session()?;
+            sm.flush_current_session()?;
+            assert!(!sm.has_unsaved_current_session());
+            assert_eq!(sm.store.load(&id)?.lines_edited, total);
+        }
+    }
+    assert_eq!(std::fs::read_to_string(file)?, "three\n");
     Ok(())
 }

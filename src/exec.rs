@@ -1491,6 +1491,7 @@ mod tests {
             .expect("Failed to open store");
         let session_id = store.list_with_stats().expect("list").remove(0).meta.id;
 
+        drop(first); // The previous process releases ownership before resume.
         // Second process resumes the same session: the first instruction
         // must be part of the resumed history and the request.
         let mut second = Executor::new(AppConfig {

@@ -744,6 +744,7 @@ fn reported_usage_is_per_run_and_once_per_saved_session_across_resume() {
     let files: Vec<_> = std::fs::read_dir(project.root.join(".doge/sessions"))
         .expect("sessions")
         .map(|entry| entry.expect("entry").path().join("session.json"))
+        .filter(|path| path.is_file())
         .collect();
     assert_eq!(files.len(), 1);
     let saved: Value =
@@ -781,11 +782,9 @@ fn failed_attempt_has_unknown_usage_and_invalid_completion_keeps_reported_usage(
         );
         let file = std::fs::read_dir(project.root.join(".doge/sessions"))
             .expect("sessions")
-            .next()
-            .expect("one")
-            .expect("entry")
-            .path()
-            .join("session.json");
+            .map(|entry| entry.expect("entry").path().join("session.json"))
+            .find(|path| path.is_file())
+            .expect("one checkpoint");
         let saved: Value =
             serde_json::from_slice(&std::fs::read(file).expect("session")).expect("JSON");
         assert_eq!(saved["usage"]["attempts"], 1);
@@ -833,11 +832,9 @@ fn failed_checkpoint_preserves_existing_session_bytes_in_real_cli() {
     assert!(first.status.success());
     let file = std::fs::read_dir(project.root.join(".doge/sessions"))
         .expect("sessions")
-        .next()
-        .expect("one")
-        .expect("entry")
-        .path()
-        .join("session.json");
+        .map(|entry| entry.expect("entry").path().join("session.json"))
+        .find(|path| path.is_file())
+        .expect("one checkpoint");
     let before = std::fs::read(&file).expect("before");
     let saved: Value = serde_json::from_slice(&before).expect("saved");
     // The old payload greatly exceeds the limit; timestamp/provenance size
@@ -876,4 +873,100 @@ fn failed_checkpoint_preserves_existing_session_bytes_in_real_cli() {
         1,
         "failed checkpoint did not send a new inference request"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn lease_independent_cli_processes_exclude_stale_writers_and_release_on_exit() {
+    use std::process::Stdio;
+    let project = Project::new(false);
+    let release = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicBool::new(false));
+    let gate = release.clone();
+    let arrived = ready.clone();
+    let server = Server::new(move |_, request| {
+        let holding = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["content"] == "LEASE_HOLD" || m["content"] == "LEASE_KILL");
+        let last_user = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .unwrap();
+        if holding && (last_user["content"] == "LEASE_HOLD" || last_user["content"] == "LEASE_KILL")
+        {
+            arrived.store(true, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(8);
+            while !gate.load(Ordering::SeqCst) && Instant::now() < until {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        response("done", vec![], "stop")
+    });
+    let seed = project
+        .command_prompt(&server, "LEASE_SEED")
+        .output()
+        .unwrap();
+    assert!(seed.status.success());
+    for (prompt, force) in [("LEASE_HOLD", false), ("LEASE_KILL", true)] {
+        release.store(false, Ordering::SeqCst);
+        ready.store(false, Ordering::SeqCst);
+        let mut first = CleanupChild(Some(
+            project
+                .command_prompt(&server, prompt)
+                .arg("--resume=latest")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let until = Instant::now() + Duration::from_secs(4);
+        while !ready.load(Ordering::SeqCst) && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            ready.load(Ordering::SeqCst),
+            "first process reached provider with lease"
+        );
+        let before = server.requests.lock().unwrap().len();
+        let second = project
+            .command_prompt(&server, "MUST_NOT_RUN")
+            .arg("--resume=latest")
+            .output()
+            .unwrap();
+        assert!(!second.status.success());
+        assert!(String::from_utf8_lossy(&second.stderr).contains("already in use"));
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            before,
+            "busy process cannot call provider"
+        );
+        assert!(first.try_wait().unwrap().is_none());
+        if force {
+            first.kill().unwrap();
+            assert!(!first.wait_with_output().unwrap().status.success());
+            release.store(true, Ordering::SeqCst);
+        } else {
+            release.store(true, Ordering::SeqCst);
+            assert!(first.wait_with_output().unwrap().status.success());
+        }
+        let retry = project
+            .command_prompt(&server, "AFTER_OWNER_EXIT")
+            .arg("--resume=latest")
+            .output()
+            .unwrap();
+        assert!(
+            retry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+        let requests = server.requests.lock().unwrap();
+        let messages = requests.last().unwrap()["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["content"] == "LEASE_SEED"));
+        assert!(messages.iter().any(|m| m["content"] == prompt));
+    }
 }
