@@ -318,12 +318,16 @@ async fn commit_semantic_edit_success(
         kind: crate::provenance::ChangeKind::SemanticEdit,
         path: prepared.file.clone(),
         before: crate::tools::mutation::MutationSnapshot {
+            resolved_path: None,
+            identity: None,
             exists: true,
             content: Some(before_content),
             content_hash: result.before_file_hash.clone(),
             byte_len: result.before_byte_len,
         },
         after: crate::tools::mutation::MutationSnapshot {
+            resolved_path: None,
+            identity: None,
             exists: true,
             content: Some(after_content),
             content_hash: result.after_file_hash.clone(),

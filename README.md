@@ -757,6 +757,19 @@ Combining these enables maximum code exploration effectiveness without overwhelm
 
 `search_repomap` returns `symbol_id` for every symbol (no fingerprint in search results; fingerprints are computed only for the edit target to avoid extra I/O and token cost).
 
+Text mutation tools resolve an authorized canonical target before reading or
+writing. Editing through a file, directory or project-root symlink preserves the
+alias and changes its target; undo and captured review receipts refer to that
+canonical target. Existing scope and temporary-directory allowances still apply.
+Dangling links, link cycles and non-regular files are rejected. Before publishing,
+tools recheck the requested path, scope, file identity and contents; detected
+retargeting or replacement conflicts leave tracking unchanged. Undo refuses a
+changed canonical parent or target, even when its contents match.
+
+These checks are optimistic: there is still a gap between the final check and
+rename or unlink. They do not provide an operating-system compare-and-swap or a
+filesystem sandbox against concurrent directory replacement.
+
 ## 📋 Diff Review Panel
 
 After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):

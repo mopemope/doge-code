@@ -29,10 +29,155 @@ use thiserror::Error;
 
 use crate::provenance::{ChangeKind, file_content_hash};
 
+/// An authorized destination retained independently of the requested alias.
+#[derive(Clone)]
+pub struct MutationTarget {
+    requested: PathBuf,
+    resolved: PathBuf,
+    roots: Vec<PathBuf>,
+    root_spellings: Vec<PathBuf>,
+    original_identity: Option<FileIdentity>,
+    originally_exists: bool,
+    #[cfg(test)]
+    pub(super) before_publish_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+impl std::fmt::Debug for MutationTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MutationTarget")
+            .field("requested", &self.requested)
+            .field("resolved", &self.resolved)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl FileIdentity {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            #[cfg(unix)]
+            device: meta.dev(),
+            #[cfg(unix)]
+            inode: meta.ino(),
+            created: meta.created().ok(),
+            #[cfg(unix)]
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+    fn same_object(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        if self.device != other.device || self.inode != other.inode {
+            return false;
+        }
+        self.created == other.created
+    }
+}
+
+impl MutationTarget {
+    pub fn resolve(
+        requested: &Path,
+        config: &crate::config::AppConfig,
+        extra_roots: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        let resolved = super::scope::ensure_in_scope(requested, config, extra_roots)?;
+        let metadata = match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    !metadata.is_dir(),
+                    "Path is a directory: {}",
+                    resolved.display()
+                );
+                anyhow::ensure!(metadata.is_file(), "mutation target is not a regular file");
+                Some(metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut roots = vec![super::scope::canonicalize_root(&config.project_root)];
+        roots.extend(
+            config
+                .allowed_paths
+                .iter()
+                .chain(extra_roots)
+                .map(|path| super::scope::canonicalize_root(path)),
+        );
+        let mut root_spellings = vec![config.project_root.clone()];
+        root_spellings.extend(config.allowed_paths.iter().chain(extra_roots).cloned());
+        Ok(Self {
+            root_spellings,
+            requested: requested.to_owned(),
+            resolved,
+            roots,
+            original_identity: metadata.as_ref().map(FileIdentity::from_metadata),
+            originally_exists: metadata.is_some(),
+            #[cfg(test)]
+            before_publish_hook: None,
+        })
+    }
+    pub fn path(&self) -> &Path {
+        &self.resolved
+    }
+    pub fn revalidate(&self) -> Result<(), MutationCommitError> {
+        let now = super::scope::canonicalize_target(&self.requested)
+            .ok_or(MutationCommitError::ConcurrentModification)?;
+        if now != self.resolved
+            || !self
+                .roots
+                .iter()
+                .zip(&self.root_spellings)
+                .any(|(root, spelling)| {
+                    now.starts_with(root) && super::scope::canonicalize_root(spelling) == *root
+                })
+        {
+            return Err(MutationCommitError::ConcurrentModification);
+        }
+        let metadata = std::fs::symlink_metadata(&self.resolved);
+        match (self.originally_exists, metadata) {
+            (true, Ok(meta))
+                if meta.is_file()
+                    && self.original_identity.as_ref().is_some_and(|old| {
+                        old.same_object(&FileIdentity::from_metadata(&meta))
+                    }) => {}
+            (false, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(MutationCommitError::ConcurrentModification),
+        }
+        Ok(())
+    }
+    pub fn commit_blocking(
+        &self,
+        before: &MutationSnapshot,
+        candidate: &str,
+    ) -> Result<MutationSnapshot, MutationCommitError> {
+        self.revalidate()?;
+        commit_text_candidate_blocking_guarded(&self.resolved, before, candidate, Some(self))
+    }
+    pub async fn commit(
+        &self,
+        before: &MutationSnapshot,
+        candidate: &str,
+    ) -> Result<MutationSnapshot, MutationCommitError> {
+        self.revalidate()?;
+        commit_text_candidate_guarded(&self.resolved, before, candidate, Some(self)).await
+    }
+}
+
 /// In-memory exact file snapshot (never persisted verbatim to provenance).
 #[derive(Debug, Clone)]
 pub struct MutationSnapshot {
     pub exists: bool,
+    pub resolved_path: Option<PathBuf>,
+    pub identity: Option<FileIdentity>,
     pub content: Option<String>,
     pub content_hash: Option<String>,
     pub byte_len: Option<u64>,
@@ -42,6 +187,8 @@ impl MutationSnapshot {
     pub fn missing() -> Self {
         Self {
             exists: false,
+            resolved_path: None,
+            identity: None,
             content: None,
             content_hash: None,
             byte_len: None,
@@ -49,13 +196,18 @@ impl MutationSnapshot {
     }
 
     pub fn state_matches(&self, other: &Self) -> bool {
-        if self.exists != other.exists {
-            return false;
-        }
-        if !self.exists {
-            return true;
-        }
-        self.content_hash == other.content_hash
+        self.exists == other.exists && (!self.exists || self.content_hash == other.content_hash)
+    }
+    pub(crate) fn unchanged_for_commit(&self, expected: &Self) -> bool {
+        self.state_matches(expected)
+            && expected
+                .identity
+                .as_ref()
+                .is_none_or(|identity| self.identity.as_ref() == Some(identity))
+            && expected
+                .resolved_path
+                .as_ref()
+                .is_none_or(|path| self.resolved_path.as_ref() == Some(path))
     }
 
     pub fn content_or_empty(&self) -> &str {
@@ -116,21 +268,59 @@ pub enum MutationCommitError {
 /// - Binary / non-UTF8: error (text tools reject these like before).
 pub fn read_text_snapshot(path: &Path) -> Result<MutationSnapshot, MutationCommitError> {
     match std::fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MutationSnapshot::missing()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut missing = MutationSnapshot::missing();
+            missing.resolved_path = Some(
+                super::scope::canonicalize_target(path)
+                    .ok_or(MutationCommitError::ConcurrentModification)?,
+            );
+            Ok(missing)
+        }
         Err(e) => Err(MutationCommitError::WriteFailed(format!(
             "failed to stat {}: {e}",
             path.display()
         ))),
         Ok(meta) => {
-            if meta.is_dir() {
+            if meta.file_type().is_symlink() {
+                return Err(MutationCommitError::ConcurrentModification);
+            }
+            if !meta.is_file() {
                 return Err(MutationCommitError::WriteFailed(format!(
-                    "path is a directory: {}",
+                    "path is not a regular file (directory, symlink or special file): {}",
                     path.display()
                 )));
             }
-            let bytes = std::fs::read(path).map_err(|e| {
-                MutationCommitError::WriteFailed(format!("failed to read {}: {e}", path.display()))
-            })?;
+            let resolved = super::scope::canonicalize_target(path)
+                .ok_or(MutationCommitError::ConcurrentModification)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut file = options
+                .open(path)
+                .map_err(|error| MutationCommitError::WriteFailed(error.to_string()))?;
+            let opened = file
+                .metadata()
+                .map_err(|error| MutationCommitError::WriteFailed(error.to_string()))?;
+            if !opened.is_file()
+                || FileIdentity::from_metadata(&opened) != FileIdentity::from_metadata(&meta)
+            {
+                return Err(MutationCommitError::ConcurrentModification);
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)
+                .map_err(|error| MutationCommitError::WriteFailed(error.to_string()))?;
+            let after_read = file
+                .metadata()
+                .map_err(|error| MutationCommitError::WriteFailed(error.to_string()))?;
+            if FileIdentity::from_metadata(&after_read) != FileIdentity::from_metadata(&meta)
+                || super::scope::canonicalize_target(path).as_ref() != Some(&resolved)
+            {
+                return Err(MutationCommitError::ConcurrentModification);
+            }
             if bytes.contains(&0) {
                 return Err(MutationCommitError::WriteFailed(
                     "binary content is not allowed".to_string(),
@@ -146,6 +336,8 @@ pub fn read_text_snapshot(path: &Path) -> Result<MutationSnapshot, MutationCommi
             let content_hash = file_content_hash(&content);
             Ok(MutationSnapshot {
                 exists: true,
+                resolved_path: Some(resolved),
+                identity: Some(FileIdentity::from_metadata(&meta)),
                 content: Some(content),
                 content_hash: Some(content_hash),
                 byte_len: Some(byte_len),
@@ -158,49 +350,16 @@ pub fn read_text_snapshot(path: &Path) -> Result<MutationSnapshot, MutationCommi
 pub async fn read_text_snapshot_async(
     path: &Path,
 ) -> Result<MutationSnapshot, MutationCommitError> {
-    match tokio::fs::symlink_metadata(path).await {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MutationSnapshot::missing()),
-        Err(e) => Err(MutationCommitError::WriteFailed(format!(
-            "failed to stat {}: {e}",
-            path.display()
-        ))),
-        Ok(meta) => {
-            if meta.is_dir() {
-                return Err(MutationCommitError::WriteFailed(format!(
-                    "path is a directory: {}",
-                    path.display()
-                )));
-            }
-            let bytes = tokio::fs::read(path).await.map_err(|e| {
-                MutationCommitError::WriteFailed(format!("failed to read {}: {e}", path.display()))
-            })?;
-            if bytes.contains(&0) {
-                return Err(MutationCommitError::WriteFailed(
-                    "binary content is not allowed".to_string(),
-                ));
-            }
-            let content = String::from_utf8(bytes).map_err(|_| {
-                MutationCommitError::WriteFailed(format!(
-                    "file is not valid UTF-8: {}",
-                    path.display()
-                ))
-            })?;
-            let byte_len = content.len() as u64;
-            let content_hash = file_content_hash(&content);
-            Ok(MutationSnapshot {
-                exists: true,
-                content: Some(content),
-                content_hash: Some(content_hash),
-                byte_len: Some(byte_len),
-            })
-        }
-    }
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_text_snapshot(&path))
+        .await
+        .map_err(|error| MutationCommitError::WriteFailed(error.to_string()))?
 }
 
 /// Canonicalize a path for scope comparison.
 ///
-/// Tools scope-check canonicalized paths (resolving `..` and symlinks), but
-/// receipts carry the raw user-supplied path. Comparing the raw path
+/// New mutation receipts carry authorized resolved targets. This compatibility
+/// helper also handles older raw spellings (resolving `..` and symlinks). Comparing the raw path
 /// lexically would misclassify e.g. `/proj/sub/../a.txt` as outside the
 /// project. Canonicalize the file when it exists, otherwise the parent
 /// directory joined with the file name (covers deleted files on the undo
@@ -289,13 +448,22 @@ pub fn build_receipt(
 ///
 /// Algorithm: pre-write re-read -> compare `exists` + content with `before`
 /// -> sibling temp + write + fsync -> persist (no-clobber for new files) ->
-/// read-back verify -> after snapshot. Any race yields
+/// read-back verify -> after snapshot. Detected path/content changes yield
 /// [`MutationCommitError::ConcurrentModification`] without touching disk
 /// beyond the temp file.
 pub async fn commit_text_candidate(
     path: &Path,
     before: &MutationSnapshot,
     candidate: &str,
+) -> Result<MutationSnapshot, MutationCommitError> {
+    commit_text_candidate_guarded(path, before, candidate, None).await
+}
+
+async fn commit_text_candidate_guarded(
+    path: &Path,
+    before: &MutationSnapshot,
+    candidate: &str,
+    target: Option<&MutationTarget>,
 ) -> Result<MutationSnapshot, MutationCommitError> {
     if candidate.as_bytes().contains(&0) {
         return Err(MutationCommitError::WriteFailed(
@@ -311,7 +479,7 @@ pub async fn commit_text_candidate(
 
     // Pre-write re-read: refuse when the file moved under us.
     let current = read_text_snapshot_async(path).await?;
-    if !current.state_matches(before) {
+    if !current.unchanged_for_commit(before) {
         tracing::warn!(file = %path.display(), "mutation.concurrent_modification");
         return Err(MutationCommitError::ConcurrentModification);
     }
@@ -359,6 +527,17 @@ pub async fn commit_text_candidate(
             .map_err(|e| MutationCommitError::WriteFailed(format!("temp fsync: {e}")))?;
     }
 
+    #[cfg(test)]
+    if let Some(hook) = target.and_then(|target| target.before_publish_hook.as_ref()) {
+        hook();
+    }
+    if let Some(target) = target {
+        target.revalidate()?;
+    }
+    let latest = read_text_snapshot(path)?;
+    if !latest.unchanged_for_commit(before) {
+        return Err(MutationCommitError::ConcurrentModification);
+    }
     if is_new_file {
         temp.persist_noclobber(path).map_err(|e| {
             // Another writer won the creation race.
@@ -374,25 +553,14 @@ pub async fn commit_text_candidate(
             .map_err(|e| MutationCommitError::WriteFailed(format!("persist: {e}")))?;
     }
 
-    // Read-back verify: the file must now contain exactly the candidate.
-    let after_bytes = tokio::fs::read(path).await.map_err(|e| {
-        MutationCommitError::VerifyFailed(format!("read-back failed for {}: {e}", path.display()))
-    })?;
-    if after_bytes != candidate.as_bytes() {
-        return Err(MutationCommitError::VerifyFailed(format!(
-            "content mismatch after commit for {}",
-            path.display()
-        )));
+    let after = read_text_snapshot_async(path)
+        .await
+        .map_err(|error| MutationCommitError::VerifyFailed(error.to_string()))?;
+    if after.content.as_deref() != Some(candidate) || after.resolved_path != current.resolved_path {
+        return Err(MutationCommitError::VerifyFailed(
+            "content or destination mismatch after commit".into(),
+        ));
     }
-    let after_content = String::from_utf8(after_bytes).map_err(|_| {
-        MutationCommitError::VerifyFailed(format!("non-UTF8 after commit: {}", path.display()))
-    })?;
-    let after = MutationSnapshot {
-        exists: true,
-        byte_len: Some(after_content.len() as u64),
-        content_hash: Some(file_content_hash(&after_content)),
-        content: Some(after_content),
-    };
 
     tracing::info!(
         file = %path.display(),
@@ -409,13 +577,22 @@ pub fn commit_text_candidate_blocking(
     before: &MutationSnapshot,
     candidate: &str,
 ) -> Result<MutationSnapshot, MutationCommitError> {
+    commit_text_candidate_blocking_guarded(path, before, candidate, None)
+}
+
+fn commit_text_candidate_blocking_guarded(
+    path: &Path,
+    before: &MutationSnapshot,
+    candidate: &str,
+    target: Option<&MutationTarget>,
+) -> Result<MutationSnapshot, MutationCommitError> {
     if candidate.as_bytes().contains(&0) {
         return Err(MutationCommitError::WriteFailed(
             "binary content is not allowed".to_string(),
         ));
     }
     let current = read_text_snapshot(path)?;
-    if !current.state_matches(before) {
+    if !current.unchanged_for_commit(before) {
         return Err(MutationCommitError::ConcurrentModification);
     }
     let is_new_file = !before.exists;
@@ -448,6 +625,17 @@ pub fn commit_text_candidate_blocking(
             .sync_all()
             .map_err(|e| MutationCommitError::WriteFailed(format!("temp fsync: {e}")))?;
     }
+    #[cfg(test)]
+    if let Some(hook) = target.and_then(|target| target.before_publish_hook.as_ref()) {
+        hook();
+    }
+    if let Some(target) = target {
+        target.revalidate()?;
+    }
+    let latest = read_text_snapshot(path)?;
+    if !latest.unchanged_for_commit(before) {
+        return Err(MutationCommitError::ConcurrentModification);
+    }
     if is_new_file {
         temp.persist_noclobber(path).map_err(|e| {
             let msg = e.to_string();
@@ -461,24 +649,14 @@ pub fn commit_text_candidate_blocking(
         temp.persist(path)
             .map_err(|e| MutationCommitError::WriteFailed(format!("persist: {e}")))?;
     }
-    let after_bytes = std::fs::read(path).map_err(|e| {
-        MutationCommitError::VerifyFailed(format!("read-back failed for {}: {e}", path.display()))
-    })?;
-    if after_bytes != candidate.as_bytes() {
-        return Err(MutationCommitError::VerifyFailed(format!(
-            "content mismatch after commit for {}",
-            path.display()
-        )));
+    let after = read_text_snapshot(path)
+        .map_err(|error| MutationCommitError::VerifyFailed(error.to_string()))?;
+    if after.content.as_deref() != Some(candidate) || after.resolved_path != current.resolved_path {
+        return Err(MutationCommitError::VerifyFailed(
+            "content or destination mismatch after commit".into(),
+        ));
     }
-    let after_content = String::from_utf8(after_bytes).map_err(|_| {
-        MutationCommitError::VerifyFailed(format!("non-UTF8 after commit: {}", path.display()))
-    })?;
-    Ok(MutationSnapshot {
-        exists: true,
-        byte_len: Some(after_content.len() as u64),
-        content_hash: Some(file_content_hash(&after_content)),
-        content: Some(after_content),
-    })
+    Ok(after)
 }
 
 #[cfg(test)]
@@ -730,12 +908,16 @@ mod finalize_integration_tests {
             kind: ChangeKind::SemanticEdit,
             path: file.clone(),
             before: MutationSnapshot {
+                resolved_path: None,
+                identity: None,
                 exists: true,
                 content: Some(before_content),
                 content_hash: result.before_file_hash.clone(),
                 byte_len: result.before_byte_len,
             },
             after: MutationSnapshot {
+                resolved_path: None,
+                identity: None,
                 exists: true,
                 content: Some(after_content),
                 content_hash: result.after_file_hash.clone(),

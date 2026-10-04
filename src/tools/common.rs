@@ -368,13 +368,17 @@ impl FsTools {
             content_hash: receipt.after.content_hash.clone(),
             byte_len: receipt.after.byte_len,
         };
-        let entry = crate::tools::undo::BackupEntry {
-            entry_id: uuid::Uuid::now_v7().to_string(),
-            path: receipt.path.clone(),
-            before: before_state,
-            expected_after,
-            change_id,
-        };
+        let entry =
+            crate::tools::undo::BackupEntry {
+                entry_id: uuid::Uuid::now_v7().to_string(),
+                path: receipt.path.clone(),
+                before: before_state,
+                expected_after,
+                expected_path: receipt.after.resolved_path.clone().unwrap_or_else(|| {
+                    crate::tools::mutation::canonicalize_for_scope(&receipt.path)
+                }),
+                change_id,
+            };
         self.undo_stack.write().await.push_entry(entry);
     }
 

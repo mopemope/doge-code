@@ -322,6 +322,10 @@ impl FsTools {
                 checked_path(&root, &receipt.path)?;
                 let current = mutation::read_text_snapshot(&receipt.path)?;
                 anyhow::ensure!(
+                    current.resolved_path.as_ref() == Some(&receipt.path),
+                    "Conflict: review destination changed"
+                );
+                anyhow::ensure!(
                     exact(&current, &receipt.after),
                     "Conflict during rollback: {}",
                     receipt.path.display()
@@ -358,6 +362,12 @@ impl FsTools {
                         Err(error) => return Err(error.into()),
                     }
                 } else {
+                    let latest = mutation::read_text_snapshot(&receipt.path)?;
+                    anyhow::ensure!(
+                        latest.resolved_path.as_ref() == Some(&receipt.path)
+                            && latest.unchanged_for_commit(&current),
+                        "Conflict before review removal"
+                    );
                     std::fs::remove_file(&receipt.path)?;
                     (MutationSnapshot::missing(), None)
                 };
