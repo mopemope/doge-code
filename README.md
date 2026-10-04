@@ -83,7 +83,10 @@ whole-file/code-block responses. The protocol does not guarantee the semantic
 correctness of model edits: keep reviewing Git diffs and running relevant tests.
 Successful watch edits use the
 normal persistent change tracking and in-process undo bookkeeping, and enabled
-backups have unique names. Watch has no undo command; its undo stack is not
+backups have unique names. Backup retention only removes regular files whose
+complete original basename and generated timestamp/UUIDv7 suffix match the target.
+Unknown names, symlinks, directories and backups of other files are retained;
+`backup_keep = 0` keeps all backups. Watch has no undo command; its undo stack is not
 restored by a separate exec/TUI/resumed process. Restore a watch backup manually
 after inspecting the current file.
 The snapshot check narrows the external-write race window; it is not an OS-level
