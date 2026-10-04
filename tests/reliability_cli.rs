@@ -1491,3 +1491,85 @@ fn shell_stdin_timeout_then_next_invocation_recovers_in_real_cli() {
     );
     assert_eq!(server.requests.lock().unwrap().len(), 3);
 }
+
+#[cfg(unix)]
+#[test]
+fn search_scope_real_cli_refuses_escapes_and_ambient_rg_configuration() {
+    let project = Project::new(false);
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().canonicalize().unwrap();
+    let secret = outside.join("secret.txt");
+    std::fs::write(&secret, "EXTERNAL_SEARCH_SCOPE_MARKER").unwrap();
+    std::fs::write(project.root.join("inside.txt"), "inside marker").unwrap();
+    std::os::unix::fs::symlink(&outside, project.root.join("link")).unwrap();
+    let rg_config = project.root.join("rg-config");
+    std::fs::write(&rg_config, format!("--follow\n{}\n", secret.display())).unwrap();
+    let relative = format!(
+        "../{}/secret.txt",
+        outside.file_name().unwrap().to_str().unwrap()
+    );
+    let absolute = project.root.join(&relative).display().to_string();
+    let server = Server::new(move |index, request| {
+        if index == 1 {
+            return response(
+                "",
+                vec![
+                    call(
+                        "relative",
+                        "search_text",
+                        json!({"search_pattern":"SEARCH_SCOPE","file_glob":relative}),
+                    ),
+                    call(
+                        "absolute",
+                        "search_text",
+                        json!({"search_pattern":"SEARCH_SCOPE","file_glob":absolute}),
+                    ),
+                    call(
+                        "symlink",
+                        "search_text",
+                        json!({"search_pattern":"SEARCH_SCOPE","file_glob":"link/secret.txt"}),
+                    ),
+                    call(
+                        "ambient",
+                        "search_text",
+                        json!({"search_pattern":"SEARCH_SCOPE","file_glob":"**/*.txt"}),
+                    ),
+                    call(
+                        "inside",
+                        "search_text",
+                        json!({"search_pattern":"inside marker","file_glob":"inside.txt"}),
+                    ),
+                ],
+                "tool_calls",
+            );
+        }
+        let messages = request["messages"].as_array().unwrap();
+        assert_tool_result_blocks(messages);
+        for id in ["relative", "absolute", "symlink", "ambient", "inside"] {
+            let value: Value = serde_json::from_str(
+                messages.iter().find(|m| m["tool_call_id"] == id).unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(!value.to_string().contains("EXTERNAL_SEARCH_SCOPE_MARKER"));
+            match id {
+                "ambient" => assert_eq!(value["meta"]["returned"], 0),
+                "inside" => assert_eq!(value["meta"]["returned"], 1),
+                _ => assert!(value["error"].is_string()),
+            }
+        }
+        response("search scope verified", vec![], "stop")
+    });
+    let output = project
+        .command(&server)
+        .env("RIPGREP_CONFIG_PATH", rg_config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}

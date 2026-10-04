@@ -334,6 +334,17 @@ environment. Captured output preserves line endings within the output budget.
 - `search_text`: Text-based search across files
 - `fs_read_many_files`: Batch file reading with budget management
 
+`search_text` resolves the literal directory prefix of `file_glob` and checks
+project scope and explicit `allowed_paths` before starting ripgrep. Parent
+traversal and directory symlinks cannot select an unauthorized search root.
+Exact filenames can use individually allowed files without granting access to
+neighboring files. Wildcards after a parent traversal must have an authorized
+literal prefix; parent components after a wildcard are rejected.
+Searches preserve nested globs, project-root aliases, pagination and output
+budgets. Omitting a glob searches only the project; ordinary absolute globs
+outside it retain their empty-result behavior. The tool ignores ambient
+`RIPGREP_CONFIG_PATH` settings and does not follow symlinks while traversing.
+
 ### Editing Tools
 - `apply_patch`: Apply a unified diff patch to a file (single `file_path`; read the file first)
 - `edit`: Replace specific code blocks
