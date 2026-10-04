@@ -276,6 +276,7 @@ match. Without Git, referenced files can be recorded but collection is partial.
 No file bodies, environment variables, toolchain probes or remote URLs are added.
 
 Each endpoint is limited to 10,000 paths, 16 MiB per file, 128 MiB of reads and
+
 4 MiB serialized data, with a cooperative 10-second collection budget. Acquisition
 failure does not change command success or failure. `/test`, `/lint` and the
 process tool warn about changed or indeterminate endpoints; `provenance_read`
@@ -566,8 +567,8 @@ and session/metadata symlinks are rejected. Malformed sessions are preserved and
 reported rather than silently skipped during listing or latest-session selection.
 The retention limit is 100 sessions and excludes the checkpoint being saved. If
 safe retention inventory fails, the checkpoint succeeds with a warning and no
-sessions are removed. Keep the store in a trusted directory: there is no cross-process
-writer lock or guarantee against concurrent adversarial directory replacement.
+sessions are removed. Keep the store in a trusted directory: session leases do not
+guarantee protection against concurrent adversarial directory replacement.
 
 TUI startup resolves `--resume` before creating a session, so retention cannot
 remove the requested target during startup. Deleting the active session clears
@@ -590,7 +591,15 @@ jobs and wait for cleanup before flushing. A failed flush keeps the UI open with
 retry hint; stalled cleanup also keeps the UI open. The final error-path flush runs
 after shutdown and reports failure with a nonzero exit. Explicit clear/delete retain
 their intentional discard behavior. Capacity errors remain unsaved; this does not
-add capacity rescue, cross-process writer coordination or power-loss guarantees.
+add capacity rescue or power-loss guarantees.
+
+A session takes a nonblocking exclusive OS lease before use and retains it through
+its final checkpoint and shutdown. Concurrent use or deletion of the same session
+is refused explicitly; different sessions can run concurrently, and read-only
+list/show remains available. Retention skips active sessions and may temporarily
+exceed the session limit. This protection requires participating binaries and a
+filesystem supporting OS locks; old binaries, external manual edits and unsupported
+network filesystems are outside this guarantee.
 
 `exec --json` includes a `usage` object with inference attempts, usage-report count,
 provider-reported prompt/completion/total subtotals, and optional reasoning/cache

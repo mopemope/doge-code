@@ -1,11 +1,12 @@
 use crate::session::{SessionData, SessionStore};
 use anyhow::Result;
-use tracing::{debug, error as tracing_error};
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct SessionManager {
     pub store: SessionStore,
     pub current_session: Option<SessionData>,
+    pub(crate) current_lease: Option<super::lease::SessionLease>,
     pub(crate) save_state: SessionSaveState,
 }
 
@@ -31,6 +32,7 @@ impl SessionManager {
             store,
             current_session: None,
             save_state: SessionSaveState::Durable,
+            current_lease: None,
         })
     }
 
@@ -40,6 +42,7 @@ impl SessionManager {
             store,
             current_session: None,
             save_state: SessionSaveState::Durable,
+            current_lease: None,
         }
     }
 
@@ -78,7 +81,12 @@ impl SessionManager {
                 .try_exists()?,
             "session checkpoint was deleted; refusing to recreate it during flush"
         );
-        let outcome = self.store.save_with_outcome(session)?;
+        let outcome = self.store.save_with_lease(
+            session,
+            self.current_lease
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
+        )?;
         self.adopt_save_outcome(&id, &outcome);
         Ok(outcome)
     }
@@ -118,34 +126,38 @@ impl SessionManager {
     /// If `initial_prompt` is provided the session title will be set and persisted.
     pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
         self.flush_before_transition()?;
-        let mut session = self.store.create()?;
-
-        if let Some(prompt) = initial_prompt {
-            // Use owned String; pass &str to session API
-            session.set_initial_prompt(&prompt);
-            // Mark that the title is user-provided
-            session.meta.title_is_default = false;
-            if let Err(e) = self.store.save(&session) {
-                tracing_error!(
-                    ?e,
-                    "Failed to save session data after setting initial prompt"
-                );
-                return Err(e.into());
-            }
-        }
-
+        let (session, lease, outcome) = self.store.create_with_lease(initial_prompt)?;
+        let id = session.meta.id.clone();
         self.current_session = Some(session);
-        self.save_state = SessionSaveState::Durable;
+        self.current_lease = Some(lease);
+        self.adopt_save_outcome(&id, &outcome);
         Ok(())
     }
 
     /// Load a session by ID
     pub fn load_session(&mut self, id: &str) -> Result<()> {
         self.flush_before_transition()?;
+        let lease = self.acquire_transition_lease(id)?;
         let session = self.store.load(id)?;
         self.current_session = Some(session);
+        if let Some(lease) = lease {
+            self.current_lease = Some(lease);
+        }
         self.save_state = SessionSaveState::Durable;
         Ok(())
+    }
+
+    fn acquire_transition_lease(&self, id: &str) -> Result<Option<super::lease::SessionLease>> {
+        if self.current_session_id().as_deref() == Some(id) {
+            let lease = self
+                .current_lease
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?;
+            lease.validate(&self.store.root, id)?;
+            Ok(None)
+        } else {
+            Ok(Some(self.store.try_lease(id)?))
+        }
     }
 
     /// Load a session by (possibly partial) ID without making it current.
@@ -166,9 +178,14 @@ impl SessionManager {
         id: &str,
     ) -> Result<(SessionData, Vec<crate::llm::types::ChatMessage>)> {
         self.flush_before_transition()?;
-        let session = self.peek_session(id)?;
+        let full_id = self.store.resolve_id_prefix(id)?;
+        let lease = self.acquire_transition_lease(&full_id)?;
+        let session = self.store.load(&full_id)?;
         let messages = session.conversation_messages()?;
         self.current_session = Some(session.clone());
+        if let Some(lease) = lease {
+            self.current_lease = Some(lease);
+        }
         self.save_state = SessionSaveState::Durable;
         Ok((session, messages))
     }
@@ -190,10 +207,8 @@ impl SessionManager {
             .cloned();
         match target {
             Some(id) => {
-                let session = self.store.load(&id)?;
-                let messages = session.conversation_messages()?;
-                self.current_session = Some(session.clone());
-                self.save_state = SessionSaveState::Durable;
+                let result = self.switch_to_validated_session(&id)?;
+                let (session, messages) = result;
                 Ok(Some((session, messages)))
             }
             None => Ok(None),
@@ -208,10 +223,7 @@ impl SessionManager {
     /// Load the latest session
     pub fn load_latest_session(&mut self) -> Result<()> {
         self.flush_before_transition()?;
-        if let Some(session) = self.store.get_latest()? {
-            self.current_session = Some(session);
-            self.save_state = SessionSaveState::Durable;
-        }
+        self.load_latest_session_excluding(None)?;
         Ok(())
     }
 
@@ -238,12 +250,22 @@ impl SessionManager {
 
     /// Delete a session by ID
     pub fn delete_session(&mut self, id: &str) -> Result<()> {
-        self.store.delete(id)?;
+        if self.current_session_id().as_deref() == Some(id) {
+            self.store.delete_with_lease(
+                id,
+                self.current_lease
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
+            )?;
+        } else {
+            self.store.delete(id)?;
+        }
         // If the current session is the one being deleted, clear it
         if let Some(current) = &self.current_session
             && current.meta.id == id
         {
             self.current_session = None;
+            self.current_lease = None;
             self.save_state = SessionSaveState::Durable;
         }
         Ok(())
@@ -260,7 +282,12 @@ impl SessionManager {
         };
         let mut candidate = current.clone();
         candidate.clear_conversation_context();
-        let outcome = self.store.save_with_outcome(&candidate)?;
+        let outcome = self.store.save_with_lease(
+            &candidate,
+            self.current_lease
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
+        )?;
         let id = candidate.meta.id.clone();
         self.current_session = Some(candidate);
         self.adopt_save_outcome(&id, &outcome);
@@ -402,7 +429,12 @@ impl SessionManager {
         candidate.observations = observations;
         candidate.unseen_tool_results = unseen;
         candidate.timestamp = chrono::Utc::now().to_rfc3339();
-        let outcome = self.store.save_with_outcome(&candidate)?;
+        let outcome = self.store.save_with_lease(
+            &candidate,
+            self.current_lease
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
+        )?;
         let id = candidate.meta.id.clone();
         self.current_session = Some(candidate);
         self.adopt_save_outcome(&id, &outcome);
@@ -454,6 +486,14 @@ impl SessionManager {
     }
 
     /// Update the current session with tool call count
+    pub fn update_current_session_with_lines_edited(&mut self, lines_edited: u64) -> Result<()> {
+        if let Some(session) = &mut self.current_session {
+            session.increment_lines_edited(lines_edited);
+            self.save_current_session()?;
+        }
+        Ok(())
+    }
+
     pub fn update_current_session_with_tool_call_count(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.increment_tool_calls();
@@ -695,6 +735,70 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn lease_busy_transitions_preserve_current_and_release_on_errors() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path()).unwrap();
+        let mut first = SessionManager::with_store(store.clone());
+        first.create_session(Some("owned first".into())).unwrap();
+        let a = first.current_session_id().unwrap();
+        let mut second = SessionManager::with_store(store.clone());
+        second.create_session(Some("owned second".into())).unwrap();
+        let b = second.current_session_id().unwrap();
+        assert!(
+            second
+                .load_session(&a)
+                .unwrap_err()
+                .to_string()
+                .contains("already in use")
+        );
+        assert_eq!(second.current_session_id().as_deref(), Some(b.as_str()));
+        let before = serde_json::to_value(first.current_session.as_ref().unwrap()).unwrap();
+        assert!(
+            first
+                .switch_to_validated_session(&b)
+                .unwrap_err()
+                .to_string()
+                .contains("already in use")
+        );
+        assert_eq!(
+            serde_json::to_value(first.current_session.as_ref().unwrap()).unwrap(),
+            before
+        );
+        first.switch_to_validated_session(&a).unwrap(); // Reuses its own lease.
+        assert!(matches!(
+            store.save(first.current_session.as_ref().unwrap()),
+            Err(crate::session::error::SessionError::Busy(_))
+        ));
+        assert!(matches!(
+            store.delete(&a),
+            Err(crate::session::error::SessionError::Busy(_))
+        ));
+        let read = SessionStore::open_existing(dir.path()).unwrap();
+        assert_eq!(read.list().unwrap().len(), 2);
+        assert!(read.load(&a).is_ok());
+        // Latest is owned by second; don't silently select an older session.
+        let mut third = SessionManager::with_store(store.clone());
+        assert!(
+            third
+                .load_latest_validated_excluding(None)
+                .unwrap_err()
+                .to_string()
+                .contains("already in use")
+        );
+        assert!(third.current_session.is_none());
+        let absent = "missing-target";
+        assert!(third.load_session(absent).is_err());
+        assert!(store.try_lease(absent).is_ok()); // Failed load released temporary guard.
+        drop(second);
+        first.switch_to_validated_session(&b).unwrap();
+        assert!(store.try_lease(&a).is_ok()); // Old ownership released after adoption.
+        first.delete_session(&b).unwrap();
+        assert!(first.current_lease.is_none());
+        first.flush_current_session().unwrap();
+        assert!(store.load(&b).is_err()); // No resurrection after active delete.
+    }
+
+    #[test]
     fn test_new_default() {
         let store = SessionStore::new_default().expect("Failed to create default session store");
         assert!(
@@ -720,6 +824,7 @@ mod tests {
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         };
@@ -776,6 +881,7 @@ mod tests {
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         };
@@ -803,6 +909,7 @@ mod tests {
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         };
@@ -840,6 +947,7 @@ mod tests {
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         };
@@ -886,6 +994,7 @@ mod tests {
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         };

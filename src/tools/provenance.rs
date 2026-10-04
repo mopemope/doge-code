@@ -1476,6 +1476,7 @@ mod tests {
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         }));
@@ -1744,6 +1745,7 @@ mod provenance_extra_tests {
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         }));
@@ -1776,6 +1778,7 @@ mod provenance_extra_tests {
             )
             .unwrap();
         assert!(store.events_dir().exists());
+        drop(fs); // External delete follows completion of the active owner.
         // Delete via SessionStore: whole session dir must go.
         let sessions_root = _proj.path().join(".doge/sessions");
         let sstore = crate::session::SessionStore::new(sessions_root).unwrap();
@@ -2392,6 +2395,7 @@ mod review_fix_tests {
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
             save_state: Default::default(),
+            current_lease: None,
             store,
             current_session: None,
         }));
