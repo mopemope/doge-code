@@ -2,7 +2,6 @@ use crate::session::data::{SessionData, SessionMeta, SessionSummary};
 use crate::session::error::SessionError;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use tracing::error;
 
@@ -12,7 +11,11 @@ const MAX_SESSIONS: usize = 100;
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn validate_id(id: &str) -> Result<(), SessionError> {
-    if id.is_empty() || id == "." || id == ".." || id == ".locks" || id.contains(['/', '\\', '\0'])
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || matches!(id, ".locks" | ".recovery")
+        || id.contains(['/', '\\', '\0'])
     {
         return Err(SessionError::InvalidId(id.to_owned()));
     }
@@ -93,7 +96,7 @@ impl SessionStore {
             if kind.is_symlink() {
                 return Err(SessionError::InvalidId("symlink in session store".into()));
             }
-            if entry.file_name() == ".locks" {
+            if matches!(entry.file_name().to_str(), Some(".locks" | ".recovery")) {
                 continue;
             }
             if kind.is_dir() {
@@ -145,7 +148,7 @@ impl SessionStore {
         })
     }
 
-    fn ensure_writable(&self) -> Result<(), SessionError> {
+    pub(super) fn ensure_writable(&self) -> Result<(), SessionError> {
         if self.read_only {
             return Err(SessionError::WriteError(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -185,10 +188,10 @@ impl SessionStore {
                 )));
             }
             let p = entry.path();
-            if entry.file_name() == ".locks" {
+            if matches!(entry.file_name().to_str(), Some(".locks" | ".recovery")) {
                 if p.is_symlink() || !p.is_dir() {
                     return Err(SessionError::InvalidId(
-                        "unsafe session lock directory".into(),
+                        "unsafe session auxiliary directory".into(),
                     ));
                 }
                 continue;
@@ -322,15 +325,18 @@ impl SessionStore {
         data: &SessionData,
         lease: &super::lease::SessionLease,
     ) -> Result<SessionSaveOutcome, SessionError> {
+        self.save_with_lease_limit(data, lease, MAX_SESSION_BYTES)
+    }
+
+    pub(super) fn save_with_lease_limit(
+        &self,
+        data: &SessionData,
+        lease: &super::lease::SessionLease,
+        limit: u64,
+    ) -> Result<SessionSaveOutcome, SessionError> {
         lease.validate(&self.root, &data.meta.id)?;
         self.ensure_writable()?;
         validate_id(&data.meta.id)?;
-        let json_data = serde_json::to_string_pretty(data)?;
-        if json_data.len() as u64 > MAX_SESSION_BYTES {
-            return Err(SessionError::WriteError(std::io::Error::other(
-                "session metadata exceeds 16 MiB; previous checkpoint retained",
-            )));
-        }
         let anchor = self.root.canonicalize().map_err(SessionError::WriteError)?;
         let dir = anchor.join(&data.meta.id);
         if dir.is_symlink() {
@@ -357,9 +363,7 @@ impl SessionStore {
         };
         let mut candidate =
             tempfile::NamedTempFile::new_in(&dir).map_err(SessionError::WriteError)?;
-        candidate
-            .write_all(json_data.as_bytes())
-            .map_err(SessionError::WriteError)?;
+        super::recovery::write_bounded_json(&mut candidate, data, limit)?;
         if let Some(permissions) = permissions {
             candidate
                 .as_file()
@@ -503,7 +507,7 @@ fn cleanup_old_sessions(store: &SessionStore, protected: Option<&str>) -> Result
             )));
         }
         let entry = entry.map_err(SessionError::ReadError)?;
-        if entry.file_name() != ".locks"
+        if !matches!(entry.file_name().to_str(), Some(".locks" | ".recovery"))
             && entry.file_type().map_err(SessionError::ReadError)?.is_dir()
         {
             directories += 1;
