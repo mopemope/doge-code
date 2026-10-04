@@ -594,7 +594,7 @@ jobs and wait for cleanup before flushing. A failed flush keeps the UI open with
 retry hint; stalled cleanup also keeps the UI open. The final error-path flush runs
 after shutdown and reports failure with a nonzero exit. Explicit clear/delete retain
 their intentional discard behavior. Capacity errors remain unsaved; this does not
-add capacity rescue or power-loss guarantees.
+remove capacity limits or add power-loss guarantees.
 
 A session takes a nonblocking exclusive OS lease before use and retains it through
 its final checkpoint and shutdown. Concurrent use or deletion of the same session
@@ -603,6 +603,32 @@ list/show remains available. Retention skips active sessions and may temporarily
 exceed the session limit. This protection requires participating binaries and a
 filesystem supporting OS locks; old binaries, external manual edits and unsupported
 network filesystems are outside this guarantee.
+
+For an oversized unsaved checkpoint, `/session export` writes the complete current
+in-memory session (conversation, provider-bound state, tool calls/results,
+observations, unseen results and usage) into a version-1 JSON recovery envelope
+under `.doge/sessions/.recovery/<UUID>.json` (or the configured session store).
+The recovery limit is 64 MiB; the normal save/read limit remains 16 MiB. Both use
+bounded streaming serialization. Recovery files use private file permissions and
+are published without overwriting existing files. A post-publication directory-sync
+warning means the file exists but its durability is unconfirmed.
+
+Export requires an idle foreground and retains the current conversation, usage,
+lease and unsaved state. It does not enable new/switch/quit by itself. Inspect the
+reported absolute path and JSON first; the file is a recovery artifact, **not** a
+normal `--resume` input. You can read or extract the conversation and tool results
+from its `session` field. After verifying the export, explicitly clear or delete
+the conversation if you choose to discard it, then continue in a session fitting
+the normal limit. Import, oversized resume, automatic offload and automatic
+summarization are not provided. A recovery exceeding 64 MiB fails explicitly.
+
+After CLI completion or an irreversible TUI error exit, a final capacity failure
+alone triggers one recovery attempt after checkpoint owners stop. The path and
+byte count go to stderr, and the original failure remains nonzero. Recovery
+failure reports both errors. Ordinary permission/disk errors do not trigger an
+automatic export, and recoverable TUI failures only guide you to `/session export`.
+Recovery files are excluded from normal session listing, ID resolution and
+retention cleanup; read-only stores cannot create recovery files.
 
 `exec --json` includes a `usage` object with inference attempts, usage-report count,
 provider-reported prompt/completion/total subtotals, and optional reasoning/cache

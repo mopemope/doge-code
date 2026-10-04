@@ -22,11 +22,14 @@ impl TuiExecutor {
     pub(crate) fn handle_session_command(&mut self, args: &str, ui: &mut TuiApp) -> Result<()> {
         let args: Vec<&str> = args.split_whitespace().collect();
         if args.is_empty() {
-            ui.push_log("Usage: /session <new|list|show|switch|save|delete|current|clear>");
+            ui.push_log("Usage: /session <new|list|show|switch|save|export|delete|current|clear>");
             return Ok(());
         }
 
-        if matches!(args[0], "new" | "switch" | "delete" | "clear" | "save") {
+        if matches!(
+            args[0],
+            "new" | "switch" | "delete" | "clear" | "save" | "export"
+        ) {
             self.ensure_session_idle()?;
         }
 
@@ -126,6 +129,33 @@ impl TuiExecutor {
                 }
             }
 
+            "export" => {
+                if args.len() != 1 {
+                    ui.push_log("Usage: /session export (no path or other arguments)");
+                } else {
+                    let (result, unsaved) = {
+                        let manager = self.session_manager.lock().unwrap();
+                        (
+                            manager.export_current_session(),
+                            manager.has_unsaved_current_session(),
+                        )
+                    };
+                    match result {
+                        Ok(export) => {
+                            let status = if unsaved {
+                                "Normal checkpoint remains unsaved"
+                            } else {
+                                "Normal checkpoint status is unchanged"
+                            };
+                            ui.push_log(format!("Recovery exported: {} ({} bytes). {status}; export does not clear unsaved changes and is not a resumable session.", export.path.display(), export.bytes));
+                            if let Some(warning) = export.durability_warning {
+                                ui.push_log(format!("Warning: {warning}"));
+                            }
+                        }
+                        Err(error) => ui.push_log(format!("Failed to export recovery: {error:#}")),
+                    }
+                }
+            }
             "current" => {
                 if let Some(info) = self.session_manager.lock().unwrap().current_session_info() {
                     ui.push_log(info);
@@ -146,7 +176,7 @@ impl TuiExecutor {
                 Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },
             _ => {
-                ui.push_log("Unknown session command. Usage: /session <new|list|show|switch|save|delete|current|clear>");
+                ui.push_log("Unknown session command. Usage: /session <new|list|show|switch|save|export|delete|current|clear>");
             }
         }
         Ok(())

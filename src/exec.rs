@@ -217,7 +217,9 @@ impl Executor {
             .get_session_manager()
         {
             let mut manager = crate::utils::safe_std_lock(manager, "session_manager")?;
-            manager.flush_before_transition()?;
+            if let Err(error) = manager.flush_before_transition() {
+                return Err(manager.recover_capacity_exit(error));
+            }
             if let Some(message) = manager.checkpoint_warning() {
                 eprintln!("Warning: {message}");
             }

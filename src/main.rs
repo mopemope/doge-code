@@ -464,7 +464,10 @@ async fn run_tui(
             && let Some(executor) = handler.as_any().downcast_ref::<TuiExecutor>()
         {
             let mut manager = utils::safe_std_lock(&executor.session_manager, "session_manager")?;
-            match manager.flush_before_transition()? {
+            match manager
+                .flush_before_transition()
+                .map_err(|error| manager.recover_capacity_exit(error))?
+            {
                 crate::session::store::SessionSaveOutcome::Durable => {}
                 crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } => {
                     eprintln!("Warning: {message}")

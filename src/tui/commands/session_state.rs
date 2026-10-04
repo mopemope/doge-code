@@ -267,6 +267,77 @@ mod tests {
     }
 
     #[test]
+    fn capacity_tui_export_preserves_dirty_and_requires_explicit_discard() {
+        let (mut executor, _dir) = test_executor();
+        let id = current_session_id(&executor);
+        let (checkpoint, before, expected) = {
+            let mut sm = executor.session_manager.lock().unwrap();
+            let path = sm.store.session_dir(&id).join("session.json");
+            let before = std::fs::read(&path).unwrap();
+            sm.current_session.as_mut().unwrap().conversation.push(
+                std::collections::HashMap::from([
+                    ("role".into(), serde_json::json!("assistant")),
+                    (
+                        "content".into(),
+                        serde_json::json!("x".repeat(17 * 1024 * 1024)),
+                    ),
+                ]),
+            );
+            assert!(sm.flush_current_session().is_err());
+            let expected = serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap();
+            (path, before, expected)
+        };
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        executor
+            .handle_session_command("export /outside", &mut ui)
+            .unwrap();
+        let root = checkpoint.parent().unwrap().parent().unwrap();
+        assert!(!root.join(".recovery").exists());
+        executor.handle_session_command("export", &mut ui).unwrap();
+        let files: Vec<_> = std::fs::read_dir(root.join(".recovery"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        assert_eq!(saved["session"], expected);
+        let mut sm = executor.session_manager.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap(),
+            expected
+        );
+        assert!(sm.has_unsaved_current_session());
+        assert!(sm.create_session(None).is_err());
+        assert!(sm.switch_to_validated_session(&id).is_err());
+        drop(sm);
+        assert!(executor.prepare_session_exit(&mut ui).is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), before);
+        assert!(ui.log.iter().any(|e| matches!(e, crate::tui::state::LogEntry::Plain(s) if s.contains("Normal checkpoint remains unsaved"))));
+        executor.clear_runtime_conversation().unwrap(); // Explicit, requested discard.
+        assert!(
+            !executor
+                .session_manager
+                .lock()
+                .unwrap()
+                .has_unsaved_current_session()
+        );
+        assert!(executor.prepare_session_exit(&mut ui).unwrap());
+        executor
+            .session_manager
+            .lock()
+            .unwrap()
+            .delete_session(&id)
+            .unwrap();
+        executor.handle_session_command("export", &mut ui).unwrap();
+        assert!(ui.log.iter().any(|e| matches!(e, crate::tui::state::LogEntry::Plain(s) if s.contains("No session loaded"))));
+        assert_eq!(
+            std::fs::read_dir(root.join(".recovery")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
     fn lease_busy_tui_switch_preserves_runtime_and_self_switch_works() {
         let (mut executor, _dir) = test_executor();
         let history = vec![user_msg("retain runtime")];
@@ -875,7 +946,7 @@ mod tests {
         assert!(executor.switch_to_session(&id).is_err());
         assert!(executor.resume_session(&id).is_err());
         assert!(executor.clear_runtime_conversation().is_err());
-        for command in ["new", "clear", "delete", "switch"] {
+        for command in ["new", "clear", "delete", "switch", "save", "export"] {
             assert!(executor.handle_session_command(command, &mut ui).is_err());
         }
         crate::tui::commands::handlers::slash_commands::clear::handle_clear(&mut executor, &mut ui);

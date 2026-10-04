@@ -43,7 +43,7 @@ impl TuiApp {
             }
             Err(error) => {
                 self.exit_requested_at = None;
-                self.push_log(format!("Exit blocked: session remains unsaved: {error}. Fix the cause, retry /session save, then /quit."));
+                self.push_log(format!("Exit blocked: session remains unsaved: {error}. Fix the cause, retry /session save, then /quit. For capacity errors use /session export before explicitly clearing or deleting the conversation."));
                 false
             }
         }

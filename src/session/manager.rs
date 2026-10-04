@@ -81,12 +81,16 @@ impl SessionManager {
                 .try_exists()?,
             "session checkpoint was deleted; refusing to recreate it during flush"
         );
-        let outcome = self.store.save_with_lease(
+        let result = self.store.save_with_lease(
             session,
             self.current_lease
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
-        )?;
+        );
+        let outcome = match result {
+            Err(error @ super::error::SessionError::CapacityExceeded { .. }) => return Err(anyhow::Error::new(error).context("Normal checkpoint remains unsaved; use /session export to recover the in-memory session")),
+            result => result?,
+        };
         self.adopt_save_outcome(&id, &outcome);
         Ok(outcome)
     }
@@ -106,6 +110,47 @@ impl SessionManager {
                 }
             }
         };
+    }
+
+    pub(crate) fn export_current_session(&self) -> Result<super::recovery::RecoveryExport> {
+        let session = self
+            .current_session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session loaded; nothing to export"))?;
+        let lease = self
+            .current_lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?;
+        Ok(self.store.export_recovery(session, lease)?)
+    }
+
+    /// Called only for irreversible error exits, after all checkpoint owners stop.
+    /// A successful recovery never turns the original save/run failure into success.
+    pub(crate) fn recover_capacity_exit(&self, error: anyhow::Error) -> anyhow::Error {
+        if !error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<super::error::SessionError>(),
+                Some(super::error::SessionError::CapacityExceeded { .. })
+            )
+        }) {
+            return error;
+        }
+        match self.export_current_session() {
+            Ok(export) => {
+                eprintln!(
+                    "Normal checkpoint remains unsaved; recovery file: {} ({} bytes). This is a recovery artifact, not a resumable session.",
+                    export.path.display(),
+                    export.bytes
+                );
+                if let Some(warning) = export.durability_warning {
+                    eprintln!("Warning: {warning}");
+                }
+                error
+            }
+            Err(recovery_error) => {
+                error.context(format!("recovery export also failed: {recovery_error:#}"))
+            }
+        }
     }
 
     fn save_current_session(&mut self) -> Result<()> {
@@ -733,6 +778,60 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn capacity_exit_recovery_only_handles_typed_capacity_and_keeps_both_errors() {
+        let dir = tempdir().unwrap();
+        let mut sm = SessionManager::with_store(SessionStore::new(dir.path()).unwrap());
+        assert!(sm.export_current_session().is_err());
+        sm.create_session(None).unwrap();
+        let snapshot = serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap();
+        let generic = sm.recover_capacity_exit(anyhow::anyhow!("disk full"));
+        assert_eq!(generic.to_string(), "disk full");
+        assert!(!dir.path().join(".recovery").exists());
+        let capacity = || {
+            anyhow::Error::new(crate::session::error::SessionError::CapacityExceeded {
+                limit: 16 * 1024 * 1024,
+                detected_at_least: 17 * 1024 * 1024,
+            })
+        };
+        let error = sm.recover_capacity_exit(capacity());
+        assert!(
+            error
+                .downcast_ref::<crate::session::error::SessionError>()
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".recovery"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap(),
+            snapshot
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join(".recovery"),
+                std::fs::Permissions::from_mode(0o500),
+            )
+            .unwrap();
+            let error = sm.recover_capacity_exit(capacity());
+            assert!(error.to_string().contains("recovery export also failed"));
+            assert!(error.chain().any(|e| matches!(
+                e.downcast_ref::<crate::session::error::SessionError>(),
+                Some(crate::session::error::SessionError::CapacityExceeded { .. })
+            )));
+            std::fs::set_permissions(
+                dir.path().join(".recovery"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn lease_busy_transitions_preserve_current_and_release_on_errors() {
