@@ -2,7 +2,7 @@ use super::credentials::{Account, CredentialStore, Tokens};
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
-use rand::RngCore;
+use rand::TryRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
@@ -253,10 +253,12 @@ fn token_set(response: TokenResponse, old: Option<&Tokens>, received_at: i64) ->
     })
 }
 
-pub(crate) fn random_secret() -> String {
+pub(crate) fn random_secret() -> Result<String> {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .context("OS entropy unavailable")?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 pub(crate) fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
@@ -386,9 +388,9 @@ impl AuthService {
             "http://127.0.0.1:{}/auth/callback",
             listener.local_addr()?.port()
         );
-        let state = random_secret();
-        let nonce = random_secret();
-        let verifier = random_secret();
+        let state = random_secret()?;
+        let nonce = random_secret()?;
+        let verifier = random_secret()?;
         let mut url = url::Url::parse(&format!("{}/api/accounts/authorize", self.auth_base))?;
         {
             let mut query = url.query_pairs_mut();

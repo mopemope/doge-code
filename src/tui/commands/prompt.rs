@@ -70,7 +70,7 @@ pub(crate) fn get_project_instructions_file_path(
 
 /// Combine the base system prompt with project-specific instructions.
 pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
-    let mut tera = Tera::default();
+    let tera = Tera::default();
     let mut context = Context::new();
 
     let sys_prompt_template =
@@ -86,7 +86,7 @@ pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
     );
 
     let base_sys_prompt = tera
-        .render_str(&sys_prompt_template, &context)
+        .render_str(&sys_prompt_template, &context, false)
         .unwrap_or_else(|e| {
             error!("Failed to render system prompt: {e}");
             sys_prompt_template // fallback to the original template
@@ -103,6 +103,26 @@ pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_prompt_renders_all_values_without_html_escaping() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("project<&>日本語");
+        std::fs::create_dir(&project_root).expect("project directory");
+        let instructions = "Keep <literal> & quoted instructions.\n";
+        std::fs::write(project_root.join("AGENTS.md"), instructions).expect("instructions");
+        let cfg = crate::config::AppConfig {
+            project_root,
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&cfg);
+        assert!(prompt.contains(&cfg.project_root.to_string_lossy().to_string()));
+        assert!(prompt.contains(std::env::consts::OS));
+        assert!(prompt.ends_with(instructions));
+        for variable in ["date", "os", "project_dir", "shell"] {
+            assert!(!prompt.contains(&format!("{{{{ {variable} }}}}")));
+        }
+    }
 
     #[test]
     fn test_authoritative_prompt_has_no_visible_thinking_requirement() {

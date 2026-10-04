@@ -1,0 +1,21 @@
+-- Created by pre-upgrade dgc (SeaORM 1.1.20 / SQLx 0.8.6). Test-only data.
+BEGIN TRANSACTION;
+CREATE TABLE "action_log" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "session_id" varchar NOT NULL, "timestamp" varchar NOT NULL, "action_type" varchar NOT NULL, "content" text NOT NULL, "metadata" json_text NOT NULL, "embedding" blob NOT NULL );
+CREATE TABLE "file_hash" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "file_path" text NOT NULL, "hash" text NOT NULL, "project_root" text NOT NULL, "created_at" timestamp_text DEFAULT CURRENT_TIMESTAMP NOT NULL );
+INSERT INTO "file_hash" VALUES(1,'/legacy/project/sample.rs','fffd6ea60a4b1825652446fe474b727b40c3fcbf3ca7c99b67be2b1422ea9734','/legacy/project','2026-10-04T04:02:15.097157609+00:00');
+CREATE TABLE "seaql_migrations" ( "version" varchar NOT NULL PRIMARY KEY, "applied_at" bigint NOT NULL );
+INSERT INTO "seaql_migrations" VALUES('m20230101_000001_create_tables',1791086535);
+INSERT INTO "seaql_migrations" VALUES('m20230101_000002_add_keywords_to_symbol_info',1791086535);
+INSERT INTO "seaql_migrations" VALUES('m20251230_000001_create_action_log_table',1791086535);
+INSERT INTO "seaql_migrations" VALUES('m20260113_000001_create_symbol_relation_table',1791086535);
+CREATE TABLE "symbol_info" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" text NOT NULL, "kind" text NOT NULL, "file_path" text NOT NULL, "start_line" integer NOT NULL, "start_col" integer NOT NULL, "end_line" integer NOT NULL, "end_col" integer NOT NULL, "parent" text, "file_total_lines" integer NOT NULL, "function_lines" integer, "project_root" text NOT NULL, "created_at" timestamp_text DEFAULT CURRENT_TIMESTAMP NOT NULL , "keywords" text DEFAULT '');
+INSERT INTO "symbol_info" VALUES(1,'helper','fn','/legacy/project/sample.rs',1,1,1,15,NULL,2,1,'/legacy/project','2026-10-04T04:02:15.096905659+00:00','[]');
+INSERT INTO "symbol_info" VALUES(2,'main','fn','/legacy/project/sample.rs',2,1,2,24,NULL,2,1,'/legacy/project','2026-10-04T04:02:15.096905950+00:00','[]');
+CREATE TABLE "symbol_relation" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "source_symbol_id" integer NOT NULL, "target_symbol_name" varchar NOT NULL, "relation_type" varchar NOT NULL, "line" integer NOT NULL, "created_at" timestamp_text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY ("source_symbol_id") REFERENCES "symbol_info" ("id") ON DELETE CASCADE ON UPDATE CASCADE );
+INSERT INTO "symbol_relation" VALUES(1,2,'helper','call',2,'2026-10-04 04:02:15');
+CREATE INDEX "idx_action_log_session_id" ON "action_log" ("session_id");
+DELETE FROM "sqlite_sequence";
+INSERT INTO "sqlite_sequence" VALUES('symbol_info',2);
+INSERT INTO "sqlite_sequence" VALUES('file_hash',1);
+INSERT INTO "sqlite_sequence" VALUES('symbol_relation',1);
+COMMIT;

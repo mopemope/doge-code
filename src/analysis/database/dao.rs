@@ -500,6 +500,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_sqlite_reopens_without_reset_and_rolls_back() {
+        use sea_orm::{ConnectionTrait, EntityTrait, TransactionTrait};
+        let directory = TempDir::new().expect("fixture directory");
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("legacy.sqlite").display()
+        );
+        let db = Database::connect(&url).await.expect("fixture database");
+        db.execute_unprepared(include_str!("fixtures/sea-orm-1.1-repomap.sql"))
+            .await
+            .expect("load pre-upgrade database");
+        db.close().await.expect("close legacy database");
+        let db = Database::connect(&url)
+            .await
+            .expect("reopen existing database");
+        crate::analysis::database::migration::run_migrations(&db)
+            .await
+            .expect("existing migration history");
+        let project_root = PathBuf::from("/legacy/project");
+        let map = RepomapDAO::load_repomap(&db, &project_root)
+            .await
+            .expect("existing symbols")
+            .expect("retained map");
+        assert_eq!(map.0.symbols.len(), 2);
+        assert_eq!(map.0.relations.len(), 1);
+        assert!(map.0.symbols.iter().any(|symbol| symbol.name == "helper"));
+        let transaction = db.begin().await.expect("begin transaction");
+        transaction
+            .execute_unprepared("DELETE FROM symbol_relation; DELETE FROM symbol_info;")
+            .await
+            .expect("transaction changes");
+        transaction.rollback().await.expect("rollback");
+        db.close().await.expect("close upgraded database");
+        let db = Database::connect(&url)
+            .await
+            .expect("reopen after rollback");
+        crate::analysis::database::migration::run_migrations(&db)
+            .await
+            .expect("idempotent migrations");
+        let map = RepomapDAO::load_repomap(&db, &project_root)
+            .await
+            .expect("reopened symbols")
+            .expect("retained map");
+        assert_eq!(map.0.symbols.len(), 2);
+        assert_eq!(map.0.relations.len(), 1);
+        let migrations = db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT COUNT(*) AS total FROM seaql_migrations".to_owned(),
+            ))
+            .await
+            .expect("migration history")
+            .expect("count");
+        assert_eq!(
+            migrations
+                .try_get::<i64>("", "total")
+                .expect("migration count"),
+            4
+        );
+        assert_eq!(
+            crate::analysis::database::entities::symbol_info::Entity::find()
+                .all(&db)
+                .await
+                .expect("retained rows")
+                .len(),
+            2
+        );
+        db.close().await.expect("close fixture database");
+    }
+
+    #[tokio::test]
     async fn test_save_and_load_repomap() {
         let (_tmp_dir, db) = setup_test_db().await;
         let project_root = PathBuf::from("/test/project");

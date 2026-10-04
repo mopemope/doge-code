@@ -178,22 +178,28 @@ def check_ci(root):
         if value.startswith('"'):
             value = json.loads(value)
         commands.add(tuple(shlex.split(value)))
+    version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["rust-version"]
+    if re.fullmatch(r"\d+\.\d+", version):
+        version += ".0"
     expected = {
         ("cargo", "fmt", "--all", "--check"),
         ("cargo", "clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"),
         ("cargo", "test", "--locked"),
-        ("cargo", "check", "--locked", "--all-targets", "--all-features"),
+        ("rustup", "run", version, "cargo", "check", "--locked", "--all-targets", "--all-features"),
         ("bash", "scripts/verify.sh", "guidance"),
         ("bash", "scripts/verify.sh", "tui-deps"),
     }
     expected.update(("cargo", "test", "--locked", name) for name in ("tui::", "execution::", "jobs::"))
     for command in sorted(expected - commands):
         errors.append(f"CI missing expected verification command: {shlex.join(command)}")
-    version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["rust-version"]
-    if re.fullmatch(r"\d+\.\d+", version):
-        version += ".0"
     if f"dtolnay/rust-toolchain@{version}" not in source:
         errors.append(f"CI MSRV toolchain must match Cargo.toml rust-version ({version})")
+    toolchain = tomllib.loads((root / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", toolchain):
+        errors.append("Development toolchain must pin a stable Rust release")
+    ci_toolchains = re.findall(r"dtolnay/rust-toolchain@([^\s]+)", source)
+    if any(value not in (version, toolchain) for value in ci_toolchains):
+        errors.append("CI development toolchain must match rust-toolchain.toml")
     # Ensure the wrapper's Rust gate agrees with the commands checked above.
     module_spec = importlib.util.spec_from_file_location("dgc_verify", root / "scripts/verify.py")
     module = importlib.util.module_from_spec(module_spec)

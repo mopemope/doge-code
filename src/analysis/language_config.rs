@@ -77,3 +77,31 @@ pub fn extension_map() -> &'static HashMap<&'static str, &'static LanguageConfig
         map
     })
 }
+
+#[cfg(test)]
+mod runtime_compatibility_tests {
+    use super::*;
+    #[test]
+    fn every_registered_grammar_parses_with_current_runtime() {
+        for config in language_configs() {
+            let source = match config.extensions[0] {
+                "rs" => "fn main() {}",
+                "ts" => "const value: number = 1;",
+                "js" => "function main() {}",
+                "py" => "def main():\n    pass\n",
+                "go" => "package main\nfunc main() {}",
+                "cs" => "class Main {}",
+                "c" => "int main(void) { return 0; }",
+                "cpp" => "int main() { return 0; }",
+                "md" => "# Heading\n\nBody.\n",
+                extension => panic!("uncovered grammar: {extension}"),
+            };
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&config.language)
+                .expect("compatible grammar ABI");
+            let tree = parser.parse(source, None).expect("parsed source");
+            assert!(!tree.root_node().has_error(), "{}", config.extensions[0]);
+        }
+    }
+}

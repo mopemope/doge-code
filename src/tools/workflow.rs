@@ -84,7 +84,7 @@ pub async fn run_workflow_with_cancel(
         .context(format!("Failed to read workflow file: {:?}", workflow_path))?;
 
     let workflow: Workflow =
-        serde_yaml::from_str(&content).context("Failed to parse workflow YAML")?;
+        serde_saphyr::from_str(&content).context("Failed to parse workflow YAML")?;
 
     let mut output = String::new();
     output.push_str(&format!("Running workflow: {}\n", workflow.name));
@@ -198,6 +198,15 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn legacy_yaml_workflow_preserves_quoted_args_and_environment() {
+        let workflow: Workflow = serde_saphyr::from_str("name: legacy\nsteps:\n- name: inspect\n  program: printf\n  args: ['on', '001', 'null', '日本語']\n  env: {MODE: 'on'}\n  timeout_ms: 1500\n").expect("legacy workflow");
+        assert_eq!(workflow.name, "legacy");
+        assert_eq!(workflow.steps[0].args, ["on", "001", "null", "日本語"]);
+        assert_eq!(workflow.steps[0].env["MODE"], "on");
+        assert_eq!(workflow.steps[0].timeout_ms, Some(1500));
+    }
 
     #[tokio::test]
     async fn test_run_workflow_success() -> Result<()> {
