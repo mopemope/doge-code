@@ -553,6 +553,34 @@ mod tests {
     }
 
     #[test]
+    fn native_watcher_observes_file_changes() {
+        let directory = tempfile::tempdir().expect("watch directory");
+        let path = directory.path().join("watched.rs");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut watcher: RecommendedWatcher =
+            Watcher::new(sender, notify::Config::default()).expect("native watcher");
+        watcher
+            .watch(directory.path(), RecursiveMode::Recursive)
+            .expect("watch directory");
+        std::fs::write(&path, "fn main() {}\n").expect("watched file");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let event = receiver
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("file event")
+                .expect("watch result");
+            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+                && event
+                    .paths
+                    .iter()
+                    .any(|observed| observed.file_name() == path.file_name())
+            {
+                break;
+            }
+        }
+    }
+
+    #[test]
     fn test_single_flight_releases_on_drop_and_limits_feedback_events() {
         let entries = WatchEntries::default();
         let path = Path::new("fixture.rs");

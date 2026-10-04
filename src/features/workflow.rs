@@ -47,7 +47,7 @@ impl Workflow {
             // Frontmatter exists
             let yaml_str = parts[1];
             let body = parts[2];
-            let metadata: WorkflowMetadata = serde_yaml::from_str(yaml_str)
+            let metadata: WorkflowMetadata = serde_saphyr::from_str(yaml_str)
                 .map_err(|e| anyhow::anyhow!("Failed to parse workflow frontmatter: {}", e))?;
             (metadata, body)
         } else {
@@ -155,4 +155,23 @@ pub async fn run_workflow(cfg: AppConfig, workflow_name: &str) -> Result<()> {
     let workflow = Workflow::load(workflow_name, &cfg.project_root).await?;
     let executor = WorkflowExecutor::new(cfg);
     executor.execute(&workflow).await
+}
+
+#[cfg(test)]
+mod yaml_compatibility_tests {
+    use super::*;
+    #[test]
+    fn legacy_markdown_frontmatter_preserves_multiline_description() {
+        let workflow = Workflow::parse(
+            "legacy",
+            "---\ndescription: |\n  on 001 null\n  日本語\n---\n- first step\n- second step\n",
+            PathBuf::from("legacy.md"),
+        )
+        .expect("legacy workflow");
+        assert_eq!(
+            workflow.metadata.description.as_deref(),
+            Some("on 001 null\n日本語\n")
+        );
+        assert_eq!(workflow.steps, ["first step", "second step"]);
+    }
 }

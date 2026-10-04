@@ -217,9 +217,16 @@ class GuidanceTests(unittest.TestCase):
         self.write("Cargo.toml", f'[package]\nrust-version = "{version}"\n')
         toolchain = version + ".0" if version.count(".") == 1 else version
         self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
+        self.write("rust-toolchain.toml", (SCRIPTS.parent / "rust-toolchain.toml").read_text())
         source = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
         self.write(".github/workflows/ci.yml", source)
         self.assertEqual(guidance.check_ci(self.root), [])
+        dev = tomllib.loads((SCRIPTS.parent / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+        self.write(".github/workflows/ci.yml", source.replace(f"@{dev}", "@stable"))
+        self.assertTrue(guidance.check_ci(self.root))
+        self.write(".github/workflows/ci.yml", source)
+        self.write(".github/workflows/ci.yml", source.replace(f"rustup run {toolchain} cargo check", "cargo check"))
+        self.assertTrue(guidance.check_ci(self.root))
         self.write(".github/workflows/ci.yml", source.replace("-- -D warnings", ""))
         self.assertTrue(guidance.check_ci(self.root))
         self.write(".github/workflows/ci.yml", source.replace(f"@{toolchain}", "@0.0.0"))

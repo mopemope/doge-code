@@ -1452,3 +1452,27 @@ async fn inference_uses_configured_deadline_instead_of_oauth_timeout() -> Result
     );
     Ok(())
 }
+
+#[test]
+fn oidc_accepts_es256_jwk_and_rejects_wrong_nonce() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let mut value = claims();
+    value["exp"] = json!(auth::now() + 600);
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some("test-ec-key".into());
+    let token = encode(
+        &header,
+        &value,
+        &EncodingKey::from_ec_der(include_bytes!("fixtures/test-only-ec.der")),
+    )
+    .expect("synthetic ES256 signature");
+    let keys = serde_json::from_str(include_str!("fixtures/test-only-ec-jwks.json"))
+        .expect("synthetic EC JWK");
+    assert_eq!(
+        auth::validate_id(&token, &keys, "test-client", "test-nonce")
+            .expect("verified ES256 identity")
+            .sub,
+        "synthetic-subject"
+    );
+    assert!(auth::validate_id(&token, &keys, "test-client", "wrong-nonce").is_err());
+}

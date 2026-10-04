@@ -94,7 +94,7 @@ impl ClientHandler for DogeMcpClientHandler {
     fn get_info(&self) -> ClientConfig {
         // Do not advertise elicitation or Tasks support: Doge-Code has no UI or
         // durable task manager for those protocol features yet.
-        ClientConfig::default()
+        ClientConfig::default().with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
     }
 
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
@@ -416,7 +416,7 @@ fn http_client_lifecycle(connect_timeout_ms: u64) -> ClientLifecycleMode {
                 ProtocolVersion::V_2025_03_26,
                 ProtocolVersion::V_2024_11_05,
             ],
-            legacy_version: Some(ProtocolVersion::LATEST),
+            legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
         }
     }
 }
