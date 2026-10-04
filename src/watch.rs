@@ -308,8 +308,33 @@ async fn write_watch_backup(
     Ok(Some(backup_path))
 }
 
+fn is_watch_backup_for(name: &str, file_name: &str) -> bool {
+    let mut parts = name.rsplitn(3, '.');
+    let Some(uuid_text) = parts.next() else {
+        return false;
+    };
+    let Some(seconds_text) = parts.next() else {
+        return false;
+    };
+    let Some(original) = parts.next().and_then(|s| s.strip_suffix(".bak")) else {
+        return false;
+    };
+    if original != file_name {
+        return false;
+    }
+    let Ok(seconds) = seconds_text.parse::<u64>() else {
+        return false;
+    };
+    let Ok(uuid) = uuid::Uuid::parse_str(uuid_text) else {
+        return false;
+    };
+    seconds.to_string() == seconds_text
+        && uuid.get_version_num() == 7
+        && uuid.get_variant() == uuid::Variant::RFC4122
+        && uuid.to_string() == uuid_text
+}
+
 async fn prune_watch_backups(backup_dir: &Path, file_name: &str, keep: usize) -> Result<()> {
-    let prefix = format!("{}.bak.", file_name);
     let mut entries = match fs::read_dir(backup_dir).await {
         Ok(entries) => entries,
         Err(_) => return Ok(()),
@@ -319,7 +344,7 @@ async fn prune_watch_backups(backup_dir: &Path, file_name: &str, keep: usize) ->
     while let Some(entry) = entries.next_entry().await? {
         let entry_name = entry.file_name();
         let entry_name = entry_name.to_string_lossy();
-        if !entry_name.starts_with(&prefix) {
+        if !is_watch_backup_for(&entry_name, file_name) || !entry.file_type().await?.is_file() {
             continue;
         }
 
@@ -748,6 +773,82 @@ mod tests {
         assert!(entry.change_id.is_some(), "committed provenance");
         crate::tools::undo::undo(&tools).await?;
         assert_eq!(fs::read_to_string(&path).await?, "original");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_pruning_preserves_other_file_and_unknown_entries() -> Result<()> {
+        for name in ["source.rs", "点.source.rs"] {
+            let dir = tempfile::tempdir()?;
+            let foreign_name = format!("{name}.bak.note");
+            let foreign = dir
+                .path()
+                .join(format!("{foreign_name}.bak.100.{}", uuid::Uuid::now_v7()));
+            fs::write(&foreign, "only backup of another file").await?;
+            std::fs::File::open(&foreign)?.set_times(
+                std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)),
+            )?;
+            let mut genuine = Vec::new();
+            for order in 10..13 {
+                // Multiple backups in the same unix second remain distinct.
+                let path = dir
+                    .path()
+                    .join(format!("{name}.bak.100.{}", uuid::Uuid::now_v7()));
+                fs::write(&path, "genuine").await?;
+                std::fs::File::open(&path)?.set_times(
+                    std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(order)),
+                )?;
+                genuine.push(path);
+            }
+            let malformed = [
+                format!("{name}.bak.unknown"),
+                format!("{name}.bak.100.{}.extra", uuid::Uuid::now_v7()),
+                format!("{name}.bak.00100.{}", uuid::Uuid::now_v7()),
+                format!("{name}.bak.100.{}", uuid::Uuid::new_v4()),
+            ];
+            for filename in &malformed {
+                fs::write(dir.path().join(filename), "unknown").await?;
+            }
+            let directory = dir
+                .path()
+                .join(format!("{name}.bak.100.{}", uuid::Uuid::now_v7()));
+            fs::create_dir(&directory).await?;
+            #[cfg(unix)]
+            let alias = {
+                let alias = dir
+                    .path()
+                    .join(format!("{name}.bak.100.{}", uuid::Uuid::now_v7()));
+                std::os::unix::fs::symlink(&foreign, &alias)?;
+                alias
+            };
+            prune_watch_backups(dir.path(), name, 2).await?;
+            assert!(!genuine[0].exists());
+            assert!(genuine[1].exists() && genuine[2].exists());
+            prune_watch_backups(dir.path(), name, 1).await?;
+            assert!(!genuine[1].exists() && genuine[2].exists());
+            assert_eq!(
+                fs::read_to_string(&foreign).await?,
+                "only backup of another file"
+            );
+            for filename in &malformed {
+                assert!(dir.path().join(filename).exists());
+            }
+            assert!(directory.is_dir());
+            #[cfg(unix)]
+            assert!(std::fs::symlink_metadata(alias)?.file_type().is_symlink());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_keep_zero_keeps_all_generated_backups() -> Result<()> {
+        let (_temp, mut cfg, _tools) = fixture();
+        cfg.watch_config.backup_keep = Some(0);
+        let path = cfg.project_root.join("a.txt");
+        fs::write(&path, "fixture").await?;
+        let first = write_watch_backup(&path, "first", &cfg).await?.unwrap();
+        let second = write_watch_backup(&path, "second", &cfg).await?.unwrap();
+        assert!(first.exists() && second.exists());
         Ok(())
     }
 
