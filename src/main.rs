@@ -458,6 +458,29 @@ async fn run_tui(
     // only tasks still stuck past the grace period.
     jobs.shutdown(crate::jobs::JOB_SHUTDOWN_GRACE).await;
 
+    // Final error-path flush happens only after all job checkpoints stopped.
+    let flush_result = (|| -> Result<()> {
+        if let Some(handler) = &app.handler
+            && let Some(executor) = handler.as_any().downcast_ref::<TuiExecutor>()
+        {
+            let mut manager = utils::safe_std_lock(&executor.session_manager, "session_manager")?;
+            match manager.flush_before_transition()? {
+                crate::session::store::SessionSaveOutcome::Durable => {}
+                crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } => {
+                    eprintln!("Warning: {message}")
+                }
+            }
+            if let Some(message) = manager.checkpoint_warning() {
+                eprintln!("Warning: {message}");
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = flush_result {
+        return Err(error.context(format!(
+            "final TUI checkpoint failed (UI result: {run_result:?})"
+        )));
+    }
     run_result?;
 
     // Display session statistics on shutdown
@@ -493,19 +516,25 @@ async fn run_exec(
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await
     };
-    let run = executor.run_with_cancel(instruction, json, Some(cancel.clone()));
-    tokio::pin!(run);
-    tokio::select! {
-        biased;
-        signal_result = signal => {
-            signal_result?;
-            cancel.cancel();
-            // Keep polling the agent so managed children are reaped and
-            // canonical interruption history is saved before CLI exit.
-            run.await
+    let result = {
+        let run = executor.run_with_cancel(instruction, json, Some(cancel.clone()));
+        tokio::pin!(run);
+        tokio::select! {
+            biased;
+            signal_result = signal => {
+                signal_result?;
+                cancel.cancel();
+                // Keep polling the agent so managed children are reaped and
+                // canonical interruption history is saved before CLI exit.
+                run.await
+            }
+            result = &mut run => result,
         }
-        result = &mut run => result,
-    }
+    };
+    executor
+        .flush_session()
+        .context("final exec checkpoint failed")?;
+    result
 }
 
 impl std::fmt::Debug for Cli {

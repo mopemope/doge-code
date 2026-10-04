@@ -95,14 +95,13 @@ pub fn handle_normal_mode_key(
 
                 let immediate_control = is_immediate_control_command(&line);
 
-                if line.trim() == "/quit" {
-                    return Ok(true);
-                }
-
-                if immediate_control {
-                    app.dispatch(&line);
-                } else {
-                    app.pending_instructions.push_back(line);
+                let quitting = line.trim() == "/quit";
+                if !quitting {
+                    if immediate_control {
+                        app.dispatch(&line);
+                    } else {
+                        app.pending_instructions.push_back(line);
+                    }
                 }
 
                 app.textarea = TextArea::default();
@@ -111,6 +110,9 @@ pub fn handle_normal_mode_key(
                 app.textarea.set_placeholder_text("Enter your message...");
                 app.dirty = true;
                 app.spinner_state = 0;
+                if quitting {
+                    return Ok(true);
+                }
             }
         }
 
@@ -573,6 +575,10 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut terminal
         )?);
+        assert!(
+            app.textarea.lines().iter().all(|line| line.is_empty()),
+            "a refused quit must allow a fresh recovery command"
+        );
         Ok(())
     }
 

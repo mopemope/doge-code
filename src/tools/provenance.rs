@@ -1475,6 +1475,7 @@ mod tests {
         let sessions_root = project_root.join(".doge/sessions");
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -1742,6 +1743,7 @@ mod provenance_extra_tests {
         let sessions_root = proj.path().join(".doge/sessions");
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -2389,6 +2391,7 @@ mod review_fix_tests {
         let sessions_root = proj.path().join(".doge/sessions");
         let store = crate::session::SessionStore::new(sessions_root).unwrap();
         let manager = std::sync::Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));

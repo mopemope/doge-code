@@ -209,6 +209,22 @@ impl Executor {
         Ok(())
     }
 
+    /// Final CLI checkpoint retry reuses the canonical SessionData payload.
+    pub(crate) fn flush_session(&self) -> Result<()> {
+        if let Some(manager) = self
+            .tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+        {
+            let mut manager = crate::utils::safe_std_lock(manager, "session_manager")?;
+            manager.flush_before_transition()?;
+            if let Some(message) = manager.checkpoint_warning() {
+                eprintln!("Warning: {message}");
+            }
+        }
+        Ok(())
+    }
+
     /// Runs the executor with the given instruction.
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
     pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
