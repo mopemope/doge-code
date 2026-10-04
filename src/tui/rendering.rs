@@ -422,11 +422,24 @@ impl TuiApp {
         }
 
         // instructions footer for diff
-        let instructions = Paragraph::new(
-            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss",
-        )
-        .style(theme.footer_style)
-        .block(Block::default().borders(Borders::ALL));
+        let help = if review.rejecting {
+            "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
+                .to_string()
+        } else if review.rejectable {
+            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss"
+                .to_string()
+        } else {
+            format!(
+                "View only: {} | a accept, q dismiss",
+                review
+                    .reject_reason
+                    .as_deref()
+                    .unwrap_or("No turn-owned rollback capture.")
+            )
+        };
+        let instructions = Paragraph::new(help)
+            .style(theme.footer_style)
+            .block(Block::default().borders(Borders::ALL));
         f.render_widget(instructions, layout[footer_idx]);
     }
 

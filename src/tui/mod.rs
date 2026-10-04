@@ -35,3 +35,5 @@ mod integration_test;
 
 #[cfg(test)]
 mod test_completion;
+
+mod job_messages;

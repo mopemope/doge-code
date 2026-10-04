@@ -127,6 +127,7 @@ pub(crate) fn spawn_agent_turn(
     if let Some(active_id) = executor.jobs.foreground_id()
         && let Some(active) = executor.jobs.get_snapshot(active_id)
     {
+        ui.queued_dispatch_rejected = true;
         ui.push_log(busy_message(&active));
         return Err(JobStartError::ForegroundBusy { active });
     }
@@ -216,6 +217,13 @@ pub(crate) fn spawn_agent_turn(
         0
     };
     let spawn_result = executor.jobs.spawn(spec, move |ctx| async move {
+        // Declare the guard first: on every return/abort, sender drops before
+        // the guard joins the forwarding thread.
+        let _forwarder;
+        let scoped_ui_tx;
+        (scoped_ui_tx, _forwarder) = crate::tui::job_messages::scoped_sender(ui_tx, ctx.id);
+        let ui_tx = scoped_ui_tx;
+        let fs = fs.with_review_capture(ctx.id);
         let token = ctx.cancellation_token();
         if let Some(tx) = &ui_tx {
             let _ = tx.send("::status:sending".into());
@@ -338,6 +346,7 @@ pub(crate) fn spawn_agent_turn(
 
     match spawn_result {
         Ok(id) => {
+            ui.latest_agent_job_id = Some(id);
             // Only freshly observed user directives become the retry source.
             // Internal follow-ups and inherited replays must never overwrite
             // the last real user input (or they would corrupt compact retry
@@ -358,12 +367,11 @@ pub(crate) fn spawn_agent_turn(
             ui.processing_start_time = Some(std::time::Instant::now());
             ui.last_elapsed_time = None;
             ui.dirty = true;
-            if let Some(tx) = &executor.ui_tx {
-                let _ = tx.send("::status:preparing".into());
-            }
+            ui.status = crate::tui::state::Status::Thinking;
             Ok(id)
         }
         Err(JobStartError::ForegroundBusy { active }) => {
+            ui.queued_dispatch_rejected = true;
             ui.push_log(busy_message(&active));
             Err(JobStartError::ForegroundBusy { active })
         }

@@ -58,6 +58,21 @@ impl UndoStack {
         self.stack.push_back(entry);
     }
 
+    pub(crate) fn remove_review_entry(
+        &mut self,
+        receipt: &crate::tools::mutation::MutationReceipt,
+        change_id: Option<&str>,
+    ) {
+        if let Some(index) = self.stack.iter().rposition(|entry| {
+            entry.path == receipt.path
+                && entry.change_id.as_deref() == change_id
+                && entry.expected_after.exists == receipt.after.exists
+                && entry.expected_after.content_hash == receipt.after.content_hash
+        }) {
+            self.stack.remove(index);
+        }
+    }
+
     pub fn pop(&mut self) -> Option<BackupEntry> {
         self.stack.pop_back()
     }

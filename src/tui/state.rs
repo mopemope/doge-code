@@ -234,6 +234,8 @@ pub struct TuiApp {
     pub auto_compact_pending: bool,
     // remaining context tokens (calculated)
     pub remaining_context_tokens: Option<u32>,
+    pub(crate) latest_agent_job_id: Option<crate::jobs::JobId>,
+    pub(crate) queued_dispatch_rejected: bool,
     pub pending_instructions: VecDeque<String>,
     // plan list
     pub plan_list: Vec<PlanItem>,
@@ -491,6 +493,8 @@ impl TuiApp {
             auto_compact_pending: false,
             // remaining context tokens starts as None (calculated later)
             remaining_context_tokens: None,
+            latest_agent_job_id: None,
+            queued_dispatch_rejected: false,
             pending_instructions: VecDeque::new(),
             // plan list
             plan_list: Vec::new(),

@@ -26,6 +26,7 @@ impl JobId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobKind {
     AgentTurn,
+    DiffReject,
     Compact,
     Test,
     Lint,
@@ -36,6 +37,7 @@ pub enum JobKind {
 impl fmt::Display for JobKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            JobKind::DiffReject => write!(f, "diff_reject"),
             JobKind::AgentTurn => write!(f, "agent_turn"),
             JobKind::Compact => write!(f, "compact"),
             JobKind::Test => write!(f, "test"),

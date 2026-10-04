@@ -94,10 +94,6 @@ pub fn handle_normal_mode_key(
                 }
 
                 let immediate_control = is_immediate_control_command(&line);
-                if !immediate_control {
-                    app.last_elapsed_time = None;
-                    app.processing_start_time = Some(std::time::Instant::now());
-                }
 
                 if line.trim() == "/quit" {
                     return Ok(true);

@@ -17,6 +17,22 @@ const PLAN_CREATION_GUIDANCE: &str = "Plan requirements:\n- Produce at least thr
 
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
+    fn foreground_job_id(&self) -> Option<crate::jobs::JobId> {
+        None
+    }
+    fn foreground_busy(&self) -> bool {
+        false
+    }
+    fn handle_queued(&mut self, line: &str, ui: &mut TuiApp) -> bool {
+        self.handle(line, ui);
+        true
+    }
+    fn review_payload(&self, _id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
+        None
+    }
+    fn dismiss_review(&self, _id: &str) {}
+    fn reject_review(&mut self, _id: &str, _ui: &mut TuiApp) {}
+
     fn get_custom_commands(&self) -> Vec<String>;
     fn as_any(&self) -> &dyn Any;
     /// Post-terminal `JobManager` completion signal (`::job_completed:<id>`).
@@ -89,19 +105,13 @@ impl TuiExecutor {
         // Post-terminal follow-up eligibility signal. The hook fires inside
         // `JobManager::finish_job` strictly after foreground release, so a
         // successor spawned from the resulting `::job_completed:<id>`
-        // message can never race the still-running producer. Only
-        // normally-completed Test/Lint runs are signalled; cancellation,
-        // shutdown, and infrastructure failure stay silent.
+        // message can never race the still-running producer. Every foreground
+        // terminal outcome is signalled; follow-ups still require normally
+        // completed Test/Lint producers.
         if let Some(tx) = ui_tx {
             let hook: crate::jobs::manager::JobCompletionHook =
                 std::sync::Arc::new(move |completion: crate::jobs::JobCompletion| {
-                    if completion.kind == crate::jobs::JobKind::Compact
-                        || (completion.outcome == crate::jobs::JobRunOutcome::Completed
-                            && matches!(
-                                completion.kind,
-                                crate::jobs::JobKind::Test | crate::jobs::JobKind::Lint
-                            ))
-                    {
+                    if completion.scope == crate::jobs::JobScope::Foreground {
                         let _ = tx.send(format!("::job_completed:{}", completion.id));
                     }
                 });
