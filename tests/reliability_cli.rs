@@ -1053,3 +1053,67 @@ fn capacity_exit_exports_complete_oversized_response_and_retains_checkpoint() {
     assert!(stderr.contains("capacity"), "{stderr}");
     assert_eq!(server.requests.lock().expect("requests").len(), 2);
 }
+
+#[test]
+fn read_pagination_real_tool_loop_follows_cursor_through_final_marker() {
+    let project = Project::new(false);
+    let path = project.root.join("paged.txt");
+    let mut expected: Vec<_> = (0..499)
+        .map(|i| format!("{i:04}{}", "x".repeat(96)))
+        .collect();
+    expected.push("FINAL_READ_PAGINATION_MARKER".into());
+    std::fs::write(&path, expected.join("\n")).expect("fixture file");
+    let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = observed.clone();
+    let server = Server::new(move |n, request| {
+        let cursor = if n == 1 {
+            Some(1)
+        } else {
+            let last = request["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "tool")
+                .expect("actual returned tool message");
+            let encoded = last["content"].as_str().expect("serialized tool result");
+            assert!(encoded.chars().count() <= 40_000);
+            let decoded: Value = serde_json::from_str(encoded).expect("valid result JSON");
+            assert_eq!(decoded["ok"], true);
+            let result = &decoded["result"];
+            let content = result["content"].as_str().expect("content");
+            captured
+                .lock()
+                .expect("captured lines")
+                .extend(content.lines().map(str::to_owned));
+            result["next_cursor"].as_u64()
+        };
+        match cursor {
+            Some(cursor) => response(
+                "",
+                vec![call(
+                    &format!("read-{n}"),
+                    "fs_read",
+                    json!({"path":path,"cursor":cursor}),
+                )],
+                "tool_calls",
+            ),
+            None => response("FINAL_READ_PAGINATION_MARKER observed", vec![], "stop"),
+        }
+    });
+    let output = project
+        .command(&server)
+        .output()
+        .expect("real CLI tool loop");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(*observed.lock().expect("all lines"), expected);
+    assert!(
+        output_json(&output)["response"]
+            .as_str()
+            .is_some_and(|text| text.contains("FINAL_READ_PAGINATION_MARKER"))
+    );
+}

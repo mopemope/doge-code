@@ -739,8 +739,9 @@ Combining these enables maximum code exploration effectiveness without overwhelm
 
 ## 📂 File Tools Lightweight Mode
 
-- `fs_read`: Default mode is `mode="summary"` returning up to 400 lines & 6,000 characters, with remaining tracked via `next_cursor`. Only specify `mode="full"` or `page_size`/`cursor` when full text is needed.
-- `fs_read_many_files`: Files resolved from `paths` are returned 5 per page with up to 40 lines each in `mode="summary"`, automatically returning `warnings` + `next_cursor` if `response_budget_chars` would be exceeded.
+- `fs_read`: Default `mode="summary"` returns up to 400 complete lines and 6,000 Unicode scalar characters including line separators. `next_cursor` is the first unread 1-based line; `end_line` describes only returned lines. A first line too large for the budget is an explicit error: retry the same line with a larger budget. EOF cursors return empty content. `mode="full"` removes the default line cap but still obeys character and serialized JSON limits.
+- `fs_read_many_files`: Resolved paths retain their existing order, with 5 paths per page and up to 40 lines / 1,200 Unicode scalar characters per file in `mode="summary"`. The combined snippet budget defaults to 8,000 characters. `next_cursor` is the actual first unread 0-based path index, including skipped directories. If the first snippet exceeds the total budget, a smaller file summary is returned with `truncated=true`; use `fs_read` for its remaining content. Truncation guidance belongs to metadata, not snippet text.
+- For both read tools, explicit line/page/snippet/budget limits must be positive; the batch path cursor may be zero. Character budgets count Unicode scalars, not bytes or grapheme clusters, and are capped at 40,000. The entire serialized result must also fit the existing 40,000-character read safety limit, so escaping and metadata may reduce complete lines/files further. Oversized single lines have no offset pagination; increase the budget within these limits or extract smaller lines outside the tool. `full` is still bounded.
 - `fs_list`: Directory listings also return as `FsListResponse`, with `entries` containing only `path` and `is_dir` for compactness. Use `cursor`/`page_size`/`response_budget_chars` to progressively fetch deep tree structures.
 
 ## 🎯 Symbol-Specific Editing /edit-symbol

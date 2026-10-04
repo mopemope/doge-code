@@ -165,6 +165,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_pagination_dispatch_validates_numbers_and_preserves_serialized_cursor()
+    -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("long\"path.txt");
+        let line = "\"\\\u{0001}".repeat(1000);
+        std::fs::write(&path, vec![line.clone(); 10].join("\n"))?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["fs_read", "fs_read_many_files"]).await;
+        for name in ["fs_read", "fs_read_many_files"] {
+            for key in if name == "fs_read" {
+                vec![
+                    "cursor",
+                    "start_line",
+                    "limit",
+                    "page_size",
+                    "response_budget_chars",
+                ]
+            } else {
+                vec![
+                    "cursor",
+                    "max_entries",
+                    "page_size",
+                    "response_budget_chars",
+                    "snippet_max_chars",
+                ]
+            } {
+                for invalid in [
+                    json!(-1),
+                    json!(1.5),
+                    json!("2"),
+                    serde_json::from_str("18446744073709551616")?,
+                ] {
+                    let mut args = json!({"path":path,"paths":[path]});
+                    args[key] = invalid;
+                    let call = ToolCall {
+                        id: Some("read-invalid".into()),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: name.into(),
+                            arguments: args.to_string(),
+                        },
+                    };
+                    assert!(
+                        dispatch_tool_call(&runtime, &call)
+                            .await
+                            .unwrap_err()
+                            .to_string()
+                            .contains("invalid argument")
+                    );
+                }
+            }
+            let args = json!({"path":path,"paths":[path,path],"response_budget_chars":40000,"snippet_max_chars":40000,"page_size":100});
+            let call = ToolCall {
+                id: Some("read-json".into()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: name.into(),
+                    arguments: args.to_string(),
+                },
+            };
+            let output = dispatch_tool_call(&runtime, &call).await?;
+            assert!(output.is_success);
+            let serialized = serde_json::to_string(&output.value)?;
+            assert!(serialized.chars().count() <= crate::tools::budget::READ_TOOL_OUTPUT_MAX_CHARS);
+            let final_output = crate::llm::truncate_tool_output(serialized.clone(), name);
+            assert_eq!(final_output, serialized);
+            let decoded: serde_json::Value = serde_json::from_str(&final_output)?;
+            assert!(decoded["result"]["next_cursor"].is_number());
+        }
+        let call = ToolCall {
+            id: Some("read-path-error".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "fs_read".into(),
+                arguments: json!({"path":format!("/{}","x".repeat(50_000))}).to_string(),
+            },
+        };
+        let error = dispatch_tool_call(&runtime, &call).await.unwrap_err();
+        assert!(
+            serde_json::json!({"error":error.to_string()})
+                .to_string()
+                .chars()
+                .count()
+                < 4000
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_remote_tool_error_preserves_failure_flag() -> Result<()> {
         let dir = tempdir()?;
         let app = Arc::new(AppConfig {

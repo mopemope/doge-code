@@ -3,7 +3,6 @@ use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
-use std::cmp::min;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -14,17 +13,17 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "fs_read".to_string(),
             strict: None,
-            description: "Reads a text file from an absolute path. Supports partial reading via `start_line`/`limit` or `mode='summary'` for large files. Always read files before editing.".to_string(),
+            description: "Reads a text file from an absolute path. Supports partial reading via `start_line`/`limit` or `mode='summary'` for large files. Returns complete lines within Unicode-character and serialized JSON budgets; full mode remains bounded. Always read files before editing.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute path of the file to read."},
-                    "start_line": {"type": "integer", "description": "1-based line number to start reading from. Legacy: prefer `cursor` for pagination."},
-                    "limit": {"type": "integer", "description": "Maximum number of lines to return."},
-                    "cursor": {"type": "integer", "description": "1-based alias for start_line when paginating from previous response"},
-                    "page_size": {"type": "integer", "description": "Number of lines to return (overrides limit)"},
-                    "response_budget_chars": {"type": "integer", "description": "Approximate maximum characters for the snippet (default 6000)"},
-                    "mode": {"type": "string", "enum": ["summary", "full"], "description": "Summary avoids long files unless full is requested"}
+                    "start_line": {"type": "integer", "minimum": 1, "description": "1-based line number to start reading from. Legacy: prefer `cursor` for pagination."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."},
+                    "cursor": {"type": "integer", "minimum": 1, "description": "1-based alias for start_line when paginating from previous response"},
+                    "page_size": {"type": "integer", "minimum": 1, "description": "Number of lines to return (overrides limit)"},
+                    "response_budget_chars": {"type": "integer", "minimum": 1, "description": "Positive Unicode scalar character budget including line separators (default 6000, capped at 40000; JSON overhead may reduce a page)"},
+                    "mode": {"type": "string", "enum": ["summary", "full"], "description": "Summary limits line count; full considers all lines but remains budgeted"}
                 },
                 "required": ["path"]
             }),
@@ -118,72 +117,100 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
     let lines: Vec<&str> = s.lines().collect();
     let total_lines = lines.len();
 
-    // Tool contract uses 1-based line numbers for consistency with `edit`.
-    let requested_start_line = opts.cursor.or(opts.start_line);
-    let start_line = if total_lines == 0 {
-        0
-    } else {
-        requested_start_line.unwrap_or(1).clamp(1, total_lines)
-    };
-    let start_index = start_line.saturating_sub(1);
-
-    let mut line_limit = opts
-        .page_size
-        .or(opts.limit)
-        .unwrap_or_else(|| match opts.mode {
-            FsReadMode::Summary => DEFAULT_SUMMARY_LINES,
-            FsReadMode::Full => total_lines.saturating_sub(start_index),
-        });
-
-    if opts.mode == FsReadMode::Full && opts.limit.is_none() && opts.page_size.is_none() {
-        line_limit = total_lines.saturating_sub(start_index);
+    for (name, value) in [
+        ("start_line", opts.start_line),
+        ("cursor", opts.cursor),
+        ("limit", opts.limit),
+        ("page_size", opts.page_size),
+        ("response_budget_chars", opts.response_budget_chars),
+    ] {
+        super::budget::positive_read_option(name, value)?;
     }
-
-    let end_index = min(start_index.saturating_add(line_limit), total_lines);
-
-    let mut content = lines[start_index..end_index].join("\n");
-    let mut truncated = end_index < total_lines;
-    let mut warnings = Vec::new();
-
-    let budget = opts
+    let requested = opts.cursor.or(opts.start_line).unwrap_or(1);
+    let start_index = requested.saturating_sub(1).min(total_lines);
+    let line_limit = opts.page_size.or(opts.limit).unwrap_or(match opts.mode {
+        FsReadMode::Summary => DEFAULT_SUMMARY_LINES,
+        FsReadMode::Full => total_lines.saturating_sub(start_index),
+    });
+    let requested_budget = opts
         .response_budget_chars
         .unwrap_or(DEFAULT_SUMMARY_BUDGET_CHARS);
-    if !content.is_empty() && content.len() > budget {
-        let mut truncate_at = budget.min(content.len());
-        while truncate_at > 0 && !content.is_char_boundary(truncate_at) {
-            truncate_at -= 1;
-        }
-        if truncate_at == 0 {
-            truncate_at = budget.min(content.len());
-        }
-        content.truncate(truncate_at);
-        content.push_str("\n[[TRUNCATED BY BUDGET]]");
-        truncated = true;
-        warnings.push(format!(
-            "content trimmed to {} chars; rerun with higher response_budget_chars or mode='full'",
-            budget
-        ));
+    let budget = requested_budget.min(super::budget::READ_TOOL_OUTPUT_MAX_CHARS);
+    let mut warnings = Vec::new();
+    if requested_budget > budget {
+        warnings.push(
+            "response_budget_chars capped at 40000; serialized JSON overhead also applies".into(),
+        );
     }
-
-    let next_cursor = if truncated {
-        Some(end_index.saturating_add(1))
-    } else {
-        None
-    };
-    if truncated && warnings.is_empty() {
-        warnings.push("additional content available; increase limit or request next cursor".into());
+    let mut end_index = start_index;
+    let mut chars = 0usize;
+    for line in &lines[start_index..start_index.saturating_add(line_limit).min(total_lines)] {
+        let needed = line
+            .chars()
+            .count()
+            .saturating_add(usize::from(end_index > start_index));
+        if needed > budget.saturating_sub(chars) {
+            if end_index == start_index {
+                anyhow::bail!(
+                    "response_budget_chars too small: line {requested} requires at least {} Unicode characters; retry from the same start_line={requested} with a larger budget (maximum 40000, including a separate serialized JSON limit). Single-line offset pagination is unavailable",
+                    line.chars().count()
+                );
+            }
+            break;
+        }
+        chars += needed;
+        end_index += 1;
     }
-
-    Ok(FsReadResult {
+    let mut result = FsReadResult {
         path: path.to_string(),
-        content,
-        start_line,
+        content: lines[start_index..end_index].join("\n"),
+        start_line: if total_lines == 0 { 0 } else { requested },
         end_line: end_index,
         total_lines,
-        truncated,
-        next_cursor,
+        truncated: end_index < total_lines,
+        next_cursor: (end_index < total_lines).then(|| end_index.saturating_add(1)),
         warnings,
-    })
+    };
+    if result.truncated {
+        result
+            .warnings
+            .push("additional complete lines available; request next_cursor".into());
+    }
+    if !super::budget::read_result_fits(&result)? {
+        anyhow::ensure!(
+            end_index > start_index,
+            "read result metadata exceeds the 40000-character serialized JSON limit; use a shorter path"
+        );
+        result
+            .warnings
+            .push("serialized JSON limit applied; request next_cursor for unread lines".into());
+        // Escaping may expand thousands of tiny lines. Find a complete prefix
+        // in logarithmic serialization passes rather than deleting one at a time.
+        let mut low = start_index;
+        let mut high = end_index - 1;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            set_page_end(&mut result, &lines, start_index, mid);
+            if super::budget::read_result_fits(&result)? {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        set_page_end(&mut result, &lines, start_index, low);
+        anyhow::ensure!(
+            low > start_index && super::budget::read_result_fits(&result)?,
+            "line {requested} cannot fit the 40000-character serialized JSON limit with its escaping and metadata; no lines consumed, retry the same start_line after reducing line size or path length. Single-line offset pagination is unavailable"
+        );
+    }
+    Ok(result)
+}
+
+fn set_page_end(result: &mut FsReadResult, lines: &[&str], start: usize, end: usize) {
+    result.content = lines[start..end].join("\n");
+    result.end_line = end;
+    result.truncated = end < result.total_lines;
+    result.next_cursor = result.truncated.then(|| end.saturating_add(1));
 }
 
 #[cfg(test)]

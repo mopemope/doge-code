@@ -66,7 +66,7 @@ Returning-tool responses should be structured JSON with:
 Large-output tools should accept a `response_budget_chars` parameter (an upper
 limit like `5000`) and automatically downscale limit/count/snippet size to stay
 under it. Reference implementation: `src/tools/read.rs`
-(`fs_read`: summary mode defaults to 400 lines / 6,000 chars). See also
+(`fs_read`: summary mode defaults to 400 lines / 6,000 chars). Read budgets count Unicode scalar characters. `fs_read` returns complete lines and resumes at the first unread line; a first line that cannot fit fails explicitly without advancing. `fs_read_many_files` resumes from the actual unread path index and labels shortened snippets as file summaries. Both measure the complete serialized `{ok,result}` envelope, including escaping and metadata, against the shared 40,000-character read cap before dispatch; pagination metadata must survive the global fallback unchanged. See also
 `src/tools/read_many.rs`, `src/tools/list.rs`,
 `src/tools/search_repomap/repomap/repomap_filter.rs`.
 
