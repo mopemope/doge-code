@@ -10,6 +10,12 @@ use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 
+/// Only control commands bypass the ordinary instruction queue.
+fn is_immediate_control_command(line: &str) -> bool {
+    let line = line.trim();
+    line == "/jobs" || line.split_whitespace().next() == Some("/cancel")
+}
+
 /// Handle keys when in Normal input mode. Returns Ok(true) if the caller should exit the event loop.
 pub fn handle_normal_mode_key(
     app: &mut TuiApp,
@@ -87,17 +93,21 @@ pub fn handle_normal_mode_key(
                     app.draft.clear();
                 }
 
-                // Clear last elapsed time on new submission
-                app.last_elapsed_time = None;
-
-                // Start processing timer on instruction submission
-                app.processing_start_time = Some(std::time::Instant::now());
+                let immediate_control = is_immediate_control_command(&line);
+                if !immediate_control {
+                    app.last_elapsed_time = None;
+                    app.processing_start_time = Some(std::time::Instant::now());
+                }
 
                 if line.trim() == "/quit" {
                     return Ok(true);
                 }
 
-                app.pending_instructions.push_back(line);
+                if immediate_control {
+                    app.dispatch(&line);
+                } else {
+                    app.pending_instructions.push_back(line);
+                }
 
                 app.textarea = TextArea::default();
                 app.textarea
@@ -406,6 +416,168 @@ mod tests {
                 viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
             },
         )?)
+    }
+
+    #[test]
+    fn enter_dispatches_controls_while_busy_without_resetting_timer() -> anyhow::Result<()> {
+        use crate::tui::commands::core::CommandHandler;
+        use std::sync::{Arc, Mutex};
+        struct Recorder(Arc<Mutex<Vec<String>>>);
+        impl CommandHandler for Recorder {
+            fn handle(&mut self, line: &str, _: &mut TuiApp) {
+                self.0.lock().unwrap().push(line.trim().into());
+            }
+            fn get_custom_commands(&self) -> Vec<String> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let mut terminal = test_terminal()?;
+        for status in [
+            crate::tui::state::Status::Thinking,
+            crate::tui::state::Status::Running,
+        ] {
+            for line in ["/jobs", " /cancel ", "/cancel job-2", "/cancel\tbad-id"] {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let mut app = TuiApp::new_for_test("controls", None, "default");
+                app.handler = Some(Box::new(Recorder(calls.clone())));
+                app.status = status;
+                let started = std::time::Instant::now();
+                app.processing_start_time = Some(started);
+                app.pending_instructions.push_back("next prompt".into());
+                app.textarea = TextArea::from(vec![line.to_string()]);
+                // Avoid touching persistent input history in this isolated test.
+                app.input_history.push(line.into());
+                handle_normal_mode_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    &mut terminal,
+                )?;
+                assert_eq!(*calls.lock().unwrap(), [line.trim()]);
+                assert_eq!(app.pending_instructions, ["next prompt"]);
+                assert_eq!(app.processing_start_time, Some(started));
+                assert_eq!(app.textarea.lines(), [""]);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enter_controls_target_current_job_and_preserve_prompt_queue() -> anyhow::Result<()> {
+        use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, JobStatus, WorkspaceAccess};
+        use crate::tui::commands::core::TuiExecutor;
+        use crate::tui::state::{LogEntry, Status};
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir()?;
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().into(),
+            no_repomap: true,
+            ..Default::default()
+        };
+        let repomap = Arc::new(tokio::sync::RwLock::new(None));
+        let tools = crate::tools::FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
+        let manager = Arc::new(Mutex::new(crate::session::SessionManager::with_store(
+            crate::session::SessionStore::new(dir.path().join("sessions"))?,
+        )));
+        let executor = TuiExecutor::construct_with_session_manager(cfg, repomap, tools, manager)?;
+        let jobs = executor.jobs.clone();
+        let spawn = || {
+            jobs.spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::None,
+                    "blocking",
+                ),
+                |ctx| async move {
+                    ctx.cancellation.cancelled().await;
+                    JobRunOutcome::Cancelled
+                },
+            )
+            .expect("blocking job")
+        };
+        let mut app = TuiApp::new_for_test("controls", None, "default");
+        app.handler = Some(Box::new(executor));
+        let mut terminal = test_terminal()?;
+        for (status, cancel) in [
+            (Status::Thinking, " /cancel "),
+            (Status::Running, "/cancel ID"),
+            (Status::Thinking, "/cancel\tID"),
+        ] {
+            let id = spawn();
+            app.status = status;
+            for line in [
+                " /jobs ",
+                "/cancel bad-id",
+                "/cancellation",
+                "/jobs-extra",
+                "ordinary prompt",
+            ] {
+                app.textarea = TextArea::from(vec![line.to_string()]);
+                app.input_history.push(line.into());
+                handle_normal_mode_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    &mut terminal,
+                )?;
+            }
+            assert!(app.log.iter().any(|entry| match entry {
+                LogEntry::Plain(text) | LogEntry::Markdown(text) => text.contains(&id.to_string()),
+            }));
+            assert!(app.log.iter().any(|entry| match entry {
+                LogEntry::Plain(text) | LogEntry::Markdown(text) =>
+                    text.contains("Unknown job id: bad-id"),
+            }));
+            assert_eq!(
+                app.pending_instructions,
+                ["/cancellation", "/jobs-extra", "ordinary prompt"]
+            );
+            let line = cancel.replace("ID", &id.to_string());
+            app.textarea = TextArea::from(vec![line.clone()]);
+            app.input_history.push(line);
+            handle_normal_mode_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut terminal,
+            )?;
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while jobs.foreground_id().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            assert_eq!(jobs.get_snapshot(id).unwrap().status, JobStatus::Cancelled);
+            // Immediate cancels cannot remain queued and target the next job.
+            assert_eq!(
+                app.pending_instructions,
+                ["/cancellation", "/jobs-extra", "ordinary prompt"]
+            );
+            app.pending_instructions.clear();
+        }
+        let id = spawn();
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut terminal,
+        )?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while jobs.foreground_id().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(jobs.get_snapshot(id).unwrap().status, JobStatus::Cancelled);
+        assert!(app.pending_instructions.is_empty());
+        app.textarea = TextArea::from(vec![" /quit ".to_string()]);
+        app.input_history.push(" /quit ".into());
+        assert!(handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut terminal
+        )?);
+        Ok(())
     }
 
     #[test]
