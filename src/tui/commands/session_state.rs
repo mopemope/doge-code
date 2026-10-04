@@ -267,6 +267,45 @@ mod tests {
     }
 
     #[test]
+    fn lease_busy_tui_switch_preserves_runtime_and_self_switch_works() {
+        let (mut executor, _dir) = test_executor();
+        let history = vec![user_msg("retain runtime")];
+        persist_runtime(&executor, &history);
+        executor.replace_conversation_from_messages(history.clone());
+        let id = current_session_id(&executor);
+        let store = executor.session_manager.lock().unwrap().store.clone();
+        let mut other = SessionManager::with_store(store.clone());
+        other.create_session(Some("busy target".into())).unwrap();
+        let busy_id = other.current_session_id().unwrap();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        ui.last_user_input = Some("keep retry".into());
+        assert!(
+            executor
+                .switch_to_session(&busy_id)
+                .unwrap_err()
+                .to_string()
+                .contains("already in use")
+        );
+        assert_eq!(current_session_id(&executor), id);
+        assert_eq!(
+            runtime_messages(&executor)[0].content.as_deref(),
+            Some("retain runtime")
+        );
+        assert_eq!(ui.last_user_input.as_deref(), Some("keep retry"));
+        executor
+            .handle_session_command(&format!("switch {busy_id}"), &mut ui)
+            .unwrap();
+        assert_eq!(ui.last_user_input.as_deref(), Some("keep retry"));
+        executor
+            .handle_session_command(&format!("switch {id}"), &mut ui)
+            .unwrap();
+        assert_eq!(
+            runtime_messages(&executor)[0].content.as_deref(),
+            Some("retain runtime")
+        );
+    }
+
+    #[test]
     fn startup_resume_preserves_retention_target() {
         for resume_latest in [false, true] {
             let (executor, _dir) = test_executor();
@@ -279,7 +318,9 @@ mod tests {
                     .replace_conversation_messages(&[user_msg("oldest but updated latest")])
                     .unwrap();
                 target.timestamp = "2030-01-01T00:00:00Z".into();
-                sm.store.save(&target).unwrap();
+                sm.store
+                    .save_with_lease(&target, sm.current_lease.as_ref().unwrap())
+                    .unwrap();
                 for _ in 0..99 {
                     sm.store.create().unwrap();
                 }
@@ -292,6 +333,7 @@ mod tests {
             };
             let mut cfg = executor.cfg.clone();
             cfg.resume = Some(resume.clone());
+            drop(executor); // Simulate a completed previous process, releasing its lease.
             let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
             let tools =
                 crate::tools::FsTools::new(repomap.clone(), std::sync::Arc::new(cfg.clone()));
@@ -335,7 +377,9 @@ mod tests {
                 .insert("pending".into(), "test".into(), "recoverable".into(), 32)
                 .unwrap();
             let session = sm.current_session.clone().unwrap();
-            sm.store.save(&session).unwrap();
+            sm.store
+                .save_with_lease(&session, sm.current_lease.as_ref().unwrap())
+                .unwrap();
             (
                 sm.store.root.join(&session.meta.id).join("session.json"),
                 serde_json::to_value(session).unwrap(),
@@ -458,8 +502,9 @@ mod tests {
         let (executor, _dir) = test_executor();
         let id = current_session_id(&executor);
         let path = executor.cfg.project_root.join(".doge/sessions");
+        let original_cfg = executor.cfg.clone();
         let construct = || {
-            let mut cfg = executor.cfg.clone();
+            let mut cfg = original_cfg.clone();
             cfg.resume = Some("latest".into());
             let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
             let tools =
@@ -491,8 +536,11 @@ mod tests {
                 "role".into(),
                 serde_json::json!(123),
             )]));
-            sm.store.save(&corrupt).unwrap();
+            sm.store
+                .save_with_lease(&corrupt, sm.current_lease.as_ref().unwrap())
+                .unwrap();
         }
+        drop(executor); // Allow decode testing after the previous owner has exited.
         assert!(fresh.resume_session(&id).is_err());
         assert!(fresh.resume_session("latest").is_err());
         assert!(
@@ -514,7 +562,7 @@ mod tests {
                 .len(),
             1
         );
-        executor
+        fresh
             .session_manager
             .lock()
             .unwrap()
@@ -635,6 +683,7 @@ mod tests {
         .expect("fresh executor");
         assert!(runtime_messages(&fresh).is_empty());
 
+        drop(executor); // Previous process ownership ends before startup resume.
         let outcome = fresh.resume_session("latest").expect("resume");
         assert_eq!(
             outcome,
@@ -719,7 +768,9 @@ mod tests {
                 session.unseen_tool_results.insert("call-1".into());
             }
             let snapshot = sm.current_session.clone().expect("session");
-            sm.store.save(&snapshot).expect("save with unseen");
+            sm.store
+                .save_with_lease(&snapshot, sm.current_lease.as_ref().unwrap())
+                .expect("save with unseen");
         }
         let id_before = current_session_id(&executor);
 
@@ -773,7 +824,9 @@ mod tests {
                 session.add_conversation_entry(bad);
             }
             let snapshot = sm.current_session.clone().expect("session");
-            sm.store.save(&snapshot).expect("save corrupt target");
+            sm.store
+                .save_with_lease(&snapshot, sm.current_lease.as_ref().unwrap())
+                .expect("save corrupt target");
         }
         // Return to the healthy session first so the corrupt one is a switch
         // target rather than the current session.

@@ -963,6 +963,7 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
     manager.bind_inference("openai-chatgpt:test-account:test-model".into())?;
     manager.update_current_session_with_history(&history)?;
     let id = manager.current_session_id().expect("session");
+    drop(manager); // Resume after the previous owner exits.
     let mut resumed = crate::session::SessionManager::with_store(store);
     resumed.load_session(&id)?;
     let loaded = resumed.current_session.as_ref().expect("resumed");

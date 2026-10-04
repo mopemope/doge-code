@@ -11,8 +11,9 @@ const MAX_SESSIONS: usize = 100;
 /// Shared save/read limit, including recoverable observations.
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 
-fn validate_id(id: &str) -> Result<(), SessionError> {
-    if id.is_empty() || id == "." || id == ".." || id.contains(['/', '\\', '\0']) {
+pub(crate) fn validate_id(id: &str) -> Result<(), SessionError> {
+    if id.is_empty() || id == "." || id == ".." || id == ".locks" || id.contains(['/', '\\', '\0'])
+    {
         return Err(SessionError::InvalidId(id.to_owned()));
     }
     Ok(())
@@ -91,6 +92,9 @@ impl SessionStore {
             let kind = entry.file_type().map_err(SessionError::ReadError)?;
             if kind.is_symlink() {
                 return Err(SessionError::InvalidId("symlink in session store".into()));
+            }
+            if entry.file_name() == ".locks" {
+                continue;
             }
             if kind.is_dir() {
                 let metadata = fs::symlink_metadata(entry.path().join("session.json"));
@@ -181,6 +185,14 @@ impl SessionStore {
                 )));
             }
             let p = entry.path();
+            if entry.file_name() == ".locks" {
+                if p.is_symlink() || !p.is_dir() {
+                    return Err(SessionError::InvalidId(
+                        "unsafe session lock directory".into(),
+                    ));
+                }
+                continue;
+            }
             if !p.is_dir() {
                 continue;
             }
@@ -282,6 +294,35 @@ impl SessionStore {
         &self,
         data: &SessionData,
     ) -> Result<SessionSaveOutcome, SessionError> {
+        let lease = self.try_lease(&data.meta.id)?;
+        self.save_with_lease(data, &lease)
+    }
+
+    pub(crate) fn try_lease(&self, id: &str) -> Result<super::lease::SessionLease, SessionError> {
+        self.ensure_writable()?;
+        super::lease::SessionLease::acquire(&self.root, id)
+    }
+
+    pub(crate) fn create_with_lease(
+        &self,
+        initial_prompt: Option<String>,
+    ) -> Result<(SessionData, super::lease::SessionLease, SessionSaveOutcome), SessionError> {
+        let mut data = SessionData::new();
+        if let Some(prompt) = initial_prompt {
+            data.set_initial_prompt(&prompt);
+            data.meta.title_is_default = false;
+        }
+        let lease = self.try_lease(&data.meta.id)?;
+        let outcome = self.save_with_lease(&data, &lease)?;
+        Ok((data, lease, outcome))
+    }
+
+    pub(crate) fn save_with_lease(
+        &self,
+        data: &SessionData,
+        lease: &super::lease::SessionLease,
+    ) -> Result<SessionSaveOutcome, SessionError> {
+        lease.validate(&self.root, &data.meta.id)?;
         self.ensure_writable()?;
         validate_id(&data.meta.id)?;
         let json_data = serde_json::to_string_pretty(data)?;
@@ -361,6 +402,16 @@ impl SessionStore {
 
     /// Delete session data by specifying the session ID.
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
+        let lease = self.try_lease(id)?;
+        self.delete_with_lease(id, &lease)
+    }
+
+    pub(crate) fn delete_with_lease(
+        &self,
+        id: &str,
+        lease: &super::lease::SessionLease,
+    ) -> Result<(), SessionError> {
+        lease.validate(&self.root, id)?;
         self.ensure_writable()?;
         validate_id(id)?;
         let dir = self.root.join(id);
@@ -452,7 +503,9 @@ fn cleanup_old_sessions(store: &SessionStore, protected: Option<&str>) -> Result
             )));
         }
         let entry = entry.map_err(SessionError::ReadError)?;
-        if entry.file_type().map_err(SessionError::ReadError)?.is_dir() {
+        if entry.file_name() != ".locks"
+            && entry.file_type().map_err(SessionError::ReadError)?.is_dir()
+        {
             directories += 1;
         }
     }
@@ -478,20 +531,31 @@ fn cleanup_old_sessions(store: &SessionStore, protected: Option<&str>) -> Result
 
         // The sessions are sorted by creation date in descending order (newest first)
         // So we need to delete from the end of the vector (oldest sessions)
+        let mut removed = 0;
         for session_meta in sessions
             .iter()
             .rev()
             .filter(|s| Some(s.id.as_str()) != protected)
-            .take(excess_count)
         {
-            store.delete(&session_meta.id)?;
+            if removed == excess_count {
+                break;
+            }
+            match store.try_lease(&session_meta.id) {
+                Ok(lease) => {
+                    store.delete_with_lease(&session_meta.id, &lease)?;
+                    removed += 1;
+                }
+                Err(SessionError::Busy(_)) => continue,
+                Err(error) => return Err(error),
+            }
         }
-
-        tracing::info!(
-            "Cleaned up {} old sessions to maintain limit of {}",
-            excess_count,
-            MAX_SESSIONS
-        );
+        if removed < excess_count {
+            tracing::warn!(
+                remaining = excess_count - removed,
+                "session retention limit temporarily exceeded; active sessions preserved"
+            );
+        }
+        tracing::info!(removed, "old session retention cleanup completed");
     }
     Ok(())
 }
@@ -501,6 +565,82 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    #[test]
+    fn lease_retention_skips_active_and_counts_successful_deletes() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path()).unwrap();
+        let mut active = SessionData::new();
+        active.meta.created_at = "2000-01-01T00:00:00Z".into();
+        let lease = store.try_lease(&active.meta.id).unwrap();
+        store.save_with_lease(&active, &lease).unwrap();
+        let mut all_leases = vec![lease];
+        for _ in 0..MAX_SESSIONS {
+            let (data, lease, _) = store.create_with_lease(None).unwrap();
+            all_leases.push(lease);
+            assert!(store.load(&data.meta.id).is_ok());
+        }
+        assert_eq!(store.list().unwrap().len(), MAX_SESSIONS + 1); // All busy: safe overage.
+        let removable = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id != active.meta.id)
+            .unwrap()
+            .id;
+        let index = all_leases
+            .iter()
+            .position(|l| l.validate(dir.path(), &removable).is_ok())
+            .unwrap();
+        drop(all_leases.remove(index));
+        store.save_with_lease(&active, &all_leases[0]).unwrap();
+        assert_eq!(store.list().unwrap().len(), MAX_SESSIONS);
+        assert!(store.load(&removable).is_err());
+        assert!(store.load(&active.meta.id).is_ok());
+        assert!(dir.path().join(".locks").is_dir());
+        assert!(
+            dir.path()
+                .join(".locks")
+                .join(format!("{removable}.lock"))
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_canonical_scope_and_unsafe_paths_fail_closed() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        let store = SessionStore::new(&root).unwrap();
+        let data = store.create().unwrap();
+        let lease = store.try_lease(&data.meta.id).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let alias_store = SessionStore::new(&alias).unwrap();
+        assert!(matches!(
+            alias_store.try_lease(&data.meta.id),
+            Err(SessionError::Busy(_))
+        ));
+        alias_store.save_with_lease(&data, &lease).unwrap();
+        let other = SessionStore::new(dir.path().join("other")).unwrap();
+        assert!(other.save_with_lease(&data, &lease).is_err());
+        let other_lease = other.try_lease(&data.meta.id).unwrap();
+        other.save_with_lease(&data, &other_lease).unwrap();
+        for id in ["", ".", "..", ".locks", "../bad", "bad/name", "bad\\name"] {
+            assert!(store.try_lease(id).is_err());
+        }
+        drop(lease);
+        let lock = root.join(".locks").join(format!("{}.lock", data.meta.id));
+        std::fs::remove_file(&lock).unwrap(); // Isolated adversarial fixture only.
+        symlink(dir.path().join("outside"), &lock).unwrap();
+        assert!(store.try_lease(&data.meta.id).is_err());
+        assert!(!dir.path().join("outside").exists());
+        let unsafe_store = SessionStore::new(dir.path().join("unsafe")).unwrap();
+        symlink(root.join(".locks"), unsafe_store.root.join(".locks")).unwrap();
+        assert!(unsafe_store.try_lease("anything").is_err());
+        assert!(SessionStore::open_existing(&unsafe_store.root).is_err());
+    }
 
     #[test]
     fn test_new_default() {
