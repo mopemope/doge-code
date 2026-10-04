@@ -41,6 +41,7 @@ pub struct PreparedSemanticEdit {
     pub symbol_id: SymbolId,
     pub expected_fingerprint: ContentFingerprint,
     pub file: PathBuf,
+    pub mutation_target: crate::tools::mutation::MutationTarget,
     pub name: String,
     pub kind: SymbolKind,
     pub parent: Option<String>,
@@ -78,36 +79,12 @@ fn resolve_absolute(project_root: &Path, file: &Path) -> PathBuf {
 }
 
 fn ensure_within_root(project_root: &Path, absolute: &Path) -> Result<PathBuf, SemanticEditError> {
-    // Canonical comparison only: the previous lexical `||` fallback accepted
-    // `/root/a/../../etc` lexically. For missing files, canonicalize the
-    // parent directory instead so symlinked roots still match.
-    let root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    let file_canon = if let Ok(canon) = absolute.canonicalize() {
-        canon
-    } else if let Some(parent) = absolute.parent() {
-        match parent.canonicalize() {
-            Ok(canon_parent) => {
-                if let Some(name) = absolute.file_name() {
-                    canon_parent.join(name)
-                } else {
-                    absolute.to_path_buf()
-                }
-            }
-            Err(_) => absolute.to_path_buf(),
-        }
-    } else {
-        absolute.to_path_buf()
+    let config = crate::config::AppConfig {
+        project_root: project_root.to_path_buf(),
+        ..Default::default()
     };
-    if file_canon.starts_with(&root_canon) {
-        return Ok(absolute.to_path_buf());
-    }
-    Err(SemanticEditError::AnalysisFailed(format!(
-        "file {} is outside project root {}",
-        absolute.display(),
-        project_root.display()
-    )))
+    crate::tools::scope::ensure_in_project_scope(absolute, &config)
+        .map_err(|error| SemanticEditError::AnalysisFailed(error.to_string()))
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -148,6 +125,15 @@ pub fn prepare_from_source(
     line: u32,
     source: &str,
 ) -> Result<PreparedSemanticEdit, SemanticEditError> {
+    let config = crate::config::AppConfig {
+        project_root: project_root.to_path_buf(),
+        ..Default::default()
+    };
+    let mutation_target =
+        crate::tools::mutation::MutationTarget::resolve(absolute_file, &config, &[])
+            .map_err(|error| SemanticEditError::AnalysisFailed(error.to_string()))?;
+    let canonical_root = crate::tools::scope::canonicalize_root(project_root);
+    let project_root = canonical_root.as_path();
     let absolute = ensure_within_root(project_root, absolute_file)?;
     // Validate the path relativizes (fail closed on outside/escape).
     normalize_relative_path(project_root, &absolute)
@@ -193,6 +179,7 @@ pub fn prepare_from_source(
         symbol_id,
         expected_fingerprint: fingerprint,
         file: absolute,
+        mutation_target,
         name: target.name.clone(),
         kind: target.kind,
         parent: target.parent.clone(),
@@ -210,9 +197,22 @@ pub fn prepare_edit(
     line: u32,
 ) -> Result<PreparedSemanticEdit, SemanticEditError> {
     let absolute = resolve_absolute(project_root, file);
-    let source = std::fs::read_to_string(&absolute)
+    let config = crate::config::AppConfig {
+        project_root: project_root.to_path_buf(),
+        ..Default::default()
+    };
+    let target = crate::tools::mutation::MutationTarget::resolve(&absolute, &config, &[])
         .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?;
-    prepare_from_source(project_root, &absolute, line, &source)
+    let source = crate::tools::mutation::read_text_snapshot(target.path())
+        .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?
+        .content
+        .unwrap_or_default();
+    target
+        .revalidate()
+        .map_err(|_| SemanticEditError::ConcurrentModification)?;
+    let mut prepared = prepare_from_source(project_root, target.path(), line, &source)?;
+    prepared.mutation_target = target;
+    Ok(prepared)
 }
 
 /// Async file-backed prepare (TUI job path).
@@ -222,10 +222,23 @@ pub async fn prepare_edit_async(
     line: u32,
 ) -> Result<PreparedSemanticEdit, SemanticEditError> {
     let absolute = resolve_absolute(project_root, file);
-    let source = tokio::fs::read_to_string(&absolute)
-        .await
+    let config = crate::config::AppConfig {
+        project_root: project_root.to_path_buf(),
+        ..Default::default()
+    };
+    let target = crate::tools::mutation::MutationTarget::resolve(&absolute, &config, &[])
         .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?;
-    prepare_from_source(project_root, &absolute, line, &source)
+    let source = crate::tools::mutation::read_text_snapshot_async(target.path())
+        .await
+        .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?
+        .content
+        .unwrap_or_default();
+    target
+        .revalidate()
+        .map_err(|_| SemanticEditError::ConcurrentModification)?;
+    let mut prepared = prepare_from_source(project_root, target.path(), line, &source)?;
+    prepared.mutation_target = target;
+    Ok(prepared)
 }
 
 /// Build the candidate source in memory (pure).
@@ -298,6 +311,8 @@ pub fn apply_with_snapshots(
     pre_write_source: &str,
     project_root: &Path,
 ) -> Result<(String, SemanticEditResult, RepoMap), SemanticEditError> {
+    let canonical_root = crate::tools::scope::canonicalize_root(project_root);
+    let project_root = canonical_root.as_path();
     if replacement.trim().is_empty() {
         return Err(SemanticEditError::InvalidReplacement(
             "replacement is empty".to_string(),
@@ -414,9 +429,14 @@ pub async fn apply_edit(
     replacement: &str,
     project_root: &Path,
 ) -> Result<(SemanticEditResult, RepoMap, String), SemanticEditError> {
-    let current_source = tokio::fs::read_to_string(&prepared.file)
+    prepared
+        .mutation_target
+        .revalidate()
+        .map_err(|_| SemanticEditError::ConcurrentModification)?;
+    let before_snapshot = crate::tools::mutation::read_text_snapshot_async(&prepared.file)
         .await
-        .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?;
+        .map_err(|error| SemanticEditError::AnalysisFailed(error.to_string()))?;
+    let current_source = before_snapshot.content.clone().unwrap_or_default();
     // Validate against the current snapshot first (pure, no I/O).
     // Pre-write snapshot is re-read after validation to close the race.
     let (candidate, _result, _candidate_map) = apply_with_snapshots(
@@ -427,9 +447,11 @@ pub async fn apply_edit(
         project_root,
     )?;
 
-    let pre_write_source = tokio::fs::read_to_string(&prepared.file)
+    let pre_write_source = crate::tools::mutation::read_text_snapshot_async(&prepared.file)
         .await
-        .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?;
+        .map_err(|e| SemanticEditError::AnalysisFailed(e.to_string()))?
+        .content
+        .unwrap_or_default();
     if pre_write_source != current_source {
         return Err(SemanticEditError::ConcurrentModification);
     }
@@ -444,13 +466,9 @@ pub async fn apply_edit(
     debug_assert_eq!(candidate, candidate2);
     // Shared commit: pre-write race check + sibling-temp persist + verify.
     // Permission inheritance and fsync live in the common writer now.
-    let before_snapshot = crate::tools::mutation::MutationSnapshot {
-        exists: true,
-        content: Some(current_source.clone()),
-        content_hash: Some(crate::provenance::file_content_hash(&current_source)),
-        byte_len: Some(current_source.len() as u64),
-    };
-    crate::tools::mutation::commit_text_candidate(&prepared.file, &before_snapshot, &candidate)
+    prepared
+        .mutation_target
+        .commit(&before_snapshot, &candidate)
         .await
         .map_err(|e| match e {
             crate::tools::mutation::MutationCommitError::ConcurrentModification => {
@@ -711,12 +729,16 @@ mod receipt_tests {
             kind: crate::provenance::ChangeKind::SemanticEdit,
             path: file.clone(),
             before: crate::tools::mutation::MutationSnapshot {
+                resolved_path: None,
+                identity: None,
                 exists: true,
                 content: Some(before_content),
                 content_hash: result.before_file_hash.clone(),
                 byte_len: result.before_byte_len,
             },
             after: crate::tools::mutation::MutationSnapshot {
+                resolved_path: None,
+                identity: None,
                 exists: true,
                 content: Some(after_content),
                 content_hash: result.after_file_hash.clone(),

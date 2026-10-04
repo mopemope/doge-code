@@ -165,7 +165,8 @@ fn create_tool_parameters() -> Value {
 
 /// apply_patchツールの主要インターフェース関数
 pub async fn apply_patch(params: ApplyPatchParams, config: &AppConfig) -> Result<ApplyPatchResult> {
-    Ok(apply_patch_impl(params, config).await?.result)
+    let target = validate_file_path_and_access(&params.file_path, config).await?;
+    Ok(apply_patch_impl(params, &target).await?.result)
 }
 
 /// apply_patchツールの主要インターフェース関数（エラー回復機能付き）
@@ -187,11 +188,21 @@ pub async fn apply_patch_with_recovery_and_receipt(
     params: ApplyPatchParams,
     config: &AppConfig,
 ) -> Result<crate::tools::mutation::MutationExecution<ApplyPatchResult>> {
-    match apply_patch_impl(params.clone(), config).await {
+    let target = match validate_file_path_and_access(&params.file_path, config).await {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(crate::tools::mutation::MutationExecution {
+                result: ApplyPatchResult::failure(error.to_string(), &params.file_path),
+                receipt: None,
+            });
+        }
+    };
+    match apply_patch_impl(params.clone(), &target).await {
         Ok(exec) if exec.result.success => Ok(exec),
         Ok(exec) => {
             if let Some(recovered) =
-                attempt_recovery_with_receipt(&params, config, &exec.result.message).await?
+                attempt_recovery_with_receipt(&params, config, &target, &exec.result.message)
+                    .await?
             {
                 Ok(recovered)
             } else {
@@ -200,7 +211,7 @@ pub async fn apply_patch_with_recovery_and_receipt(
         }
         Err(e) => {
             if let Some(recovered) =
-                attempt_recovery_with_receipt(&params, config, &e.to_string()).await?
+                attempt_recovery_with_receipt(&params, config, &target, &e.to_string()).await?
             {
                 Ok(recovered)
             } else {
@@ -219,12 +230,14 @@ pub async fn apply_patch_with_recovery_and_receipt(
 async fn attempt_recovery_with_receipt(
     params: &ApplyPatchParams,
     config: &AppConfig,
+    target: &crate::tools::mutation::MutationTarget,
     error_message: &str,
 ) -> Result<Option<crate::tools::mutation::MutationExecution<ApplyPatchResult>>> {
+    target.revalidate()?;
     let error_recovery_tool = ErrorRecoveryTool::new(config.clone());
     let error_context = ErrorContext {
         error_source: "apply_patch".to_string(),
-        file_path: params.file_path.clone(),
+        file_path: target.path().to_string_lossy().into_owned(),
         patch_content: params.patch_content.clone(),
         command: "".to_string(),
         output: error_message.to_string(),
@@ -245,7 +258,7 @@ async fn attempt_recovery_with_receipt(
                 patch_content: new_patch,
             };
             Some(
-                apply_patch_impl(new_params, config)
+                apply_patch_impl(new_params, target)
                     .await
                     .unwrap_or_else(|e| crate::tools::mutation::MutationExecution {
                         result: ApplyPatchResult::failure(
@@ -282,11 +295,10 @@ async fn attempt_recovery_with_receipt(
 /// apply_patchの実際の実装 (receipt付き; session/undo/provenanceなし)
 async fn apply_patch_impl(
     params: ApplyPatchParams,
-    config: &AppConfig,
+    target: &crate::tools::mutation::MutationTarget,
 ) -> Result<crate::tools::mutation::MutationExecution<ApplyPatchResult>> {
     use crate::tools::mutation::{
-        MutationTargetReceipt, build_receipt, commit_text_candidate, mutation_changed,
-        read_text_snapshot_async,
+        MutationTargetReceipt, build_receipt, mutation_changed, read_text_snapshot_async,
     };
 
     let file_path = params.file_path;
@@ -297,11 +309,8 @@ async fn apply_patch_impl(
         crate::tools::mutation::MutationExecution { result, receipt }
     };
 
-    // ===== 1. パス検証 =====
-    validate_file_path_and_access(&file_path, config).await?;
-
-    // ===== 2. ファイル存在と属性検証 =====
-    let path = Path::new(&file_path);
+    target.revalidate()?;
+    let path = target.path();
     validate_file_exists_and_readable(path).await?;
 
     // ===== 3. 正確な before snapshot =====
@@ -374,7 +383,7 @@ async fn apply_patch_impl(
     validate_write_permissions(path).await?;
 
     // ===== 10. 共有commit (race check + sibling temp + verify) =====
-    let after = match commit_text_candidate(path, &before, &patched_content).await {
+    let after = match target.commit(&before, &patched_content).await {
         Ok(after) => after,
         Err(crate::tools::mutation::MutationCommitError::ConcurrentModification) => {
             return Ok(ok(
@@ -417,7 +426,10 @@ async fn apply_patch_impl(
 // ===== ユーティリティ関数群 =====
 
 /// パスの検証とアクセスチェック
-async fn validate_file_path_and_access(file_path: &str, config: &AppConfig) -> Result<()> {
+async fn validate_file_path_and_access(
+    file_path: &str,
+    config: &AppConfig,
+) -> Result<crate::tools::mutation::MutationTarget> {
     let path = Path::new(file_path);
 
     // 絶対パスチェック
@@ -428,7 +440,7 @@ async fn validate_file_path_and_access(file_path: &str, config: &AppConfig) -> R
     // プロジェクトルート内または許可されたパス内のチェック。
     // ルートとターゲットは同一の正規化契約で比較する。
     // 存在しないパスは信頼できる既存祖先で解決し、 traversal/escape は拒否する。
-    crate::tools::scope::ensure_in_project_scope(path, config).map_err(|e| {
+    crate::tools::mutation::MutationTarget::resolve(path, config, &[]).map_err(|e| {
         if path
             .components()
             .any(|comp| matches!(comp, Component::ParentDir))
@@ -443,9 +455,7 @@ async fn validate_file_path_and_access(file_path: &str, config: &AppConfig) -> R
                 file_path
             )
         }
-    })?;
-
-    Ok(())
+    })
 }
 
 /// ファイル存在と読み取り可能かの検証

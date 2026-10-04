@@ -2,12 +2,12 @@ use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::tools::mutation::{
     MutationExecution, MutationReceipt, MutationSnapshot, MutationTargetReceipt, build_receipt,
-    commit_text_candidate, mutation_changed, read_text_snapshot_async,
+    mutation_changed, read_text_snapshot_async,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const DESCRIPTION: &str = "Replaces a single, unique text block in a file. `target_block` must match EXACTLY and be UNIQUE in the file context. Use this for surgical edits.";
 
@@ -87,12 +87,8 @@ pub async fn edit_with_receipt(
     // Check if the path is within the project root or in allowed paths.
     // Roots and target share one canonical-path contract so symlink-alias
     // spellings (e.g. macOS `/var` vs `/private/var`) authorize correctly.
-    crate::tools::scope::ensure_in_project_scope(path, config).map_err(|e| {
-        anyhow::anyhow!(
-            "Access to files outside the project root is not allowed: {} ({e})",
-            file_path
-        )
-    })?;
+    let target = crate::tools::mutation::MutationTarget::resolve(path, config, &[])?;
+    let path = target.path();
 
     // 1. Exact before snapshot (rejects directories / binary like text tools).
     let before: MutationSnapshot = read_text_snapshot_async(path)
@@ -221,8 +217,7 @@ pub async fn edit_with_receipt(
     // A race reflects a changed world, not bad arguments: report it as an
     // unsuccessful result (no receipt, no undo, no provenance), the same
     // shape as `apply_patch`, so dispatch treats both tools alike.
-    let after = match commit_text_candidate(Path::new(&file_path), &before, &modified_content).await
-    {
+    let after = match target.commit(&before, &modified_content).await {
         Ok(after) => after,
         Err(crate::tools::mutation::MutationCommitError::ConcurrentModification) => {
             return Ok(MutationExecution {
@@ -245,7 +240,7 @@ pub async fn edit_with_receipt(
     };
     let receipt: MutationReceipt = build_receipt(
         crate::provenance::ChangeKind::TextEdit,
-        PathBuf::from(&file_path),
+        path.to_path_buf(),
         before,
         after,
         MutationTargetReceipt::File,

@@ -26,6 +26,7 @@ pub struct BackupEntry {
     pub path: PathBuf,
     pub before: UndoFileState,
     pub expected_after: crate::provenance::FileStateEvidence,
+    pub expected_path: PathBuf,
     pub change_id: Option<String>,
 }
 
@@ -159,7 +160,14 @@ pub async fn undo_with_attribution(
                 changed: false,
                 path: entry.path.to_string_lossy().to_string(),
                 message: format!("Undo failed to read current file state: {e}"),
-                conflict: false,
+                conflict: e
+                    .downcast_ref::<crate::tools::mutation::MutationCommitError>()
+                    .is_some_and(|error| {
+                        matches!(
+                            error,
+                            crate::tools::mutation::MutationCommitError::ConcurrentModification
+                        )
+                    }),
                 warnings: vec![],
                 change_id: None,
             });
@@ -167,7 +175,9 @@ pub async fn undo_with_attribution(
     };
 
     // Stale guard: current must still equal the state committed earlier.
-    if !evidence_matches(&current.0, &entry.expected_after) {
+    if current.1.resolved_path.as_ref() != Some(&entry.expected_path)
+        || !evidence_matches(&current.0, &entry.expected_after)
+    {
         tracing::warn!(
             file = %entry.path.display(),
             expected_hash = entry.expected_after.content_hash.as_deref().unwrap_or("missing"),
@@ -191,6 +201,21 @@ pub async fn undo_with_attribution(
     let (restore_receipt_before, restore_receipt_after) = match &entry.before {
         UndoFileState::Missing => {
             // Delete the created file. Fail closed on any error.
+            let latest = crate::tools::mutation::read_text_snapshot_async(&entry.path).await;
+            if !latest.as_ref().is_ok_and(|snapshot| {
+                snapshot.resolved_path.as_ref() == Some(&entry.expected_path)
+                    && snapshot.unchanged_for_commit(&before_snapshot)
+            }) {
+                return Ok(UndoResult {
+                    success: false,
+                    changed: false,
+                    path: entry.path.to_string_lossy().into_owned(),
+                    message: "Undo refused: destination changed before removal (conflict).".into(),
+                    conflict: true,
+                    warnings: vec![],
+                    change_id: None,
+                });
+            }
             if let Err(e) = tokio::fs::remove_file(&entry.path).await {
                 return Ok(UndoResult {
                     success: false,
@@ -311,7 +336,7 @@ async fn current_file_evidence(
 ) -> Result<(crate::provenance::FileStateEvidence, MutationSnapshot)> {
     let snap = crate::tools::mutation::read_text_snapshot_async(path)
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     Ok((snapshot_to_evidence(&snap), snap))
 }
 
@@ -328,6 +353,8 @@ fn after_to_snapshot(
     content: Option<String>,
 ) -> MutationSnapshot {
     MutationSnapshot {
+        resolved_path: None,
+        identity: None,
         exists: evidence.exists,
         content,
         content_hash: evidence.content_hash.clone(),

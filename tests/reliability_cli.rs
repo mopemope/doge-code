@@ -1117,3 +1117,68 @@ fn read_pagination_real_tool_loop_follows_cursor_through_final_marker() {
             .is_some_and(|text| text.contains("FINAL_READ_PAGINATION_MARKER"))
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn cli_symlink_edit_then_undo_preserves_alias_and_target() {
+    use std::os::unix::fs::symlink;
+    let project = Project::new(false);
+    let target = project.root.join("target.txt");
+    let alias = project.root.join("alias.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    symlink("target.txt", &alias).unwrap();
+    let observed_target = target.clone();
+    let observed_alias = alias.clone();
+    let server = Server::new(move |index, _request| match index {
+        1 => response(
+            "",
+            vec![call(
+                "edit-alias",
+                "edit",
+                json!({"file_path":observed_alias,"target_block":"original","new_block":"changed"}),
+            )],
+            "tool_calls",
+        ),
+        2 => {
+            assert_eq!(
+                std::fs::read_to_string(&observed_target).unwrap(),
+                "changed\n"
+            );
+            assert_eq!(
+                std::fs::read_link(&observed_alias).unwrap(),
+                PathBuf::from("target.txt")
+            );
+            response(
+                "",
+                vec![call("undo-alias", "undo", json!({}))],
+                "tool_calls",
+            )
+        }
+        3 => {
+            assert_eq!(
+                std::fs::read_to_string(&observed_target).unwrap(),
+                "original\n"
+            );
+            assert_eq!(
+                std::fs::read_link(&observed_alias).unwrap(),
+                PathBuf::from("target.txt")
+            );
+            response("alias undo verified", vec![], "stop")
+        }
+        _ => panic!("unexpected request {index}"),
+    });
+    let output = project.command(&server).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_json(&output)
+            .to_string()
+            .contains("alias undo verified")
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "original\n");
+    assert!(alias.is_symlink());
+}

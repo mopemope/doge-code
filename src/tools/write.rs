@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use crate::tools::mutation::{
     MutationExecution, MutationReceipt, MutationSnapshot, MutationTargetReceipt, build_receipt,
-    commit_text_candidate_blocking, mutation_changed, read_text_snapshot,
+    mutation_changed, read_text_snapshot,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -71,12 +71,8 @@ pub fn fs_write_with_receipt(
     // the temp extra scope stays explicit to this tool and is not
     // generalized to other file tools.
     let temp_dir = std::env::temp_dir();
-    crate::tools::scope::ensure_in_scope(p, config, &[temp_dir]).map_err(|e| {
-        anyhow::anyhow!(
-            "Access to files outside the project root is not allowed: {} ({e})",
-            path
-        )
-    })?;
+    let target = crate::tools::mutation::MutationTarget::resolve(p, config, &[temp_dir])?;
+    let p = target.path();
 
     // Exact before snapshot.
     let before: MutationSnapshot =
@@ -104,8 +100,9 @@ pub fn fs_write_with_receipt(
             .with_context(|| format!("create parent directories for {}", p.display()))?;
     }
 
-    let after =
-        commit_text_candidate_blocking(p, &before, content).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let after = target
+        .commit_blocking(&before, content)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let receipt: MutationReceipt = build_receipt(
         crate::provenance::ChangeKind::FileWrite,
         p.to_path_buf(),
