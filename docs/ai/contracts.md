@@ -14,6 +14,14 @@ commit helper, `MutationReceipt`, `finalize_mutation`, and regression tests
 (success / no-op / failure / race / undo / provenance). This prevents future
 tracking gaps.
 
+Mutation targets retain both the requested spelling and the authorized canonical
+path. Snapshot, commit, receipt and rollback use the canonical path. Revalidate
+the original spelling, authorized root, object identity and contents immediately
+before publication. Shared writers reject unresolved symlinks and non-regular
+files; new files use no-clobber publication. Rollback must compare its saved
+canonical path before restoring or deleting. These are optimistic checks, not
+filesystem compare-and-swap: final check-to-rename/unlink races remain possible.
+
 ## Job Lifecycle
 
 - Do not spawn new user-visible long-running TUI work directly with

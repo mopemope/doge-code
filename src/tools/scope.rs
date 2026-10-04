@@ -90,19 +90,27 @@ pub fn canonicalize_target(path: &Path) -> Option<PathBuf> {
     let mut remainder: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor: &Path = path;
     loop {
-        if ancestor.exists() {
+        if let Ok(metadata) = std::fs::symlink_metadata(ancestor) {
             // A remainder beneath a non-directory (e.g. `file.txt/../x`)
             // is unrepresentable (ENOTDIR): deny rather than lexically
             // collapsing through the file.
-            if !remainder.is_empty() && !ancestor.is_dir() {
+            if !remainder.is_empty() && !metadata.is_dir() && !metadata.file_type().is_symlink() {
                 return None;
             }
             let canonical_ancestor = ancestor.canonicalize().ok()?;
+            if !remainder.is_empty() && !canonical_ancestor.is_dir() {
+                return None;
+            }
             let mut joined = canonical_ancestor;
             for component in remainder.iter().rev() {
                 joined.push(component);
             }
             return Some(normalize_lexical(&joined));
+        }
+        if std::fs::symlink_metadata(ancestor)
+            .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+        {
+            return None;
         }
         let parent = ancestor.parent()?;
         if parent.as_os_str().is_empty() {
