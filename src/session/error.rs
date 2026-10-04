@@ -3,6 +3,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum SessionError {
     #[error(
+        "session JSON exceeds capacity limit {limit} bytes (detected at least {detected_at_least} bytes); previous checkpoint retained"
+    )]
+    CapacityExceeded { limit: u64, detected_at_least: u64 },
+    #[error(
         "Session {0} is already in use by another process; choose a different session or wait for its owner to exit"
     )]
     Busy(String),

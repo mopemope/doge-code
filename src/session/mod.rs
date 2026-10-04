@@ -4,6 +4,7 @@ pub mod error;
 pub mod format;
 mod lease;
 pub mod manager;
+pub(crate) mod recovery;
 pub mod store;
 #[cfg(test)]
 pub mod tests;

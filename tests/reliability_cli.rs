@@ -868,6 +868,10 @@ fn failed_checkpoint_preserves_existing_session_bytes_in_real_cli() {
         "old checkpoint bytes retained"
     );
     assert!(output_json(&output)["error"].as_str().is_some());
+    assert!(
+        !project.root.join(".doge/sessions/.recovery").exists(),
+        "ordinary filesystem failures must not trigger automatic recovery"
+    );
     assert_eq!(
         server.requests.lock().expect("requests").len(),
         1,
@@ -969,4 +973,83 @@ fn lease_independent_cli_processes_exclude_stale_writers_and_release_on_exit() {
         assert!(messages.iter().any(|m| m["content"] == "LEASE_SEED"));
         assert!(messages.iter().any(|m| m["content"] == prompt));
     }
+}
+
+#[test]
+fn capacity_exit_exports_complete_oversized_response_and_retains_checkpoint() {
+    let project = Project::new(false);
+    let response_body = format!("{}CAPACITY_END", "x".repeat(17 * 1024 * 1024));
+    let expected = response_body.clone();
+    let before_response = Arc::new(Mutex::new(None));
+    let captured_checkpoint = before_response.clone();
+    let fixture_store = project.root.join(".doge/sessions");
+    let server = Server::new(move |n, _| {
+        if n == 2 {
+            let path = std::fs::read_dir(&fixture_store)
+                .expect("store")
+                .map(|entry| entry.expect("entry").path().join("session.json"))
+                .find(|path| path.is_file())
+                .expect("checkpoint before response");
+            *captured_checkpoint.lock().expect("checkpoint") =
+                Some(std::fs::read(path).expect("bytes"));
+        }
+        response_with_usage(if n == 1 { "seed" } else { &response_body }, vec![], "stop")
+    });
+    let first = project.command(&server).output().expect("seed");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let store = project.root.join(".doge/sessions");
+    let checkpoint = std::fs::read_dir(&store)
+        .expect("sessions")
+        .map(|entry| entry.expect("entry").path().join("session.json"))
+        .find(|path| path.is_file())
+        .expect("checkpoint");
+
+    let resumed = project
+        .command_prompt(&server, "oversized response")
+        .arg("--resume=latest")
+        .output()
+        .expect("oversized run");
+    assert!(!resumed.status.success());
+    // The new prompt checkpoint is saved before inference. The failed final
+    // save must preserve those exact bytes, including that latest prompt.
+    assert_eq!(
+        std::fs::read(&checkpoint).expect("retained"),
+        before_response
+            .lock()
+            .expect("checkpoint")
+            .as_ref()
+            .expect("captured")
+            .clone()
+    );
+    let recoveries: Vec<_> = std::fs::read_dir(store.join(".recovery"))
+        .expect("recovery")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(recoveries.len(), 1);
+    let recovered: Value =
+        serde_json::from_slice(&std::fs::read(&recoveries[0]).expect("recovery bytes"))
+            .expect("envelope");
+    assert_eq!(recovered["version"], 1);
+    let session = &recovered["session"];
+    assert_eq!(recovered["source_session_id"], session["meta"]["id"]);
+    assert!(
+        session["conversation"]
+            .as_array()
+            .expect("conversation")
+            .iter()
+            .any(|message| message["content"].as_str() == Some(expected.as_str())),
+        "full final response including tail retained"
+    );
+    assert_eq!(session["usage"]["total_tokens"], 300);
+    let stderr = String::from_utf8_lossy(&resumed.stderr);
+    assert!(
+        stderr.contains(recoveries[0].to_str().expect("absolute path")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("capacity"), "{stderr}");
+    assert_eq!(server.requests.lock().expect("requests").len(), 2);
 }
