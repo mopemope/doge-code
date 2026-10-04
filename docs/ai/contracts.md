@@ -34,6 +34,13 @@ filesystem compare-and-swap: final check-to-rename/unlink races remain possible.
 Runtime hints are request-scoped context, not conversation state.
 Do not push recent-file/memory hints into durable HistoryManager messages.
 
+Each assistant tool-call batch has exactly one matching result per call before
+the next non-tool message. Queue non-tool interventions until the batch closes.
+Checkpoint real or skipped results individually; only the final interrupted
+batch may receive unknown results in its durable projection. Validate per batch,
+not by global ID lookup. Never reorder arbitrary user messages to repair legacy
+history; reject ambiguous blocks before inference or new directive persistence.
+
 ## Context Budget / Observation Safety
 
 Preflight context reductions must preserve unseen tool results.

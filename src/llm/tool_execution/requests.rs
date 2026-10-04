@@ -41,6 +41,7 @@ pub async fn chat_tools_once(
     cancel: Option<tokio_util::sync::CancellationToken>,
     ui_tx: Option<Sender<String>>,
 ) -> Result<ChoiceMessageWithTools> {
+    crate::llm::history::validate_tool_blocks(messages, false)?;
     if let Some(auth) = &client.subscription {
         let effort = crate::llm::reasoning::resolve_reasoning_hint(
             &client.base_url,

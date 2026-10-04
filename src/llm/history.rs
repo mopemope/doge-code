@@ -121,6 +121,76 @@ pub fn durable_conversation_messages(
         .collect()
 }
 
+/// Validate each assistant invocation and its contiguous tool-result block.
+/// IDs are local to a batch: reuse in a later complete invocation is allowed.
+/// Only a final interrupted block may lack results in the durable projection.
+pub(crate) fn validate_tool_blocks(
+    messages: &[ChatMessage],
+    allow_pending_tail: bool,
+) -> anyhow::Result<Vec<String>> {
+    use std::collections::BTreeSet;
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        anyhow::ensure!(
+            message.role != "tool",
+            "invalid history: orphan tool result at message {index}"
+        );
+        if message.tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        anyhow::ensure!(
+            message.role == "assistant",
+            "invalid history: tool calls outside assistant at message {index}"
+        );
+        let mut pending = BTreeSet::new();
+        for call in &message.tool_calls {
+            let id = call
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("invalid history: missing tool-call ID at message {index}")
+                })?;
+            anyhow::ensure!(
+                pending.insert(id),
+                "invalid history: duplicate tool-call ID at message {index}"
+            );
+        }
+        index += 1;
+        while index < messages.len() && messages[index].role == "tool" {
+            let result = &messages[index];
+            anyhow::ensure!(
+                result.tool_calls.is_empty(),
+                "invalid history: tool result contains calls at message {index}"
+            );
+            let id = result.tool_call_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("invalid history: missing result ID at message {index}")
+            })?;
+            anyhow::ensure!(
+                pending.remove(id),
+                "invalid history: duplicate or mismatched result ID at message {index}"
+            );
+            index += 1;
+        }
+        if !pending.is_empty() {
+            anyhow::ensure!(
+                allow_pending_tail && index == messages.len(),
+                "invalid history: incomplete tool-result block before message {index}; original session retained, inspect it before retrying"
+            );
+            return Ok(message
+                .tool_calls
+                .iter()
+                .filter_map(|call| call.id.as_ref())
+                .filter(|id| pending.contains(id.as_str()))
+                .cloned()
+                .collect());
+        }
+    }
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +220,62 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: Some(id.into()),
         }
+    }
+
+    #[test]
+    fn tool_blocks_reject_interleaving_and_ambiguous_ids_without_reordering() {
+        let invocation = tool_call_msg("a");
+        let user = ChatMessage {
+            role: "user".into(),
+            content: Some("user instruction".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_state: None,
+        };
+        for bad in [
+            vec![
+                invocation.clone(),
+                user.clone(),
+                tool_result_msg("a", "real".into()),
+            ],
+            vec![invocation.clone(), tool_result_msg("b", "wrong".into())],
+            vec![
+                invocation.clone(),
+                tool_result_msg("a", "real".into()),
+                tool_result_msg("a", "duplicate".into()),
+            ],
+            vec![tool_result_msg("a", "orphan".into())],
+        ] {
+            let before = serde_json::to_value(&bad).unwrap();
+            assert!(validate_tool_blocks(&bad, false).is_err());
+            assert!(validate_tool_blocks(&bad, true).is_err());
+            assert_eq!(serde_json::to_value(&bad).unwrap(), before);
+        }
+        let mut duplicate = invocation.clone();
+        duplicate.tool_calls.push(duplicate.tool_calls[0].clone());
+        assert!(validate_tool_blocks(&[duplicate], true).is_err());
+        let mut missing = invocation.clone();
+        missing.tool_calls[0].id = None;
+        assert!(validate_tool_blocks(&[missing], true).is_err());
+        let mut opaque = invocation.clone();
+        opaque.provider_state = Some(crate::features::openai_subscription::ProviderState {
+            version: 1,
+            account: "fixture".into(),
+            model: "mock".into(),
+            output: vec![serde_json::json!({"encrypted_content":"opaque"})],
+        });
+        let valid = vec![
+            opaque,
+            tool_result_msg("a", "first".into()),
+            user,
+            invocation.clone(),
+            tool_result_msg("a", "second".into()),
+        ];
+        assert!(validate_tool_blocks(&valid, false).is_ok());
+        assert_eq!(
+            validate_tool_blocks(&[invocation], true).unwrap(),
+            vec!["a"]
+        );
     }
 
     /// P0 regression: the durable conversation buffer must never split a

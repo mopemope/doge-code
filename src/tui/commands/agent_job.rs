@@ -198,6 +198,11 @@ pub(crate) fn spawn_agent_turn(
         tool_call_id: None,
     });
 
+    if let Err(error) = crate::llm::validate_tool_blocks(&msgs, false) {
+        ui.push_log(format!("[ERROR] {error}"));
+        return Err(JobStartError::ShuttingDown);
+    }
+
     let spec = JobSpec::new(
         JobKind::AgentTurn,
         JobScope::Foreground,
