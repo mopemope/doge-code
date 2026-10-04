@@ -242,6 +242,7 @@ impl Executor {
         // Build this turn's request from the durable snapshot. The outer
         // history stays untouched until the canonical result commits.
         let msgs = self.build_request_messages(instruction).await;
+        crate::llm::validate_tool_blocks(&msgs, false)?;
 
         // Missing client means the agent never starts: record no directive
         // (matches TUI busy/missing-key semantics).

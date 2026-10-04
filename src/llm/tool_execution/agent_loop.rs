@@ -110,6 +110,7 @@ fn block_plan_write_call(
     fs: &FsTools,
     ui_tx: &Option<std::sync::mpsc::Sender<String>>,
     history: &mut crate::llm::tool_execution::history::HistoryManager,
+    pending_interventions: &mut Vec<ChatMessage>,
     task_sentinel: &mut crate::analysis::TaskSentinel,
     loop_detected: &mut bool,
     reason: PlanWriteBlockReason,
@@ -135,7 +136,7 @@ fn block_plan_write_call(
     let blocked = build_plan_write_blocked_value(reason, count);
     let blocked_content = truncate_tool_output(blocked.to_string(), PLAN_WRITE_TOOL_NAME);
     history.push_tool_result(tc.id.clone(), blocked_content);
-    history.push(ChatMessage {
+    pending_interventions.push(ChatMessage {
         provider_state: None,
         role: "system".into(),
         content: Some(plan_write_block_system_message(reason).to_string()),
@@ -248,6 +249,7 @@ pub async fn run_agent_loop(
     attribution: crate::provenance::ProvenanceAttribution,
 ) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
     debug!("run_agent_loop called");
+    crate::llm::history::validate_tool_blocks(&messages, false)?;
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
         let binding = match client.account_label() {
             Some(account) => format!("openai-chatgpt:{account}:{model}"),
@@ -968,6 +970,7 @@ pub async fn run_agent_loop(
         // durable unknown outcomes and are never silently replayed.
         history.checkpoint()?;
 
+        let mut pending_interventions = Vec::new();
         let mut loop_detected = false;
         let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
         let mut batch_stall_detected = false;
@@ -979,6 +982,7 @@ pub async fn run_agent_loop(
                     tc.id.clone(),
                     "{\"error\":\"Loop detected in current tool batch. Execution skipped to allow for immediate reassessment.\"}".to_string(),
                 );
+                history.checkpoint()?;
                 continue;
             }
 
@@ -995,11 +999,13 @@ pub async fn run_agent_loop(
                         fs,
                         &ui_tx,
                         &mut history,
+                        &mut pending_interventions,
                         &mut task_sentinel,
                         &mut loop_detected,
                         PlanWriteBlockReason::RepeatedUnchanged,
                         consecutive_plan_write_no_change_count,
                     );
+                    history.checkpoint()?;
                     batch_observations.push(crate::llm::reasoning::ToolObservation::new(
                         PLAN_WRITE_TOOL_NAME,
                         false,
@@ -1023,11 +1029,13 @@ pub async fn run_agent_loop(
                         fs,
                         &ui_tx,
                         &mut history,
+                        &mut pending_interventions,
                         &mut task_sentinel,
                         &mut loop_detected,
                         PlanWriteBlockReason::RepeatedIdenticalArgs,
                         repeated_plan_write_count,
                     );
+                    history.checkpoint()?;
                     batch_observations.push(crate::llm::reasoning::ToolObservation::new(
                         PLAN_WRITE_TOOL_NAME,
                         false,
@@ -1403,7 +1411,7 @@ File modification detected. You MUST now verify your changes:
                     let _ = tx.send("::status:warning:Loop detected. Intervening...".to_string());
                 }
 
-                history.push(ChatMessage {
+                pending_interventions.push(ChatMessage {
                     provider_state: None,
                     role: "system".into(), // Escalated to system role
                     content: Some(warning_msg),
@@ -1436,7 +1444,7 @@ File modification detected. You MUST now verify your changes:
                     let _ =
                         tx.send("::status:warning:Progress stalled. Intervening...".to_string());
                 }
-                history.push(ChatMessage {
+                pending_interventions.push(ChatMessage {
                     provider_state: None,
                     role: "user".into(),
                     content: Some(stall_warning),
@@ -1457,7 +1465,7 @@ File modification detected. You MUST now verify your changes:
                 };
 
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
-                    history.push(ChatMessage {
+                    pending_interventions.push(ChatMessage {
                         provider_state: None,
                         role: "user".into(),
                         content: Some(hint.to_string()),
@@ -1466,6 +1474,9 @@ File modification detected. You MUST now verify your changes:
                     });
                 }
             }
+        }
+        for intervention in pending_interventions {
+            history.push(intervention);
         }
         history.checkpoint()?;
         // Aggregate the finished batch once (order-independent): the heaviest

@@ -102,18 +102,7 @@ impl HistoryManager {
         // persist. Provider state, assistant function calls, function call
         // outputs, and unseen-result protection are preserved untouched.
         let mut messages = crate::llm::durable_conversation_messages(persisted);
-        let answered: BTreeSet<_> = messages
-            .iter()
-            .filter(|m| m.role == "tool")
-            .filter_map(|m| m.tool_call_id.clone())
-            .collect();
-        let interrupted: Vec<_> = messages
-            .iter()
-            .flat_map(|m| &m.tool_calls)
-            .filter_map(|call| call.id.as_ref())
-            .filter(|id| !answered.contains(*id))
-            .cloned()
-            .collect();
+        let interrupted = crate::llm::history::validate_tool_blocks(&messages, true)?;
         for id in interrupted {
             // The process may have stopped during a batch. Never claim that an
             // unfinished call ran or automatically replay its possible side effect.
@@ -2532,6 +2521,54 @@ mod tests {
                 serde_json::json!({"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}),
             )
             .expect("usage"),
+        );
+    }
+
+    #[test]
+    fn checkpoint_closes_only_pending_tail_even_when_id_reused_in_previous_batch() {
+        let (_root, manager, _client, mut history) = usage_history_fixture();
+        history.push(make_assistant_with_tool_calls("same", "first invocation"));
+        history.push_tool_result(Some("same".into()), "first real result".into());
+        history.push(make_msg("user", "next"));
+        let mut pending = make_assistant_with_tool_calls("same", "second invocation");
+        pending.provider_state = Some(crate::features::openai_subscription::ProviderState {
+            version: 1,
+            account: "fixture".into(),
+            model: "mock".into(),
+            output: vec![serde_json::json!({"encrypted_content":"opaque"})],
+        });
+        history.push(pending.clone());
+        history.checkpoint().unwrap();
+        let saved = manager.lock().unwrap().current_session.clone().unwrap();
+        let messages = saved.conversation_messages().unwrap();
+        // In-memory history remains incomplete; only durable projection gets unknown.
+        assert_eq!(history.as_slice().last().unwrap().role, "assistant");
+        assert_eq!(
+            messages.last().unwrap().tool_call_id.as_deref(),
+            Some("same")
+        );
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("outcome unknown")
+        );
+        assert!(crate::llm::history::validate_tool_blocks(&messages, false).is_ok());
+        assert!(saved.unseen_tool_results.contains("same"));
+        assert_eq!(
+            serde_json::to_value(&messages[messages.len() - 2].provider_state).unwrap(),
+            serde_json::to_value(&pending.provider_state).unwrap()
+        );
+        history.push_tool_result(Some("same".into()), "second real result".into());
+        history.checkpoint().unwrap();
+        let saved = manager.lock().unwrap().current_session.clone().unwrap();
+        assert!(
+            !serde_json::to_string(&saved.conversation)
+                .unwrap()
+                .contains("outcome unknown")
         );
     }
 
