@@ -125,6 +125,13 @@ struct ChatRequestRef<'a> {
 ///
 /// A result containing the compacted message or an error
 pub async fn compact_conversation_history(params: CompactParams) -> Result<CompactResult> {
+    compact_conversation_history_cancellable(params, None).await
+}
+
+pub async fn compact_conversation_history_cancellable(
+    params: CompactParams,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Result<CompactResult> {
     let CompactParams {
         client,
         model,
@@ -149,11 +156,11 @@ pub async fn compact_conversation_history(params: CompactParams) -> Result<Compa
 
     // Send the summarization request to the LLM using run_agent_loop
     // Send the summarization request to the LLM using chat_once (no tool usage needed/allowed for compaction)
-    match client.chat_once(&model, msgs, None).await {
+    match client.chat_once(&model, msgs, cancel).await {
         Ok(final_msg) => {
             // Extract the summary from the final message
             let summary = final_msg.content;
-            if !summary.is_empty() {
+            if !summary.trim().is_empty() {
                 // Create a new compacted message with the summary
                 let compacted_message = llm::types::ChatMessage {
                     provider_state: None,
@@ -232,7 +239,7 @@ pub async fn compact_conversation_history_ref(
     match client.chat_once_request(&req, None).await {
         Ok(final_msg) => {
             let summary = final_msg.content;
-            if !summary.is_empty() {
+            if !summary.trim().is_empty() {
                 Ok(CompactResult {
                     compacted_message: ChatMessage {
                         provider_state: None,

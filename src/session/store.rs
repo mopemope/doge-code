@@ -18,10 +18,22 @@ fn validate_id(id: &str) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// A replacement is irreversible even when its directory fsync fails.
+/// Legacy `save` still returns an error; manual transactions need this distinction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionSaveOutcome {
+    Durable,
+    DurabilityUnconfirmed { message: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     pub(crate) root: PathBuf,
     read_only: bool,
+    #[cfg(test)]
+    pub(crate) fail_directory_sync: bool,
+    #[cfg(test)]
+    pub(crate) before_sync_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
 }
 
 impl SessionStore {
@@ -35,6 +47,10 @@ impl SessionStore {
         Ok(Self {
             root: base,
             read_only: false,
+            #[cfg(test)]
+            fail_directory_sync: false,
+            #[cfg(test)]
+            before_sync_barrier: None,
         })
     }
 
@@ -49,6 +65,10 @@ impl SessionStore {
         Ok(Self {
             root,
             read_only: false,
+            #[cfg(test)]
+            fail_directory_sync: false,
+            #[cfg(test)]
+            before_sync_barrier: None,
         })
     }
 
@@ -82,6 +102,10 @@ impl SessionStore {
         Ok(Self {
             root,
             read_only: true,
+            #[cfg(test)]
+            fail_directory_sync: false,
+            #[cfg(test)]
+            before_sync_barrier: None,
         })
     }
 
@@ -246,6 +270,18 @@ impl SessionStore {
     /// Save the session data.
     /// Automatically cleans up old sessions if the limit is exceeded.
     pub fn save(&self, data: &SessionData) -> Result<(), SessionError> {
+        match self.save_with_outcome(data)? {
+            SessionSaveOutcome::Durable => Ok(()),
+            SessionSaveOutcome::DurabilityUnconfirmed { message } => {
+                Err(SessionError::WriteError(std::io::Error::other(message)))
+            }
+        }
+    }
+
+    pub(crate) fn save_with_outcome(
+        &self,
+        data: &SessionData,
+    ) -> Result<SessionSaveOutcome, SessionError> {
         self.ensure_writable()?;
         validate_id(&data.meta.id)?;
         let json_data = serde_json::to_string_pretty(data)?;
@@ -296,19 +332,31 @@ impl SessionStore {
         candidate
             .persist(&session_file)
             .map_err(|e| SessionError::WriteError(e.error))?;
+        #[cfg(test)]
+        if let Some(barrier) = &self.before_sync_barrier {
+            barrier.wait();
+            barrier.wait();
+        }
         #[cfg(unix)]
-        fs::File::open(&dir)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| {
-                SessionError::WriteError(std::io::Error::other(format!(
-                    "session replaced, but directory sync failed: {e}"
-                )))
-            })?;
+        let sync_result = fs::File::open(&dir).and_then(|file| file.sync_all());
+        #[cfg(not(unix))]
+        let sync_result: std::io::Result<()> = Ok(());
+        #[cfg(test)]
+        let sync_result = if self.fail_directory_sync {
+            Err(std::io::Error::other("injected directory sync failure"))
+        } else {
+            sync_result
+        };
+        if let Err(error) = sync_result {
+            return Ok(SessionSaveOutcome::DurabilityUnconfirmed {
+                message: format!("session replaced, but directory sync failed: {error}"),
+            });
+        }
         if let Err(error) = cleanup_old_sessions(self, Some(&data.meta.id)) {
             tracing::warn!(%error, "session checkpoint saved; retention cleanup skipped");
         }
 
-        Ok(())
+        Ok(SessionSaveOutcome::Durable)
     }
 
     /// Delete session data by specifying the session ID.

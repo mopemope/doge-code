@@ -1,10 +1,10 @@
+use crate::llm::OpenAIClient;
 use crate::llm::observation::{
     MIN_OBSERVABLE_TOOL_CHARS, OBSERVATION_READ_TOOL_NAME, OBSERVATION_STUB_PREFIX,
     ObservationFootprint, ObservationGcReport, ObservationStore, SharedObservationStore,
     fallback_stub, is_observation_stub, new_shared_store, observation_stub, stub_observation_id,
 };
 use crate::llm::types::ChatMessage;
-use crate::llm::{OpenAIClient, compact_conversation_history};
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::{error, info, warn};
@@ -19,6 +19,7 @@ pub struct HistoryManager {
     unseen_tool_results: BTreeSet<String>,
     usage_checkpoint: std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>,
     expected_session_id: Option<String>,
+    checkpoints_enabled: bool,
 }
 
 /// Structured compaction report: overall reclaimed bytes plus how much is
@@ -71,6 +72,7 @@ impl HistoryManager {
         let usage_checkpoint = std::sync::Mutex::new(client.usage_snapshot());
         Self {
             usage_checkpoint,
+            checkpoints_enabled: true,
             expected_session_id,
             messages,
             client,
@@ -85,7 +87,7 @@ impl HistoryManager {
     /// Save canonical tool history for every provider before the next operation.
     /// Failed/cancelled turns retain pending results instead of reverting to old UI history.
     pub fn checkpoint(&self) -> Result<()> {
-        if self.messages.is_empty() {
+        if !self.checkpoints_enabled || self.messages.is_empty() {
             return Ok(());
         }
         let Some(manager) = self
@@ -161,6 +163,7 @@ impl HistoryManager {
         let usage_checkpoint = std::sync::Mutex::new(client.usage_snapshot());
         let mut this = Self {
             usage_checkpoint,
+            checkpoints_enabled: true,
             expected_session_id,
             messages,
             client,
@@ -172,6 +175,13 @@ impl HistoryManager {
         };
         this.reconcile_observations_after_restore("with_observations");
         this
+    }
+
+    /// Explicitly detached candidates must never checkpoint, including on Drop.
+    /// Agent histories retain their default memory-first checkpoint contract.
+    pub fn without_checkpoints(mut self) -> Self {
+        self.checkpoints_enabled = false;
+        self
     }
 
     /// Add a message to the history
@@ -963,7 +973,26 @@ impl HistoryManager {
         self.perform_compaction().await
     }
 
+    /// Manual compaction builds a detached candidate without saving checkpoints
+    /// or accounting usage. Automatic callers retain their existing behavior.
+    pub async fn compact_manually(
+        &mut self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<bool> {
+        if self.messages.len() <= 2 || self.messages.iter().all(|m| m.role == "system") {
+            return Ok(false);
+        }
+        self.perform_compaction_cancellable(Some(cancel)).await
+    }
+
     async fn perform_compaction(&mut self) -> Result<bool> {
+        self.perform_compaction_cancellable(None).await
+    }
+
+    async fn perform_compaction_cancellable(
+        &mut self,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<bool> {
         let before_bytes = self.messages_json_bytes();
         let unseen = self.unseen_count();
         let protect_start = self.protected_suffix_start_for_unseen();
@@ -1017,7 +1046,9 @@ impl HistoryManager {
             cfg: self.config.clone(),
         };
 
-        match compact_conversation_history(params).await {
+        match crate::llm::compact_history::compact_conversation_history_cancellable(params, cancel)
+            .await
+        {
             Ok(compact_result) => {
                 if compact_result.metadata.success {
                     let after_prefix = match protect_start {
@@ -2570,6 +2601,44 @@ mod tests {
                 .expect("session")
                 .token_count,
             150
+        );
+    }
+
+    #[test]
+    fn agent_drop_still_checkpoints_complete_payload_and_usage() {
+        let (_root, manager, client, mut history) = usage_history_fixture();
+        history.push(make_msg("assistant", "drop checkpoint payload"));
+        report_fixture_usage(&client);
+        drop(history);
+        let saved = manager
+            .lock()
+            .expect("lock")
+            .current_session
+            .clone()
+            .expect("session");
+        assert_eq!(saved.token_count, 150);
+        assert_eq!(saved.requests, 1);
+        assert_eq!(
+            saved
+                .conversation_messages()
+                .expect("decode")
+                .last()
+                .expect("last")
+                .content
+                .as_deref(),
+            Some("drop checkpoint payload")
+        );
+        assert_eq!(
+            serde_json::to_value(
+                manager
+                    .lock()
+                    .expect("lock")
+                    .store
+                    .load(&saved.meta.id)
+                    .expect("disk")
+            )
+            .expect("encode"),
+            serde_json::to_value(saved).expect("encode")
         );
     }
 

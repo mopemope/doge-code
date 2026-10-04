@@ -642,6 +642,27 @@ currently executing or recently finished. They are different lists: a busy
 foreground job is rejected explicitly (use `/jobs` to inspect it or
 `/cancel` to stop it) and is never auto-queued into `/stack`.
 
+`/jobs` and `/cancel [job-id]` submitted with Enter are handled immediately,
+even while a job is running; Esc also cancels the current foreground job.
+Other prompts keep their existing queue order. `/compact` is a foreground
+`compact` job visible in `/jobs`, cancellable with `/cancel` or Esc, and drained
+on shutdown. While it owns the session, another foreground job, session switch,
+or `/clear` is rejected. It summarizes only a safe history prefix and preserves
+unseen tool-call batches and recoverable observations; when no safe prefix exists,
+it leaves the conversation unchanged without contacting the provider.
+
+Manual compaction checks that the starting session and history are still current
+before saving, and adopts the summary only after the save succeeds. Provider,
+validation, and pre-commit save failures retain the original conversation and are
+reported as failed jobs, without a success notice. Cancellation before commit
+leaves history unchanged; cancellation after a saved summary does not undo it.
+If replacement succeeds but directory sync fails, disk and memory both adopt
+the summary and a warning reports that crash durability is unconfirmed; this
+produces neither a normal success notice nor a claim that history was unchanged.
+Shutdown waits for an already-started synchronous commit to finish before
+terminalizing that job. Manual compaction remains outside session agent-turn
+usage totals.
+
 ## 🔍 search_repomap Cheat Sheet
 
 - `result_density`: Default `"compact"` returns no snippets and compresses to 5 symbols per file. Switch to `"full"` only for files where you need details to save context.
