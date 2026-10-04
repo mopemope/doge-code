@@ -152,12 +152,17 @@ impl SessionManager {
     /// Clear the current session's conversation plus the conversation-owned
     /// Observation Store and unseen tool results. Session identity, metrics,
     /// and provenance flags are preserved.
-    pub fn clear_current_session_conversation(&mut self) -> Result<()> {
-        if let Some(ref mut session) = self.current_session {
-            session.clear_conversation_context();
-            self.store.save(session)?;
-        }
-        Ok(())
+    pub(crate) fn clear_current_session_conversation(
+        &mut self,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        let Some(current) = self.current_session.as_ref() else {
+            return Ok(crate::session::store::SessionSaveOutcome::Durable);
+        };
+        let mut candidate = current.clone();
+        candidate.clear_conversation_context();
+        let outcome = self.store.save_with_outcome(&candidate)?;
+        self.current_session = Some(candidate);
+        Ok(outcome)
     }
 
     pub fn bind_inference(&mut self, binding: String) -> Result<()> {

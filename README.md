@@ -560,6 +560,15 @@ safe retention inventory fails, the checkpoint succeeds with a warning and no
 sessions are removed. Keep the store in a trusted directory: there is no cross-process
 writer lock or guarantee against concurrent adversarial directory replacement.
 
+TUI startup resolves `--resume` before creating a session, so retention cannot
+remove the requested target during startup. Deleting the active session clears
+its runtime conversation and retry inputs; the next prompt starts a fresh session.
+Deleting another session leaves the active conversation intact. `/session clear`
+keeps the session identity and metrics: a failure before checkpoint replacement
+preserves the live conversation, observations and unseen results. After replacement,
+a directory-sync warning adopts the cleared checkpoint in memory and reports the
+unconfirmed durability.
+
 While a foreground job owns the session, TUI session creation, switching, deletion,
 resume and clearing wait for the job to release it, including its final checkpoint.
 A final save failure marks the job failed and keeps the updated in-memory history

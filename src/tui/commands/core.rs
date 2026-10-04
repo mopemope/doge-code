@@ -138,7 +138,7 @@ impl TuiExecutor {
         }
     }
 
-    fn send_plan_items_to_ui(&self, items: &[plan::PlanItem]) {
+    pub(super) fn send_plan_items_to_ui(&self, items: &[plan::PlanItem]) {
         if let Some(tx) = &self.ui_tx {
             // Send as JSON object with items
             let payload = serde_json::json!({
