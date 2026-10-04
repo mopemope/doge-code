@@ -6,6 +6,21 @@ use tracing::{debug, error as tracing_error};
 pub struct SessionManager {
     pub store: SessionStore,
     pub current_session: Option<SessionData>,
+    pub(crate) save_state: SessionSaveState,
+}
+
+/// Process-local state only; never added to the session wire format.
+#[derive(Debug, Default)]
+pub(crate) enum SessionSaveState {
+    #[default]
+    Durable,
+    Unsaved {
+        session_id: String,
+    },
+    DurabilityUnconfirmed {
+        session_id: String,
+        message: String,
+    },
 }
 
 impl SessionManager {
@@ -15,6 +30,7 @@ impl SessionManager {
         Ok(Self {
             store,
             current_session: None,
+            save_state: SessionSaveState::Durable,
         })
     }
 
@@ -23,12 +39,85 @@ impl SessionManager {
         Self {
             store,
             current_session: None,
+            save_state: SessionSaveState::Durable,
+        }
+    }
+
+    pub fn has_unsaved_current_session(&self) -> bool {
+        matches!(&self.save_state, SessionSaveState::Unsaved { session_id }
+            if self.current_session_id().as_deref() == Some(session_id.as_str()))
+    }
+
+    pub(crate) fn checkpoint_warning(&self) -> Option<&str> {
+        match &self.save_state {
+            SessionSaveState::DurabilityUnconfirmed {
+                session_id,
+                message,
+            } if self.current_session_id().as_deref() == Some(session_id.as_str()) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// Re-save the complete payload already in memory, without applying usage again.
+    pub(crate) fn flush_current_session(
+        &mut self,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        use crate::session::store::SessionSaveOutcome;
+        let Some(session) = self.current_session.as_ref() else {
+            self.save_state = SessionSaveState::Durable;
+            return Ok(SessionSaveOutcome::Durable);
+        };
+        let id = session.meta.id.clone();
+        self.save_state = SessionSaveState::Unsaved {
+            session_id: id.clone(),
+        };
+        anyhow::ensure!(
+            self.store
+                .session_dir(&id)
+                .join("session.json")
+                .try_exists()?,
+            "session checkpoint was deleted; refusing to recreate it during flush"
+        );
+        let outcome = self.store.save_with_outcome(session)?;
+        self.adopt_save_outcome(&id, &outcome);
+        Ok(outcome)
+    }
+
+    fn adopt_save_outcome(
+        &mut self,
+        id: &str,
+        outcome: &crate::session::store::SessionSaveOutcome,
+    ) {
+        self.save_state = match outcome {
+            crate::session::store::SessionSaveOutcome::Durable => SessionSaveState::Durable,
+            crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } => {
+                tracing::warn!(%message, "session checkpoint replaced; durability unconfirmed");
+                SessionSaveState::DurabilityUnconfirmed {
+                    session_id: id.into(),
+                    message: message.clone(),
+                }
+            }
+        };
+    }
+
+    fn save_current_session(&mut self) -> Result<()> {
+        self.flush_current_session().map(|_| ())
+    }
+
+    pub(crate) fn flush_before_transition(
+        &mut self,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        if self.has_unsaved_current_session() {
+            self.flush_current_session()
+        } else {
+            Ok(crate::session::store::SessionSaveOutcome::Durable)
         }
     }
 
     /// Create a new session with an optional initial prompt.
     /// If `initial_prompt` is provided the session title will be set and persisted.
     pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
+        self.flush_before_transition()?;
         let mut session = self.store.create()?;
 
         if let Some(prompt) = initial_prompt {
@@ -46,13 +135,16 @@ impl SessionManager {
         }
 
         self.current_session = Some(session);
+        self.save_state = SessionSaveState::Durable;
         Ok(())
     }
 
     /// Load a session by ID
     pub fn load_session(&mut self, id: &str) -> Result<()> {
+        self.flush_before_transition()?;
         let session = self.store.load(id)?;
         self.current_session = Some(session);
+        self.save_state = SessionSaveState::Durable;
         Ok(())
     }
 
@@ -73,9 +165,11 @@ impl SessionManager {
         &mut self,
         id: &str,
     ) -> Result<(SessionData, Vec<crate::llm::types::ChatMessage>)> {
+        self.flush_before_transition()?;
         let session = self.peek_session(id)?;
         let messages = session.conversation_messages()?;
         self.current_session = Some(session.clone());
+        self.save_state = SessionSaveState::Durable;
         Ok((session, messages))
     }
 
@@ -87,6 +181,7 @@ impl SessionManager {
         &mut self,
         exclude_id: Option<&str>,
     ) -> Result<Option<(SessionData, Vec<crate::llm::types::ChatMessage>)>> {
+        self.flush_before_transition()?;
         let summaries = self.store.list_with_stats()?;
         let target = summaries
             .iter()
@@ -98,6 +193,7 @@ impl SessionManager {
                 let session = self.store.load(&id)?;
                 let messages = session.conversation_messages()?;
                 self.current_session = Some(session.clone());
+                self.save_state = SessionSaveState::Durable;
                 Ok(Some((session, messages)))
             }
             None => Ok(None),
@@ -111,8 +207,10 @@ impl SessionManager {
 
     /// Load the latest session
     pub fn load_latest_session(&mut self) -> Result<()> {
+        self.flush_before_transition()?;
         if let Some(session) = self.store.get_latest()? {
             self.current_session = Some(session);
+            self.save_state = SessionSaveState::Durable;
         }
         Ok(())
     }
@@ -122,6 +220,7 @@ impl SessionManager {
     ///
     /// Returns whether a session was loaded.
     pub fn load_latest_session_excluding(&mut self, exclude_id: Option<&str>) -> Result<bool> {
+        self.flush_before_transition()?;
         let summaries = self.store.list_with_stats()?;
         let target = summaries
             .iter()
@@ -145,6 +244,7 @@ impl SessionManager {
             && current.meta.id == id
         {
             self.current_session = None;
+            self.save_state = SessionSaveState::Durable;
         }
         Ok(())
     }
@@ -161,7 +261,9 @@ impl SessionManager {
         let mut candidate = current.clone();
         candidate.clear_conversation_context();
         let outcome = self.store.save_with_outcome(&candidate)?;
+        let id = candidate.meta.id.clone();
         self.current_session = Some(candidate);
+        self.adopt_save_outcome(&id, &outcome);
         Ok(outcome)
     }
 
@@ -174,7 +276,7 @@ impl SessionManager {
                 );
             } else {
                 session.inference_binding = Some(binding);
-                self.store.save(session)?;
+                self.save_current_session()?;
             }
         }
         Ok(())
@@ -270,10 +372,7 @@ impl SessionManager {
             // Called only after history encoding and usage application succeed.
             // Disk failure leaves this complete payload in memory for retry.
             usage_applied();
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -304,7 +403,9 @@ impl SessionManager {
         candidate.unseen_tool_results = unseen;
         candidate.timestamp = chrono::Utc::now().to_rfc3339();
         let outcome = self.store.save_with_outcome(&candidate)?;
+        let id = candidate.meta.id.clone();
         self.current_session = Some(candidate);
+        self.adopt_save_outcome(&id, &outcome);
         Ok(outcome)
     }
 
@@ -317,10 +418,7 @@ impl SessionManager {
         if let Some(ref mut session) = self.current_session {
             session.observations = observations;
             session.unseen_tool_results = unseen;
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session observations");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -341,10 +439,7 @@ impl SessionManager {
     pub fn update_current_session_with_token_count(&mut self, token_count: u64) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.increment_token_count(token_count);
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -353,10 +448,7 @@ impl SessionManager {
     pub fn update_current_session_with_request_count(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.increment_requests();
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -365,10 +457,7 @@ impl SessionManager {
     pub fn update_current_session_with_tool_call_count(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.increment_tool_calls();
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -377,10 +466,7 @@ impl SessionManager {
     pub fn record_tool_call_success(&mut self, tool_name: &str) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.record_tool_call_success(tool_name);
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -389,10 +475,7 @@ impl SessionManager {
     pub fn record_tool_call_failure(&mut self, tool_name: &str) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.record_tool_call_failure(tool_name);
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -401,10 +484,7 @@ impl SessionManager {
     pub fn set_initial_prompt_for_current_session(&mut self, prompt: &str) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.set_initial_prompt(prompt);
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -416,10 +496,7 @@ impl SessionManager {
     ) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.add_changed_file(path);
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(?e, "Failed to save session data after adding changed file");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -450,13 +527,7 @@ impl SessionManager {
     pub fn clear_changed_files_from_current_session(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.clear_changed_files();
-            if let Err(e) = self.store.save(session) {
-                tracing_error!(
-                    ?e,
-                    "Failed to save session data after clearing changed files"
-                );
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -464,8 +535,13 @@ impl SessionManager {
     /// Get current session info
     pub fn current_session_info(&self) -> Option<String> {
         self.current_session.as_ref().map(|session| {
+            let checkpoint = if self.has_unsaved_current_session() { "unsaved; retry /session save".to_string() }
+                else if let SessionSaveState::DurabilityUnconfirmed { session_id, message } = &self.save_state {
+                    if session_id == &session.meta.id { format!("replaced; durability unconfirmed: {message}") } else { "saved".into() }
+                } else { "saved".into() };
             format!(
-                "Current Session:\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}\n  Changed files count: {}",
+                "Current Session:\n  Checkpoint: {}\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}\n  Changed files count: {}",
+                checkpoint,
                 session.meta.id,
                 session.meta.title,
                 session.meta.created_at,
@@ -598,10 +674,7 @@ impl SessionManager {
     pub fn mark_current_session_provenance_failure(&mut self) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             session.mark_provenance_failure();
-            if let Err(e) = self.store.save(session) {
-                tracing::error!(?e, "Failed to save session provenance failure flag");
-                return Err(e.into());
-            }
+            self.save_current_session()?;
         }
         Ok(())
     }
@@ -646,6 +719,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         };
@@ -701,6 +775,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         };
@@ -727,6 +802,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         };
@@ -763,6 +839,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         };
@@ -808,6 +885,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp directory");
         let store = SessionStore::new(dir.path()).expect("Failed to create session store");
         let mut session_manager = SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         };
@@ -841,5 +919,92 @@ mod tests {
                 .len(),
             0
         );
+    }
+    #[test]
+    fn recovery_all_memory_first_mutations_track_failures_and_flush_without_reapplying_usage() {
+        type Mutation = Box<dyn Fn(&mut SessionManager) -> Result<()>>;
+        let mutations: Vec<Mutation> = vec![
+            Box::new(|sm| sm.bind_inference("fixture-binding".into())),
+            Box::new(|sm| {
+                sm.update_current_session_with_history(&[crate::llm::ChatMessage {
+                    role: "user".into(),
+                    content: Some("pending".into()),
+                    provider_state: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }])
+            }),
+            Box::new(|sm| {
+                sm.update_current_session_with_observations(
+                    crate::llm::observation::ObservationStore::default(),
+                    std::collections::BTreeSet::from(["pending".into()]),
+                )
+            }),
+            Box::new(|sm| sm.update_current_session_with_token_count(12)),
+            Box::new(|sm| sm.update_current_session_with_request_count()),
+            Box::new(|sm| sm.update_current_session_with_tool_call_count()),
+            Box::new(|sm| sm.record_tool_call_success("fixture")),
+            Box::new(|sm| sm.record_tool_call_failure("fixture")),
+            Box::new(|sm| sm.set_initial_prompt_for_current_session("new title")),
+            Box::new(|sm| sm.update_current_session_with_changed_file("fixture.rs".into())),
+            Box::new(|sm| sm.clear_changed_files_from_current_session()),
+            Box::new(|sm| sm.mark_current_session_provenance_failure()),
+        ];
+        for mutation in mutations {
+            let dir = tempfile::tempdir().unwrap();
+            let mut sm =
+                SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+            sm.create_session(None).unwrap();
+            let id = sm.current_session_id().unwrap();
+            let path = sm.store.session_dir(&id).join("session.json");
+            let original = std::fs::metadata(&path).unwrap().permissions();
+            let mut readonly = original.clone();
+            readonly.set_readonly(true);
+            std::fs::set_permissions(&path, readonly).unwrap();
+            assert!(mutation(&mut sm).is_err());
+            assert!(sm.has_unsaved_current_session());
+            let expected = serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap();
+            std::fs::set_permissions(&path, original).unwrap();
+            sm.flush_current_session().unwrap();
+            sm.flush_current_session().unwrap();
+            assert!(!sm.has_unsaved_current_session());
+            assert_eq!(
+                serde_json::to_value(sm.store.load(&id).unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_capacity_and_post_rename_warning_and_deleted_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        assert!(matches!(
+            sm.flush_current_session().unwrap(),
+            crate::session::store::SessionSaveOutcome::Durable
+        ));
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        sm.current_session.as_mut().unwrap().meta.title = "x".repeat(17 * 1024 * 1024);
+        assert!(sm.flush_current_session().is_err());
+        assert!(sm.has_unsaved_current_session());
+        sm.current_session.as_mut().unwrap().meta.title = "restored".into();
+        sm.store.fail_directory_sync = true;
+        assert!(matches!(
+            sm.flush_current_session().unwrap(),
+            crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { .. }
+        ));
+        assert!(!sm.has_unsaved_current_session());
+        assert!(
+            sm.current_session_info()
+                .unwrap()
+                .contains("durability unconfirmed")
+        );
+        assert_eq!(sm.store.load(&id).unwrap().meta.title, "restored");
+        sm.delete_session(&id).unwrap();
+        sm.flush_current_session().unwrap();
+        assert!(!sm.store.session_dir(&id).exists());
+        assert!(!sm.has_unsaved_current_session());
     }
 }

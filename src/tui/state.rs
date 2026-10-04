@@ -273,6 +273,7 @@ pub struct TuiApp {
     pub repomap_status: RepomapStatus,
     /// Start time for processing elapsed time tracking
     pub processing_start_time: Option<std::time::Instant>,
+    pub(crate) exit_requested_at: Option<std::time::Instant>,
     /// Final elapsed time string for display after processing completes (remains until next instruction)
     pub last_elapsed_time: Option<String>,
     /// Configuration for the application; used to access context window size
@@ -512,6 +513,7 @@ impl TuiApp {
             // repomap status
             repomap_status: RepomapStatus::default(), // Initialize with NotStarted
             processing_start_time: None,
+            exit_requested_at: None,
             last_elapsed_time: None,
             cfg: None,
             shell_session: None,

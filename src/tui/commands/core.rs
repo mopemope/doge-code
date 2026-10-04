@@ -33,6 +33,10 @@ pub trait CommandHandler {
     fn dismiss_review(&self, _id: &str) {}
     fn reject_review(&mut self, _id: &str, _ui: &mut TuiApp) {}
 
+    /// Return true only after jobs released ownership and the checkpoint was flushed.
+    fn prepare_exit(&mut self, _ui: &mut TuiApp) -> anyhow::Result<bool> {
+        Ok(true)
+    }
     fn get_custom_commands(&self) -> Vec<String>;
     fn as_any(&self) -> &dyn Any;
     /// Post-terminal `JobManager` completion signal (`::job_completed:<id>`).

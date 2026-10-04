@@ -70,6 +70,46 @@ impl TuiExecutor {
         Ok(resolved)
     }
 
+    pub(crate) fn report_session_save_outcome(
+        &self,
+        outcome: &crate::session::store::SessionSaveOutcome,
+    ) {
+        if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } =
+            outcome
+            && let Some(tx) = &self.ui_tx
+        {
+            let _ = tx.send(format!("Warning: {message}"));
+        }
+    }
+
+    pub(crate) fn flush_session(&self) -> Result<crate::session::store::SessionSaveOutcome> {
+        self.ensure_session_idle()?;
+        let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
+        sm.flush_current_session()
+    }
+
+    /// Poll normal exit without dropping the UI on a failed checkpoint.
+    pub(crate) fn prepare_session_exit(&mut self, ui: &mut TuiApp) -> Result<bool> {
+        for job in self
+            .jobs
+            .snapshots()
+            .into_iter()
+            .filter(|j| !j.status.is_terminal())
+        {
+            self.jobs.cancel(job.id);
+        }
+        if self.jobs.active_count() != 0 {
+            return Ok(false);
+        }
+        let outcome = self.flush_session()?;
+        if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } =
+            outcome
+        {
+            ui.push_log(format!("Warning: {message}"));
+        }
+        Ok(true)
+    }
+
     /// Create a fresh session and isolate it from the previous conversation:
     /// the runtime buffer is emptied and turn metadata that would replay the
     /// old instruction (`last_user_prompt`, retry directive tracking) is
@@ -80,14 +120,17 @@ impl TuiExecutor {
         initial_prompt: Option<String>,
     ) -> Result<String> {
         self.ensure_session_idle()?;
-        let new_id = {
+        let mut history =
+            crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
+        let (new_id, outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
+            let outcome = sm.flush_before_transition()?;
             sm.create_session(initial_prompt)?;
-            sm.get_current_session_id()?
+            (sm.get_current_session_id()?, outcome)
         };
-        if let Ok(mut history) = self.conversation_history.lock() {
-            history.clear();
-        }
+        history.clear();
+        drop(history);
+        self.report_session_save_outcome(&outcome);
         self.last_user_prompt = None;
         ui.last_user_input = None;
         ui.last_observed_directive_id = None;
@@ -110,13 +153,18 @@ impl TuiExecutor {
     /// switches always replace, never merge.
     pub fn switch_to_session(&self, id: &str) -> Result<SessionData> {
         self.ensure_session_idle()?;
-        // Validate-then-commit under the session lock only; the runtime
-        // conversation lock is taken afterwards, never together with it.
-        let (session, messages) = {
+        // Match agent checkpoint lock order and acquire fallible locks before committing.
+        let mut history =
+            crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
+        let (session, messages, outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            sm.switch_to_validated_session(id)?
+            let outcome = sm.flush_before_transition()?;
+            let (session, messages) = sm.switch_to_validated_session(id)?;
+            (session, messages, outcome)
         };
-        self.replace_conversation_from_messages(messages);
+        history.replace(messages);
+        drop(history);
+        self.report_session_save_outcome(&outcome);
         Ok(session)
     }
 
@@ -533,6 +581,8 @@ mod tests {
                     .join(&id)
                     .exists()
             );
+            executor.handle_session_command("save", &mut ui).unwrap();
+            assert!(ui.log.iter().any(|entry| matches!(entry, crate::tui::state::LogEntry::Plain(text) if text.contains("nothing to save"))));
             assert!(late_history.checkpoint().is_err());
             executor.start_new_session(&mut ui, None).unwrap();
             persist_runtime(&executor, &[user_msg("new conversation")]);
@@ -800,5 +850,214 @@ mod tests {
             .start_new_session(&mut ui, None)
             .expect("new after release");
         assert_ne!(current_session_id(&executor), id);
+    }
+    #[test]
+    fn recovery_save_and_failed_transitions_preserve_complete_context() {
+        let (mut executor, _dir) = test_executor();
+        let id = current_session_id(&executor);
+        let other = executor
+            .session_manager
+            .lock()
+            .unwrap()
+            .store
+            .create()
+            .unwrap();
+        let path = executor
+            .cfg
+            .project_root
+            .join(".doge/sessions")
+            .join(&id)
+            .join("session.json");
+        let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).unwrap();
+        let messages = vec![user_msg("unsaved recovery message")];
+        {
+            let mut sm = executor.session_manager.lock().unwrap();
+            let mut obs = crate::llm::observation::ObservationStore::default();
+            obs.insert("pending".into(), "test".into(), "exact result".into(), 32)
+                .unwrap();
+            assert!(
+                sm.update_current_session_with_history_and_observations(
+                    &messages,
+                    Some(obs),
+                    Some(std::collections::BTreeSet::from(["pending".into()]))
+                )
+                .is_err()
+            );
+            assert!(sm.has_unsaved_current_session());
+        }
+        executor.replace_conversation_from_messages(messages);
+        executor.last_user_prompt = Some("retry preserved".into());
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        ui.last_user_input = Some("retry preserved".into());
+        let before = serde_json::to_value(
+            executor
+                .session_manager
+                .lock()
+                .unwrap()
+                .current_session
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(executor.start_new_session(&mut ui, None).is_err());
+        assert!(executor.switch_to_session(&other.meta.id).is_err());
+        assert!(executor.prepare_session_exit(&mut ui).is_err());
+        assert!(executor.flush_session().is_err());
+        assert_eq!(current_session_id(&executor), id);
+        assert_eq!(
+            serde_json::to_value(
+                executor
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .current_session
+                    .as_ref()
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        assert_eq!(
+            runtime_messages(&executor)[0].content.as_deref(),
+            Some("unsaved recovery message")
+        );
+        assert_eq!(
+            executor.last_user_prompt.as_deref(),
+            Some("retry preserved")
+        );
+        assert_eq!(ui.last_user_input.as_deref(), Some("retry preserved"));
+        std::fs::set_permissions(&path, original_permissions).unwrap();
+        executor.handle_session_command("save", &mut ui).unwrap();
+        assert!(
+            !executor
+                .session_manager
+                .lock()
+                .unwrap()
+                .has_unsaved_current_session()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                executor
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .store
+                    .load(&id)
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        executor.switch_to_session(&other.meta.id).unwrap();
+        executor.switch_to_session(&id).unwrap();
+        assert_eq!(
+            runtime_messages(&executor)[0].content.as_deref(),
+            Some("unsaved recovery message")
+        );
+        assert!(executor.prepare_session_exit(&mut ui).unwrap());
+    }
+
+    #[tokio::test]
+    async fn recovery_exit_cancels_owner_then_flushes_and_save_waits() {
+        use crate::jobs::{JobKind, JobRunOutcome, JobScope, JobSpec, WorkspaceAccess};
+        let (mut executor, _dir) = test_executor();
+        let manager = executor.session_manager.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let id = executor
+            .jobs
+            .spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::Write,
+                    "cancel fixture",
+                ),
+                move |ctx| async move {
+                    started.send(()).unwrap();
+                    ctx.cancellation_token().cancelled().await;
+                    manager
+                        .lock()
+                        .unwrap()
+                        .update_current_session_with_history(&[user_msg("owner final checkpoint")])
+                        .unwrap();
+                    JobRunOutcome::Cancelled
+                },
+            )
+            .unwrap();
+        ready.await.unwrap();
+        let mut ui = TuiApp::new("test", None, "dark").unwrap();
+        assert!(executor.flush_session().is_err());
+        assert!(!executor.prepare_session_exit(&mut ui).unwrap());
+        for _ in 0..100 {
+            if executor.jobs.active_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(executor.jobs.active_count(), 0, "owner {id} cleaned up");
+        assert!(executor.prepare_session_exit(&mut ui).unwrap());
+        let sm = executor.session_manager.lock().unwrap();
+        assert_eq!(
+            sm.store
+                .load(&sm.current_session_id().unwrap())
+                .unwrap()
+                .conversation_messages()
+                .unwrap()[0]
+                .content
+                .as_deref(),
+            Some("owner final checkpoint")
+        );
+    }
+    #[test]
+    fn recovery_quit_poll_keeps_ui_on_failure_then_retries() {
+        let (executor, _dir) = test_executor();
+        let id = current_session_id(&executor);
+        let path = executor
+            .cfg
+            .project_root
+            .join(".doge/sessions")
+            .join(&id)
+            .join("session.json");
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).unwrap();
+        let manager = executor.session_manager.clone();
+        assert!(
+            manager
+                .lock()
+                .unwrap()
+                .update_current_session_with_history(&[user_msg("pending exit")])
+                .is_err()
+        );
+        let mut ui = TuiApp::new("test", None, "dark")
+            .unwrap()
+            .with_handler(Box::new(executor));
+        ui.request_exit();
+        assert!(!ui.poll_exit_request());
+        assert!(ui.exit_requested_at.is_none());
+        assert!(ui.handler.is_some());
+        assert!(ui.log.iter().any(|entry| matches!(entry, crate::tui::state::LogEntry::Plain(text) if text.contains("Exit blocked") && text.contains("/session save"))));
+        std::fs::set_permissions(&path, permissions).unwrap();
+        ui.dispatch("/session save");
+        ui.request_exit();
+        assert!(ui.poll_exit_request());
+        assert!(!manager.lock().unwrap().has_unsaved_current_session());
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .store
+                .load(&id)
+                .unwrap()
+                .conversation_messages()
+                .unwrap()[0]
+                .content
+                .as_deref(),
+            Some("pending exit")
+        );
     }
 }

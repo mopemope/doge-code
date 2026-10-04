@@ -571,8 +571,17 @@ unconfirmed durability.
 
 While a foreground job owns the session, TUI session creation, switching, deletion,
 resume and clearing wait for the job to release it, including its final checkpoint.
-A final save failure marks the job failed and keeps the updated in-memory history
-available for a save retry; it does not claim durable completion.
+A final save failure marks the job failed and keeps the complete in-memory checkpoint
+(messages, observations, unseen results and usage) available for `/session save`.
+`/session current` shows an unsaved checkpoint. Saving waits for foreground ownership
+to be released and retries the existing payload without charging usage again. New
+sessions and switches first flush pending changes; a failure leaves the current
+conversation and retry inputs intact. `/quit` and the second Ctrl+C cancel active
+jobs and wait for cleanup before flushing. A failed flush keeps the UI open with a
+retry hint; stalled cleanup also keeps the UI open. The final error-path flush runs
+after shutdown and reports failure with a nonzero exit. Explicit clear/delete retain
+their intentional discard behavior. Capacity errors remain unsaved; this does not
+add capacity rescue, cross-process writer coordination or power-loss guarantees.
 
 `exec --json` includes a `usage` object with inference attempts, usage-report count,
 provider-reported prompt/completion/total subtotals, and optional reasoning/cache

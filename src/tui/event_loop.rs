@@ -17,6 +17,38 @@ struct DiffReviewError {
 }
 
 impl TuiApp {
+    pub(crate) fn request_exit(&mut self) {
+        self.exit_requested_at.get_or_insert_with(Instant::now);
+        self.push_log("Waiting for jobs and saving the current session before exit...");
+    }
+
+    pub(crate) fn poll_exit_request(&mut self) -> bool {
+        let Some(started) = self.exit_requested_at else {
+            return false;
+        };
+        let result = if let Some(mut handler) = self.handler.take() {
+            let result = handler.prepare_exit(self);
+            self.handler = Some(handler);
+            result
+        } else {
+            Ok(true)
+        };
+        match result {
+            Ok(true) => true,
+            Ok(false) if started.elapsed() < crate::jobs::JOB_SHUTDOWN_GRACE => false,
+            Ok(false) => {
+                self.exit_requested_at = None;
+                self.push_log("Exit blocked: jobs still own the session. Inspect /jobs and retry /quit after cleanup.");
+                false
+            }
+            Err(error) => {
+                self.exit_requested_at = None;
+                self.push_log(format!("Exit blocked: session remains unsaved: {error}. Fix the cause, retry /session save, then /quit."));
+                false
+            }
+        }
+    }
+
     pub fn event_loop(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
@@ -183,7 +215,7 @@ impl TuiApp {
                     // starts strictly after the predecessor. UI status
                     // messages never authorize this path.
                     if let Some(producer) = msg.strip_prefix("::job_completed:") {
-                        if self.handler.is_some() {
+                        if self.handler.is_some() && self.exit_requested_at.is_none() {
                             let mut handler = self.handler.take().unwrap();
                             handler.handle_job_completed(producer, self);
                             self.handler = Some(handler);
@@ -495,6 +527,9 @@ impl TuiApp {
                 }
             }
 
+            if self.poll_exit_request() {
+                return Ok(());
+            }
             self.dispatch_pending_instruction();
 
             // Timeout Check
@@ -543,7 +578,8 @@ impl TuiApp {
                             if let Some(prev) = last_ctrl_c_at
                                 && now.duration_since(prev) <= Duration::from_secs(3)
                             {
-                                return Ok(());
+                                self.request_exit();
+                                continue;
                             }
                             last_ctrl_c_at = Some(now);
                             self.dispatch("/cancel");
@@ -566,7 +602,7 @@ impl TuiApp {
                         match self.input_mode {
                             InputMode::Normal => {
                                 if handle_normal_mode_key(self, k, terminal)? {
-                                    return Ok(());
+                                    self.request_exit();
                                 }
                             }
                             InputMode::HistorySearch => {
@@ -678,7 +714,8 @@ impl TuiApp {
     /// Called after draining completion messages. Ownership, not a cosmetic
     /// status notice, determines when an accepted instruction may be consumed.
     pub(crate) fn dispatch_pending_instruction(&mut self) {
-        if self.foreground_busy()
+        if self.exit_requested_at.is_some()
+            || self.foreground_busy()
             || (self.handler.is_none() && !matches!(self.status, Status::Ready | Status::Error))
         {
             return;

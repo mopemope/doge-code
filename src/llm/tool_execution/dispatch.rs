@@ -693,6 +693,7 @@ mod tests {
         let project_root = dir.path().to_path_buf();
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -770,6 +771,7 @@ mod tests {
         let project_root = dir.path().to_path_buf();
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -810,6 +812,7 @@ mod tests {
         std::fs::write(&target, "hello\n")?;
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -901,6 +904,7 @@ mod tests {
         std::fs::write(project_root.join("dummy.py"), "x = 1\n")?;
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -984,6 +988,7 @@ mod tests {
         };
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -1579,6 +1584,7 @@ mod tests {
         });
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let session_manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -1756,6 +1762,7 @@ mod tests {
         });
         let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store,
             current_session: None,
         }));
@@ -1829,6 +1836,7 @@ mod tests {
         )?;
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
         let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
             store: crate::session::SessionStore::new(root.path().join(".doge/sessions"))?,
             current_session: None,
         }));

@@ -22,6 +22,7 @@ async fn test_execute_bash_with_permissions_allowed() -> Result<()> {
 
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -49,6 +50,7 @@ async fn test_execute_bash_with_permissions_not_allowed() -> Result<()> {
 
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -78,6 +80,7 @@ async fn test_execute_bash_with_permissions_no_config() -> Result<()> {
 
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -238,6 +241,7 @@ async fn test_execute_bash_complex_allowed_command() -> Result<()> {
 
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -265,6 +269,7 @@ async fn test_execute_bash_with_empty_allowed_commands() -> Result<()> {
 
     let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
     let session_manager = Arc::new(Mutex::new(crate::session::SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -303,6 +308,7 @@ async fn test_plan_read_creates_session_if_missing() -> Result<()> {
 
     let store = SessionStore::new(project_root.join(".doge/sessions")).unwrap();
     let session_manager = Arc::new(Mutex::new(SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));
@@ -338,6 +344,7 @@ async fn test_plan_write_creates_session_and_persists_plan() -> Result<()> {
 
     let store = SessionStore::new(project_root.join(".doge/sessions")).unwrap();
     let session_manager = Arc::new(Mutex::new(SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     }));

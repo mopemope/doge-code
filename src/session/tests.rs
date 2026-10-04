@@ -14,6 +14,7 @@ fn test_session_metric_tracking() {
 
     // Create a SessionManager
     let mut session_manager = SessionManager {
+        save_state: Default::default(),
         store,
         current_session: None,
     };

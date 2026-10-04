@@ -30,6 +30,10 @@ use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
 // This allows each command to be tested independently and keeps dispatch.rs focused on routing.
 
 impl CommandHandler for TuiExecutor {
+    fn prepare_exit(&mut self, ui: &mut TuiApp) -> anyhow::Result<bool> {
+        self.prepare_session_exit(ui)
+    }
+
     fn foreground_job_id(&self) -> Option<crate::jobs::JobId> {
         self.jobs.foreground_id()
     }

@@ -26,7 +26,7 @@ impl TuiExecutor {
             return Ok(());
         }
 
-        if matches!(args[0], "new" | "switch" | "delete" | "clear") {
+        if matches!(args[0], "new" | "switch" | "delete" | "clear" | "save") {
             self.ensure_session_idle()?;
         }
 
@@ -96,9 +96,21 @@ impl TuiExecutor {
                 }
             }
             "save" => {
-                // This is implicitly handled when history is updated.
-                // We can add an explicit save if needed.
-                ui.push_log("Session is saved automatically.");
+                if self.current_session_id().is_none() {
+                    ui.push_log("No session loaded; nothing to save.");
+                } else {
+                    match self.flush_session() {
+                Ok(crate::session::store::SessionSaveOutcome::Durable) => {
+                    ui.push_log("Session checkpoint saved.")
+                }
+                Ok(crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed {
+                    message,
+                }) => ui.push_log(format!("Warning: {message}")),
+                Err(error) => ui.push_log(format!(
+                    "Session remains unsaved: {error}. Fix the cause, then retry /session save."
+                )),
+            }
+                }
             }
             "delete" => {
                 if args.len() != 2 {
