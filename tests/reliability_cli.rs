@@ -618,14 +618,30 @@ fn cli_signals_reap_managed_process_and_preserve_unknown_outcome() {
             pid_file.display(),
             pid_file.display()
         );
-        let server = Server::new(move |_, _| {
+        let server = Server::new(move |index, request| {
+            if index > 1 {
+                assert_tool_result_blocks(request["messages"].as_array().unwrap());
+                return response("cancelled batch retained", vec![], "stop");
+            }
             response(
                 "",
-                vec![call(
-                    "process",
-                    "execute_process",
-                    json!({"program":"/bin/sh","args":["-c",script],"cwd":root}),
-                )],
+                vec![
+                    call(
+                        "before-process",
+                        "fs_read",
+                        json!({"path":root.join("fixture.toml")}),
+                    ),
+                    call(
+                        "process",
+                        "execute_process",
+                        json!({"program":"/bin/sh","args":["-c",script],"cwd":root}),
+                    ),
+                    call(
+                        "unstarted-write",
+                        "fs_write",
+                        json!({"path":root.join("must-not-run"),"content":"unexpected"}),
+                    ),
+                ],
                 "tool_calls",
             )
         });
@@ -698,6 +714,42 @@ fn cli_signals_reap_managed_process_and_preserve_unknown_outcome() {
             }
         }
         assert!(retained, "interrupted call must be durable");
+        let checkpoint = std::fs::read_dir(project.root.join(".doge/sessions"))
+            .unwrap()
+            .map(|e| e.unwrap().path().join("session.json"))
+            .find(|p| p.is_file())
+            .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(checkpoint).unwrap()).unwrap();
+        let messages = saved["conversation"].as_array().unwrap();
+        assert_tool_result_blocks(messages);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m["role"] == "tool"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("outcome unknown")))
+                .count(),
+            2
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["tool_call_id"] == "before-process"
+                    && !m["content"].as_str().unwrap().contains("outcome unknown"))
+        );
+        assert!(!project.root.join("must-not-run").exists());
+        let resumed = project
+            .command(&server)
+            .arg("--resume=latest")
+            .output()
+            .unwrap();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(!project.root.join("must-not-run").exists());
     }
 }
 
@@ -1181,4 +1233,261 @@ fn cli_symlink_edit_then_undo_preserves_alias_and_target() {
     assert_eq!(server.requests.lock().unwrap().len(), 3);
     assert_eq!(std::fs::read_to_string(target).unwrap(), "original\n");
     assert!(alias.is_symlink());
+}
+
+#[test]
+fn recovery_hint_follows_all_sibling_results_and_survives_resume() {
+    let project = Project::new(false);
+    let missing = project.root.join("not found.txt");
+    let existing = project.root.join("existing.txt");
+    std::fs::write(&existing, "sibling evidence").unwrap();
+    let server = Server::new(move |index, request| {
+        if index == 1 {
+            return response(
+                "",
+                vec![
+                    call("missing", "fs_read", json!({"path":missing})),
+                    call("existing", "fs_read", json!({"path":existing})),
+                ],
+                "tool_calls",
+            );
+        }
+        let messages = request["messages"].as_array().unwrap();
+        let start = messages
+            .iter()
+            .position(|m| m["tool_calls"][0]["id"] == "missing")
+            .unwrap();
+        assert_eq!(messages[start + 1]["tool_call_id"], "missing");
+        assert_eq!(
+            messages[start + 2]["tool_call_id"],
+            "existing",
+            "hint must follow the complete result block"
+        );
+        assert!(
+            messages[start + 2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("sibling evidence")
+        );
+        assert_eq!(messages[start + 3]["role"], "user");
+        assert!(
+            messages[start + 3]["content"]
+                .as_str()
+                .unwrap()
+                .contains("path")
+        );
+        response("recovery complete", vec![], "stop")
+    });
+    let first = project.command(&server).output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let resumed = project
+        .command(&server)
+        .arg("--resume=latest")
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+}
+
+fn assert_tool_result_blocks(messages: &[Value]) {
+    let mut index = 0;
+    while index < messages.len() {
+        let calls = messages[index]["tool_calls"].as_array();
+        assert_ne!(messages[index]["role"], "tool", "orphan result");
+        let Some(calls) = calls.filter(|c| !c.is_empty()) else {
+            index += 1;
+            continue;
+        };
+        let mut pending = std::collections::BTreeSet::new();
+        for call in calls {
+            assert!(pending.insert(call["id"].as_str().unwrap()));
+        }
+        index += 1;
+        while index < messages.len() && messages[index]["role"] == "tool" {
+            assert!(pending.remove(messages[index]["tool_call_id"].as_str().unwrap()));
+            index += 1;
+        }
+        assert!(
+            pending.is_empty(),
+            "incomplete result block before non-tool message"
+        );
+    }
+}
+
+#[test]
+fn loop_plan_block_and_stall_interventions_follow_sibling_results() {
+    for mode in ["loop", "plan", "stall"] {
+        let project = Project::new(false);
+        let mut reads = Vec::new();
+        for n in 0..16 {
+            let path = project.root.join(format!("file-{n}.txt"));
+            std::fs::write(&path, "evidence").unwrap();
+            reads.push(path);
+        }
+        let server = Server::new(move |index, request| {
+            if index == 1 {
+                let calls=match mode {
+                    "loop" => (0..4).map(|n|call(&format!("loop-{n}"),"fs_read",json!({"path":reads[0]}))).collect(),
+                    "plan" => (0..4).map(|n|call(&format!("plan-{n}"),"plan_write",json!({"items":[{"id":"p1","content":"fixture plan","status":"pending"}]}))).chain(std::iter::once(call("plan-sibling","fs_read",json!({"path":reads[0]})))).collect(),
+                    _ => reads.iter().enumerate().map(|(n,path)|call(&format!("stall-{n}"),"fs_read",json!({"path":path.with_extension("missing")}))).collect(),
+                };
+                return response("", calls, "tool_calls");
+            }
+            let messages = request["messages"].as_array().unwrap();
+            assert_tool_result_blocks(messages);
+            let start = messages
+                .iter()
+                .position(|m| m["tool_calls"].as_array().is_some_and(|c| !c.is_empty()))
+                .unwrap();
+            let count = messages[start]["tool_calls"].as_array().unwrap().len();
+            assert!(messages[start + count + 1..].iter().any(|m| matches!(
+                m["role"].as_str(),
+                Some("system" | "user")
+            )
+                && m["content"].as_str().is_some_and(|c| c.contains("WARNING")
+                    || c.to_lowercase().contains("repeated")
+                    || c.contains("Stop repeating"))));
+            if mode != "stall" {
+                assert!(
+                    messages[start + count]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Execution skipped")
+                );
+            }
+            response("intervention verified", vec![], "stop")
+        });
+        let output = project.command(&server).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn malformed_legacy_session_fails_closed_without_rewriting_or_provider_request() {
+    let project = Project::new(false);
+    let path = project.root.join("evidence.txt");
+    std::fs::write(&path, "evidence").unwrap();
+    let server = Server::new(move |index, _| match index {
+        1 => response(
+            "",
+            vec![
+                call("first", "fs_read", json!({"path":path})),
+                call("second", "fs_read", json!({"path":path})),
+            ],
+            "tool_calls",
+        ),
+        2 => response("seed", vec![], "stop"),
+        _ => panic!("invalid history reached provider"),
+    });
+    assert!(project.command(&server).output().unwrap().status.success());
+    let checkpoint = std::fs::read_dir(project.root.join(".doge/sessions"))
+        .unwrap()
+        .map(|e| e.unwrap().path().join("session.json"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let mut session: Value = serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
+    let messages = session["conversation"].as_array_mut().unwrap();
+    let first = messages
+        .iter()
+        .position(|m| m["tool_call_id"] == "first")
+        .unwrap();
+    messages.insert(
+        first + 1,
+        json!({"role":"user","content":"legacy intervention","tool_calls":[]}),
+    );
+    let bytes = serde_json::to_vec(&session).unwrap();
+    std::fs::write(&checkpoint, &bytes).unwrap();
+    let output = project
+        .command(&server)
+        .arg("--resume=latest")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid history"));
+    assert_eq!(std::fs::read(checkpoint).unwrap(), bytes);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn shell_stdin_timeout_then_next_invocation_recovers_in_real_cli() {
+    let project = Project::new(true);
+    let config = std::fs::read_to_string(&project.config)
+        .unwrap()
+        .replace("allow_shell=false", "allow_shell=true");
+    std::fs::write(&project.config, format!("command_timeout_ms=50\n{config}")).unwrap();
+    let large = format!(
+        "head -c 1048576 /dev/zero\n#{}\nsleep 30",
+        "x".repeat(256 * 1024)
+    );
+    let server = Server::new(move |index, request| match index {
+        1 => response(
+            "",
+            vec![call(
+                "large-shell",
+                "execute_shell",
+                json!({"command":large}),
+            )],
+            "tool_calls",
+        ),
+        2 => {
+            let messages = request["messages"].as_array().unwrap();
+            assert_tool_result_blocks(messages);
+            let result: Value = serde_json::from_str(
+                messages
+                    .iter()
+                    .find(|m| m["tool_call_id"] == "large-shell")
+                    .unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["timed_out"], true);
+            response(
+                "",
+                vec![call(
+                    "fresh-shell",
+                    "execute_shell",
+                    json!({"command":"printf fresh"}),
+                )],
+                "tool_calls",
+            )
+        }
+        3 => {
+            let messages = request["messages"].as_array().unwrap();
+            assert_tool_result_blocks(messages);
+            let result: Value = serde_json::from_str(
+                messages
+                    .iter()
+                    .find(|m| m["tool_call_id"] == "fresh-shell")
+                    .unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["stdout"], "fresh");
+            assert_eq!(result["success"], true);
+            response("shell recovery verified", vec![], "stop")
+        }
+        _ => panic!("unexpected request"),
+    });
+    let output = project.command(&server).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
 }

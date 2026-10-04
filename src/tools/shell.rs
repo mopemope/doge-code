@@ -5,7 +5,7 @@ use serde_json::json;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -238,6 +238,9 @@ impl ShellSession {
     ) -> Result<ExecuteShellResult> {
         let mut invocation = ShellInvocationGuard::new(self);
         let result = invocation.run(command, cancel).await;
+        if result.is_err() && invocation.started {
+            invocation.session.reset_session().await;
+        }
         invocation.disarm();
         result
     }
@@ -248,6 +251,8 @@ impl ShellSession {
         cancel: Option<CancellationToken>,
         started: &mut bool,
     ) -> Result<ExecuteShellResult> {
+        let deadline = (self.command_timeout_ms != 0)
+            .then(|| tokio::time::Instant::now() + Duration::from_millis(self.command_timeout_ms));
         let cancellation = cancel.unwrap_or_default();
         if cancellation.is_cancelled() {
             return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled));
@@ -261,59 +266,32 @@ impl ShellSession {
             command, sentinel, sentinel
         );
 
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("Shell stdin not available"))?;
+        // All three pipe directions share one deadline and cancellation scope.
+        // Borrowed futures are dropped before resetting/reaping the session.
         *started = true;
-        stdin
-            .write_all(sentinel_command.as_bytes())
-            .await
-            .context("Failed to write to shell stdin")?;
-        stdin.flush().await.context("Failed to flush shell stdin")?;
-
-        let stdout_prefix = "__DOGE_SENTINEL:";
-        let stderr_prefix = "__DOGE_SENTINEL_ERR:";
-        let timeout =
-            (self.command_timeout_ms != 0).then(|| Duration::from_millis(self.command_timeout_ms));
-
-        // Keep the borrowed readers inside this block. On timeout/cancel the
-        // read future is dropped before reset_session() reclaims the shell.
         let read_outcome = {
-            let stdout_reader = self
+            let stdin = self
+                .stdin
+                .as_mut()
+                .ok_or_else(|| anyhow!("Shell stdin not available"))?;
+            let stdout = self
                 .stdout
                 .as_mut()
                 .ok_or_else(|| anyhow!("Shell stdout not available"))?;
-            let stderr_reader = self
+            let stderr = self
                 .stderr
                 .as_mut()
                 .ok_or_else(|| anyhow!("Shell stderr not available"))?;
-            let read_task = async {
-                tokio::join!(
-                    read_until_sentinel(stdout_reader, stdout_prefix, &sentinel),
-                    read_until_sentinel(stderr_reader, stderr_prefix, &sentinel)
-                )
-            };
-            tokio::pin!(read_task);
-
-            if let Some(duration) = timeout {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => ReadOutcome::Cancelled,
-                    result = tokio::time::timeout(duration, &mut read_task) => {
-                        match result {
-                            Ok(result) => ReadOutcome::Completed(result),
-                            Err(_) => ReadOutcome::TimedOut,
-                        }
-                    }
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => ReadOutcome::Cancelled,
-                    result = &mut read_task => ReadOutcome::Completed(result),
-                }
-            }
+            run_shell_io(
+                stdin,
+                stdout,
+                stderr,
+                sentinel_command.as_bytes(),
+                &sentinel,
+                &cancellation,
+                deadline,
+            )
+            .await
         };
 
         match read_outcome {
@@ -333,7 +311,8 @@ impl ShellSession {
                     timed_out: true,
                 })
             }
-            ReadOutcome::Completed((stdout_capture, stderr_capture)) => {
+            ReadOutcome::Completed(result) => {
+                let (stdout_capture, stderr_capture) = result?;
                 let (stdout_raw, stdout_truncated) = stdout_capture.capture.finish();
                 let (stderr_raw, stderr_truncated) = stderr_capture.capture.finish();
                 let (stdout, stderr, budgeted, mut warnings) =
@@ -390,9 +369,56 @@ impl ShellSession {
 }
 
 enum ReadOutcome {
-    Completed((SentinelRead, SentinelRead)),
+    Completed(Result<(SentinelRead, SentinelRead)>),
     TimedOut,
     Cancelled,
+}
+
+/// Concurrent, borrowed I/O: no detached writer or reader survives completion.
+#[allow(clippy::too_many_arguments)]
+async fn run_shell_io<W, O, E>(
+    stdin: &mut W,
+    stdout: &mut O,
+    stderr: &mut E,
+    command: &[u8],
+    sentinel: &str,
+    cancellation: &CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+) -> ReadOutcome
+where
+    W: AsyncWrite + Unpin,
+    O: AsyncRead + Unpin,
+    E: AsyncRead + Unpin,
+{
+    let io = async {
+        let write = async {
+            stdin
+                .write_all(command)
+                .await
+                .context("Failed to write to shell stdin")?;
+            stdin.flush().await.context("Failed to flush shell stdin")
+        };
+        let (_, out, err) = tokio::try_join!(
+            write,
+            read_until_sentinel(stdout, "__DOGE_SENTINEL:", sentinel),
+            read_until_sentinel(stderr, "__DOGE_SENTINEL_ERR:", sentinel)
+        )?;
+        Ok((out, err))
+    };
+    tokio::pin!(io);
+    let timeout = async {
+        if let Some(deadline) = deadline {
+            tokio::time::sleep_until(deadline).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => ReadOutcome::Cancelled,
+        _ = timeout => ReadOutcome::TimedOut,
+        result = &mut io => ReadOutcome::Completed(result),
+    }
 }
 
 struct SentinelRead {
@@ -404,7 +430,11 @@ struct SentinelRead {
 /// Read one shell response without allowing a command to grow an unbounded
 /// line buffer. The scanner keeps only a small rolling line window; the actual
 /// output is fed into the same head/tail bounded capture used by finite tools.
-async fn read_until_sentinel<R>(reader: &mut R, prefix: &str, sentinel_id: &str) -> SentinelRead
+async fn read_until_sentinel<R>(
+    reader: &mut R,
+    prefix: &str,
+    sentinel_id: &str,
+) -> Result<SentinelRead>
 where
     R: AsyncRead + Unpin,
 {
@@ -412,18 +442,15 @@ where
     const SCANNER_TAIL_MARGIN: usize = 256;
 
     let mut capture = crate::execution::BoundedCapture::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     let mut line_buffer = Vec::new();
     let mut chunk = vec![0_u8; 8192];
 
     loop {
-        let count = match reader.read(&mut chunk).await {
-            Ok(count) => count,
-            Err(error) => {
-                warnings.push(format!("shell output reader failed: {error}"));
-                break;
-            }
-        };
+        let count = reader
+            .read(&mut chunk)
+            .await
+            .context("shell output reader failed")?;
         if count == 0 {
             break;
         }
@@ -437,14 +464,13 @@ where
             if let Some((marker_offset, exit_code)) = find_sentinel_line(&line, prefix, sentinel_id)
             {
                 capture.push(&line[..marker_offset]);
-                return SentinelRead {
+                return Ok(SentinelRead {
                     capture,
                     exit_code,
                     warnings,
-                };
+                });
             }
             capture.push(&line);
-            capture.push(b"\n");
             start = index + 1;
         }
         if start < count {
@@ -466,19 +492,15 @@ where
         let line = std::mem::take(&mut line_buffer);
         if let Some((marker_offset, exit_code)) = find_sentinel_line(&line, prefix, sentinel_id) {
             capture.push(&line[..marker_offset]);
-            return SentinelRead {
+            return Ok(SentinelRead {
                 capture,
                 exit_code,
                 warnings,
-            };
+            });
         }
         capture.push(&line);
     }
-    SentinelRead {
-        capture,
-        exit_code: None,
-        warnings,
-    }
+    anyhow::bail!("shell output ended before invocation sentinel")
 }
 
 /// Find a sentinel in one complete line. `Some(None)` means a valid stderr
@@ -491,7 +513,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
     haystack
         .windows(needle.len())
-        .position(|window| window == needle)
+        .rposition(|window| window == needle)
 }
 
 fn find_sentinel_line(
@@ -515,11 +537,14 @@ fn find_sentinel_line(
         return (suffix == sentinel_id).then_some((position, None));
     }
     let separator = suffix.iter().position(|byte| *byte == b':')?;
-    let code = std::str::from_utf8(&suffix[..separator]).ok()?.parse().ok();
+    let code = std::str::from_utf8(&suffix[..separator])
+        .ok()?
+        .parse()
+        .ok()?;
     if &suffix[separator + 1..] != sentinel_id {
         return None;
     }
-    Some((position, code))
+    Some((position, Some(code)))
 }
 
 #[cfg(test)]
@@ -531,6 +556,304 @@ fn parse_sentinel_line(line: &[u8], prefix: &str, sentinel_id: &str) -> Option<O
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    struct FixtureWriter {
+        blocked_flush: bool,
+        broken: bool,
+    }
+    impl AsyncWrite for FixtureWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(if self.broken {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            } else {
+                Ok(buf.len())
+            })
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.blocked_flush {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    struct FaultReader;
+    impl AsyncRead for FaultReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::Other.into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_io_bounds_flush_and_fails_on_broken_pipe_eof_or_reader_error() {
+        for blocked_flush in [false, true] {
+            let mut writer = FixtureWriter {
+                blocked_flush,
+                broken: !blocked_flush,
+            };
+            let mut out = &b"__DOGE_SENTINEL:0:abc\n"[..];
+            let mut err = &b"__DOGE_SENTINEL_ERR:abc\n"[..];
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_shell_io(
+                    &mut writer,
+                    &mut out,
+                    &mut err,
+                    b"command",
+                    "abc",
+                    &CancellationToken::new(),
+                    Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                ),
+            )
+            .await
+            .unwrap();
+            if blocked_flush {
+                assert!(matches!(result, ReadOutcome::TimedOut));
+            } else {
+                assert!(matches!(result, ReadOutcome::Completed(Err(_))));
+            }
+        }
+        let mut writer = FixtureWriter {
+            blocked_flush: false,
+            broken: false,
+        };
+        let mut eof = tokio::io::empty();
+        let (_peer, mut waiting) = tokio::io::duplex(16);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_shell_io(
+                &mut writer,
+                &mut eof,
+                &mut waiting,
+                b"command",
+                "abc",
+                &CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ReadOutcome::Completed(Err(_))));
+        let mut failure = FaultReader;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_shell_io(
+                &mut writer,
+                &mut failure,
+                &mut waiting,
+                b"command",
+                "abc",
+                &CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ReadOutcome::Completed(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn shell_pre_cancel_starts_no_process_and_flush_cancel_has_no_deadline() {
+        let temp = TempDir::new().unwrap();
+        let shell = SharedShellSession::new(temp.path().to_path_buf(), 0);
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(
+            shell
+                .exec_with_cancel("touch side-effect", Some(token))
+                .await
+                .is_err()
+        );
+        assert!(shell.0.lock().await.child.is_none());
+        assert!(!temp.path().join("side-effect").exists());
+        let token = CancellationToken::new();
+        let mut writer = FixtureWriter {
+            blocked_flush: true,
+            broken: false,
+        };
+        let mut out = &b"__DOGE_SENTINEL:0:abc\n"[..];
+        let mut err = &b"__DOGE_SENTINEL_ERR:abc\n"[..];
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                run_shell_io(
+                    &mut writer,
+                    &mut out,
+                    &mut err,
+                    b"command",
+                    "abc",
+                    &token,
+                    None
+                ),
+                cancel
+            )
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, ReadOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn shell_cancel_during_large_stdin_without_timeout_resets_and_recovers() {
+        let temp = TempDir::new().unwrap();
+        let shell = SharedShellSession::new(temp.path().to_path_buf(), 0);
+        let cancel = CancellationToken::new();
+        let command = format!("sleep 30\n#{}", "x".repeat(2 * 1024 * 1024));
+        let invocation = shell.exec_with_cancel(&command, Some(cancel.clone()));
+        let cancellation = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(invocation, cancellation)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(crate::llm::LlmErrorKind::Cancelled)
+        ));
+        let recovered: ExecuteShellResult =
+            serde_json::from_str(&shell.exec("printf fresh").await.unwrap()).unwrap();
+        assert_eq!(recovered.stdout, "fresh");
+        shell.0.lock().await.reset_session().await;
+    }
+
+    #[tokio::test]
+    async fn shell_early_eof_terminates_remaining_command_and_recovers() {
+        let temp = TempDir::new().unwrap();
+        let shell = SharedShellSession::new(temp.path().to_path_buf(), 0);
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), shell.exec("exec 2>&-; sleep 30"))
+                .await
+                .unwrap();
+        assert!(result.is_err());
+        let recovered: ExecuteShellResult =
+            serde_json::from_str(&shell.exec("printf fresh").await.unwrap()).unwrap();
+        assert_eq!(recovered.stdout, "fresh");
+        shell.0.lock().await.reset_session().await;
+    }
+
+    #[tokio::test]
+    async fn shell_large_bidirectional_io_completes_with_bounded_independent_capture() {
+        let temp = TempDir::new().unwrap();
+        let mut session = ShellSession::new(temp.path().to_path_buf(), 10_000);
+        session.start().unwrap();
+        let command = format!(
+            "head -c 1048576 /dev/zero | tr '\\0' x\nhead -c 1048576 /dev/zero | tr '\\0' y >&2\n#{}\n",
+            "z".repeat(2 * 1024 * 1024)
+        );
+        let result = tokio::time::timeout(Duration::from_secs(12), session.exec_command(&command))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.success && result.output_truncated);
+        assert!(result.stdout.starts_with('x') && result.stderr.starts_with('y'));
+        assert!(result.stdout.len() + result.stderr.len() < 100_000);
+        session.reset_session().await;
+    }
+
+    #[tokio::test]
+    async fn sentinel_split_false_prefix_and_long_line_preserve_exact_bytes() {
+        let data = format!(
+            "{}__DOGE_SENTINEL:invalid:wrong__DOGE_SENTINEL:0:abc\n",
+            "x".repeat(20_000)
+        );
+        let (mut writer, mut reader) = tokio::io::duplex(7);
+        let writing = async {
+            writer.write_all(data.as_bytes()).await.unwrap();
+        };
+        let reading = async {
+            read_until_sentinel(&mut reader, "__DOGE_SENTINEL:", "abc")
+                .await
+                .unwrap()
+        };
+        let ((), result) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(writing, reading)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            result.capture.finish().0,
+            format!("{}__DOGE_SENTINEL:invalid:wrong", "x".repeat(20_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_large_stdin_and_output_respects_invocation_deadline() {
+        let temp = TempDir::new().unwrap();
+        let mut session = ShellSession::new(temp.path().to_path_buf(), 50);
+        session.start().unwrap();
+        let command = format!(
+            "head -c 1048576 /dev/zero\n#{}\nsleep 30",
+            "x".repeat(2 * 1024 * 1024)
+        );
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), session.exec_command(&command)).await;
+        assert!(
+            result.is_ok(),
+            "outer watchdog: stdin write ignored invocation deadline"
+        );
+        assert!(result.unwrap().unwrap().timed_out);
+        assert!(!session.is_running());
+        session.start().unwrap();
+        assert_eq!(
+            session
+                .exec_command("printf recovered")
+                .await
+                .unwrap()
+                .stdout,
+            "recovered"
+        );
+        session.reset_session().await;
+    }
+
+    #[tokio::test]
+    async fn shell_preserves_exact_newlines_and_independent_streams() {
+        let temp = TempDir::new().unwrap();
+        let mut session = ShellSession::new(temp.path().to_path_buf(), 1000);
+        session.start().unwrap();
+        for (command, expected) in [
+            ("printf 'one\\ntwo\\n'", "one\ntwo\n"),
+            ("printf 'cr\\r\\n'", "cr\r\n"),
+            ("printf tail", "tail"),
+            ("true", ""),
+        ] {
+            let result = session.exec_command(command).await.unwrap();
+            assert_eq!(result.stdout, expected);
+            assert_eq!(result.stderr, "");
+        }
+        let result = session
+            .exec_command("printf 'out\\n'; printf 'err\\n' >&2")
+            .await
+            .unwrap();
+        assert_eq!(result.stdout, "out\n");
+        assert_eq!(result.stderr, "err\n");
+        session.reset_session().await;
+    }
 
     #[tokio::test]
     async fn test_shell_session_basic() {
@@ -591,8 +914,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut session = ShellSession::new(temp_dir.path().to_path_buf(), 0);
         session.start().unwrap();
-        let result = session.exec_command("exit 0").await.unwrap();
-        assert!(!result.success || result.exit_code.is_some());
+        assert!(session.exec_command("exit 0").await.is_err());
+        assert!(!session.is_running());
         session.start().unwrap();
         let result = session.exec_command("echo recovered").await.unwrap();
         assert_eq!(result.stdout.trim(), "recovered");
@@ -682,7 +1005,9 @@ mod tests {
         writer.write_all(b"partial__DOGE_SEN").await.unwrap();
         writer.write_all(b"TINEL:0:abc\n").await.unwrap();
         drop(writer);
-        let result = read_until_sentinel(&mut reader, "__DOGE_SENTINEL:", "abc").await;
+        let result = read_until_sentinel(&mut reader, "__DOGE_SENTINEL:", "abc")
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.capture.finish().0, "partial");
     }
@@ -707,7 +1032,9 @@ mod tests {
         writer.write_all(&line).await.unwrap();
         drop(writer);
 
-        let result = read_until_sentinel(&mut reader, "__DOGE_SENTINEL:", "abc").await;
+        let result = read_until_sentinel(&mut reader, "__DOGE_SENTINEL:", "abc")
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, Some(0));
         let (output, _) = result.capture.finish();
         assert_eq!(output.chars().count(), 1_000);
@@ -742,7 +1069,10 @@ mod tests {
     async fn test_shell_future_drop_aborts_in_flight_command() {
         let temp_dir = TempDir::new().unwrap();
         let session = SharedShellSession::new(temp_dir.path().to_path_buf(), 0);
-        let command = "echo $$ > shell.pid; sleep 30".to_string();
+        let command = format!(
+            "sleep 30 & echo $! > child.pid; echo $$ > shell.pid; sleep 30\n#{}",
+            "x".repeat(2 * 1024 * 1024)
+        );
         let task_session = session.clone();
         let task = tokio::spawn(async move { task_session.exec(&command).await });
 
@@ -754,8 +1084,15 @@ mod tests {
         }
         assert!(temp_dir.path().join("shell.pid").exists());
 
+        let descendant: u32 = std::fs::read_to_string(temp_dir.path().join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         task.abort();
         let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!crate::execution::lifecycle::is_process_alive(descendant));
 
         let recovered =
             tokio::time::timeout(Duration::from_secs(2), session.exec("echo recovered"))

@@ -321,6 +321,14 @@ to Git commands, with a 10-second timeout per command.
 
 All finite LLM-facing process tools use the same managed process lifecycle: bounded streaming capture, timeout/cancellation, Unix process-group cleanup, and direct-child reaping.
 
+Persistent `execute_shell` writes stdin while reading stdout and stderr. Its
+`command_timeout_ms` covers write, flush and output collection together; `0`
+disables the deadline while cancellation still works. Timeout, cancellation,
+pipe failures and premature output EOF terminate the shell tree and reset the
+session. The next call starts a fresh shell; successful commands retain cwd and
+environment. Captured output preserves line endings within the output budget.
+
+
 ### Code Analysis Tools
 - `search_repomap`: Search parsed code symbols with advanced filtering
 - `search_text`: Text-based search across files
@@ -769,6 +777,13 @@ changed canonical parent or target, even when its contents match.
 These checks are optimistic: there is still a gap between the final check and
 rename or unlink. They do not provide an operating-system compare-and-swap or a
 filesystem sandbox against concurrent directory replacement.
+
+Tool results from one assistant batch remain contiguous before loop, stalled
+progress or recovery hints. Interrupted calls are saved as unknown outcomes;
+resume preserves completed results and does not replay pending side effects.
+Malformed legacy tool-result blocks are refused with an `invalid history`
+diagnostic. Their saved conversation is retained for inspection rather than
+silently moving user instructions or removing messages.
 
 ## 📋 Diff Review Panel
 
