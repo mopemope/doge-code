@@ -98,7 +98,7 @@ Non-interactive session management. Sessions are listed most recently updated fi
 ## 🔧 Installation
 
 ### Prerequisites
-- Rust 1.88+ (Rust Edition 2024)
+- Rust 1.94+ (Rust Edition 2024); development and CI use Rust 1.99.0
 - An OpenAI-compatible API key (`OPENAI_API_KEY`), or an eligible ChatGPT account with plan usage authorized through Sign in with ChatGPT
 - ripgrep (`rg` on `PATH`; required at runtime by the `search_text` tool, which shells out to `rg` with no fallback)
 

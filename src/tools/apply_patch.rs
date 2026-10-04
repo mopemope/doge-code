@@ -478,8 +478,37 @@ fn normalize_line_endings(content: &str) -> (String, bool) {
 
 /// パッチの解析
 fn parse_patch(patch_content: &str) -> Result<diffy::Patch<'_, str>> {
-    diffy::Patch::from_str(patch_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse patch: {}", e))
+    let patch = diffy::Patch::from_str(patch_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse patch: {}", e))?;
+    // diffy 0.5 accepts trailing content and additional files. This tool
+    // applies exactly one text patch, so every line after its first hunk must
+    // belong to the parsed hunks (including no-newline markers).
+    let mut lines = patch_content.split_inclusive('\n').peekable();
+    while lines.peek().is_some_and(|line| !line.starts_with("@@ ")) {
+        lines.next();
+    }
+    for hunk in patch.hunks() {
+        if !lines.next().is_some_and(|line| line.starts_with("@@ ")) {
+            anyhow::bail!("Failed to parse patch: missing hunk header");
+        }
+        for _ in hunk.lines() {
+            lines
+                .next()
+                .context("Failed to parse patch: missing hunk line")?;
+            if lines
+                .peek()
+                .is_some_and(|line| line.starts_with("\\ No newline at end of file"))
+            {
+                lines.next();
+            }
+        }
+    }
+    if lines.next().is_some() {
+        anyhow::bail!(
+            "Failed to parse patch: trailing content or multiple files are not supported"
+        );
+    }
+    Ok(patch)
 }
 
 /// 空のパッチかどうかのチェック
@@ -839,6 +868,19 @@ mod tests {
         std::fs::write(&file_path, content).unwrap();
         let file_path_str = file_path.to_str().unwrap().to_string();
         (dir, file_path_str)
+    }
+
+    #[test]
+    fn rejects_trailing_content_and_multiple_file_patches() {
+        let patch = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(parse_patch(patch).is_ok());
+        for tail in [
+            "garbage\n",
+            "--- a/other\n+++ b/other\n",
+            "GIT binary patch\nliteral 0\n",
+        ] {
+            assert!(parse_patch(&format!("{patch}{tail}")).is_err(), "{tail}");
+        }
     }
 
     fn create_patch_content(original: &str, modified: &str) -> String {

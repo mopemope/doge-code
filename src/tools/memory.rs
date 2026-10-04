@@ -69,7 +69,7 @@ impl MemoryTools {
             metadata: metadata.unwrap_or(json!({})),
         };
 
-        let yaml = serde_yaml::to_string(&frontmatter)?;
+        let yaml = serde_saphyr::to_string(&frontmatter)?;
         let full_content = format!("---\n{}---\n{}", yaml, content);
 
         let path = self.get_memory_path(key);
@@ -165,7 +165,7 @@ fn parse_memory_file(content: &str) -> (MemoryFrontmatter, String) {
     {
         let yaml_str = &content[3..end_idx + 3];
         let body = &content[end_idx + 6..]; // 3 for start --- + 3 for end --- + yaml len
-        if let Ok(fm) = serde_yaml::from_str::<MemoryFrontmatter>(yaml_str) {
+        if let Ok(fm) = serde_saphyr::from_str::<MemoryFrontmatter>(yaml_str) {
             return (fm, body.trim().to_string());
         }
     }
@@ -284,6 +284,23 @@ pub fn search_memory_tool_def() -> ToolDef {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn legacy_yaml_frontmatter_preserves_metadata_and_roundtrips() {
+        let legacy = "---\ntags:\n- architecture\n- 'on'\nmetadata:\n  enabled: true\n  count: 2\n  label: '001'\n  empty: null\n  note: |\n    first line\n    second line\n---\n日本語 body\n";
+        let (frontmatter, body) = parse_memory_file(legacy);
+        assert_eq!(frontmatter.tags, ["architecture", "on"]);
+        assert_eq!(
+            frontmatter.metadata,
+            json!({"enabled":true,"count":2,"label":"001","empty":null,"note":"first line\nsecond line\n"})
+        );
+        assert_eq!(body, "日本語 body");
+        let encoded = serde_saphyr::to_string(&frontmatter).expect("serialize metadata");
+        let restored: MemoryFrontmatter =
+            serde_saphyr::from_str(&encoded).expect("reopen metadata");
+        assert_eq!(restored.metadata, frontmatter.metadata);
+        assert_eq!(restored.tags, frontmatter.tags);
+    }
 
     #[tokio::test]
     async fn test_memory_lifecycle() -> Result<()> {

@@ -557,6 +557,91 @@ mod client_tests {
     }
 
     #[tokio::test]
+    async fn legacy_http_initializes_after_discovery_and_with_unlimited_timeout() {
+        use axum::{
+            Json, Router,
+            extract::State,
+            http::StatusCode,
+            response::{IntoResponse, Response},
+            routing::post,
+        };
+        use serde_json::{Value, json};
+        use tokio::sync::Mutex;
+        async fn legacy(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Response {
+            requests.lock().await.push(request.clone());
+            let method = request["method"].as_str().expect("method");
+            if method == "server/discover" {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Expected initialize request",
+                )
+                    .into_response();
+            }
+            if method == "initialize" {
+                assert_eq!(request["params"]["protocolVersion"], "2025-11-25");
+                return Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":{"protocolVersion":"2025-11-25", "capabilities":{}, "serverInfo":{"name":"legacy", "version":"test"}}})).into_response();
+            }
+            if method == "tools/list" {
+                return Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":{"tools":[]}}))
+                    .into_response();
+            }
+            StatusCode::ACCEPTED.into_response()
+        }
+        for connect_timeout_ms in [5_000, 0] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/mcp", post(legacy))
+                .with_state(requests.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener");
+            let address = listener.local_addr().expect("address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("mock server");
+            });
+            let config = McpServerConfig {
+                address: Some(format!("http://{address}/mcp")),
+                connect_timeout_ms,
+                ..http_config()
+            };
+            let client = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                McpClient::from_config(&config),
+            )
+            .await
+            .expect("bounded test")
+            .expect("legacy connection");
+            assert!(client.list_tools().await.expect("legacy tools").is_empty());
+            assert_eq!(
+                client
+                    .get_server_info()
+                    .await
+                    .expect("legacy info")
+                    .protocol_version,
+                rmcp::model::ProtocolVersion::V_2025_11_25
+            );
+            let requests = requests.lock().await;
+            let methods: Vec<_> = requests
+                .iter()
+                .map(|request| request["method"].as_str().expect("method"))
+                .collect();
+            assert_eq!(
+                methods.contains(&"server/discover"),
+                connect_timeout_ms != 0
+            );
+            assert!(methods.contains(&"initialize"));
+            assert!(methods.contains(&"notifications/initialized"));
+            drop(requests);
+            drop(client);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_mcp_client_rejects_invalid_stdio_config() {
         let config = McpServerConfig {
             name: "test".to_string(),
