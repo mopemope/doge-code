@@ -102,7 +102,11 @@ pub async fn collect_diff_review_payload(
         let project_root = project_root.clone();
         let filter_paths = filter_paths.to_vec();
         async move {
-            let mut args = vec!["diff".to_string(), "--name-only".to_string()];
+            let mut args = vec![
+                "diff".to_string(),
+                "--name-only".to_string(),
+                "-z".to_string(),
+            ];
             if !filter_paths.is_empty() {
                 args.push("--".to_string());
                 args.extend(
@@ -120,7 +124,12 @@ pub async fn collect_diff_review_payload(
         async move {
             run_git_command(
                 &project_root,
-                vec!["status".to_string(), "--porcelain=v1".to_string()],
+                vec![
+                    "ls-files".to_string(),
+                    "--others".to_string(),
+                    "--exclude-standard".to_string(),
+                    "-z".to_string(),
+                ],
             )
             .await
         }
@@ -141,8 +150,7 @@ pub async fn collect_diff_review_payload(
     let names_output = names_output??;
     let mut files = names_output
         .stdout
-        .lines()
-        .map(str::trim)
+        .split('\0')
         .filter(|line| !line.is_empty())
         .map(ToString::to_string)
         .collect::<Vec<_>>();
@@ -153,26 +161,11 @@ pub async fn collect_diff_review_payload(
 
     // Process untracked files in parallel
     let mut untracked_tasks = Vec::new();
-    for line in status_text.lines() {
-        let Some(path) = line.strip_prefix("?? ") else {
-            continue;
-        };
-
-        if path.trim().is_empty() || path.ends_with('/') {
+    for path in status_text.split('\0').filter(|path| !path.is_empty()) {
+        if !filter_paths.is_empty() && !filter_paths.iter().any(|p| p == Path::new(path)) {
             continue;
         }
-
-        let path = path.trim().to_string();
-
-        // Scope to agent-modified files when a filter is provided
-        if !filter_paths.is_empty()
-            && !filter_paths.iter().any(|p| {
-                let p_str = p.to_string_lossy();
-                p_str.ends_with(path.as_str()) || path.ends_with(p_str.as_ref())
-            })
-        {
-            continue;
-        }
+        let path = path.to_string();
         let task = tokio::spawn({
             let project_root = project_root.clone();
             async move {
@@ -222,6 +215,8 @@ pub async fn collect_diff_review_payload(
     debug!(files = ?files, "Collected diff review payload");
 
     Ok(Some(DiffReviewPayload {
+        review_id: None,
+        reject_reason: None,
         diff: combined_diff,
         files,
         evidence: Vec::new(),

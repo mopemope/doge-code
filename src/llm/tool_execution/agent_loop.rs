@@ -911,48 +911,30 @@ pub async fn run_agent_loop(
                 && file_was_written
                 && let Some(tx) = &ui_tx
             {
-                // Scope the diff to files the agent modified in this session so
-                // unrelated uncommitted work in the worktree is not shown/reverted.
-                // Session paths are project-root relative, matching the cwd of the
-                // git commands run inside collect_diff_review_payload.
-                let filter_paths = fs.get_session_changed_files();
-                match crate::llm::tool_execution::collect_diff_review_payload(
-                    &cfg.project_root,
-                    &filter_paths,
-                )
-                .await
-                {
-                    Ok(Some(payload)) => {
-                        let enriched =
-                            crate::tools::provenance::enrich_diff_review_with_evidence(fs, payload);
-                        match serde_json::to_string(&enriched) {
-                            Ok(json) => {
-                                let _ = tx.send(format!("::diff_review:{}", json));
-                            }
-                            Err(e) => {
-                                let agent_error = AgentLoopError::Serialization(e.to_string());
-                                handle_agent_error(&agent_error, &ui_tx);
-                                let _ = tx.send(format!(
-                                    "::diff_review:{}",
-                                    serde_json::json!({
-                                        "error": format!("Failed to serialize diff review payload: {}", e)
-                                    })
-                                ));
-                            }
+                let payload = if fs.review_capture.is_some() {
+                    fs.seal_review()
+                } else {
+                    match crate::llm::tool_execution::collect_diff_review_payload(
+                        &cfg.project_root,
+                        &fs.get_session_changed_files(),
+                    )
+                    .await
+                    {
+                        Ok(payload) => payload,
+                        Err(e) => {
+                            handle_agent_error(
+                                &AgentLoopError::DiffCollection(e.to_string()),
+                                &ui_tx,
+                            );
+                            None
                         }
                     }
-                    Ok(None) => {
-                        debug!("No diff detected after tool execution");
-                    }
-                    Err(e) => {
-                        let agent_error = AgentLoopError::DiffCollection(e.to_string());
-                        handle_agent_error(&agent_error, &ui_tx);
-                        let _ = tx.send(format!(
-                            "::diff_review:{}",
-                            serde_json::json!({
-                                "error": format!("Failed to collect diff review payload: {}", e)
-                            })
-                        ));
+                };
+                if let Some(payload) = payload {
+                    let enriched =
+                        crate::tools::provenance::enrich_diff_review_with_evidence(fs, payload);
+                    if let Ok(json) = serde_json::to_string(&enriched) {
+                        let _ = tx.send(format!("::diff_review:{json}"));
                     }
                 }
             }

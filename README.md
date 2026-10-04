@@ -644,7 +644,7 @@ foreground job is rejected explicitly (use `/jobs` to inspect it or
 
 `/jobs` and `/cancel [job-id]` submitted with Enter are handled immediately,
 even while a job is running; Esc also cancels the current foreground job.
-Other prompts keep their existing queue order. `/compact` is a foreground
+Other prompts keep FIFO queue order and are consumed only after the foreground owner releases its slot, including cancellation cleanup, diff collection and session saves. Cosmetic done/error messages cannot release the queue. Busy reservation races retain accepted prompts for retry. `/compact` is a foreground
 `compact` job visible in `/jobs`, cancellable with `/cancel` or Esc, and drained
 on shutdown. While it owns the session, another foreground job, session switch,
 or `/clear` is rejected. It summarizes only a safe history prefix and preserves
@@ -695,15 +695,31 @@ Combining these enables maximum code exploration effectiveness without overwhelm
 
 After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):
 
-- **Scoped to agent changes**: the diff covers only files the agent modified in the current session, so unrelated uncommitted work in your worktree is never shown or reverted
+- **Scoped to agent changes**: the TUI diff covers captured text mutations from this turn, from the first pre-edit contents to the last committed contents; existing staged, unstaged and untracked user content is the baseline
 - **Split view**: log on the left, diff preview on the right with per-file tabs showing addition/deletion counts
 - **Syntax highlighting**: additions in green, removals in red, hunk headers in yellow, etc.
 - **Keyboard controls** (active while the input box is empty):
   - `a` — accept changes (keep them applied)
-  - `r` — reject changes (revert via `git restore`; untracked/new files are removed). The agent is notified on your next instruction that the changes were reverted
-  - `q` / `Esc` — dismiss the panel (changes remain applied)
+  - `r` — restore this review’s captured pre-edit contents, preserving Git’s index. Only files captured as missing before creation are removed. The agent is notified of restored changes on your next instruction
+  - `q` / `Esc` — dismiss the panel (changes remain applied). During rollback, Esc requests cancellation and the panel stays open until the result; accept/dismiss are disabled
   - `←`/`→` — switch between changed files
   - `↑`/`↓` — scroll; `PgUp`/`PgDn` — fast scroll; `Home`/`End` — jump to top/bottom
+
+Reject runs as a foreground workspace-write job. Before any restoration, every
+captured target must still match its reviewed contents and have the expected file
+type, with no symlink traversal or paths outside the project. An initial conflict
+leaves every file untouched. Each restore rechecks its target; later conflicts,
+I/O failures or cancellation report restored mutations and remaining mutations
+separately, and retries skip completed restores. These checks are optimistic:
+uncooperative external writers can still race filesystem operations.
+
+Rollback evidence is independent of `/undo` and bounded to 128 receipts and 8 MiB
+of captured text/diffs per turn. Overflow, unknown baselines, mixed external edits
+between agent edits, and unsupported or legacy reviews are view only, with a
+reason. Shell, remote and other edits without mutation receipts are outside this
+rollback scope. Accept and dismiss only discard review evidence; they do not edit
+files. Review evidence is memory-local and expires when a new turn replaces it or
+the session ends.
 
 Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 

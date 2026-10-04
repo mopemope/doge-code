@@ -55,6 +55,8 @@ pub struct FsTools {
     remote_tool_manager: RemoteToolManager,
     execution_policy: crate::execution::ExecutionPolicy,
     pub context_manager: Arc<RwLock<ContextManager>>,
+    pub(crate) review_registry: Arc<Mutex<Option<Arc<Mutex<crate::tools::review::ReviewCapture>>>>>,
+    pub(crate) review_capture: Option<Arc<Mutex<crate::tools::review::ReviewCapture>>>,
     pub undo_stack: Arc<RwLock<crate::tools::undo::UndoStack>>,
     pub shell_session: SharedShellSession,
 }
@@ -76,6 +78,8 @@ impl FsTools {
             config: config.clone(),
             remote_tool_manager: RemoteToolManager::new(config.clone()),
             execution_policy: crate::execution::ExecutionPolicy::new(config.clone()),
+            review_registry: Arc::new(Mutex::new(None)),
+            review_capture: None,
             undo_stack: Arc::new(RwLock::new(crate::tools::undo::UndoStack::new())),
             shell_session: SharedShellSession::new(
                 config.project_root.clone(),
@@ -275,6 +279,7 @@ impl FsTools {
         let outside_tracked_scope = !canonical_absolute.starts_with(&canonical_root);
 
         if outside_tracked_scope {
+            self.capture_receipt(&receipt, None);
             // Allowed outside paths are a supported scope gap, not a failure.
             if options.record_undo {
                 self.push_undo_for_receipt(&receipt, None).await;
@@ -316,6 +321,7 @@ impl FsTools {
             }
         };
 
+        self.capture_receipt(&receipt, change_id.clone());
         if options.record_undo {
             self.push_undo_for_receipt(&receipt, change_id.clone())
                 .await;

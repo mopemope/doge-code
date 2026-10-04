@@ -361,6 +361,18 @@ impl JobManager {
             .len()
     }
 
+    /// Commit one bounded workspace restoration and its progress together.
+    /// Cancellation/shutdown cannot terminalize the owner during this step.
+    /// The callback must not await or call JobManager.
+    pub(crate) fn synchronous_step<R>(&self, id: JobId, step: impl FnOnce() -> R) -> Option<R> {
+        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let record = state.active.get(&id)?;
+        if record.status == JobStatus::Cancelling || record.token.is_cancelled() {
+            return None;
+        }
+        Some(step())
+    }
+
     /// Serialize a short synchronous irreversible commit and terminalization
     /// with cancellation/shutdown bookkeeping. No awaits or JobManager calls
     /// are allowed in `commit`. A shutdown cannot report a saved commit as

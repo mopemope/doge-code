@@ -3,6 +3,7 @@ pub mod budget;
 mod common;
 pub mod mutation;
 pub mod requirements;
+pub mod review;
 pub mod scope;
 
 #[derive(thiserror::Error, Debug)]
