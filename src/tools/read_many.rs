@@ -14,7 +14,7 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "fs_read_many_files".to_string(),
-            description: "Reads multiple files at once via paths or globs. Efficient for context gathering. Supports `mode='summary'`.".to_string(),
+            description: "Reads multiple files at once via paths or globs. Efficient for context gathering. Returns file summaries with actual unread-path cursors; use fs_read for truncated file content.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
@@ -36,27 +36,32 @@ pub fn tool_def() -> ToolDef {
                     "mode": {
                         "type": ["string", "null"],
                         "enum": ["summary", "full"],
-                        "description": "Summary returns small snippets by default; full streams entire files"
+                        "description": "Summary limits snippets to 40 lines; full skips that line cap but still obeys all character and serialized JSON budgets"
                     },
                     "response_budget_chars": {
                         "type": ["integer", "null"],
-                        "description": "Approximate character budget for combined snippets"
+                        "minimum": 1,
+                        "description": "Positive Unicode scalar character budget for combined snippets (default 8000, capped at 40000; JSON overhead may reduce output)"
                     },
                     "cursor": {
                         "type": ["integer", "null"],
+                        "minimum": 0,
                         "description": "Start index (0-based) when paging through file list"
                     },
                     "page_size": {
                         "type": ["integer", "null"],
+                        "minimum": 1,
                         "description": "How many files to include in this page"
                     },
                     "max_entries": {
                         "type": ["integer", "null"],
+                        "minimum": 1,
                         "description": "Hard cap for files per response"
                     },
                     "snippet_max_chars": {
                         "type": ["integer", "null"],
-                        "description": "Maximum snippet size per file before truncation"
+                        "minimum": 1,
+                        "description": "Positive Unicode scalar character cap per file (default 1200, at most 40000; truncation is marked in metadata)"
                     }
                 },
                 "required": ["paths"]
@@ -106,6 +111,14 @@ pub fn fs_read_many_files(
     config: &AppConfig,
     options: FsReadManyOptions,
 ) -> Result<FsReadManyResponse> {
+    for (name, value) in [
+        ("page_size", options.page_size),
+        ("max_entries", options.max_entries),
+        ("response_budget_chars", options.response_budget_chars),
+        ("snippet_max_chars", options.snippet_max_chars),
+    ] {
+        super::budget::positive_read_option(name, value)?;
+    }
     let mut warnings = Vec::new();
     let mut all_paths = Vec::new();
 
@@ -136,112 +149,131 @@ pub fn fs_read_many_files(
     }
 
     let total_files = all_paths.len();
-    if total_files == 0 {
-        return Ok(FsReadManyResponse {
-            files: Vec::new(),
-            total_files,
-            next_cursor: None,
-            warnings,
-        });
-    }
-
     let cursor = options.cursor.unwrap_or(0).min(total_files);
-    let mut page_size = options
+    let page_size = options
         .page_size
         .or(options.max_entries)
-        .unwrap_or(DEFAULT_MULTI_PAGE_SIZE);
-    if options.mode == FsReadMode::Full {
-        page_size = options.page_size.unwrap_or(DEFAULT_MULTI_PAGE_SIZE);
-    }
-    if let Some(max_entries) = options.max_entries {
-        page_size = page_size.min(max_entries);
-    }
-    if page_size == 0 {
-        page_size = 1;
-    }
-
-    let end_index = (cursor + page_size).min(total_files);
-    let selected = &all_paths[cursor..end_index];
-
-    let snippet_char_cap = options
-        .snippet_max_chars
-        .unwrap_or(DEFAULT_MULTI_SNIPPET_CHARS);
-    let mut remaining_budget = options
+        .unwrap_or(DEFAULT_MULTI_PAGE_SIZE)
+        .min(options.max_entries.unwrap_or(usize::MAX));
+    let end_index = cursor.saturating_add(page_size).min(total_files);
+    let requested_budget = options
         .response_budget_chars
         .unwrap_or(DEFAULT_MULTI_BUDGET);
-
-    let mut files = Vec::new();
-
-    for path in selected {
+    let mut remaining_budget = requested_budget.min(super::budget::READ_TOOL_OUTPUT_MAX_CHARS);
+    let snippet_cap = options
+        .snippet_max_chars
+        .unwrap_or(DEFAULT_MULTI_SNIPPET_CHARS)
+        .min(super::budget::READ_TOOL_OUTPUT_MAX_CHARS);
+    if requested_budget > remaining_budget
+        || options
+            .snippet_max_chars
+            .is_some_and(|cap| cap > snippet_cap)
+    {
+        warnings.push(
+            "character budgets capped at 40000; serialized JSON overhead also applies".into(),
+        );
+    }
+    let mut response = FsReadManyResponse {
+        files: Vec::new(),
+        total_files,
+        next_cursor: (cursor < total_files).then_some(cursor),
+        warnings,
+    };
+    let mut consumed = cursor;
+    let mut file_indices = Vec::new();
+    for (index, path) in all_paths.iter().enumerate().take(end_index).skip(cursor) {
         if !path.is_file() {
+            consumed = index + 1;
             continue;
         }
         let p = Path::new(path);
-        if !p.is_absolute() {
-            anyhow::bail!("Path must be absolute: {}", p.display());
-        }
-
+        anyhow::ensure!(p.is_absolute(), "Path must be absolute");
         let mut f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
         let mut s = String::new();
         f.read_to_string(&mut s)
             .with_context(|| format!("read {}", p.display()))?;
         let total_lines = s.lines().count();
-        let mut truncated = false;
-
-        let mut snippet = if options.mode == FsReadMode::Summary {
-            let snippet_lines: Vec<&str> = s.lines().take(DEFAULT_MULTI_SNIPPET_LINES).collect();
-            truncated = total_lines > snippet_lines.len();
-            snippet_lines.join("\n")
+        let snippet = if options.mode == FsReadMode::Summary {
+            s.lines()
+                .take(DEFAULT_MULTI_SNIPPET_LINES)
+                .collect::<Vec<_>>()
+                .join("\n")
         } else {
             s
         };
-
-        if snippet.len() > snippet_char_cap {
-            let mut truncate_at = snippet_char_cap;
-            while truncate_at > 0 && !snippet.is_char_boundary(truncate_at) {
-                truncate_at -= 1;
+        let snippet_chars = snippet.chars().count();
+        let mut wanted = snippet_chars.min(snippet_cap);
+        if wanted > remaining_budget {
+            if !response.files.is_empty() {
+                break;
             }
-            if truncate_at == 0 {
-                truncate_at = snippet_char_cap;
-            }
-            snippet.truncate(truncate_at);
-            snippet.push_str("\n[[TRUNCATED]]");
-            truncated = true;
+            wanted = remaining_budget;
         }
-
-        if snippet.len() > remaining_budget {
-            warnings.push(format!(
-                "response budget exceeded after {} files; request cursor={} for remaining",
-                files.len(),
-                cursor + files.len()
-            ));
-            break;
-        }
-
-        remaining_budget = remaining_budget.saturating_sub(snippet.len());
-
         let metadata = fs::metadata(p).with_context(|| format!("metadata {}", p.display()))?;
-        files.push(FileSnippet {
+        response.files.push(FileSnippet {
             path: p.display().to_string(),
             total_bytes: metadata.len(),
             total_lines,
-            snippet,
-            truncated,
+            snippet: super::budget::safe_take_chars(&snippet, wanted).to_owned(),
+            truncated: wanted < snippet_chars
+                || (options.mode == FsReadMode::Summary
+                    && total_lines > DEFAULT_MULTI_SNIPPET_LINES),
         });
+        response.next_cursor = (index + 1 < total_files).then_some(index + 1);
+        // Include continuation guidance in the measured payload, not in snippet text.
+        if response.files.iter().any(|file| file.truncated)
+            && !response.warnings.iter().any(|w| w.starts_with("truncated"))
+        {
+            response.warnings.push("truncated snippets are file summaries; use fs_read on the file for remaining lines".into());
+        }
+        if !super::budget::read_result_fits(&response)? {
+            if response.files.len() > 1 {
+                response.files.pop();
+                response.next_cursor = Some(index);
+                break;
+            }
+            // A first-file summary may be shortened safely; never consume a file
+            // whose metadata or even one available character cannot fit.
+            let mut low = 0;
+            let mut high = wanted;
+            while low < high {
+                let mid = low + (high - low).div_ceil(2);
+                response.files[0].snippet =
+                    super::budget::safe_take_chars(&snippet, mid).to_owned();
+                response.files[0].truncated = true;
+                if !response.warnings.iter().any(|w| w.starts_with("truncated")) {
+                    response.warnings.push("truncated snippets are file summaries; use fs_read on the file for remaining lines".into());
+                }
+                if super::budget::read_result_fits(&response)? {
+                    low = mid;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            wanted = low;
+            response.files[0].snippet = super::budget::safe_take_chars(&snippet, wanted).to_owned();
+            response.files[0].truncated = true;
+            anyhow::ensure!(
+                super::budget::read_result_fits(&response)? && (wanted > 0 || snippet_chars == 0),
+                "first file cannot fit the 40000-character serialized JSON limit; no file consumed, use fs_read with a shorter path"
+            );
+        }
+        remaining_budget -= wanted;
+        file_indices.push(index);
+        consumed = index + 1;
     }
-
-    let next_cursor = if end_index < total_files {
-        Some(end_index)
-    } else {
-        None
-    };
-
-    Ok(FsReadManyResponse {
-        files,
-        total_files,
-        next_cursor,
-        warnings,
-    })
+    response.next_cursor = (consumed < total_files).then_some(consumed);
+    // A later truncation warning or cursor can add overhead. Restore the actual
+    // first removed path index if that pushes the final envelope over its cap.
+    while !super::budget::read_result_fits(&response)? {
+        anyhow::ensure!(
+            response.files.len() > 1,
+            "read result metadata exceeds the 40000-character serialized JSON limit; use shorter paths"
+        );
+        response.files.pop();
+        response.next_cursor = file_indices.pop();
+    }
+    Ok(response)
 }
 
 #[cfg(test)]

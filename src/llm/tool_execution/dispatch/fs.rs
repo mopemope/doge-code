@@ -48,26 +48,11 @@ pub async fn fs_list(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Res
 
 pub async fn fs_read(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let start_line = args
-        .get("start_line")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    let cursor = args
-        .get("cursor")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    let page_size = args
-        .get("page_size")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    let response_budget_chars = args
-        .get("response_budget_chars")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
+    let start_line = read_usize(args, "start_line", false)?;
+    let limit = read_usize(args, "limit", false)?;
+    let cursor = read_usize(args, "cursor", false)?;
+    let page_size = read_usize(args, "page_size", false)?;
+    let response_budget_chars = read_usize(args, "response_budget_chars", false)?;
     let options = FsReadOptions {
         start_line,
         limit,
@@ -87,7 +72,7 @@ pub async fn fs_read(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Res
                 result_summary: format!("Read {} bytes from {}", result.content.len(), path),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(e) => Err(crate::tools::budget::bounded_read_error(e)),
     }
 }
 
@@ -251,26 +236,11 @@ pub async fn fs_read_many_files(
     let recursive = args.get("recursive").and_then(|v| v.as_bool());
     let options = FsReadManyOptions {
         mode: FsReadMode::from_optional_str(args.get("mode").and_then(|v| v.as_str())),
-        cursor: args
-            .get("cursor")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize),
-        page_size: args
-            .get("page_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize),
-        max_entries: args
-            .get("max_entries")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize),
-        response_budget_chars: args
-            .get("response_budget_chars")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize),
-        snippet_max_chars: args
-            .get("snippet_max_chars")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize),
+        cursor: read_usize(args, "cursor", true)?,
+        page_size: read_usize(args, "page_size", false)?,
+        max_entries: read_usize(args, "max_entries", false)?,
+        response_budget_chars: read_usize(args, "response_budget_chars", false)?,
+        snippet_max_chars: read_usize(args, "snippet_max_chars", false)?,
     };
 
     match runtime
@@ -285,6 +255,23 @@ pub async fn fs_read_many_files(
                 result_summary: format!("Read {} files", result.files.len()),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(e) => Err(crate::tools::budget::bounded_read_error(e)),
     }
+}
+
+fn read_usize(args: &serde_json::Value, key: &str, allow_zero: bool) -> Result<Option<usize>> {
+    let Some(value) = args.get(key).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| {
+            anyhow!("invalid argument: {key} must be a nonnegative integer fitting usize")
+        })?;
+    anyhow::ensure!(
+        allow_zero || value > 0,
+        "invalid argument: {key} must be greater than zero"
+    );
+    Ok(Some(value))
 }

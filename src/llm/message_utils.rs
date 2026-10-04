@@ -91,10 +91,9 @@ fn serialized_len(value: &serde_json::Value) -> usize {
 /// the model.
 pub fn max_output_chars(tool_name: &str) -> usize {
     const DEFAULT_MAX_LEN: usize = 8000;
-    const READ_MAX_LEN: usize = 40000; // Allow more context for reading files
 
     if tool_name == "fs_read" || tool_name == "fs_read_many_files" || tool_name == "plan_read" {
-        READ_MAX_LEN
+        crate::tools::budget::READ_TOOL_OUTPUT_MAX_CHARS
     } else {
         DEFAULT_MAX_LEN
     }
