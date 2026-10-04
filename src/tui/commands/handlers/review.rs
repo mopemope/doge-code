@@ -79,7 +79,9 @@ mod tests {
             .tools
             .clone()
             .with_review_capture(crate::jobs::JobId(99));
-        let path = dir.path().join("a");
+        // macOS temp paths can start at /var while the configured canonical
+        // root starts at /private/var. Build receipts in that same root.
+        let path = executor.cfg.project_root.join("a");
         std::fs::write(&path, "baseline").unwrap();
         let before = mutation::read_text_snapshot(&path).unwrap();
         let after = mutation::commit_text_candidate_blocking(&path, &before, "agent").unwrap();
@@ -100,6 +102,15 @@ mod tests {
             )
             .await;
         let payload = executor.tools.seal_review().unwrap();
+        assert!(
+            payload.reject_reason.is_none(),
+            "capture must support rollback: {:?}",
+            payload.reject_reason
+        );
+        assert!(
+            !payload.files.is_empty(),
+            "fixture mutation must be captured"
+        );
         let review_id = payload.review_id.clone().unwrap();
         ui.diff_review = Some(crate::tui::diff_review::DiffReviewState::from_payload(
             payload,
