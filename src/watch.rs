@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify_rust::Notification;
-use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
@@ -382,7 +381,15 @@ async fn handle_file_change(
     }
 
     crate::tools::scope::ensure_in_scope(&path, cfg, &[])?;
+    anyhow::ensure!(
+        fs::metadata(&path).await?.len() <= MAX_WATCH_BYTES as u64,
+        "watch source exceeds 8 MiB"
+    );
     let before = crate::tools::mutation::read_text_snapshot_async(&path).await?;
+    anyhow::ensure!(
+        before.content_or_empty().len() <= MAX_WATCH_BYTES,
+        "watch source exceeds 8 MiB"
+    );
     let content = before.content_or_empty().to_owned();
 
     // Use AI comment pattern from configuration (as a literal string, not regex)
@@ -478,6 +485,118 @@ async fn commit_watch_candidate(
     Ok(())
 }
 
+// Match the 8 MiB bounded review-evidence budget; reject before allocating candidates.
+const MAX_WATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WATCH_EDITS: usize = 64;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchEditEnvelope {
+    version: u32,
+    #[serde(deserialize_with = "deserialize_watch_edits")]
+    edits: Vec<WatchEdit>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchEdit {
+    search: String,
+    replace: String,
+}
+
+fn deserialize_watch_edits<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<WatchEdit>, D::Error> {
+    struct Edits;
+    impl<'de> serde::de::Visitor<'de> for Edits {
+        type Value = Vec<WatchEdit>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most 64 watch edits")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut edits =
+                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX_WATCH_EDITS));
+            while let Some(edit) = sequence.next_element()? {
+                if edits.len() == MAX_WATCH_EDITS {
+                    return Err(serde::de::Error::custom("too many watch edits"));
+                }
+                edits.push(edit);
+            }
+            Ok(edits)
+        }
+    }
+    deserializer.deserialize_seq(Edits)
+}
+
+const WATCH_EDIT_PROMPT: &str = r#"Return exactly one JSON edit envelope, with no prose or Markdown fences:
+{"version":1,"edits":[{"search":"fn old() {}","replace":"fn new() {}"}]}
+Version must be 1. Only version/edits and search/replace fields are allowed; never return a path.
+Each nonempty search must occur exactly once in the ORIGINAL file. All searches refer to that same original snapshot, must not overlap, and are not applied sequentially to discover new matches.
+Preserve Unicode, CRLF and final-newline bytes except where explicitly edited. Use at most 64 edits. Return {"version":1,"edits":[]} for no change. Do not return the whole file or an unexplained code fragment. Response and resulting file must each be at most 8 MiB.
+The example demonstrates the wire format; use actual original text for each search."#;
+
+/// Resolve every range against the original snapshot before changing any bytes.
+fn apply_watch_edit_envelope(original: &str, response: &str) -> Result<String> {
+    anyhow::ensure!(
+        original.len() <= MAX_WATCH_BYTES,
+        "watch source exceeds 8 MiB"
+    );
+    anyhow::ensure!(
+        response.len() <= MAX_WATCH_BYTES,
+        "watch edit response exceeds 8 MiB"
+    );
+    let envelope: WatchEditEnvelope =
+        serde_json::from_str(response).context("watch requires a single JSON edit envelope")?;
+    anyhow::ensure!(envelope.version == 1, "unsupported watch edit version");
+    anyhow::ensure!(
+        envelope.edits.len() <= MAX_WATCH_EDITS,
+        "too many watch edits"
+    );
+    let mut ranges = Vec::with_capacity(envelope.edits.len());
+    for (index, edit) in envelope.edits.iter().enumerate() {
+        anyhow::ensure!(
+            !edit.search.is_empty(),
+            "watch edit {index} has empty search"
+        );
+        let start = original
+            .find(&edit.search)
+            .with_context(|| format!("watch edit {index} search not found"))?;
+        // Count overlapping matches too (e.g. aa occurs twice in aaa).
+        let next_char = edit
+            .search
+            .chars()
+            .next()
+            .context("watch edit has empty search")?
+            .len_utf8();
+        anyhow::ensure!(
+            !original[start + next_char..].contains(&edit.search),
+            "watch edit {index} search is ambiguous"
+        );
+        ranges.push((start, start + edit.search.len(), edit.replace.as_str()));
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    for adjacent in ranges.windows(2) {
+        anyhow::ensure!(adjacent[0].1 <= adjacent[1].0, "overlapping watch edits");
+    }
+    // Bound every intermediate candidate, not just the final net size.
+    let mut size = original.len();
+    for &(start, end, replacement) in ranges.iter().rev() {
+        size = size
+            .checked_sub(end - start)
+            .and_then(|n| n.checked_add(replacement.len()))
+            .context("watch candidate size overflow")?;
+        anyhow::ensure!(size <= MAX_WATCH_BYTES, "watch candidate exceeds 8 MiB");
+    }
+    let mut candidate = original.to_owned();
+    for &(start, end, replacement) in ranges.iter().rev() {
+        candidate.replace_range(start..end, replacement);
+    }
+    Ok(candidate)
+}
+
 async fn execute_llm_task(
     llm_client: &OpenAIClient,
     model: &str,
@@ -487,22 +606,16 @@ async fn execute_llm_task(
 ) -> Result<String> {
     info!("Executing LLM task for {}", file_path.display());
 
-    let system_prompt = "You are an expert programmer. You will be given a file's content and an instruction to modify it. Your task is to return the entire file content with the requested modification. Do not add any extra explanations or markdown formatting. Just return the raw, updated file content.".to_string();
-
-    // Determine language for syntax highlighting based on file extension
-    let language = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let user_prompt = format!(
-        "Please modify the following file based on the instruction.\n\nFile: `{}`\n\nInstruction: {}\n\n```{}\n{}\n```",
-        file_path.display(),
-        instruction,
-        language,
-        file_content
+    anyhow::ensure!(
+        file_content.len() <= MAX_WATCH_BYTES,
+        "watch source exceeds 8 MiB"
     );
+    let system_prompt = WATCH_EDIT_PROMPT.to_string();
+    let user_prompt = serde_json::json!({
+        "instruction": instruction,
+        "original": file_content,
+    })
+    .to_string();
 
     let messages = vec![
         ChatMessage {
@@ -525,16 +638,7 @@ async fn execute_llm_task(
     // The first argument is the model name, the second is the messages, the third is the cancel token (None here)
     let res = llm_client.chat_once(model, messages, None).await?;
 
-    let result_content = res.content;
-    // Extract content from markdown code block if present - match any language
-    let re = Regex::new(r"```(?:[a-zA-Z0-9_-]*|)\n([\s\S]*?)\n```")?;
-    if let Some(caps) = re.captures(&result_content)
-        && let Some(code) = caps.get(1)
-    {
-        return Ok(code.as_str().to_string());
-    }
-    // Otherwise, return the whole content
-    Ok(result_content)
+    apply_watch_edit_envelope(file_content, &res.content)
 }
 
 #[cfg(test)]
@@ -721,6 +825,170 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).await?, original);
             assert!(tools.undo_stack.read().await.is_empty());
         }
+        Ok(())
+    }
+    #[test]
+    fn watch_envelope_resolves_original_ranges_and_preserves_bytes() -> Result<()> {
+        let original = "α one\r\nβ two\r\n";
+        let response = serde_json::json!({"version":1,"edits":[
+            {"search":"α one","replace":"α two"},
+            {"search":"β two","replace":"β 三"}
+        ]})
+        .to_string();
+        assert_eq!(
+            apply_watch_edit_envelope(original, &response)?,
+            "α two\r\nβ 三\r\n"
+        );
+        assert_eq!(
+            apply_watch_edit_envelope("no final newline", r#"{"version":1,"edits":[]}"#)?,
+            "no final newline"
+        );
+        let example = WATCH_EDIT_PROMPT.lines().nth(1).unwrap();
+        assert_eq!(
+            apply_watch_edit_envelope("fn old() {}", example)?,
+            "fn new() {}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn watch_envelope_rejects_ambiguous_formats_ranges_and_sizes() {
+        for response in [
+            "Done. I updated the function.",
+            "fn partial() {}",
+            "```rust\nfn partial() {}\n```",
+            r#"{"version":1,"edits":[]} trailing"#,
+            r#"prefix {"version":1,"edits":[]}"#,
+            r#"{"version":1,"edits":[],"path":"other.rs"}"#,
+            r#"{"version":2,"edits":[]}"#,
+            r#"{"version":1,"edits":[{"search":"","replace":"x"}]}"#,
+            r#"{"version":1,"edits":[{"search":"missing","replace":"x"}]}"#,
+            r#"{"version":1,"edits":[{"search":"aa","replace":"x"}]}"#,
+            r#"{"version":1,"edits":[{"search":"abc","replace":"x"},{"search":"bc","replace":"y"}]}"#,
+            r#"{"version":1,"edits":[{"search":"abc","replace":"x"},{"search":"abc","replace":"y"}]}"#,
+            r#"{"version":1,"edits":[{"search":"abc","replace":"x","extra":true}]}"#,
+            r#"{"version":1,"version":1,"edits":[]}"#,
+            "{}",
+            "{",
+            "null",
+        ] {
+            assert!(
+                apply_watch_edit_envelope("aaa abc", response).is_err(),
+                "accepted {response}"
+            );
+        }
+        assert!(apply_watch_edit_envelope("x", &"x".repeat(MAX_WATCH_BYTES + 1)).is_err());
+        assert!(
+            apply_watch_edit_envelope(
+                &"x".repeat(MAX_WATCH_BYTES + 1),
+                r#"{"version":1,"edits":[]}"#
+            )
+            .is_err()
+        );
+        let edits = vec![serde_json::json!({"search":"x","replace":"y"}); MAX_WATCH_EDITS + 1];
+        assert!(
+            apply_watch_edit_envelope(
+                "x",
+                &serde_json::json!({"version":1,"edits":edits}).to_string()
+            )
+            .is_err()
+        );
+        let grow =
+            serde_json::json!({"version":1,"edits":[{"search":"a","replace":"xx"}]}).to_string();
+        let source = format!("a{}", "b".repeat(MAX_WATCH_BYTES - 1));
+        assert!(apply_watch_edit_envelope(&source, &grow).is_err());
+    }
+
+    #[tokio::test]
+    async fn watch_envelope_mock_rejection_is_untracked_and_valid_edit_has_receipt() -> Result<()> {
+        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+        let original = "// AI!: rename\r\nfn old() {}\r\n";
+        let valid = serde_json::json!({"version":1,"edits":[{"search":"fn old() {}","replace":"fn new() {}"}]}).to_string();
+        for response in [
+            "Done. I updated the function.",
+            "fn partial() {}",
+            "```json\n{\"version\":1,\"edits\":[]}\n```",
+            &valid,
+        ] {
+            let (_temp, cfg, tools) = fixture();
+            let path = cfg.project_root.join("source.rs");
+            fs::write(&path, original).await?;
+            let server = ServerBuilder::new()
+                .bind_addr(([127, 0, 0, 1], 0).into())
+                .run()?;
+            server.expect(Expectation::matching(request::method_path("POST", "/v1/chat/completions")).times(1)
+                .respond_with(json_encoded(serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":response}}]}))));
+            let client = OpenAIClient::new(server.url_str("/v1"), "fixture-only")?;
+            let result = handle_file_change(&client, "fixture", path.clone(), &cfg, &tools).await;
+            if response == valid {
+                // Desktop notification may be unavailable in headless fixtures; commit is observable.
+                assert_eq!(
+                    fs::read_to_string(&path).await?,
+                    "// AI!: rename\r\nfn new() {}\r\n"
+                );
+                assert!(
+                    tools
+                        .undo_stack
+                        .read()
+                        .await
+                        .peek_last()
+                        .unwrap()
+                        .change_id
+                        .is_some()
+                );
+                assert!(resolve_backup_root(&cfg).unwrap().exists());
+                crate::tools::undo::undo(&tools).await?;
+                assert_eq!(fs::read_to_string(&path).await?, original);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(fs::read_to_string(&path).await?, original);
+                assert!(tools.undo_stack.read().await.is_empty());
+                assert!(!resolve_backup_root(&cfg).unwrap().exists());
+                let manager = tools
+                    .get_session_manager_wrapper()
+                    .get_session_manager()
+                    .as_ref()
+                    .unwrap();
+                assert!(
+                    manager
+                        .lock()
+                        .unwrap()
+                        .get_changed_files_from_current_session()
+                        .is_empty()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_envelope_valid_pending_response_rejects_manual_conflict() -> Result<()> {
+        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+        let (_temp, cfg, tools) = fixture();
+        let path = cfg.project_root.join("source.rs");
+        fs::write(&path, "// AI!: rename\nfn old() {}\n").await?;
+        let server = ServerBuilder::new()
+            .bind_addr(([127, 0, 0, 1], 0).into())
+            .run()?;
+        let response = serde_json::json!({"version":1,"edits":[{"search":"fn old() {}","replace":"fn new() {}"}]}).to_string();
+        let manual = path.clone();
+        server.expect(Expectation::matching(request::method_path("POST", "/v1/chat/completions")).times(1)
+            .respond_with(move || {
+                // Runs after request arrival, hence after the original snapshot was captured.
+                std::fs::write(&manual, "manual edit").unwrap();
+                json_encoded(serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":response.clone()}}]}))
+            }));
+        let client = OpenAIClient::new(server.url_str("/v1"), "fixture-only")?;
+        let result = handle_file_change(&client, "fixture", path.clone(), &cfg, &tools).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("manual edits preserved")
+        );
+        assert_eq!(fs::read_to_string(path).await?, "manual edit");
+        assert!(tools.undo_stack.read().await.is_empty());
+        assert!(!resolve_backup_root(&cfg).unwrap().exists());
         Ok(())
     }
 }

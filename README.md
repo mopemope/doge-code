@@ -72,7 +72,16 @@ Only one operation per file runs at a time, including its debounce delay. A mode
 response is committed only if the original file snapshot still matches; manual
 edits made while inference is pending are preserved and a conflict is reported.
 Processing-time events are coalesced, so save again after the reported conflict
-and rate-limit interval to request a fresh edit. Successful watch edits use the
+and rate-limit interval to request a fresh edit. Watch requests a version-1 JSON
+edit envelope: `{"version":1,"edits":[{"search":"exact original text","replace":"new text"}]}`.
+Each search must match once in the original snapshot; overlapping edits, unknown
+fields, unsupported versions, Markdown/prose and malformed responses are rejected.
+All ranges resolve against the original and apply from the end, preserving Unicode,
+CRLF and final newlines. Empty edits are a no-op. The limits are 64 edits and 8 MiB
+for source, response and every intermediate candidate. Watch no longer accepts raw
+whole-file/code-block responses. The protocol does not guarantee the semantic
+correctness of model edits: keep reviewing Git diffs and running relevant tests.
+Successful watch edits use the
 normal persistent change tracking and in-process undo bookkeeping, and enabled
 backups have unique names. Watch has no undo command; its undo stack is not
 restored by a separate exec/TUI/resumed process. Restore a watch backup manually
