@@ -901,13 +901,7 @@ async fn execute_infer_request(
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
             if !response.status().is_success() {
-                let retry_after = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1)
-                    .min(30);
+                let retry_after = crate::llm::retry::parse_retry_after(response.headers());
                 let error = match super::auth::json_response(response).await {
                     Err(e) => e,
                     Ok(_) => anyhow::anyhow!("unexpected Responses HTTP status"),
@@ -917,10 +911,21 @@ async fn execute_infer_request(
                     .is_some_and(|e| e.retryable)
                     && attempt + 1 < attempts
                 {
-                    tokio::time::sleep(Duration::from_secs(
-                        retry_after.saturating_mul(attempt as u64 + 1).min(30),
-                    ))
-                    .await;
+                    let delay = match crate::llm::retry::compute_retry_delay(
+                        &client.llm_cfg,
+                        attempt + 1,
+                        retry_after,
+                    ) {
+                        crate::llm::retry::RetryDelayDecision::Decline => return Err(error),
+                        crate::llm::retry::RetryDelayDecision::Sleep(delay) => delay,
+                    };
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        retry_delay_ms = delay.as_millis(),
+                        "Responses retry scheduled"
+                    );
+                    // The outer deadline/cancellation covers this wait too.
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(error);

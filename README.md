@@ -1094,6 +1094,10 @@ max_retries = 3
 retry_base_ms = 1000
 retry_jitter_ms = 500
 respect_retry_after = true
+# Chat and subscription Responses honour integer Retry-After up to 300 seconds
+# exactly; longer hints decline retry. Missing/invalid hints or respect=false
+# use local exponential backoff + jitter. Responses keeps its cap of 4 attempts,
+# with request_timeout_ms covering the whole request, including all retry waits.
 
 [context_budget]
 mode = "auto"  # auto / observe / off
