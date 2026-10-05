@@ -440,12 +440,21 @@ async fn chat_tools_once_attempt(
     let body: ChatResponseWithTools = match serde_json::from_str(&cleaned_text) {
         Ok(b) => b,
         Err(e) => {
+            let summary = telemetry::JsonErrorSummary::from_error(&e);
+            error!(
+                category = summary.category,
+                line = summary.line,
+                column = summary.column,
+                response_bytes,
+                "llm chat_tools_once deserialize error"
+            );
             return Err(RequestAttemptFailure::new(
                 LlmErrorKind::Deserialize,
                 None,
                 None,
                 None,
-                anyhow!(LlmErrorKind::Deserialize).context(format!("parse chat response: {e}")),
+                anyhow!(LlmErrorKind::Deserialize)
+                    .context(format!("parse chat response: {summary}")),
             ));
         }
     };
@@ -556,7 +565,20 @@ fn validate_tool_message_with_activation(
         }
         Ok(())
     })();
-    validation.map_err(|error| error.context(LlmErrorKind::Client))
+    validation.map_err(|error| {
+        if let Some(parse_error) = error.downcast_ref::<serde_json::Error>() {
+            let summary = telemetry::JsonErrorSummary::from_error(parse_error);
+            error!(
+                category = summary.category,
+                line = summary.line,
+                column = summary.column,
+                "llm tool-call arguments deserialize error"
+            );
+            anyhow!(LlmErrorKind::Client).context(format!("invalid tool-call arguments: {summary}"))
+        } else {
+            error.context(LlmErrorKind::Client)
+        }
+    })
 }
 
 #[cfg(test)]

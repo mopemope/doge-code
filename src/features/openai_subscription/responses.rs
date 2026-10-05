@@ -678,10 +678,7 @@ pub fn completed(
             _ => {}
         }
     }
-    let usage = response.get("usage").filter(|v| !v.is_null()).map(|value| {
-        let mapped = json!({"prompt_tokens":value.get("input_tokens"),"completion_tokens":value.get("output_tokens"),"total_tokens":value.get("total_tokens"),"prompt_tokens_details":value.get("input_tokens_details"),"completion_tokens_details":value.get("output_tokens_details")});
-        serde_json::from_value::<Usage>(mapped).context("invalid Responses usage")
-    }).transpose()?;
+    let usage = response_usage(response)?;
     Ok((
         ChoiceMessageWithTools {
             refusal,
@@ -804,10 +801,7 @@ pub fn completed_with_activation(
             _ => {}
         }
     }
-    let usage = response.get("usage").filter(|v| !v.is_null()).map(|value| {
-        let mapped = json!({"prompt_tokens":value.get("input_tokens"),"completion_tokens":value.get("output_tokens"),"total_tokens":value.get("total_tokens"),"prompt_tokens_details":value.get("input_tokens_details"),"completion_tokens_details":value.get("output_tokens_details")});
-        serde_json::from_value::<Usage>(mapped).context("invalid Responses usage")
-    }).transpose()?;
+    let usage = response_usage(response)?;
     Ok((
         ChoiceMessageWithTools {
             refusal,
@@ -822,6 +816,18 @@ pub fn completed_with_activation(
         },
         usage,
     ))
+}
+
+fn response_usage(response: &Value) -> Result<Option<Usage>> {
+    response.get("usage").filter(|v| !v.is_null()).map(|value| {
+        let mapped = json!({"prompt_tokens":value.get("input_tokens"),"completion_tokens":value.get("output_tokens"),"total_tokens":value.get("total_tokens"),"prompt_tokens_details":value.get("input_tokens_details"),"completion_tokens_details":value.get("output_tokens_details")});
+        serde_json::from_value::<Usage>(mapped).map_err(|error| {
+            let summary = crate::llm::telemetry::JsonErrorSummary::from_error(&error);
+            tracing::error!(category = summary.category, line = summary.line,
+                column = summary.column, "Responses usage deserialize error");
+            anyhow::anyhow!("invalid Responses usage: {summary}")
+        })
+    }).transpose()
 }
 
 pub async fn infer(
