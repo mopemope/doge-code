@@ -63,6 +63,7 @@ impl Default for LlmConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialLlmConfig {
     pub connect_timeout_ms: Option<u64>,
     pub request_timeout_ms: Option<u64>,
