@@ -579,6 +579,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_once_408_retries_then_succeeds() {
+        // HTTP 408 (Request Timeout) is retryable per the shared retry policy,
+        // unlike a transport-level connect/read timeout. Script: 408 once,
+        // then a valid 200 with one retry allowed.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_chat_server(
+            vec![
+                ScriptedChatResponse {
+                    status: 408,
+                    body: serde_json::json!({"error": "request timeout"}),
+                    retry_after: None,
+                },
+                ScriptedChatResponse {
+                    status: 200,
+                    body: chat_ok_body(),
+                    retry_after: None,
+                },
+            ],
+            counter.clone(),
+        )
+        .await;
+        let client = chat_test_client(url, 1);
+        let msg = client
+            .chat_once("gpt", chat_messages(), None)
+            .await
+            .expect("408 then success");
+        assert_eq!(msg.content, "ok");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn chat_once_error_body_secret_not_in_error() {
         let secret = "SECRET_PROVIDER_BODY_123";
         let counter = Arc::new(AtomicUsize::new(0));

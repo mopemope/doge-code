@@ -22,6 +22,8 @@ pub mod logging;
 pub mod mcp;
 pub mod provenance;
 pub mod session;
+#[cfg(test)]
+mod test_support;
 pub mod tools;
 mod tui;
 pub mod utils;

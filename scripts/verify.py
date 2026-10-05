@@ -57,6 +57,7 @@ def commands(mode, test_filter, root):
     if mode == "guidance":
         return [([sys.executable, "scripts/check-agent-guidance.py"], False),
                 ([sys.executable, "scripts/check-sensitive-logging.py"], False),
+                ([sys.executable, "scripts/check-test-integrity.py"], False),
                 ([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests",
                   "-p", "test_*.py"], "unittest")]
     if mode == "test":

@@ -111,6 +111,14 @@ Do not silently clamp, ignore, rewrite, or fallback security/resource policy con
 - Context-governor calibration is reset after a native compaction boundary.
 - Observation GC fails closed while opaque compaction state may reference prior observations.
 
+## HTTP Test Integrity
+
+- Required HTTP fixture failures are test failures, never implicit skips.
+- Critical HTTP/LLM regression tests are not #[ignore].
+- Local test-server concurrency is bounded with ServerPool where httptest is used heavily.
+- Server expectations must be allowed to verify on Drop.
+- Restricted environments report incomplete verification rather than green results.
+
 ## Diagnostic Logging Safety
 
 - Raw prompt/message bodies are never diagnostic log fields.

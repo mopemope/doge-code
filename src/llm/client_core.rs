@@ -448,30 +448,17 @@ impl OpenAIClient {
 mod tests {
     use super::*;
     use crate::llm::types::ChatMessage;
-    use httptest::{Expectation, Server, ServerBuilder, matchers::*, responders::*};
+    use httptest::{Expectation, matchers::*, responders::*};
 
     #[tokio::test]
     async fn chat_once_happy_path() {
-        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
-            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
-            return;
-        }
-
-        let server = match ServerBuilder::new().run() {
-            Ok(server) => server,
-            Err(err) => {
-                eprintln!(
-                    "Skipping httptest-based test (server start failed: {})",
-                    err
-                );
-                return;
-            }
-        };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/v1/chat/completions"),
                 request::headers(contains(key("authorization"))),
             ])
+            .times(1)
             .respond_with(json_encoded(serde_json::json!({
                 "id": "test",
                 "choices": [
@@ -496,206 +483,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msg.content, "hello");
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn chat_once_retries_on_500_then_succeeds() {
-        let server = Server::run();
-        // Phase 1: expect a single 500 and verify it happens
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
-                .times(1)
-                .respond_with(
-                    status_code(500)
-                        .append_header("Retry-After", "0")
-                        .body("oops"),
-                ),
-        );
-        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
-            .unwrap()
-            .with_llm_config(LlmConfig {
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 5_000,
-                max_retries: 0, // do not retry in phase 1
-                retry_base_ms: 1,
-                retry_jitter_ms: 0,
-                ..LlmConfig::default()
-            });
-        let err = client
-            .chat_once(
-                "gpt",
-                vec![ChatMessage {
-                    provider_state: None,
-                    role: "user".into(),
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                }],
-                None,
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("500"));
-
-        // Phase 2: expect a single 200 and verify success with one retry allowed
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
-                .times(1)
-                .respond_with(json_encoded(serde_json::json!({
-                    "id": "test",
-                    "choices": [
-                        {"index":0, "message": {"role":"assistant","content":"ok"}}
-                    ]
-                }))),
-        );
-        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
-            .unwrap()
-            .with_llm_config(LlmConfig {
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 5_000,
-                max_retries: 1,
-                retry_base_ms: 1,
-                retry_jitter_ms: 0,
-                ..LlmConfig::default()
-            });
-        let msg = client
-            .chat_once(
-                "gpt",
-                vec![ChatMessage {
-                    provider_state: None,
-                    role: "user".into(),
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                }],
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(msg.content, "ok");
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn chat_once_non200_is_error_no_retry_on_400() {
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
-                .respond_with(status_code(400).body("bad")),
-        );
-        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
-            .unwrap()
-            .with_llm_config(LlmConfig {
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 5_000,
-                max_retries: 1,
-                retry_base_ms: 1,
-                retry_jitter_ms: 0,
-                ..LlmConfig::default()
-            });
-        let err = client
-            .chat_once(
-                "gpt",
-                vec![ChatMessage {
-                    provider_state: None,
-                    role: "user".into(),
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                }],
-                None,
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("400"));
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn chat_once_retries_on_timeout_then_succeeds() {
-        let server = Server::run();
-        // Phase 1: expect a single timeout and verify it happens
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
-                .times(1)
-                .respond_with(
-                    // Use a very short timeout in the test to trigger timeout quickly
-                    status_code(408), // HTTP 408 Request Timeout
-                ),
-        );
-        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
-            .unwrap()
-            .with_llm_config(LlmConfig {
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 50, // Short timeout to trigger
-                timeout_ms: 50,         // Short timeout to trigger
-                max_retries: 0,         // do not retry in phase 1
-                retry_base_ms: 1,
-                retry_jitter_ms: 0,
-                ..LlmConfig::default()
-            });
-        let err = client
-            .chat_once(
-                "gpt",
-                vec![ChatMessage {
-                    provider_state: None,
-                    role: "user".into(),
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                }],
-                None,
-            )
-            .await
-            .unwrap_err();
-        // Verify that a timeout error, 408 error, request sending error, status code error, or chat error occurs
-        println!("Error: {}", err);
-        assert!(
-            format!("{err}").contains("timed out")
-                || format!("{err}").contains("408")
-                || format!("{err}").contains("error sending request")
-                || format!("{err}").contains("status code")
-                || format!("{err}").contains("chat error")
-        );
-
-        // Phase 2: expect a single 200 and verify success with one retry allowed
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat.completions"))
-                .times(1)
-                .respond_with(json_encoded(serde_json::json!({
-                    "id": "test",
-                    "choices": [
-                        {"index":0, "message": {"role":"assistant","content":"ok"}}
-                    ]
-                }))),
-        );
-        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "x")
-            .unwrap()
-            .with_llm_config(LlmConfig {
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 5_000,
-                timeout_ms: 5_000,
-                max_retries: 1,
-                retry_base_ms: 1,
-                retry_jitter_ms: 0,
-                ..LlmConfig::default()
-            });
-        let msg = client
-            .chat_once(
-                "gpt",
-                vec![ChatMessage {
-                    provider_state: None,
-                    role: "user".into(),
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                }],
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(msg.content, "ok");
     }
 
     #[test]
