@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "base_ref": "develop",
+  "cases": "eval-cases.json",
+  "trials": 3,
+  "model": "exact-model-id",
+  "provider": "openai-chatgpt",
+  "environment_id": "local-eval-machine-v1",
+  "timeout_seconds": 900,
+  "termination_grace_seconds": 10,
+  "seed": 1,
+  "variants": [
+    {
+      "name": "baseline",
+      "agent_command": ["/absolute/path/to/baseline/dgc"],
+      "config": "/absolute/path/to/baseline-eval.toml"
+    },
+    {
+      "name": "candidate",
+      "agent_command": ["/absolute/path/to/candidate/dgc"],
+      "config": "/absolute/path/to/candidate-eval.toml"
+    }
+  ]
+}
