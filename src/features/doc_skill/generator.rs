@@ -37,6 +37,16 @@ impl DocGenerator {
         file_path: &Path,
         symbol_name: &str,
     ) -> Result<String> {
+        self.generate_doc_for_symbol_with_cancel(file_path, symbol_name, None)
+            .await
+    }
+
+    pub async fn generate_doc_for_symbol_with_cancel(
+        &self,
+        file_path: &Path,
+        symbol_name: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
         info!(
             "Generating doc for symbol '{}' in {:?}",
             symbol_name, file_path
@@ -57,7 +67,7 @@ impl DocGenerator {
         let prompt =
             Self::build_symbol_doc_prompt(file_path, symbol_name, symbol.kind.as_str(), &snippet);
 
-        self.call_llm(prompt).await
+        self.call_llm(prompt, cancel).await
     }
 
     fn build_symbol_doc_prompt(
@@ -75,6 +85,15 @@ File: {:?}\nSymbol: {} ({})\n\nCode snippet:\n```rust\n{}\n```\n\nGuidelines: co
 
     // ...
     pub async fn generate_doc_for_file(&self, file_path: &Path) -> Result<String> {
+        self.generate_doc_for_file_with_cancel(file_path, None)
+            .await
+    }
+
+    pub async fn generate_doc_for_file_with_cancel(
+        &self,
+        file_path: &Path,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
         info!("Generating doc for file {:?}", file_path);
 
         let repomap = self.ensure_repomap().await?;
@@ -88,7 +107,7 @@ File: {:?}\nSymbol: {} ({})\n\nCode snippet:\n```rust\n{}\n```\n\nGuidelines: co
             .collect();
 
         let prompt = Self::build_file_doc_prompt(file_path, &symbols, &truncated_code);
-        self.call_llm(prompt).await
+        self.call_llm(prompt, cancel).await
     }
 
     fn build_file_doc_prompt(file_path: &Path, symbols: &[SymbolInfo], code: &str) -> String {
@@ -154,7 +173,11 @@ Do not include the code itself in the output—only the doc comment text.",
         ensure_repomap_ready(&self.repomap, &self.project_root).await
     }
 
-    async fn call_llm(&self, prompt: String) -> Result<String> {
+    async fn call_llm(
+        &self,
+        prompt: String,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
         let messages = vec![ChatMessage {
             provider_state: None,
             role: "user".into(),
@@ -165,7 +188,7 @@ Do not include the code itself in the output—only the doc comment text.",
 
         let response = self
             .llm_client
-            .chat_once(&self.model, messages, None)
+            .chat_once(&self.model, messages, cancel)
             .await?;
 
         Ok(response.content)

@@ -1778,14 +1778,14 @@ pub async fn run_agent_loop(
             }
             // Budget safe boundary already passed for this call (batch
             // preflight for index 0, per-tool check for later indices).
-            // Count the dispatch itself; `task` counts as one main call and
-            // its internal usage is reconciled separately below.
+            // Count the dispatch itself; nested LLM work sharing the client
+            // is reconciled generically below.
             run_budget.record_tool_call();
-            let task_ledger_before = if tool_name == "task" {
-                Some(client.usage_snapshot())
-            } else {
-                None
-            };
+            // Observe the shared ledger around every tool dispatch. Ordinary
+            // tools never touch the provider, so their delta is empty and
+            // free; any nested LLM tool using the shared client is charged
+            // automatically without a per-tool allowlist.
+            let tool_usage_before = client.usage_snapshot();
             // Processes own cancellation and must finish tree cleanup/reaping.
             // Local mutations must finish commit/readback/finalization once
             // started; dropping them after rename would lose undo/provenance.
@@ -1828,16 +1828,18 @@ pub async fn run_agent_loop(
                 return Err(anyhow!(LlmErrorKind::Cancelled));
             }
 
-            // Subagent model usage shares the client ledger. Reconcile it
-            // into the run budget without exposing internal telemetry to the
-            // model-visible `task` result.
-            if let Some(before) = task_ledger_before {
-                let after = client.usage_snapshot();
-                if after.attempts != before.attempts
-                    || after.usage_records != before.usage_records
-                    || after.total_tokens != before.total_tokens
-                {
-                    run_budget.charge_internal(effective_limit, &before, &after);
+            // Internal/nested model work observed on the shared client is
+            // reconciled into the run budget without exposing internal
+            // telemetry to model-visible tool results. Empty deltas are free.
+            {
+                let tool_usage_after = client.usage_snapshot();
+                let delta = tool_usage_after.difference(&tool_usage_before);
+                if delta.has_activity() {
+                    run_budget.charge_internal(
+                        effective_limit,
+                        &tool_usage_before,
+                        &tool_usage_after,
+                    );
                 }
             }
 

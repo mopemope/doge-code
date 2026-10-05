@@ -235,7 +235,7 @@ impl AgentBudgetTracker {
         }
     }
 
-    /// Reconcile internal model work (automatic compaction, task subagent).
+    /// Reconcile internal/nested model work observed on the shared client.
     /// Multiple records are expected here, so the full reported delta is
     /// charged. Unknown attempts each cost one bounded estimate; a missing
     /// record with no ledger movement still costs the estimate so internal

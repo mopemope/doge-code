@@ -130,13 +130,65 @@ impl UsageLedger {
         self.attempts.saturating_sub(self.usage_records)
     }
 
+    /// True when the delta carries any provider-observed activity.
+    ///
+    /// An attempt without a usage record still counts: the provider was
+    /// contacted but no usage body was observed. Never treat that as zero
+    /// tokens; it is unknown usage.
+    pub fn has_activity(&self) -> bool {
+        self.attempts != 0
+            || self.usage_records != 0
+            || self.prompt_tokens != 0
+            || self.completion_tokens != 0
+            || self.total_tokens != 0
+            || self.reasoning_usage_records != 0
+            || self.cached_usage_records != 0
+            || self.cache_write_usage_records != 0
+    }
+
+    /// True when every tracked attempt has a provider usage report and no
+    /// legacy historical gap exists. Single source of truth for both
+    /// [`Self::report`] and UI surfaces; do not reimplement the predicate
+    /// elsewhere.
+    pub fn all_tracked_attempts_reported(&self) -> bool {
+        self.unknown_usage_attempts() == 0 && !self.historical_usage_unknown
+    }
+
     pub fn report(&self) -> serde_json::Value {
+        self.report_with_scope(UsageReportScope::AgentRun)
+    }
+
+    pub fn report_with_scope(&self, scope: UsageReportScope) -> serde_json::Value {
         let mut value = serde_json::json!(self);
         value["unknown_usage_attempts"] = self.unknown_usage_attempts().into();
-        value["all_tracked_attempts_reported"] =
-            (self.unknown_usage_attempts() == 0 && !self.historical_usage_unknown).into();
-        value["scope"] = "agent turns and internal summaries/subagents; manual jobs and independent doc_generate clients excluded".into();
+        value["all_tracked_attempts_reported"] = self.all_tracked_attempts_reported().into();
+        value["scope"] = scope.description().into();
         value
+    }
+}
+
+/// Typed usage-report scope. Provider usage and local budget estimates stay
+/// separate in both scopes; cached tokens remain part of input totals and
+/// reasoning tokens remain part of output totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageReportScope {
+    /// Current agent run: main requests, retries, automatic compaction, task
+    /// subagents and nested shared-client model work.
+    AgentRun,
+    /// Durable persisted session usage across runs.
+    PersistedSession,
+}
+
+impl UsageReportScope {
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::AgentRun => {
+                "current agent run including main requests, retries, automatic compaction, task subagents and nested shared-client model work; excluding manual foreground jobs outside this run, external MCP/provider usage not observed by this client and usage lost before the local client records it"
+            }
+            Self::PersistedSession => {
+                "persisted session usage including agent turns, retries, automatic summaries/compactions, task subagents, nested doc_generate requests, manual local /compact requests and /edit-symbol and /fix LLM requests; excluding external MCP services' internal model usage, provider usage never returned/observed before hard process termination, external/manual model calls and independent programs outside dgc"
+            }
+        }
     }
 }
 
@@ -162,5 +214,99 @@ mod tests {
         assert_eq!(delta.cached_tokens, None);
         assert_eq!(delta.attempts, 1);
         assert_eq!(delta.total_tokens, 0);
+    }
+
+    #[test]
+    fn empty_delta_has_no_activity() {
+        assert!(!UsageLedger::default().has_activity());
+    }
+
+    #[test]
+    fn attempt_only_delta_has_activity() {
+        let delta = UsageLedger {
+            attempts: 1,
+            ..Default::default()
+        };
+        assert!(delta.has_activity());
+        assert_eq!(delta.unknown_usage_attempts(), 1);
+    }
+
+    #[test]
+    fn usage_record_delta_has_activity() {
+        let usage: Usage = serde_json::from_value(
+            serde_json::json!({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}),
+        )
+        .expect("usage");
+        let mut ledger = UsageLedger {
+            attempts: 1,
+            ..Default::default()
+        };
+        ledger.record(&usage);
+        let before = UsageLedger::default();
+        let delta = ledger.difference(&before);
+        assert!(delta.has_activity());
+        assert_eq!(delta.total_tokens, 120);
+    }
+
+    #[test]
+    fn completeness_rejects_unknown_attempt() {
+        let ledger = UsageLedger {
+            attempts: 3,
+            usage_records: 2,
+            ..Default::default()
+        };
+        assert!(!ledger.all_tracked_attempts_reported());
+        assert_eq!(ledger.unknown_usage_attempts(), 1);
+        assert_eq!(ledger.report()["all_tracked_attempts_reported"], false);
+    }
+
+    #[test]
+    fn completeness_rejects_historical_unknown() {
+        let ledger = UsageLedger {
+            historical_usage_unknown: true,
+            ..Default::default()
+        };
+        assert!(!ledger.all_tracked_attempts_reported());
+        let complete = UsageLedger::default();
+        assert!(complete.all_tracked_attempts_reported());
+    }
+
+    #[test]
+    fn agent_run_scope_mentions_nested_shared_client_work() {
+        let scope = UsageReportScope::AgentRun.description();
+        assert!(scope.contains("nested shared-client model work"));
+        let report = UsageLedger::default().report();
+        assert_eq!(
+            report["scope"],
+            serde_json::Value::String(scope.to_string())
+        );
+    }
+
+    #[test]
+    fn exec_json_usage_shape_has_required_keys() {
+        let mut ledger = UsageLedger {
+            attempts: 2,
+            ..Default::default()
+        };
+        let usage: Usage = serde_json::from_value(
+            serde_json::json!({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}),
+        )
+        .expect("usage");
+        ledger.record(&usage);
+        let report = ledger.report();
+        for key in [
+            "attempts",
+            "usage_records",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "unknown_usage_attempts",
+            "all_tracked_attempts_reported",
+        ] {
+            assert!(report.get(key).is_some(), "missing key {key}: {report}");
+        }
+        assert_eq!(report["attempts"], 2);
+        assert_eq!(report["usage_records"], 1);
+        assert_eq!(report["unknown_usage_attempts"], 1);
     }
 }

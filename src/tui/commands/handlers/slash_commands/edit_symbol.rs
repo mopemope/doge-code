@@ -201,10 +201,35 @@ async fn run_semantic_edit_job(
         "[edit-symbol] Requesting LLM edit for {}...",
         prepared.symbol_id
     ));
-    let response = match client
+    // Usage checkpoint immediately before the provider request. The shared
+    // client ledger is observed before/after so the session persists the
+    // provider attempt even when the response later fails validation.
+    let usage_checkpoint = match capture_manual_usage_checkpoint(&client, &tools) {
+        Ok(checkpoint) => checkpoint,
+        Err(e) => {
+            ui_tx.send_logged(format!("[edit-symbol][error] Usage checkpoint failed: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+    let llm_result = client
         .chat_once(&model, messages, Some(cancellation.clone()))
-        .await
-    {
+        .await;
+    let usage_after = client.usage_snapshot();
+    // Attribute immediately after the request returns, before any response
+    // validation: empty/parse failures still consumed provider usage.
+    if let Err(e) = finish_manual_usage_attribution(usage_checkpoint, &usage_after, &tools) {
+        ui_tx.send_logged(format!(
+            "[edit-symbol][error] Usage attribution failed: {e}"
+        ));
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Failed {
+            message: e.to_string(),
+        };
+    }
+    let response = match llm_result {
         Ok(choice) => choice.content,
         Err(e) => {
             if cancellation.is_cancelled()
@@ -486,13 +511,35 @@ async fn run_legacy_line_edit_job(
         return JobRunOutcome::Cancelled;
     }
 
-    let response = match client
+    let usage_checkpoint = match capture_manual_usage_checkpoint(&client, &fs_tools) {
+        Ok(checkpoint) => checkpoint,
+        Err(e) => {
+            ui_tx.send_logged(format!("[edit-symbol][error] Usage checkpoint failed: {e}"));
+            ui_tx.send_logged("::status:error".to_string());
+            return JobRunOutcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
+    let llm_result = client
         .chat_once(&model, messages, Some(cancellation.clone()))
-        .await
-    {
+        .await;
+    let usage_after = client.usage_snapshot();
+    if let Err(e) = finish_manual_usage_attribution(usage_checkpoint, &usage_after, &fs_tools) {
+        ui_tx.send_logged(format!(
+            "[edit-symbol][error] Usage attribution failed: {e}"
+        ));
+        ui_tx.send_logged("::status:error".to_string());
+        return JobRunOutcome::Failed {
+            message: e.to_string(),
+        };
+    }
+    let response = match llm_result {
         Ok(choice) => choice.content,
         Err(e) => {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled()
+                || e.downcast_ref::<LlmErrorKind>() == Some(&LlmErrorKind::Cancelled)
+            {
                 ui_tx.send_logged("[edit-symbol] Cancelled.".to_string());
                 ui_tx.send_logged("::status:cancelled".to_string());
                 return JobRunOutcome::Cancelled;
@@ -849,6 +896,42 @@ fn kind_display(kind: &crate::analysis::SymbolKind) -> &'static str {
     }
 }
 
+/// Capture the manual usage checkpoint just before a provider request.
+///
+/// Fails closed when no session manager or current session exists; the
+/// caller must not start the source mutation in that case.
+fn capture_manual_usage_checkpoint(
+    client: &OpenAIClient,
+    tools: &FsTools,
+) -> anyhow::Result<crate::llm::usage_attribution::SessionUsageCheckpoint> {
+    let manager = tools
+        .get_session_manager_wrapper()
+        .get_session_manager()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no session manager for usage attribution"))?;
+    crate::llm::usage_attribution::SessionUsageCheckpoint::capture(client, &manager)
+}
+
+/// Attribute the provider delta immediately after the request returns.
+///
+/// Must run before response validation so empty/parse failures still persist
+/// the consumed usage. On failure the caller must not mutate the workspace.
+fn finish_manual_usage_attribution(
+    checkpoint: crate::llm::usage_attribution::SessionUsageCheckpoint,
+    after: &crate::llm::usage_ledger::UsageLedger,
+    tools: &FsTools,
+) -> anyhow::Result<crate::llm::usage_attribution::UsageAttributionResult> {
+    let manager = tools
+        .get_session_manager_wrapper()
+        .get_session_manager()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no session manager for usage attribution"))?;
+    let mut guard = crate::utils::safe_std_lock(&manager, "session_manager")?;
+    checkpoint.finish(after, &mut guard)
+}
+
 fn current_file_and_line(ui: &TuiApp) -> Option<(String, u32)> {
     inline_path_reference(ui)
 }
@@ -952,5 +1035,292 @@ mod tests {
         assert!(normalized.contains("--- a/src/lib.rs"));
         assert!(normalized.contains("+++ b/src/lib.rs"));
         assert!(normalized.ends_with('\n'));
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn edit_test_setup(
+        content: &str,
+    ) -> (
+        tempfile::TempDir,
+        FsTools,
+        std::sync::Arc<std::sync::Mutex<crate::session::SessionManager>>,
+        std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src/lib.rs");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, content).unwrap();
+        let cfg = std::sync::Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let store = crate::session::SessionStore::new(dir.path().join(".doge/sessions")).unwrap();
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::session::SessionManager::with_store(store),
+        ));
+        manager.lock().unwrap().create_session(None).unwrap();
+        let tools = FsTools::new(std::sync::Arc::new(tokio::sync::RwLock::new(None)), cfg)
+            .with_session_manager(manager.clone());
+        let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        (dir, tools, manager, repomap)
+    }
+
+    fn edit_test_client_with_body(body: serde_json::Value) -> (OpenAIClient, httptest::Server) {
+        use httptest::{Expectation, matchers::*, responders::*};
+        let server = httptest::Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(1..)
+                .respond_with(json_encoded(body)),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "test-key")
+            .unwrap()
+            .with_llm_config(crate::config::LlmConfig {
+                max_retries: 0,
+                ..Default::default()
+            });
+        (client, server)
+    }
+
+    fn symbol_response(
+        content: &str,
+        prompt: u32,
+        completion: u32,
+        total: u32,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": "edit-1",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+        })
+    }
+
+    #[tokio::test]
+    async fn edit_symbol_success_persists_usage_and_mutates() {
+        let content = "fn foo() {\n    1;\n}\nfn bar() {}\n";
+        let (_dir, tools, manager, repomap) = edit_test_setup(content);
+        let project_root = tools.config.project_root.clone();
+        let replacement = "fn foo() {\n    2;\n}\n";
+        let body = symbol_response(&format!("```rust\n{replacement}```"), 50, 10, 60);
+        let (client, _server) = edit_test_client_with_body(body);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = super::run_semantic_edit_job(
+            project_root.clone(),
+            PathBuf::from("src/lib.rs"),
+            2,
+            "change 1 to 2".to_string(),
+            "test-model".to_string(),
+            Some(client),
+            tools.clone(),
+            repomap,
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Completed));
+        assert!(
+            std::fs::read_to_string(project_root.join("src/lib.rs"))
+                .unwrap()
+                .contains("2;")
+        );
+        let session = manager.lock().unwrap().current_session.clone().unwrap();
+        let usage = session.usage.as_ref().unwrap();
+        assert_eq!(usage.total_tokens, 60);
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(session.requests, 1);
+        assert_eq!(session.token_count, 60);
+        assert!(session.changed_files.iter().any(|p| p.contains("lib.rs")));
+    }
+
+    #[tokio::test]
+    async fn edit_symbol_parse_failure_persists_usage_without_mutation() {
+        let content = "fn foo() {\n    1;\n}\n";
+        let (_dir, tools, manager, repomap) = edit_test_setup(content);
+        let project_root = tools.config.project_root.clone();
+        let before = std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
+        let body = symbol_response("hello without a code block", 12, 3, 15);
+        let (client, _server) = edit_test_client_with_body(body);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = super::run_semantic_edit_job(
+            project_root.clone(),
+            PathBuf::from("src/lib.rs"),
+            2,
+            "do something".to_string(),
+            "test-model".to_string(),
+            Some(client),
+            tools,
+            repomap,
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Completed));
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap(),
+            before,
+            "file unchanged on parse failure"
+        );
+        let session = manager.lock().unwrap().current_session.clone().unwrap();
+        assert_eq!(session.usage.as_ref().unwrap().total_tokens, 15);
+        assert_eq!(session.requests, 1);
+    }
+
+    #[tokio::test]
+    async fn edit_symbol_provider_failure_records_attempt() {
+        use httptest::{Expectation, matchers::*, responders::*};
+        let content = "fn foo() {\n    1;\n}\n";
+        let (_dir, tools, manager, repomap) = edit_test_setup(content);
+        let project_root = tools.config.project_root.clone();
+        let before = std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
+        let server = httptest::Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(1)
+                .respond_with(status_code(500).body("error")),
+        );
+        let client = OpenAIClient::new(format!("{}/", server.url_str("")), "test-key")
+            .unwrap()
+            .with_llm_config(crate::config::LlmConfig {
+                max_retries: 0,
+                ..Default::default()
+            });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = super::run_semantic_edit_job(
+            project_root.clone(),
+            PathBuf::from("src/lib.rs"),
+            1,
+            "do something".to_string(),
+            "test-model".to_string(),
+            Some(client),
+            tools,
+            repomap,
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Failed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap(),
+            before
+        );
+        let session = manager.lock().unwrap().current_session.clone().unwrap();
+        let usage = session.usage.as_ref().unwrap();
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(usage.usage_records, 0);
+        assert_eq!(usage.unknown_usage_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_symbol_cancellation_persists_attempt_without_mutation() {
+        let content = "fn foo() {\n    1;\n}\n";
+        let (_dir, tools, manager, repomap) = edit_test_setup(content);
+        let project_root = tools.config.project_root.clone();
+        let before = std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_clone = release.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(
+                move |axum::Json(_body): axum::Json<serde_json::Value>| async move {
+                    release_clone.notified().await;
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "id": "late",
+                            "choices": [{"index": 0, "message": {"role": "assistant", "content": "late"}}]
+                        })),
+                    )
+                },
+            ),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = OpenAIClient::new(&url, "test-key")
+            .unwrap()
+            .with_llm_config(crate::config::LlmConfig::default());
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = super::run_semantic_edit_job(
+            project_root.clone(),
+            PathBuf::from("src/lib.rs"),
+            1,
+            "do something".to_string(),
+            "test-model".to_string(),
+            Some(client),
+            tools,
+            repomap,
+            tx,
+            cancel,
+        )
+        .await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Cancelled));
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("src/lib.rs")).unwrap(),
+            before
+        );
+        let session = manager.lock().unwrap().current_session.clone().unwrap();
+        assert_eq!(session.usage.as_ref().unwrap().attempts, 1);
+        release.notify_one();
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_fix_persists_usage_to_session() {
+        let content = "fn foo() {\n    1;\n}\n";
+        let (_dir, tools, manager, _repomap) = edit_test_setup(content);
+        let cfg = crate::config::AppConfig {
+            project_root: tools.config.project_root.clone(),
+            ..Default::default()
+        };
+        let replacement = "fn foo() {\n    2;\n}\n";
+        let body = symbol_response(&format!("```rust\n{replacement}```"), 40, 10, 50);
+        let (client, _server) = edit_test_client_with_body(body);
+        let request = crate::llm::SymbolEditRequest {
+            model: "test-model".to_string(),
+            target: crate::llm::EditTarget {
+                file: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 3,
+                name: None,
+                kind: "lines".to_string(),
+            },
+            original_code: content.to_string(),
+            instruction: "change 1 to 2".to_string(),
+            symbol_id: None,
+            parent: None,
+        };
+        let chat_req = crate::llm::build_symbol_edit_chat_request(&request);
+        let crate::llm::types::ChatRequest { messages, .. } = chat_req;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = super::run_legacy_line_edit_job(
+            client,
+            tools.clone(),
+            cfg.clone(),
+            tx,
+            "test-model".to_string(),
+            messages,
+            request,
+            "fix src/lib.rs".to_string(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, crate::jobs::JobRunOutcome::Completed));
+        assert!(
+            std::fs::read_to_string(cfg.project_root.join("src/lib.rs"))
+                .unwrap()
+                .contains("2;")
+        );
+        let session = manager.lock().unwrap().current_session.clone().unwrap();
+        assert_eq!(session.usage.as_ref().unwrap().total_tokens, 50);
+        assert_eq!(session.requests, 1);
     }
 }

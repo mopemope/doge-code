@@ -577,6 +577,28 @@ mod tests {
         assert_eq!(data.provenance_record_failures, 0);
     }
 
+    #[test]
+    fn test_legacy_session_json_without_usage_field() {
+        // Sessions written before usage tracking must still load with None;
+        // no schema migration is required.
+        let legacy = serde_json::json!({
+            "meta": {"id": "sess-2", "created_at": "2026-01-01T00:00:00+00:00", "title": "t", "title_is_default": true},
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "conversation": [],
+            "token_count": 7,
+            "requests": 1,
+            "tool_calls": 0,
+            "lines_edited": 0,
+            "tool_call_successes": {},
+            "tool_call_failures": {},
+            "changed_files": []
+        });
+        let data: SessionData = serde_json::from_value(legacy).unwrap();
+        assert!(data.usage.is_none());
+        assert_eq!(data.token_count, 7);
+        assert_eq!(data.requests, 1);
+    }
+
     fn typed_msg(role: &str, content: Option<&str>) -> ChatMessage {
         ChatMessage {
             provider_state: None,

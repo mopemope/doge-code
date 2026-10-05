@@ -726,11 +726,14 @@ subtotals. The legacy `tokens_used` field remains the reported prompt subtotal.
 retries; a subtotal of zero does not assert zero billing. Missing optional metrics
 remain `null`, while explicitly reported zero remains zero. Session usage adds each
 checkpoint delta once and survives resume; legacy sessions mark their historical
-usage unknown. This covers agent turns and their internal summaries/subagents using
-the shared client. Manual jobs such as `/compact` and `/edit-symbol`, independent
-`doc_generate` clients, and usage lost before a forced process kill are outside
-this durable accounting scope. `all_tracked_attempts_reported` refers only to the
-tracked attempts, never complete provider billing or remaining plan quota.
+usage unknown. Persisted session usage includes agent turns, retries, automatic
+summaries/compactions, task subagents, nested `doc_generate` requests using the
+shared client, manual local `/compact` requests, and `/edit-symbol` and `/fix`
+LLM requests. Still outside durable accounting: external MCP services' internal
+model usage, provider usage that is never returned/observed before hard process
+termination, external/manual model calls, and independent programs outside dgc.
+`all_tracked_attempts_reported` refers only to the tracked attempts, never
+complete provider billing or remaining plan quota.
 
 `find_file` sorts and deduplicates complete paths and budgets the entire serialized
 JSON to at most 6,000 characters (at most 200 paths). Use `next_cursor` with the same

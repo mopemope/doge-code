@@ -19,6 +19,7 @@ mod tool_def;
 pub mod tool_execution;
 pub(crate) mod tool_runtime;
 pub mod types;
+pub mod usage_attribution;
 pub mod usage_ledger;
 
 pub use chat_with_tools::*;
