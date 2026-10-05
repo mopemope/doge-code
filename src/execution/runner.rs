@@ -113,6 +113,141 @@ pub enum ManagedProcessError {
     Cleanup(#[source] io::Error),
 }
 
+/// Synchronous structured-stream completion. Cancellation remains an async caller concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamStop {
+    Eof,
+    Limit,
+}
+
+pub(crate) struct ManagedStreamOutput<T> {
+    pub value: T,
+    pub stop: StreamStop,
+    pub status: std::process::ExitStatus,
+    pub stderr: String,
+    pub kill_requested: bool,
+}
+
+struct StreamChild {
+    child: std::process::Child,
+    group: Option<ProcessGroupHandle>,
+    stderr: Option<std::thread::JoinHandle<io::Result<String>>>,
+}
+impl StreamChild {
+    fn finish(
+        &mut self,
+        stop: StreamStop,
+    ) -> anyhow::Result<(std::process::ExitStatus, String, bool)> {
+        use anyhow::Context;
+        let polled = (stop == StreamStop::Limit).then(|| self.child.try_wait());
+        let kill_requested = matches!(polled, Some(Ok(None)));
+        if stop == StreamStop::Limit {
+            // Group drop terminates descendants before the direct-child reap.
+            drop(self.group.take());
+            let _ = self.child.kill();
+        }
+        let status = self.child.wait();
+        drop(self.group.take());
+        let diagnostic = self
+            .stderr
+            .take()
+            .map(|task| {
+                task.join()
+                    .map_err(|_| anyhow::anyhow!("stderr capture thread panicked"))?
+                    .context("failed to read process stderr")
+            })
+            .transpose();
+        if let Some(polled) = polled {
+            let _ = polled.context("failed to poll streaming process")?;
+        }
+        Ok((
+            status.context("failed to wait for streaming process")?,
+            diagnostic?.unwrap_or_default(),
+            kill_requested,
+        ))
+    }
+}
+impl Drop for StreamChild {
+    fn drop(&mut self) {
+        let _ = self.finish(StreamStop::Limit);
+    }
+}
+
+/// Managed synchronous record streaming: keeps parser framing intact instead
+/// of applying the async runner's head/tail text capture to structured JSON.
+/// The consumer must bound its own stdout records. All exits terminate/reap
+/// the owned process tree and concurrently drain bounded stderr diagnostics.
+/// This adapter deliberately does not introduce async cancellation semantics.
+pub(crate) fn run_managed_stream<T>(
+    mut command: std::process::Command,
+    consume: impl FnOnce(&mut dyn std::io::Read) -> anyhow::Result<(T, StreamStop)>,
+) -> anyhow::Result<ManagedStreamOutput<T>> {
+    use anyhow::Context;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command
+        .spawn()
+        .context("failed to spawn streaming process")?;
+    let group = ProcessGroupHandle::from_std_child(&child);
+    let mut owned = StreamChild {
+        child,
+        group: Some(group),
+        stderr: None,
+    };
+    let mut stdout = owned
+        .child
+        .stdout
+        .take()
+        .context("failed to capture process stdout")?;
+    let mut stderr = owned
+        .child
+        .stderr
+        .take()
+        .context("failed to capture process stderr")?;
+    owned.stderr = Some(
+        std::thread::Builder::new()
+            .name("process-stderr".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut prefix = Vec::new();
+                let mut bytes = [0u8; 4096];
+                loop {
+                    let count = match stderr.read(&mut bytes) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        value => value?,
+                    };
+                    if count == 0 {
+                        break;
+                    }
+                    let retain = count.min(4096usize.saturating_sub(prefix.len()));
+                    prefix.extend_from_slice(&bytes[..retain]);
+                }
+                Ok(String::from_utf8_lossy(&prefix).into_owned())
+            })
+            .context("failed to start stderr capture")?,
+    );
+    let parsed = consume(&mut stdout);
+    drop(stdout);
+    let stop = parsed.as_ref().map_or(StreamStop::Limit, |(_, stop)| *stop);
+    let finished = owned.finish(stop);
+    let (value, stop) = parsed?;
+    let (status, stderr, kill_requested) = finished?;
+    Ok(ManagedStreamOutput {
+        value,
+        stop,
+        status,
+        stderr,
+        kill_requested,
+    })
+}
+
 /// Run one finite process tree through the shared managed lifecycle.
 ///
 /// The function does not apply execution policy. It always captures output in

@@ -201,6 +201,7 @@ enum RipgrepMessageType {
     End,
     Match,
     Context,
+    Summary,
 }
 
 #[derive(Deserialize, Debug)]
@@ -219,6 +220,108 @@ struct RipgrepData {
 #[derive(Deserialize, Debug)]
 struct RipgrepText {
     text: String,
+}
+
+enum RecordEvent<'a> {
+    Record(&'a [u8]),
+    Eof,
+    Limit,
+}
+
+/// Fixed-size I/O buffering and a capped complete-record buffer. Newline
+/// bytes count toward the total cap; never parse a record cut by the cap.
+struct Records<R> {
+    reader: std::io::BufReader<RetryReads<R>>,
+    record: Vec<u8>,
+    total: usize,
+    cap: usize,
+}
+struct RetryReads<R>(R);
+impl<R: std::io::Read> std::io::Read for RetryReads<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.0.read(bytes) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+impl<R: std::io::Read> Records<R> {
+    fn new(reader: R, cap: usize) -> Self {
+        Self {
+            reader: std::io::BufReader::with_capacity(8192, RetryReads(reader)),
+            record: Vec::new(),
+            total: 0,
+            cap,
+        }
+    }
+    fn next(&mut self) -> std::io::Result<RecordEvent<'_>> {
+        use std::io::BufRead;
+        self.record.clear();
+        loop {
+            let available = self.reader.fill_buf()?;
+            if available.is_empty() {
+                ensure_complete_record(!self.record.is_empty())?;
+                return Ok(RecordEvent::Eof);
+            }
+            let end = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|index| index + 1);
+            let count = end.unwrap_or(available.len());
+            let remaining = self.cap.saturating_sub(self.total);
+            if count > remaining {
+                return Ok(RecordEvent::Limit);
+            }
+            let content_count = count - usize::from(end.is_some());
+            self.record
+                .try_reserve_exact(content_count)
+                .map_err(std::io::Error::other)?;
+            self.record.extend_from_slice(&available[..content_count]);
+            self.reader.consume(count);
+            self.total += count;
+            if end.is_some() {
+                return Ok(RecordEvent::Record(&self.record));
+            }
+        }
+    }
+}
+fn ensure_complete_record(incomplete: bool) -> std::io::Result<()> {
+    if incomplete {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "incomplete ripgrep JSON record at EOF",
+        ));
+    }
+    Ok(())
+}
+fn search_error(message: impl std::fmt::Display) -> anyhow::Error {
+    // The shared 512-scalar prefix also fits the serialized tool envelope
+    // when diagnostic control characters expand to six-byte JSON escapes.
+    crate::tools::budget::bounded_read_error(message)
+}
+
+fn check_search_exit<T>(output: &crate::execution::runner::ManagedStreamOutput<T>) -> Result<()> {
+    #[cfg(unix)]
+    let killed = {
+        use std::os::unix::process::ExitStatusExt;
+        output.status.signal() == Some(libc::SIGKILL)
+    };
+    #[cfg(not(unix))]
+    let killed = output.status.code() == Some(1);
+    let intentional_kill = output.stop == crate::execution::runner::StreamStop::Limit
+        && output.kill_requested
+        && killed;
+    anyhow::ensure!(
+        matches!(output.status.code(), Some(0 | 1)) || intentional_kill,
+        "{}",
+        search_error(format!(
+            "ripgrep failed with {}: {}",
+            output.status, output.stderr
+        ))
+    );
+    Ok(())
 }
 
 pub fn search_text(
@@ -250,6 +353,22 @@ pub fn search_text_with_options(
     options: SearchTextOptions,
     config: &AppConfig,
 ) -> Result<SearchTextResult> {
+    search_with_program(
+        search_pattern,
+        file_glob,
+        options,
+        config,
+        std::ffi::OsStr::new("rg"),
+    )
+}
+
+fn search_with_program(
+    search_pattern: &str,
+    file_glob: Option<&str>,
+    options: SearchTextOptions,
+    config: &AppConfig,
+    program: &std::ffi::OsStr,
+) -> Result<SearchTextResult> {
     let (max_results, offset) = normalize_options(options);
     let budget = options
         .response_budget_chars
@@ -266,7 +385,7 @@ pub fn search_text_with_options(
             warnings: Vec::new(),
         });
     };
-    let mut cmd = Command::new("rg");
+    let mut cmd = Command::new(program);
     // Ambient rg configuration can add traversal roots or enable symlink
     // following. The tool owns these arguments so authorization stays valid.
     cmd.arg("--no-config")
@@ -286,94 +405,55 @@ pub fn search_text_with_options(
     } else {
         cmd.arg(".");
     }
-    // Spawn ripgrep and stream its stdout to avoid loading everything into memory
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to spawn ripgrep")?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("failed to capture ripgrep stdout")?;
-
-    let reader = BufReader::new(stdout);
-
-    let mut results = Vec::new();
-    let mut bytes_read: usize = 0;
-    let mut match_index: usize = 0;
-    let mut truncated = false;
-
-    for line_res in reader.lines() {
-        let line = line_res.context("failed to read ripgrep output")?;
-        // Track bytes read from ripgrep and stop if exceeding the limit
-        bytes_read = bytes_read.saturating_add(line.len());
-        if bytes_read > MAX_OUTPUT_BYTES {
-            // try to terminate the child process
-            let _ = child.kill();
-            truncated = true;
-            break;
-        }
-
-        if let Ok(parsed) = serde_json::from_str::<RipgrepJson>(&line)
-            && let RipgrepMessageType::Match = parsed.r#type
-            && let (Some(path_text), Some(lines_text), Some(line_number)) =
-                (parsed.data.path, parsed.data.lines, parsed.data.line_number)
-        {
-            let raw_path = PathBuf::from(path_text.text);
-            let abs_path = if raw_path.is_absolute() {
-                raw_path
-            } else {
-                location.cwd.join(raw_path)
-            };
-            // Refuse unexpected or retargeted paths before exposing match text.
-            let authorized = crate::tools::scope::ensure_in_project_scope(&abs_path, config)
-                .and_then(|path| {
-                    if location.exact_file {
-                        anyhow::ensure!(
-                            path == location.root && path.is_file(),
-                            "search result left its authorized exact file"
-                        );
-                    } else {
-                        anyhow::ensure!(
-                            path.starts_with(&location.root),
-                            "search result left its authorized traversal root"
-                        );
-                    }
-                    Ok(path)
-                });
-            let abs_path = match authorized {
-                Ok(path) => path,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
+    let streamed = crate::execution::runner::run_managed_stream(cmd, |stdout| {
+        use crate::execution::runner::StreamStop;
+        let mut records = Records::new(stdout, MAX_OUTPUT_BYTES);
+        let mut results = Vec::new();
+        let mut match_index = 0usize;
+        loop {
+            let record = match records.next().context("failed to read ripgrep output")? {
+                RecordEvent::Eof => return Ok(((results, false), StreamStop::Eof)),
+                RecordEvent::Limit => {
+                    anyhow::ensure!(!results.is_empty(),
+                        "ripgrep output exceeded the 1048576-byte limit before a requested match could be returned; narrow the search pattern or file_glob (no resumable next_offset)");
+                    return Ok(((results, true), StreamStop::Limit));
                 }
+                RecordEvent::Record(record) => record,
             };
+            let parsed: RipgrepJson = serde_json::from_slice(record)
+                .map_err(|error| search_error(format!("invalid ripgrep JSON record: {error}")))?;
+            if !matches!(parsed.r#type, RipgrepMessageType::Match) { continue; }
+            let (path_text, lines_text, line_number) = match (parsed.data.path, parsed.data.lines, parsed.data.line_number) {
+                (Some(path), Some(lines), Some(number)) => (path, lines, number),
+                _ => anyhow::bail!("incomplete ripgrep match fields"),
+            };
+            let raw_path = PathBuf::from(path_text.text);
+            let abs_path = if raw_path.is_absolute() { raw_path } else { location.cwd.join(raw_path) };
+            let abs_path = crate::tools::scope::ensure_in_project_scope(&abs_path, config)?;
+            if location.exact_file {
+                anyhow::ensure!(abs_path == location.root && abs_path.is_file(), "search result left its authorized exact file");
+            } else {
+                anyhow::ensure!(abs_path.starts_with(&location.root), "search result left its authorized traversal root");
+            }
+            // Authorization precedes skipping, budgeting and exposing match text.
             match_index = match_index.saturating_add(1);
-            if match_index <= offset {
-                continue;
-            }
-
-            if results.len() >= max_results {
-                truncated = true;
-                let _ = child.kill();
-                break;
-            }
-
+            if match_index <= offset { continue; }
+            if results.len() >= max_results { return Ok(((results, false), StreamStop::Limit)); }
             results.push((abs_path, line_number, lines_text.text.trim().to_string()));
         }
-    }
-
-    // Ensure child process has exited
-    let _ = child.wait();
+    }).map_err(search_error)?;
+    check_search_exit(&streamed)?;
+    let (mut results, byte_limited) = streamed.value;
+    let truncated = streamed.stop == crate::execution::runner::StreamStop::Limit;
 
     // Trim per-match text and enforce the response budget.
     let mut warnings = Vec::new();
+    if byte_limited {
+        warnings.push(
+            "ripgrep stdout reached the byte capture limit; only complete match records returned"
+                .into(),
+        );
+    }
     for (_, _, text) in results.iter_mut() {
         if text.chars().count() > MAX_MATCH_TEXT_CHARS {
             *text = format!(
@@ -959,5 +1039,362 @@ mod scope_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use std::io::{self, Read};
+
+    #[test]
+    fn search_records_count_newlines_and_keep_exact_caps() {
+        let mut records = Records::new(b"a\n\xc3\xa9\n".as_slice(), 5);
+        assert!(matches!(records.next().unwrap(), RecordEvent::Record(b"a")));
+        assert!(matches!(
+            records.next().unwrap(),
+            RecordEvent::Record(b"\xc3\xa9")
+        ));
+        assert!(matches!(records.next().unwrap(), RecordEvent::Eof));
+        assert_eq!(records.total, 5);
+        for bytes in [b"a\n\xc3\xa9\nx".as_slice(), b"a\n\xc3\xa9x\n"] {
+            let mut records = Records::new(bytes, 5);
+            assert!(matches!(records.next().unwrap(), RecordEvent::Record(_)));
+            if matches!(records.next().unwrap(), RecordEvent::Record(_)) {
+                assert!(matches!(records.next().unwrap(), RecordEvent::Limit));
+            }
+        }
+        for bytes in [b"{}".as_slice(), b"a\n\xc3"] {
+            let mut records = Records::new(bytes, 10);
+            if bytes.starts_with(b"a") {
+                records.next().unwrap();
+            }
+            assert_eq!(
+                records.next().err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn search_records_generated_unterminated_input_stays_bounded_and_propagates_io() {
+        struct Generated {
+            left: usize,
+        }
+        impl Read for Generated {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                let count = self.left.min(bytes.len());
+                bytes[..count].fill(b'x');
+                self.left -= count;
+                Ok(count)
+            }
+        }
+        let mut records = Records::new(
+            Generated {
+                left: 128 * 1024 * 1024,
+            },
+            MAX_OUTPUT_BYTES,
+        );
+        assert!(matches!(records.next().unwrap(), RecordEvent::Limit));
+        assert!(records.record.len() <= MAX_OUTPUT_BYTES);
+        assert!(records.record.capacity() <= MAX_OUTPUT_BYTES);
+        assert!(records.total <= MAX_OUTPUT_BYTES);
+        struct Failure;
+        impl Read for Failure {
+            fn read(&mut self, _bytes: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("fixture failure"))
+            }
+        }
+        assert!(
+            Records::new(Failure, 10)
+                .next()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("fixture failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_process_direct_dispatch_mcp_distinguish_regex_error_and_no_match() -> Result<()>
+    {
+        use crate::llm::tool_execution::dispatch_tool_call;
+        use crate::llm::tool_runtime::ToolRuntime;
+        use crate::llm::types::{ToolCall, ToolCallFunction};
+        use crate::mcp::service::{DogeMcpService, McpServiceState, SearchTextParams};
+        use rmcp::handler::server::wrapper::Parameters;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("file.txt"), "inside marker\n")?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_owned(),
+            ..Default::default()
+        });
+        let fs = crate::tools::FsTools::new(Arc::new(RwLock::new(None)), config.clone());
+        let runtime = ToolRuntime::build(&fs, None, "fixture", None).await?;
+        runtime.tool_catalog.activate(&["search_text".into()]).await;
+        let service = DogeMcpService::new(Arc::new(McpServiceState::new(
+            config.clone(),
+            Arc::new(RwLock::new(None)),
+        )));
+        for (pattern, success) in [("[", false), ("ABSENT_FIXTURE_PATTERN", true)] {
+            let direct = search_text(pattern, Some("*.txt"), &config);
+            assert_eq!(direct.is_ok(), success);
+            if success {
+                assert!(direct?.is_empty());
+            } else {
+                assert!(direct.unwrap_err().to_string().contains("ripgrep failed"));
+            }
+            let call = ToolCall {
+                id: Some("search-error".into()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "search_text".into(),
+                    arguments: json!({"search_pattern":pattern,"file_glob":"*.txt"}).to_string(),
+                },
+            };
+            assert_eq!(dispatch_tool_call(&runtime, &call).await.is_ok(), success);
+            let mcp = service.search_text(Parameters(SearchTextParams {
+                search_pattern: pattern.into(),
+                file_glob: Some("*.txt".into()),
+                max_results: None,
+                offset: None,
+            }))?;
+            assert_eq!(mcp.is_error == Some(true), !success);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn fake_search(script: &str, options: SearchTextOptions) -> Result<SearchTextResult> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("file.txt"), "fixture")?;
+        let executable = dir.path().join("fixture-rg");
+        std::fs::write(&executable, format!("#!/bin/sh\n{script}\n"))?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let config = AppConfig {
+            project_root: dir.path().to_owned(),
+            ..Default::default()
+        };
+        search_with_program(
+            "fixture",
+            Some("*.txt"),
+            options,
+            &config,
+            executable.as_os_str(),
+        )
+    }
+    #[cfg(unix)]
+    pub(super) const ROW: &str = r#"printf '%s\n' '{"type":"match","data":{"path":{"text":"file.txt"},"lines":{"text":"fixture\n"},"line_number":1}}'"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn search_process_drains_large_stderr_and_reports_partial_failure_and_signal() {
+        // A fixture-owned watchdog prevents a broken drain implementation hanging the suite.
+        let watchdog = "(sleep 3; kill -KILL $$) >/dev/null 2>&1 &";
+        let result = fake_search(
+            &format!("{watchdog}\ndd if=/dev/zero bs=65536 count=3 >&2 2>/dev/null\n{ROW}\nexit 0"),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let error = fake_search(
+            &format!("{ROW}\nprintf 'fixture diagnostic' >&2\nexit 2"),
+            Default::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("fixture diagnostic") && error.contains("ripgrep failed"));
+        assert!(error.len() < 3000);
+        let controls = fake_search(
+            "dd if=/dev/zero bs=65536 count=3 >&2 2>/dev/null; exit 2",
+            Default::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            serde_json::json!({"error":controls})
+                .to_string()
+                .chars()
+                .count()
+                < 8000
+        );
+        assert!(
+            fake_search("kill -TERM $$", Default::default())
+                .unwrap_err()
+                .to_string()
+                .contains("ripgrep failed")
+        );
+        assert!(
+            fake_search("printf '{partial'", Default::default())
+                .unwrap_err()
+                .to_string()
+                .contains("read ripgrep output")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_process_caps_explain_unreturned_match_and_preserve_returned_rows() {
+        let huge = "dd if=/dev/zero bs=65536 count=20 2>/dev/null";
+        let error = fake_search(huge, Default::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("before a requested match")
+                && error.contains("no resumable next_offset")
+        );
+        let result = fake_search(&format!("{ROW}\n{huge}"), Default::default()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.truncated);
+        assert_eq!(result.next_offset, Some(1));
+        let error = fake_search(
+            &format!("{ROW}\n{huge}"),
+            SearchTextOptions {
+                offset: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("before a requested match"));
+        let result = fake_search(
+            &format!("{ROW}\n{ROW}\nsleep 3"),
+            SearchTextOptions {
+                max_results: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.rows.len(), 1);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_cleanup_tests {
+    use super::*;
+    #[test]
+    fn search_process_error_and_early_stop_reap_child_and_terminate_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+        for failure in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let escaped = dir.path().join("descendant-survived");
+            let executable = dir.path().join("fixture-rg");
+            std::fs::write(dir.path().join("file.txt"), "fixture").unwrap();
+            let row = process_tests::ROW;
+            let body = if failure {
+                "printf 'invalid-json\\n'".to_string()
+            } else {
+                format!("{row}\n{row}")
+            };
+            std::fs::write(&executable, format!("#!/bin/sh\nprintf '%s' $$ > '{}'\n(sleep 1; printf survived > '{}') >/dev/null 2>&1 &\n{body}\nsleep 3\n", pid_file.display(), escaped.display())).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let config = AppConfig {
+                project_root: dir.path().to_owned(),
+                ..Default::default()
+            };
+            let result = search_with_program(
+                "fixture",
+                Some("*.txt"),
+                SearchTextOptions {
+                    max_results: Some(1),
+                    ..Default::default()
+                },
+                &config,
+                executable.as_os_str(),
+            );
+            assert_eq!(result.is_err(), failure);
+            let pid: u32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+            assert!(
+                !crate::execution::is_process_alive(pid),
+                "direct child was not reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            assert!(!escaped.exists(), "fixture descendant survived cleanup");
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod limit_status_tests {
+    use super::*;
+    #[test]
+    fn search_process_limit_preserves_natural_exit_error_and_signal() {
+        use crate::execution::runner::{StreamStop, run_managed_stream};
+        for script in ["printf 'fixture diagnostic' >&2; exit 2", "kill -TERM $$"] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let output = run_managed_stream(command, |stdout| {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes)?;
+                // EOF from this fixture comes from process exit, then model a cap decision.
+                Ok(((), StreamStop::Limit))
+            })
+            .unwrap();
+            assert!(
+                check_search_exit(&output)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ripgrep failed")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod record_boundary_tests {
+    use super::*;
+    #[test]
+    fn search_records_utf8_split_at_io_boundary_and_partial_caps() {
+        struct Short<R> {
+            reader: R,
+            size: usize,
+        }
+        impl<R: std::io::Read> std::io::Read for Short<R> {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let len = bytes.len().min(self.size);
+                self.reader.read(&mut bytes[..len])
+            }
+        }
+        let message = json!({"type":"match","data":{"path":{"text":"file.txt"},"lines":{"text":"あ😀\n"},"line_number":1}}).to_string();
+        let data = format!("{message}\n");
+        for size in [1, 2, 3, 8192] {
+            let mut reader = Records::new(
+                Short {
+                    reader: data.as_bytes(),
+                    size,
+                },
+                data.len(),
+            );
+            let RecordEvent::Record(record) = reader.next().unwrap() else {
+                panic!("missing complete record")
+            };
+            let parsed: RipgrepJson = serde_json::from_slice(record).unwrap();
+            assert_eq!(parsed.data.lines.unwrap().text, "あ😀\n");
+            assert!(matches!(reader.next().unwrap(), RecordEvent::Eof));
+            let mut reader = Records::new(
+                Short {
+                    reader: data.as_bytes(),
+                    size,
+                },
+                data.len() - 1,
+            );
+            assert!(matches!(reader.next().unwrap(), RecordEvent::Limit));
+        }
+        for (bytes, expected_second_record) in [
+            (b"a\nb\nx".as_slice(), true),
+            (b"a\nbx\n".as_slice(), false),
+        ] {
+            let mut reader = Records::new(bytes, 4);
+            assert!(matches!(reader.next().unwrap(), RecordEvent::Record(b"a")));
+            if expected_second_record {
+                assert!(matches!(reader.next().unwrap(), RecordEvent::Record(b"b")));
+            }
+            assert!(matches!(reader.next().unwrap(), RecordEvent::Limit));
+        }
     }
 }

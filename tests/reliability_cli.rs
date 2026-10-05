@@ -1573,3 +1573,56 @@ fn search_scope_real_cli_refuses_escapes_and_ambient_rg_configuration() {
     );
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn search_process_real_cli_distinguishes_regex_failure_and_no_match() {
+    let project = Project::new(false);
+    std::fs::write(project.root.join("inside.txt"), "fixture marker\n").unwrap();
+    let server = Server::new(move |index, request| {
+        if index == 1 {
+            return response(
+                "",
+                vec![
+                    call(
+                        "regex-error",
+                        "search_text",
+                        json!({"search_pattern":"[","file_glob":"*.txt"}),
+                    ),
+                    call(
+                        "no-match",
+                        "search_text",
+                        json!({"search_pattern":"ABSENT_FIXTURE_PATTERN","file_glob":"*.txt"}),
+                    ),
+                ],
+                "tool_calls",
+            );
+        }
+        let messages = request["messages"].as_array().unwrap();
+        assert_tool_result_blocks(messages);
+        for id in ["regex-error", "no-match"] {
+            let message = messages
+                .iter()
+                .find(|message| message["tool_call_id"] == id)
+                .unwrap();
+            let value: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+            if id == "regex-error" {
+                let error = value["error"].as_str().unwrap();
+                assert!(error.contains("ripgrep failed") && error.contains("regex"));
+                assert!(error.chars().count() <= 2000);
+            } else {
+                assert_eq!(value["ok"], true);
+                assert_eq!(value["meta"]["returned"], 0);
+                assert_eq!(value["meta"]["truncated"], false);
+                assert!(value["meta"]["next_offset"].is_null());
+            }
+        }
+        response("search failure semantics verified", vec![], "stop")
+    });
+    let output = project.command(&server).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}

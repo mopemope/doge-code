@@ -87,6 +87,17 @@ impl ProcessGroupHandle {
         }
     }
 
+    /// Capture a synchronous streaming child configured as a group leader.
+    pub(crate) fn from_std_child(child: &std::process::Child) -> Self {
+        Self {
+            #[cfg(unix)]
+            pgid: child.id() as libc::pid_t,
+            #[cfg(not(unix))]
+            pid: Some(child.id()),
+            armed: true,
+        }
+    }
+
     /// Whether this guard may still send signals to the owned process group.
     pub fn is_armed(&self) -> bool {
         self.armed
