@@ -301,6 +301,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
         let response_summary_placeholder = response_bytes;
 
         let mut parsed_response_text = response_text.as_str();
+        let mut extracted_json = false;
         let body: Result<ChatResponse, _> = serde_json::from_str(parsed_response_text);
         let body = match body {
             Ok(b) => Ok(b),
@@ -309,15 +310,10 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 if let Some(extracted) = extract_json_from_text(&response_text) {
                     debug!("Extracted JSON from response text");
                     parsed_response_text = extracted;
-                    serde_json::from_str::<ChatResponse>(extracted).map_err(|e2| {
-                        anyhow::anyhow!(
-                            "Failed to parse extracted JSON: {} (original error: {})",
-                            e2,
-                            e
-                        )
-                    })
+                    extracted_json = true;
+                    serde_json::from_str::<ChatResponse>(extracted)
                 } else {
-                    Err(anyhow::Error::new(e))
+                    Err(e)
                 }
             }
         };
@@ -376,10 +372,21 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 return Err(anyhow::anyhow!(LlmErrorKind::Client).context("no choices returned"));
             }
             Err(e) => {
-                error!(attempt, total_attempts, err=%e, "llm chat_once deserialize error");
+                let summary = telemetry::JsonErrorSummary::from_error(&e);
+                error!(
+                    attempt,
+                    total_attempts,
+                    category = summary.category,
+                    line = summary.line,
+                    column = summary.column,
+                    extracted_json,
+                    response_bytes,
+                    "llm chat_once deserialize error"
+                );
                 // Deserialization never retries (fail fast).
-                return Err(anyhow::anyhow!(LlmErrorKind::Deserialize)
-                    .context(format!("parse chat response: {e}")));
+                return Err(anyhow::anyhow!(LlmErrorKind::Deserialize).context(format!(
+                    "parse chat response: {summary} (extracted_json={extracted_json})"
+                )));
             }
         }
     }
@@ -506,6 +513,210 @@ mod tests {
             "id": "test",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}]
         })
+    }
+
+    use crate::test_support::DiagnosticCapture;
+
+    #[tokio::test]
+    async fn deserialize_diagnostics_hide_provider_values_in_errors_and_logs() {
+        use httptest::{Expectation, matchers::request, responders::status_code};
+        use tracing::instrument::WithSubscriber;
+
+        const SECRET: &str = "SENTINEL_SOURCE_SECRET_20261005";
+        let mut malformed = chat_ok_body();
+        malformed["usage"] = serde_json::json!({
+            "prompt_tokens": SECRET, "completion_tokens": 1, "total_tokens": 2
+        });
+        let cases = [
+            (malformed.to_string(), "data"),
+            (format!("```json\n{malformed}\n```"), "data"),
+            (format!(r#"{{"id":"{SECRET}","choices": @}}"#), "syntax"),
+            (format!(r#"{{"id":"{SECRET}","choices": ["#), "eof"),
+        ];
+        let mut leaks = Vec::new();
+        let mut diagnostics = Vec::new();
+        for tools in [false, true] {
+            for (body, category) in &cases {
+                let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+                server.expect(
+                    Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                        .times(1)
+                        .respond_with(status_code(200).body(body.clone())),
+                );
+                let client = chat_test_client(format!("{}/", server.url_str("")), 3);
+                let capture = DiagnosticCapture::default();
+                let writer = capture.clone();
+                let subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_writer(move || writer.clone())
+                    .finish();
+                let error = async {
+                    if tools {
+                        crate::llm::tool_execution::requests::chat_tools_once(
+                            &client,
+                            "fixture",
+                            &chat_messages(),
+                            &[],
+                            None,
+                            crate::config::ReasoningMode::Off,
+                            None,
+                            None,
+                        )
+                        .await
+                        .unwrap_err()
+                    } else {
+                        client
+                            .chat_once("fixture", chat_messages(), None)
+                            .await
+                            .unwrap_err()
+                    }
+                }
+                .with_subscriber(subscriber)
+                .await;
+                assert_eq!(
+                    error.downcast_ref::<LlmErrorKind>(),
+                    Some(&LlmErrorKind::Deserialize)
+                );
+                let rendered = format!("{error:#}\n{error:?}");
+                let logs = capture.text();
+                if rendered.contains(SECRET) {
+                    leaks.push(format!("tools={tools} category={category} error"));
+                }
+                if logs.contains(SECRET) {
+                    leaks.push(format!("tools={tools} category={category} log"));
+                }
+                diagnostics.push((rendered, logs, *category));
+            }
+        }
+        assert!(
+            leaks.is_empty(),
+            "provider sentinel leaked through: {leaks:?}"
+        );
+        for (error, logs, category) in diagnostics {
+            assert!(error.contains("parse chat response") && error.contains(category));
+            assert!(error.contains("line") && error.contains("column"));
+            assert!(logs.contains("deserialize") && logs.contains(category));
+            assert!(logs.contains("line") && logs.contains("column"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_argument_diagnostics_hide_provider_values_in_errors_and_logs() {
+        use httptest::{Expectation, matchers::request, responders::json_encoded};
+        use tracing::instrument::WithSubscriber;
+        const SECRET: &str = "SENTINEL_TOOL_ARGUMENT_SECRET_20261005";
+        for (arguments, category) in [
+            (
+                serde_json::json!({"filename":"*.rs", "cursor":SECRET}).to_string(),
+                "data",
+            ),
+            (
+                format!(r#"{{"filename":"{SECRET}","cursor": @}}"#),
+                "syntax",
+            ),
+        ] {
+            let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+            server.expect(
+                Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                    .times(1)
+                    .respond_with(json_encoded(serde_json::json!({"choices": [{
+                        "index": 0, "finish_reason": "tool_calls", "message": {
+                            "role": "assistant", "content": null, "tool_calls": [{
+                                "id": "call", "type": "function", "function": {
+                                    "name": "find_file", "arguments": arguments
+                                }
+                            }]
+                        }
+                    }]}))),
+            );
+            let client = chat_test_client(format!("{}/", server.url_str("")), 3);
+            let capture = DiagnosticCapture::default();
+            let writer = capture.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish();
+            let error = crate::llm::tool_execution::requests::chat_tools_once(
+                &client,
+                "fixture",
+                &chat_messages(),
+                &[crate::tools::find_file::tool_def()],
+                None,
+                crate::config::ReasoningMode::Off,
+                None,
+                None,
+            )
+            .with_subscriber(subscriber)
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<LlmErrorKind>(),
+                Some(&LlmErrorKind::Client)
+            );
+            let rendered = format!("{error:#}\n{error:?}");
+            let logs = capture.text();
+            assert!(
+                !rendered.contains(SECRET),
+                "provider tool-argument sentinel leaked through error"
+            );
+            assert!(
+                !logs.contains(SECRET),
+                "provider tool-argument sentinel leaked through log"
+            );
+            for diagnostic in [rendered, logs] {
+                assert!(
+                    diagnostic.contains(category)
+                        && diagnostic.contains("line")
+                        && diagnostic.contains("column")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deserialize_diagnostics_preserve_successful_plain_and_fenced_json() {
+        use httptest::{Expectation, matchers::request, responders::status_code};
+        for tools in [false, true] {
+            for body in [
+                chat_ok_body().to_string(),
+                format!("```json\n{}\n```", chat_ok_body()),
+            ] {
+                let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+                server.expect(
+                    Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                        .times(1)
+                        .respond_with(status_code(200).body(body)),
+                );
+                let client = chat_test_client(format!("{}/", server.url_str("")), 3);
+                let content = if tools {
+                    crate::llm::tool_execution::requests::chat_tools_once(
+                        &client,
+                        "fixture",
+                        &chat_messages(),
+                        &[],
+                        None,
+                        crate::config::ReasoningMode::Off,
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("valid provider response")
+                    .content
+                    .expect("content")
+                } else {
+                    client
+                        .chat_once("fixture", chat_messages(), None)
+                        .await
+                        .expect("valid provider response")
+                        .content
+                };
+                assert_eq!(content, "ok");
+            }
+        }
     }
 
     #[tokio::test]

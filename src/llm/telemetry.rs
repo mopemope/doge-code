@@ -15,6 +15,40 @@ use serde::Serialize;
 /// Protocol label for OpenAI-compatible Chat Completions transport.
 pub const PROTOCOL_CHAT_COMPLETIONS: &str = "chat_completions";
 
+/// Serde's error message can contain provider values or field names. Retain
+/// only a closed category and numeric position, never the original error.
+pub(crate) struct JsonErrorSummary {
+    pub category: &'static str,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl JsonErrorSummary {
+    pub fn from_error(error: &serde_json::Error) -> Self {
+        use serde_json::error::Category;
+        Self {
+            category: match error.classify() {
+                Category::Io => "io",
+                Category::Syntax => "syntax",
+                Category::Data => "data",
+                Category::Eof => "eof",
+            },
+            line: error.line(),
+            column: error.column(),
+        }
+    }
+}
+
+impl std::fmt::Display for JsonErrorSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "JSON {} error at line {} column {}",
+            self.category, self.line, self.column
+        )
+    }
+}
+
 /// Content-free summary of an outgoing LLM request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmRequestSummary {

@@ -1867,6 +1867,89 @@ async fn mock_native_client(
 }
 
 #[tokio::test]
+async fn responses_usage_diagnostics_hide_provider_values_in_errors_and_logs() {
+    use tracing::instrument::WithSubscriber;
+    const SECRET: &str = "SENTINEL_RESPONSES_USAGE_SECRET_20261005";
+    let mut payload = response(vec![text_output()]);
+    payload["usage"]["input_tokens"] = json!(SECRET);
+    let mut leaks = Vec::new();
+    let mut diagnostics = Vec::new();
+    for native in [false, true] {
+        let mut payload = payload.clone();
+        if native {
+            payload["output"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, compaction_item("cmp-fixture"));
+        }
+        let wire = format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed","response":payload})
+        );
+        let (_server, _temp, client) = if native {
+            mock_native_client(wire, 102_400).await
+        } else {
+            mock_client(wire).await
+        };
+        let capture = crate::test_support::DiagnosticCapture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let error = crate::llm::tool_execution::requests::chat_tools_once(
+            &client,
+            "test-model",
+            &[user("fixture")],
+            &[],
+            None,
+            crate::config::ReasoningMode::Off,
+            None,
+            None,
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap_err();
+        let rendered = format!("{error:#}\n{error:?}");
+        let logs = capture.text();
+        if rendered.contains(SECRET) {
+            leaks.push(format!("native={native} error"));
+        }
+        if logs.contains(SECRET) {
+            leaks.push(format!("native={native} log"));
+        }
+        assert_eq!(client.usage_snapshot().usage_records, 0);
+        assert_eq!(client.usage_snapshot().total_tokens, 0);
+        diagnostics.push((rendered, logs));
+    }
+    let legacy_error = responses::completed(&payload, "account", "test-model", &[]).unwrap_err();
+    let legacy_error = format!("{legacy_error:#}\n{legacy_error:?}");
+    if legacy_error.contains(SECRET) {
+        leaks.push("legacy completed error".into());
+    }
+    assert!(
+        leaks.is_empty(),
+        "provider usage sentinel leaked through: {leaks:?}"
+    );
+    assert!(
+        legacy_error.contains("data")
+            && legacy_error.contains("line")
+            && legacy_error.contains("column")
+    );
+    for (error, logs) in diagnostics {
+        for diagnostic in [error, logs] {
+            assert!(
+                diagnostic.contains("data")
+                    && diagnostic.contains("line")
+                    && diagnostic.contains("column")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_inference_sends_context_management_on_wire() -> Result<()> {
     let wire = format!(
         "data: {}\n\n",
