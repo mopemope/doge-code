@@ -2248,19 +2248,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_context_sent_only_on_first_request() {
-        use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+        use httptest::{Expectation, matchers::*, responders::*};
 
-        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
-            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
-            return;
-        }
-        let server = match ServerBuilder::new().run() {
-            Ok(server) => server,
-            Err(err) => {
-                eprintln!("Skipping httptest-based test (server start failed: {err})");
-                return;
-            }
-        };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
 
         // First response: a real tool call; second response: final answer.
         let tool_call_response = serde_json::json!({

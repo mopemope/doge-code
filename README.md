@@ -1254,7 +1254,8 @@ steps:
 Start with [AGENTS.md](AGENTS.md) for change-specific guidance. Shared development
 Skills live in `docs/ai/skills/` and are linked for Codex, Claude, and OpenCode.
 Development check scripts require Python 3.11+. Search tests require ripgrep
-(`rg`) on PATH. Check logs are retained in a temporary directory.
+(`rg`) on PATH. Check logs are retained in a temporary directory. Rust tests
+require loopback socket binding for local HTTP fixtures.
 
 ```bash
 # Code formatting

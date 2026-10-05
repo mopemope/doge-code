@@ -1382,20 +1382,6 @@ mod tests {
         })
     }
 
-    fn start_server() -> Option<httptest::Server> {
-        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
-            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
-            return None;
-        }
-        // Fail loudly on bind errors: silently skipping would turn these
-        // into vacuous green tests with zero coverage.
-        Some(
-            httptest::ServerBuilder::new()
-                .run()
-                .expect("httptest server must start"),
-        )
-    }
-
     fn exec_cfg_with_server(project_root: &Path, server: &httptest::Server) -> AppConfig {
         AppConfig {
             project_root: project_root.to_path_buf(),
@@ -1481,7 +1467,7 @@ mod tests {
     #[tokio::test]
     async fn test_exec_success_persists_updated_history_without_duplication() {
         use httptest::{Expectation, matchers::*, responders::*};
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         server.expect(
             Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
                 .times(1)
@@ -1529,14 +1515,14 @@ mod tests {
     #[tokio::test]
     async fn test_exec_resume_continues_and_persists_second_turn() {
         use httptest::{Expectation, matchers::*, responders::*};
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         // Two turns against one stub endpoint.
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/v1/chat/completions"),
                 request::body(matches("remember alpha")),
             ])
-            .times(..)
+            .times(2)
             .respond_with(json_encoded(assistant_done_response())),
         );
 
