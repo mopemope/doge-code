@@ -317,8 +317,20 @@ to Git commands, with a 10-second timeout per command.
 
 ## Diagnostic Logging
 
-Diagnostic logs live at `.doge/logs/debug.log` with `0700` directories and
-`0600` files on Unix; a symlinked log path is refused. Even with
+Diagnostic logs live at `.doge/logs/debug.log` with a `0700` log directory and
+`0600` log file on Unix. Existing `.doge` permissions are retained.
+Below the selected project root, Unix opens `.doge`,
+`logs`, and `debug.log` without following symlinks; permissions and startup
+truncation use held handles. Existing hardlinked or nonregular log files are
+refused. The selected root and its ancestors are trusted, so root aliases remain
+supported. Held directories may still be renamed, and concurrent changes to the
+opened inode (including new hardlinks) are outside this guarantee. Other
+platforms use symlink preflight checks without the Unix race guarantees.
+Unix needs permission to open the root and child directories for reading;
+if a directory cannot be opened, startup fails without repairing it through a
+path. Restore access to that directory before retrying.
+Normal startup still truncates the previous log; this does not add rotation.
+Even with
 `RUST_LOG=debug`, prompts, source/file content, tool arguments/results,
 model output, raw request/response bodies, provider error bodies, refusal
 bodies, encrypted Responses state, and credentials are never logged. Logs
