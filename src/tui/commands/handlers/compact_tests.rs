@@ -213,13 +213,19 @@ async fn manual_compact_rejects_overlap_and_saves_before_adopting() {
             .unwrap()
             .usage
     );
-    assert_eq!(
-        serde_json::to_value(saved.usage).unwrap(),
-        before["session"]["usage"]
-    );
+    // Manual /compact provider usage is now persisted to the session:
+    // mock returns prompt 12 / completion 3 / total 15 with one attempt.
+    let saved_usage = saved.usage.as_ref().expect("usage persisted");
+    assert_eq!(saved_usage.total_tokens, 15);
+    assert_eq!(saved_usage.attempts, 1);
+    assert_eq!(saved_usage.usage_records, 1);
     assert_eq!(
         saved.requests,
-        before["session"]["requests"].as_u64().unwrap()
+        before["session"]["requests"].as_u64().unwrap() + 1
+    );
+    assert_eq!(
+        saved.token_count,
+        before["session"]["token_count"].as_u64().unwrap_or(0) + 15
     );
     let messages = notices(&ui);
     assert!(messages.iter().any(|m| m.contains("[SUCCESS]")));
@@ -281,8 +287,48 @@ async fn manual_compact_cancel_and_shutdown_drop_unresponsive_provider() {
         assert_eq!(terminal(&executor, id).await.status, JobStatus::Cancelled);
         mock.release();
         tokio::task::yield_now().await;
-        assert_eq!(memory(&executor), before);
-        assert_eq!(std::fs::read(disk_path(&executor, &dir)).unwrap(), disk);
+        // Cancellation after the request was sent still persists the attempt
+        // as unknown usage: attempts +1, no usage record, zero tokens.
+        // The conversation itself is unchanged.
+        let after = memory(&executor);
+        let before_session = &before["session"];
+        let after_session = &after["session"];
+        assert_eq!(
+            after["runtime"], before["runtime"],
+            "conversation must stay unchanged on cancel"
+        );
+        assert_eq!(
+            after_session["usage"]["attempts"].as_u64().unwrap(),
+            before_session["usage"]["attempts"].as_u64().unwrap_or(0) + 1,
+            "cancelled attempt must be tracked"
+        );
+        assert_eq!(
+            after_session["usage"]["usage_records"].as_u64().unwrap(),
+            before_session["usage"]["usage_records"]
+                .as_u64()
+                .unwrap_or(0),
+            "no provider usage body on cancel"
+        );
+        assert_eq!(
+            after_session["usage"]["total_tokens"].as_u64().unwrap(),
+            before_session["usage"]["total_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            "cancelled attempt adds no tokens"
+        );
+        assert_eq!(
+            after_session["requests"].as_u64().unwrap(),
+            before_session["requests"].as_u64().unwrap_or(0) + 1
+        );
+        // Disk persists the same attempt delta.
+        let saved: crate::session::SessionData =
+            serde_json::from_slice(&std::fs::read(disk_path(&executor, &dir)).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            after_session.clone(),
+            "disk must persist the cancelled attempt"
+        );
+        assert_ne!(std::fs::read(disk_path(&executor, &dir)).unwrap(), disk);
         assert!(
             !notices(&ui).iter().any(|m| m.contains("SUCCESS")
                 || m == "::status:done"
@@ -295,10 +341,21 @@ async fn manual_compact_cancel_and_shutdown_drop_unresponsive_provider() {
 
 #[tokio::test]
 async fn manual_compact_discards_changed_session_and_runtime_snapshots() {
+    // Switch (different session id) must fail closed with no attribution to
+    // the new session. Same-id session/runtime mutations still persist the
+    // provider attempt; the summary is adopted only when the runtime history
+    // is unchanged (session mutations merge via post-usage snapshot).
     for change in ["switch", "session", "runtime"] {
         let mock = MockProvider::new("obsolete summary", "stop", axum::http::StatusCode::OK).await;
         let (mut executor, mut ui, dir) = fixture();
         mock.configure(&mut executor);
+        // Capture the pre-request session id for switch-case validation.
+        let pre_id = executor
+            .session_manager
+            .lock()
+            .unwrap()
+            .current_session_id()
+            .unwrap();
         executor.handle_compact_command(&mut ui);
         let id = executor.jobs.foreground_id().unwrap();
         mock.started().await;
@@ -326,13 +383,69 @@ async fn manual_compact_discards_changed_session_and_runtime_snapshots() {
                 .append_user("forced edit"),
         }
         let changed = memory(&executor);
+        // `disk_path` follows the current session; for switch it points at the
+        // new session file, otherwise the original one.
         let path = disk_path(&executor, &dir);
         let disk = std::fs::read(&path).unwrap();
         mock.release();
-        assert_eq!(terminal(&executor, id).await.status, JobStatus::Failed);
-        assert_eq!(memory(&executor), changed);
-        assert_eq!(std::fs::read(path).unwrap(), disk);
-        assert!(!notices(&ui).iter().any(|m| m.contains("SUCCESS")));
+        let status = terminal(&executor, id).await.status;
+        let after = memory(&executor);
+        match change {
+            "switch" => {
+                // Identity changed: no usage to the new session, no summary.
+                assert_eq!(status, JobStatus::Failed, "switch must fail closed");
+                assert_eq!(after, changed);
+                assert_eq!(std::fs::read(path).unwrap(), disk);
+                // The original session file is untouched.
+                assert!(
+                    !notices(&ui).iter().any(|m| m.contains("SUCCESS")),
+                    "switch must not adopt summary"
+                );
+                let _ = pre_id;
+            }
+            "session" => {
+                // Same id with a concurrent in-memory mutation: usage merges
+                // on top and the summary is adopted against the post-usage
+                // snapshot (no concurrent history change).
+                assert_eq!(status, JobStatus::Completed, "session merge completes");
+                assert_ne!(after["runtime"], changed["runtime"], "history compacted");
+                let after_requests = after["session"]["requests"].as_u64().unwrap();
+                let changed_requests = changed["session"]["requests"].as_u64().unwrap();
+                assert_eq!(
+                    after_requests,
+                    changed_requests + 1,
+                    "usage attempt persisted"
+                );
+                assert_eq!(
+                    after["session"]["usage"]["total_tokens"].as_u64().unwrap(),
+                    changed["session"]["usage"]["total_tokens"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        + 15
+                );
+                assert_ne!(
+                    std::fs::read(path).unwrap(),
+                    disk,
+                    "disk persists usage+summary"
+                );
+            }
+            _ => {
+                // Runtime history changed: summary discarded, but the
+                // provider attempt stays persisted.
+                assert_eq!(status, JobStatus::Failed, "runtime change discards summary");
+                assert_eq!(after["runtime"], changed["runtime"], "runtime unchanged");
+                assert_eq!(
+                    after["session"]["usage"]["total_tokens"].as_u64().unwrap(),
+                    changed["session"]["usage"]["total_tokens"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        + 15,
+                    "usage persists despite discarded summary"
+                );
+                assert_ne!(std::fs::read(path).unwrap(), disk, "disk persists attempt");
+                assert!(!notices(&ui).iter().any(|m| m.contains("SUCCESS")));
+            }
+        }
     }
 }
 
@@ -360,8 +473,48 @@ async fn manual_compact_invalid_provider_results_preserve_disk_and_memory() {
         mock.started().await;
         mock.release();
         assert_eq!(terminal(&executor, id).await.status, JobStatus::Failed);
-        assert_eq!(memory(&executor), before);
-        assert_eq!(std::fs::read(path).unwrap(), disk);
+        // Provider attempts are tracked even when the summary is invalid:
+        // the conversation is unchanged but the attempt persists.
+        let after = memory(&executor);
+        assert_eq!(
+            after["runtime"], before["runtime"],
+            "history unchanged on invalid"
+        );
+        let is_usage_error = status == 400;
+        if is_usage_error {
+            // 4xx/5xx: no usage body, but the attempt is recorded as unknown.
+            assert_eq!(
+                after["session"]["usage"]["attempts"].as_u64().unwrap(),
+                before["session"]["usage"]["attempts"].as_u64().unwrap_or(0) + 1
+            );
+            assert_eq!(
+                after["session"]["usage"]["usage_records"].as_u64().unwrap(),
+                before["session"]["usage"]["usage_records"]
+                    .as_u64()
+                    .unwrap_or(0)
+            );
+        } else {
+            // 200 with empty/invalid summary still carried the mock usage.
+            assert_eq!(
+                after["session"]["usage"]["total_tokens"].as_u64().unwrap(),
+                before["session"]["usage"]["total_tokens"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    + 15
+            );
+            assert_eq!(
+                after["session"]["usage"]["usage_records"].as_u64().unwrap(),
+                before["session"]["usage"]["usage_records"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    + 1
+            );
+        }
+        assert_ne!(
+            std::fs::read(path).unwrap(),
+            disk,
+            "attempt persists to disk"
+        );
         assert!(!notices(&ui).iter().any(|m| m.contains("SUCCESS")));
         executor.handle_compact_completed(&id.to_string(), &mut ui);
         assert_eq!(ui.status, Status::Error);
@@ -389,9 +542,44 @@ async fn manual_compact_save_failure_is_transactional() {
     std::fs::set_permissions(&path, permissions).unwrap();
     mock.release();
     assert_eq!(terminal(&executor, id).await.status, JobStatus::Failed);
-    assert_eq!(memory(&executor), before);
-    assert_eq!(std::fs::read(path).unwrap(), disk);
+    // Usage attribution fails first on readonly: the summary is never
+    // adopted, the conversation is unchanged, disk is unchanged, but the
+    // complete in-memory payload (usage delta) stays Unsaved for retry.
+    let after = memory(&executor);
+    assert_eq!(
+        after["runtime"], before["runtime"],
+        "conversation unchanged"
+    );
+    assert_eq!(
+        after["session"]["usage"]["total_tokens"].as_u64().unwrap(),
+        before["session"]["usage"]["total_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            + 15,
+        "in-memory usage delta retained as unsaved"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), disk, "disk unchanged");
+    assert!(
+        executor
+            .session_manager
+            .lock()
+            .unwrap()
+            .has_unsaved_current_session(),
+        "failed usage save must leave Unsaved state for /session save retry"
+    );
     assert!(!notices(&ui).iter().any(|m| m.contains("SUCCESS")));
+    // Restore writability so the temp dir can be cleaned up.
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o600);
+    }
+    #[cfg(not(unix))]
+    {
+        permissions.set_readonly(false);
+    }
+    let _ = std::fs::set_permissions(&path, permissions);
 }
 
 #[tokio::test]
@@ -677,9 +865,17 @@ async fn manual_compact_post_replace_sync_failure_adopts_with_warning() {
         serde_json::to_value(saved.conversation_messages().unwrap()).unwrap(),
         memory(&executor)["runtime"]
     );
+    // Usage is already consumed and stays persisted; only durability is
+    // unconfirmed. Never roll back provider usage.
     assert_eq!(
-        memory(&executor)["session"]["usage"],
-        before["session"]["usage"]
+        memory(&executor)["session"]["usage"]["total_tokens"]
+            .as_u64()
+            .unwrap(),
+        before["session"]["usage"]["total_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            + 15,
+        "usage persists with durability warning"
     );
     let messages = notices(&ui);
     assert!(messages.iter().any(|m| m.contains("[WARN]")
@@ -695,7 +891,7 @@ async fn manual_compact_post_replace_sync_failure_adopts_with_warning() {
 }
 
 #[tokio::test]
-async fn manual_compact_usage_is_excluded_from_next_agent_checkpoint_and_drop() {
+async fn manual_compact_usage_is_included_in_next_agent_checkpoint() {
     let mock = MockProvider::new("summary", "stop", axum::http::StatusCode::OK).await;
     let (mut executor, mut ui, _dir) = fixture();
     mock.configure(&mut executor);
@@ -711,6 +907,10 @@ async fn manual_compact_usage_is_excluded_from_next_agent_checkpoint_and_drop() 
         .current_session
         .clone()
         .unwrap();
+    // Manual usage is now durable: 15 tokens persisted before the next run.
+    assert_eq!(session.usage.as_ref().unwrap().total_tokens, 15);
+    assert_eq!(session.requests, 1);
+    assert_eq!(session.token_count, 15);
     let client = executor.client.clone().unwrap();
     assert_eq!(client.usage_snapshot().total_tokens, 15);
     let next = crate::llm::tool_execution::history::HistoryManager::with_observations(
@@ -739,9 +939,10 @@ async fn manual_compact_usage_is_excluded_from_next_agent_checkpoint_and_drop() 
         .current_session
         .clone()
         .unwrap();
-    assert_eq!(saved.requests, 1);
-    assert_eq!(saved.token_count, 150);
-    assert_eq!(saved.usage.unwrap().total_tokens, 150);
+    // Manual 15 + agent 150, no double counting; empty second checkpoint adds nothing.
+    assert_eq!(saved.requests, 2);
+    assert_eq!(saved.token_count, 165);
+    assert_eq!(saved.usage.unwrap().total_tokens, 165);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -84,6 +84,19 @@ Observed directives and interpreted requirements are distinct provenance nodes.
 - Cached/reasoning subtotals are never double-counted.
 - Partial runs must checkpoint canonical history before return.
 
+## Usage Attribution Contract
+
+- Provider usage and local budget estimates are separate.
+- Cached input tokens are already part of input totals.
+- Reasoning tokens are already part of output totals.
+- Missing usage reports are unknown, never zero.
+- Agent-nested model requests must use the agent's shared client.
+- Any shared-client ledger movement during tool dispatch is reconciled into the main run budget.
+- Manual foreground LLM jobs persist their provider usage to the session exactly once.
+- Usage is never attributed to a session other than the session active when the operation started.
+- Failed/cancelled requests may increase attempts without increasing reported tokens.
+- Session save retry never reapplies an already-applied usage delta.
+
 ## Execution and MCP boundaries
 
 - Execution changes belong in `src/execution/` (`runner.rs` / `policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `runner.rs` is policy-free process mechanics, while `process.rs` is the ExecutionPolicy-aware LLM adapter. `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.

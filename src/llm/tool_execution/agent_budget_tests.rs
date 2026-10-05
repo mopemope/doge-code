@@ -897,3 +897,211 @@ async fn responses_pairing_survives_budget_synthetic() {
 
 #[allow(dead_code)]
 fn _tool_runtime_build_is_budget_free(_rt: &ToolRuntime<'_>) {}
+
+#[tokio::test]
+async fn doc_generate_nested_usage_exhausts_token_budget_partial() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("lib.rs");
+    std::fs::write(&target, "pub fn foo() {}\n").expect("write");
+    let doc_call = tool_call(
+        "doc_generate",
+        "doc1",
+        serde_json::json!({"path": target.to_str().unwrap()}),
+    );
+    // Main request (small usage) returns doc_generate; nested doc request
+    // reports large usage that exhausts the run token budget.
+    let (client, requests, server) = fixture(vec![
+        (200, assistant_calls_with_usage(vec![doc_call], 1000, 800)),
+        (
+            200,
+            serde_json::json!({
+                "choices": [{"index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "//! Large docs"}}],
+                "usage": {"prompt_tokens": 9000, "completion_tokens": 1000, "total_tokens": 10000}
+            }),
+        ),
+        (200, assistant_done_with_usage("should not run", 500, 400)),
+    ])
+    .await;
+    let cfg = test_cfg_with_root(
+        AgentBudgetConfig {
+            max_iterations: 10,
+            max_total_tokens: Some(20_000),
+            ..Default::default()
+        },
+        dir.path().to_path_buf(),
+    );
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()));
+    let run = run_agent_loop(
+        &client,
+        "test-model",
+        &fs,
+        user_msg("document"),
+        None,
+        None,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+    .expect("partial");
+    // doc_generate executed once; nested usage entered the run budget;
+    // no further normal main request started.
+    assert_eq!(run.status, AgentRunStatus::Partial);
+    assert_eq!(run.stop_reason, Some(AgentStopReason::TokenBudget));
+    assert_eq!(run.budget.tool_calls, 1);
+    assert!(run.budget.provider_reported_tokens >= 10000);
+    assert!(run.budget.charged_tokens >= 10000);
+    // Tool-call/result pairing intact: exactly one doc_generate result, no
+    // synthetic budget result for the completed prefix.
+    let tool_results: Vec<_> = run.messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tool_results.len(), 1);
+    assert_eq!(tool_results[0].tool_call_id.as_deref(), Some("doc1"));
+    let v: serde_json::Value =
+        serde_json::from_str(tool_results[0].content.as_deref().unwrap_or("")).expect("json");
+    assert_eq!(v["ok"], true);
+    // Only main + nested requests hit the provider (finalization blocked).
+    let count = requests.lock().expect("r").len();
+    assert!(count <= 3, "unexpected extra main requests: {count}");
+    crate::llm::history::validate_tool_blocks(&run.messages, false).expect("valid");
+    server.abort();
+}
+
+#[tokio::test]
+async fn doc_generate_session_usage_includes_both_without_double() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("lib.rs");
+    std::fs::write(&target, "pub fn foo() {}\n").expect("write");
+    let doc_call = tool_call(
+        "doc_generate",
+        "doc1",
+        serde_json::json!({"path": target.to_str().unwrap()}),
+    );
+    let (client, _requests, server) = fixture(vec![
+        (200, assistant_calls_with_usage(vec![doc_call], 1000, 800)),
+        (
+            200,
+            serde_json::json!({
+                "choices": [{"index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "//! Docs"}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+            }),
+        ),
+        (200, assistant_done_with_usage("done", 500, 400)),
+    ])
+    .await;
+    let cfg = test_cfg_with_root(
+        AgentBudgetConfig {
+            max_iterations: 10,
+            ..Default::default()
+        },
+        dir.path().to_path_buf(),
+    );
+    let sessions_root = dir.path().join(".doge").join("sessions");
+    let store = crate::session::SessionStore::new(sessions_root).expect("store");
+    let manager = Arc::new(std::sync::Mutex::new(
+        crate::session::SessionManager::with_store(store),
+    ));
+    {
+        let mut mgr = manager.lock().expect("mgr");
+        mgr.create_session(None).expect("session");
+    }
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()))
+        .with_session_manager(manager.clone());
+    let run = run_agent_loop(
+        &client,
+        "test-model",
+        &fs,
+        user_msg("document"),
+        None,
+        None,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+    .expect("completed");
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    let session = manager
+        .lock()
+        .expect("mgr")
+        .current_session
+        .clone()
+        .unwrap();
+    let usage = session.usage.as_ref().unwrap();
+    // Main (1000) + nested doc (120) = 1120, plus final answer (500).
+    // No double counting: total equals the shared-client delta.
+    let expected = client.usage_snapshot().total_tokens;
+    assert_eq!(usage.total_tokens, expected);
+    assert!(usage.total_tokens >= 1000 + 120);
+    assert_eq!(session.requests as u64, usage.attempts);
+    // Exec JSON shape: nested usage is included in the run report.
+    let report = client.usage_snapshot().report();
+    assert!(report.get("attempts").is_some());
+    assert!(report.get("unknown_usage_attempts").is_some());
+    assert!(report.get("all_tracked_attempts_reported").is_some());
+    assert!(
+        report["scope"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nested shared-client model work"),
+        "scope must mention nested work: {report}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn normal_non_llm_tool_charges_nothing() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("a.txt");
+    std::fs::write(&target, "hello\n").expect("write");
+    let read_call = tool_call(
+        "fs_read",
+        "r1",
+        serde_json::json!({"path": target.to_str().unwrap()}),
+    );
+    let (client, _requests, server) = fixture(vec![
+        (200, assistant_calls_with_usage(vec![read_call], 1000, 800)),
+        (200, assistant_done_with_usage("done", 500, 400)),
+    ])
+    .await;
+    let before = client.usage_snapshot();
+    let cfg = test_cfg_with_root(
+        AgentBudgetConfig {
+            max_iterations: 10,
+            max_total_tokens: Some(100_000),
+            ..Default::default()
+        },
+        dir.path().to_path_buf(),
+    );
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()));
+    let run = run_agent_loop(
+        &client,
+        "test-model",
+        &fs,
+        user_msg("read"),
+        None,
+        None,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+    .expect("completed");
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    // fs_read touches no provider: tool dispatch adds no internal charge
+    // beyond the two main requests. Charged equals reported for the mains.
+    let after = client.usage_snapshot();
+    let delta = after.difference(&before);
+    assert_eq!(delta.attempts, 2);
+    assert_eq!(delta.usage_records, 2);
+    assert_eq!(run.budget.request_attempts, 2);
+    assert_eq!(run.budget.usage_records, 2);
+    server.abort();
+}
