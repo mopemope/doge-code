@@ -742,6 +742,64 @@ fn test_subagent_global_project_field_wise_loading() {
     );
 }
 
+#[test]
+fn test_agent_budget_zero_rejected_by_config_loaders_without_mutation() {
+    let dir = TempDir::new().expect("tempdir");
+    let global = dir.path().join("user.toml");
+    fs::create_dir(dir.path().join(".doge")).expect("mkdir");
+    let project = dir.path().join(".doge/config.toml");
+    for field in [
+        "max_iterations",
+        "max_tool_calls",
+        "max_elapsed_ms",
+        "max_total_tokens",
+    ] {
+        let text = format!("[agent_budget]\n{field}=0\n");
+        fs::write(&global, &text).expect("global");
+        fs::write(&project, &text).expect("project");
+        let error = load_file_config_from_candidates(Some(&global), &[]).expect_err("reject zero");
+        assert!(format!("{error:#}").contains(field));
+        assert!(load_project_config(dir.path()).is_err());
+        assert_eq!(fs::read_to_string(&global).expect("read"), text);
+        assert_eq!(fs::read_to_string(&project).expect("read"), text);
+    }
+}
+
+#[test]
+fn test_agent_budget_global_project_field_wise_loading() {
+    let dir = TempDir::new().expect("tempdir");
+    let global = dir.path().join("user.toml");
+    fs::create_dir(dir.path().join(".doge")).expect("mkdir");
+    fs::write(
+        &global,
+        "[agent_budget]\nmax_iterations=128\nmax_total_tokens=800000",
+    )
+    .expect("write");
+    fs::write(
+        dir.path().join(".doge/config.toml"),
+        "[agent_budget]\nmax_elapsed_ms=900000",
+    )
+    .expect("write");
+    let user = load_file_config_from_candidates(Some(&global), &[]).expect("user");
+    let project = load_project_config(dir.path()).expect("project");
+    let merged = merge_agent_budget(user.agent_budget.as_ref(), project.agent_budget.as_ref())
+        .expect("merge");
+    assert_eq!(merged.max_iterations, 128);
+    assert_eq!(merged.max_total_tokens, Some(800000));
+    assert_eq!(merged.max_elapsed_ms, Some(900000));
+    assert_eq!(merged.max_tool_calls, None);
+    // Project partial table must not erase user fields.
+    assert_eq!(
+        (
+            merged.max_iterations,
+            merged.max_tool_calls,
+            merged.max_elapsed_ms,
+            merged.max_total_tokens
+        ),
+        (128, None, Some(900000), Some(800000))
+    );
+}
+
 fn write_temp_config(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
     let path = dir.path().join(name);
     fs::write(&path, content).unwrap();

@@ -72,6 +72,18 @@ cache-relevant request-prefix changes.
 Never treat an inferred requirement as a verbatim user directive.
 Observed directives and interpreted requirements are distinct provenance nodes.
 
+## Main-Agent Resource Budget
+
+- Budget exhaustion is partial completion, not cancellation.
+- Cancellation remains an error/cancel path.
+- Budget checks occur only at safe boundaries.
+- Never drop an in-flight mutation/process solely due to elapsed budget.
+- Never leave assistant tool calls without paired tool results.
+- Tool-call budget rejects an oversized batch before any prefix executes.
+- Provider-reported usage remains separate from local budget estimates.
+- Cached/reasoning subtotals are never double-counted.
+- Partial runs must checkpoint canonical history before return.
+
 ## Execution and MCP boundaries
 
 - Execution changes belong in `src/execution/` (`runner.rs` / `policy.rs` / `process.rs` / `lifecycle.rs` / `output.rs`); `runner.rs` is policy-free process mechanics, while `process.rs` is the ExecutionPolicy-aware LLM adapter. `FsTools` keeps only thin `execute_process` / `execute_bash` / `execute_shell` adapters. Never route `execute_process` through `bash -c`, join args into a shell string, or prefix-match `allowed_programs`.
