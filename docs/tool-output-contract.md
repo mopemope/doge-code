@@ -308,6 +308,14 @@ never used for preflight reductions.
   unseen-safe compaction as a last resort. Preflight never evicts `obs-*`
   entries or deactivates tools.
 
+- `observation_read` budgets its complete serialized response, including escaping,
+  metadata and warnings. A shorter page ends at a UTF-8 boundary and its
+  `end_byte`/`next_cursor` track the bytes actually returned. Search dispatch
+  likewise budgets its final envelope and advances `next_offset` only past
+  returned rows. Neither paged output relies on global truncation for a valid
+  continuation. If metadata plus one character/row cannot fit, return an error
+  without claiming progress.
+
 ## Tool registration checklist
 
 Every tool must be consistent at all sites; a missing site silently breaks the

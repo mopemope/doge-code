@@ -128,6 +128,14 @@ pub(crate) fn positive_read_option(name: &str, value: Option<usize>) -> anyhow::
     Ok(())
 }
 
+/// Measure the complete model-visible envelope, including JSON escaping.
+pub(crate) fn serialized_tool_output_fits<T: serde::Serialize>(
+    output: &T,
+    tool: &str,
+) -> anyhow::Result<bool> {
+    Ok(serde_json::to_string(output)?.chars().count() <= crate::llm::max_output_chars(tool))
+}
+
 /// Keep read error JSON small even when an invalid path/pattern is enormous.
 pub(crate) fn bounded_read_error(error: impl std::fmt::Display) -> anyhow::Error {
     let message = error.to_string();

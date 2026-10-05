@@ -50,6 +50,14 @@ pub struct SearchTextResult {
     pub warnings: Vec<String>,
 }
 
+impl SearchTextResult {
+    /// One shared envelope for source budgeting and actual dispatch output.
+    pub(crate) fn tool_value(&self) -> serde_json::Value {
+        let items: Vec<_> = self.rows.iter().map(|(path, line, text)| json!({"path": path.display().to_string(), "line": line, "text": text})).collect();
+        json!({ "ok": true, "results": items, "meta": { "offset": self.offset, "max_results": self.max_results, "returned": self.rows.len(), "truncated": self.truncated, "next_offset": self.next_offset }, "warnings": self.warnings })
+    }
+}
+
 type SearchRows = Vec<(PathBuf, usize, String)>;
 type CollectedMatches = (SearchRows, bool);
 
@@ -623,14 +631,48 @@ fn finish_search(
         None
     };
 
-    Ok(SearchTextResult {
+    let mut result = SearchTextResult {
         rows: results,
         truncated,
         next_offset,
         offset,
         max_results,
         warnings,
-    })
+    };
+    if !super::budget::serialized_tool_output_fits(&result.tool_value(), "search_text")? {
+        result.truncated = true;
+        result
+            .warnings
+            .push("serialized JSON limit applied; request next_offset for unread matches".into());
+        let rows = std::mem::take(&mut result.rows);
+        let mut low = 0;
+        let mut high = rows.len();
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            set_search_prefix(&mut result, &rows, mid);
+            if super::budget::serialized_tool_output_fits(&result.tool_value(), "search_text")? {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        set_search_prefix(&mut result, &rows, low);
+        anyhow::ensure!(
+            low > 0
+                && super::budget::serialized_tool_output_fits(&result.tool_value(), "search_text")?,
+            "search metadata and one match cannot fit the serialized JSON limit; no matches consumed, shorten paths or narrow the search"
+        );
+    }
+    Ok(result)
+}
+
+fn set_search_prefix(
+    result: &mut SearchTextResult,
+    rows: &[(PathBuf, usize, String)],
+    count: usize,
+) {
+    result.rows = rows[..count].to_vec();
+    result.next_offset = (count > 0).then(|| result.offset.saturating_add(count));
 }
 
 #[cfg(test)]
@@ -1681,5 +1723,108 @@ mod cancellation_tests {
                     .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod serialized_paging_tests {
+    use super::*;
+    use crate::llm::tool_execution::dispatch_tool_call;
+    use crate::llm::tool_runtime::ToolRuntime;
+    use crate::llm::truncate_tool_output;
+    use crate::llm::types::{ToolCall, ToolCallFunction};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[cfg(unix)]
+    #[test]
+    fn serialized_paging_edge_search_complete_row_or_no_progress() -> Result<()> {
+        use crate::execution::runner::{ManagedStreamOutput, StreamStop};
+        use std::os::unix::process::ExitStatusExt;
+        let output = |path| ManagedStreamOutput {
+            value: (vec![(path, 1, "\u{1}".repeat(400))], false),
+            stop: StreamStop::Eof,
+            status: std::process::ExitStatus::from_raw(0),
+            stderr: String::new(),
+            kill_requested: false,
+        };
+        let page = finish_search(output(PathBuf::from("ordinary")), 200, 0, 200)?;
+        assert_eq!(
+            page.rows.len(),
+            1,
+            "tiny approximate budget must not discard the last complete match"
+        );
+        assert!(super::super::budget::serialized_tool_output_fits(
+            &page.tool_value(),
+            "search_text"
+        )?);
+        assert_eq!(
+            truncate_tool_output(page.tool_value().to_string(), "search_text"),
+            page.tool_value().to_string()
+        );
+        let error =
+            finish_search(output(PathBuf::from("\u{1}".repeat(2_000))), 200, 0, 6_000).unwrap_err();
+        assert!(error.to_string().contains("no matches consumed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_pages_survive_model_output_budget_losslessly() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("escaped.txt"),
+            (0..20)
+                .map(|_| format!("MATCH{}\n", "\u{1}".repeat(400)))
+                .collect::<String>(),
+        )?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_owned(),
+            ..Default::default()
+        });
+        let fs = crate::tools::FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs, None, "fixture", None).await?;
+        runtime.tool_catalog.activate(&["search_text".into()]).await;
+        let mut offset = 0;
+        let mut lines = Vec::new();
+        let mut pages = 0;
+        loop {
+            let call = ToolCall { id: Some(format!("search-{pages}")), r#type: "function".into(), function: ToolCallFunction { name: "search_text".into(), arguments: json!({"search_pattern":"^MATCH", "file_glob":"escaped.txt", "offset":offset}).to_string() } };
+            let output = dispatch_tool_call(&runtime, &call).await?;
+            assert!(output.is_success);
+            let serialized = serde_json::to_string(&output.value)?;
+            let visible = truncate_tool_output(serialized.clone(), "search_text");
+            let parsed: serde_json::Value = serde_json::from_str(&visible)?;
+            eprintln!(
+                "page={pages}, serialized_chars={}, source_rows={}, visible_rows={}, next_offset={}",
+                serialized.chars().count(),
+                output.value["results"].as_array().unwrap().len(),
+                parsed["results"].as_array().map_or(0, Vec::len),
+                output.value["meta"]["next_offset"]
+            );
+            assert_eq!(
+                visible, serialized,
+                "global fallback changed rows without changing pagination"
+            );
+            let rows = parsed["results"].as_array().unwrap();
+            assert_eq!(parsed["meta"]["returned"], rows.len());
+            for row in rows {
+                lines.push(row["line"].as_u64().unwrap());
+            }
+            pages += 1;
+            match parsed["meta"]["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next as usize, offset + rows.len());
+                    offset = next as usize;
+                }
+                None => break,
+            }
+            assert!(pages < 20);
+        }
+        eprintln!(
+            "expected_rows=20, recovered_rows={}, pages={pages}",
+            lines.len()
+        );
+        assert_eq!(lines, (1..=20).collect::<Vec<_>>());
+        Ok(())
     }
 }
