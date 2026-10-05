@@ -35,6 +35,21 @@ impl std::fmt::Debug for ProviderState {
     }
 }
 
+impl ProviderState {
+    /// True when the persisted output contains an opaque server-side
+    /// compaction item. The ciphertext is never inspected.
+    pub fn contains_compaction(&self) -> bool {
+        self.output.iter().any(responses::is_compaction_item)
+    }
+
+    /// Index of the latest compaction item in the persisted output, if any.
+    /// Centralizes the canonical-boundary scan so agent loop and history
+    /// pruning share one definition.
+    pub fn latest_compaction_index(&self) -> Option<usize> {
+        responses::latest_compaction_index(&self.output)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error(
     "ChatGPT request failed (HTTP {status:?}, code {code}, request {request_id:?}). {recovery}"

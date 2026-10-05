@@ -106,7 +106,14 @@ fn measure(
     tools: &[ToolDef],
 ) -> Result<RequestFootprint> {
     if let Some(account) = client.account_label() {
-        governor.measure_subscription(account, model, messages, tools, 0)
+        governor.measure_subscription(
+            account,
+            model,
+            messages,
+            tools,
+            0,
+            client.responses_compact_threshold(),
+        )
     } else {
         governor.measure(messages, tools)
     }

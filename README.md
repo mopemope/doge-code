@@ -179,11 +179,17 @@ For catalog models whose context capacity dgc does not recognize, set
 `context_window_size` in the `[llm]` section to the documented model capacity.
 Local context estimates are approximate; encrypted reasoning is preserved as
 opaque state and its ciphertext length is not used as a token count.
-Automatic summarization of saved Responses state is currently unsupported: the
-compactor uses the Chat Completions text path, which rejects Responses history.
-Context overflow is classified correctly, but does not guarantee recovery for
-subscription sessions. Retain the saved evidence and start a new session if this
-boundary is reached.
+ChatGPT Responses uses server-side native compaction: every `POST /responses`
+request carries `context_management: [{type: "compaction", compact_threshold}]`
+with `store:false` / `stream:true` preserved. `compact_threshold` reuses dgc's
+effective auto-compaction limit (`min(auto_compact_prompt_token_threshold`,
+`context_window_size * 0.8)`); values below the Responses minimum of 1000 are
+rejected at startup without silent clamping. Compaction items are opaque and
+persisted unchanged, and the pre-compaction transcript is removed from the
+canonical replay state while the leading authority system prompt is retained.
+`/compact` does not invoke the local text summarizer for this provider.
+Incorrect or unknown model context capacity can still cause context overflow;
+configure `[llm] context_window_size` when needed.
 
 Credentials are stored in the user's platform configuration directory under
 `doge-code/openai-chatgpt/`, separately from project `.doge/` state. Unix directories
@@ -753,7 +759,7 @@ The TUI provides various slash commands for quick operations:
 | `/clear` | Clear the screen |
 | `/cancel [job-id]` | Cancel the current foreground job or a specific job (`/cancel job-12`) |
 | `/jobs` | List running and recent jobs |
-| `/compact` | Compact conversation history using LLM summarization |
+| `/compact` | Compact conversation history (OpenAI-compatible: LLM summarization; openai-chatgpt: automatic Responses native compaction, no local summarizer) |
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
 | `/test` | Run tests for the project |

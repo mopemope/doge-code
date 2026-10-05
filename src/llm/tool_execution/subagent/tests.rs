@@ -266,6 +266,7 @@ async fn test_skipped_batch_is_paired_and_not_dispatched() {
         &messages,
         &[],
         None,
+        None,
     )
     .expect("projection");
     for id in ["one", "two"] {
@@ -605,7 +606,7 @@ fn test_subscription_footprint_uses_existing_projection() {
     );
     client.subscription = Some(AuthHandle::selected(store).expect("fixture auth"));
     let responses = governor
-        .measure_subscription("account", "test", &messages, &[], 0)
+        .measure_subscription("account", "test", &messages, &[], 0, None)
         .expect("Responses measure");
     assert_eq!(
         measure(&governor, &client, "test", &messages, &[]).expect("measure subscription"),
