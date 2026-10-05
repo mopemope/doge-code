@@ -13,6 +13,12 @@ use crate::llm::types::{ChatMessage, ChoiceMessage, Usage};
 
 mod network;
 
+/// Optional request-scoped policy. Local reservations never enter usage telemetry.
+pub(crate) trait RequestAttemptPolicy: Send + Sync {
+    fn before_attempt(&self) -> Result<()>;
+    fn observe_usage(&self, usage: &Usage);
+}
+
 /// Session totals used for conservative serial-request attribution. No estimates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageTotalsSnapshot {
@@ -43,6 +49,7 @@ pub struct OpenAIClient {
     pub usage_record_count: Arc<AtomicU64>,
     /// Process-lifetime ledger shared by clones, independent of UI resets.
     pub(crate) usage_ledger: Arc<std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>>,
+    request_attempt_policy: Option<Arc<dyn RequestAttemptPolicy>>,
     /// Cumulative prompt tokens across the whole session.
     pub total_prompt_tokens_used: Arc<AtomicU64>,
     /// Last request's reasoning tokens (from `completion_tokens_details`).
@@ -141,6 +148,7 @@ impl OpenAIClient {
             total_tokens_used: Arc::new(AtomicU64::new(0)),
             usage_record_count: Arc::new(AtomicU64::new(0)),
             usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
+            request_attempt_policy: None,
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -285,7 +293,27 @@ impl OpenAIClient {
         ledger.attempts = ledger.attempts.saturating_add(1);
     }
 
+    pub(crate) fn with_request_attempt_policy(
+        &self,
+        policy: Arc<dyn RequestAttemptPolicy>,
+    ) -> Self {
+        let mut scoped = self.clone();
+        scoped.request_attempt_policy = Some(policy);
+        scoped
+    }
+
+    pub(crate) fn begin_request_attempt(&self) -> Result<()> {
+        if let Some(policy) = &self.request_attempt_policy {
+            policy.before_attempt()?;
+        }
+        self.record_request_attempt();
+        Ok(())
+    }
+
     pub fn record_usage(&self, usage: &Usage) {
+        if let Some(policy) = &self.request_attempt_policy {
+            policy.observe_usage(usage);
+        }
         self.usage_ledger
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -524,6 +552,7 @@ mod tests {
             usage_record_count: Arc::new(AtomicU64::new(0)),
             usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
+            request_attempt_policy: None,
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
@@ -543,6 +572,7 @@ mod tests {
             usage_record_count: Arc::new(AtomicU64::new(0)),
             usage_ledger: Arc::new(std::sync::Mutex::new(Default::default())),
             total_prompt_tokens_used: Arc::new(AtomicU64::new(0)),
+            request_attempt_policy: None,
             reasoning_tokens_used: Arc::new(AtomicU32::new(0)),
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
