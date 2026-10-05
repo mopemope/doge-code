@@ -216,11 +216,37 @@ impl ContextBudgetGovernor {
         overlay: u64,
         compact_threshold: Option<u32>,
     ) -> Result<RequestFootprint> {
-        let mut request = crate::features::openai_subscription::responses::build(
+        self.measure_subscription_with_activation(
+            account,
+            model,
+            messages,
+            tools,
+            tools,
+            overlay,
+            compact_threshold,
+        )
+    }
+
+    /// Append-only Responses measurement: `base_tools` drive the stable
+    /// top-level schema bytes; `active_tools` resolve `additional_tools`
+    /// input suffix bytes. Never double-counts the same schema in both.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_subscription_with_activation(
+        &self,
+        account: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        base_tools: &[ToolDef],
+        active_tools: &[ToolDef],
+        overlay: u64,
+        compact_threshold: Option<u32>,
+    ) -> Result<RequestFootprint> {
+        let mut request = crate::features::openai_subscription::responses::build_with_activation(
             model,
             account,
             messages,
-            tools,
+            base_tools,
+            active_tools,
             None,
             compact_threshold,
         )?;
@@ -832,5 +858,97 @@ mod tests {
             .expect("with");
         // Envelope is tiny but present so the projection does not drift.
         assert!(with.total_json_bytes >= without.total_json_bytes);
+    }
+}
+
+#[cfg(test)]
+mod append_only_tests {
+    use super::*;
+    use crate::llm::types::{ChatMessage, ToolDef, ToolFunctionDef};
+
+    fn tool_def(name: &str) -> ToolDef {
+        ToolDef {
+            kind: "function".into(),
+            function: ToolFunctionDef {
+                name: name.into(),
+                description: format!("{name} helper"),
+                parameters: serde_json::json!({"type":"object"}),
+                strict: None,
+            },
+        }
+    }
+
+    fn user_msg() -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some("hi".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_responses_schema_bytes_stable_input_grows() {
+        let gov = ContextBudgetGovernor::new(crate::config::ContextBudgetConfig::default());
+        let base = vec![tool_def("fs_read"), tool_def("tool_search")];
+        let active = vec![
+            tool_def("edit"),
+            tool_def("fs_read"),
+            tool_def("tool_search"),
+        ];
+        // Pre-activation history: no markers.
+        let before_msgs = vec![user_msg()];
+        // Post-activation history: tool_search call + result + marker.
+        // Build marker via trusted active set (single edit).
+        let search_call = ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("c1".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "tool_search".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let search_result = ChatMessage {
+            provider_state: None,
+            role: "tool".into(),
+            content: Some("{}".into()),
+            tool_calls: vec![],
+            tool_call_id: Some("c1".into()),
+        };
+        let marker = ChatMessage {
+            provider_state: Some(
+                crate::features::openai_subscription::ProviderState::activation(
+                    "a".into(),
+                    "m".into(),
+                    vec!["edit".into()],
+                ),
+            ),
+            role: "developer".into(),
+            content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+        };
+        let after_msgs = vec![user_msg(), search_call, search_result, marker];
+        let before = gov
+            .measure_subscription_with_activation("a", "m", &before_msgs, &base, &base, 0, None)
+            .expect("before");
+        let after = gov
+            .measure_subscription_with_activation("a", "m", &after_msgs, &base, &active, 0, None)
+            .expect("after");
+        assert_eq!(
+            before.tool_schema_json_bytes, after.tool_schema_json_bytes,
+            "stable base top-level must not grow"
+        );
+        assert!(
+            after.message_json_bytes > before.message_json_bytes,
+            "additional suffix must be measured in input bytes"
+        );
     }
 }

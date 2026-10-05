@@ -47,6 +47,95 @@ fn persist_history_and_observations(
     messages
 }
 
+/// Wire-exposed additional tools: union of `additional_tool_names` from all
+/// developer activation markers in canonical history.
+fn wire_exposed_additional(messages: &[ChatMessage]) -> std::collections::BTreeSet<String> {
+    let mut exposed = std::collections::BTreeSet::new();
+    for msg in messages {
+        if msg.role == "developer"
+            && let Some(state) = msg.provider_state.as_ref()
+            && state.is_activation_marker()
+        {
+            for name in &state.additional_tool_names {
+                exposed.insert(name.clone());
+            }
+        }
+    }
+    exposed
+}
+
+/// Fail-closed sidecar validation against the trusted catalog.
+///
+/// Unknown names (e.g. removed MCP tools or hand-edited session files) and,
+/// once `active_names` is known, names outside the live active set are
+/// refused instead of being wired. `active_names` is `None` only at startup
+/// before the restore activation runs.
+fn validate_activation_sidecar(
+    sidecar: &std::collections::BTreeSet<String>,
+    catalog: &crate::llm::ToolCatalog,
+    active_names: Option<&std::collections::BTreeSet<String>>,
+) -> Result<()> {
+    for name in sidecar {
+        if !catalog.contains(name) {
+            anyhow::bail!(
+                "session references unknown tool '{name}'; start a new session (tool removed from catalog)"
+            );
+        }
+        if let Some(active) = active_names
+            && !active.contains(name)
+        {
+            anyhow::bail!("activation marker for inactive tool '{name}'; refusing to wire");
+        }
+    }
+    Ok(())
+}
+
+/// Post-compaction rebase: append a deterministic developer marker for
+/// sidecar activations missing from post-compaction wire history.
+///
+/// Returns the appended names (sorted) when a marker was pushed; caller must
+/// `checkpoint()` before the next provider request. Generic providers never
+/// rebase (their top-level tools already carry the active set).
+///
+/// The sidecar must already pass [`validate_activation_sidecar`]; this only
+/// wires trusted names.
+fn rebase_missing_activations(
+    history: &mut crate::llm::tool_execution::history::HistoryManager,
+    base_names: &std::collections::BTreeSet<String>,
+    account: &str,
+    model: &str,
+) -> Result<Vec<String>> {
+    let sidecar = history.activated_tools().clone();
+    if sidecar.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wire = wire_exposed_additional(history.as_slice());
+    let mut missing: Vec<String> = sidecar
+        .difference(&wire)
+        .filter(|name| !base_names.contains(name.as_str()))
+        .cloned()
+        .collect();
+    missing.sort();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Fail closed on tampered sidecar entries: names resolve only
+    // through the trusted catalog validated by the caller.
+    let state = crate::features::openai_subscription::ProviderState::activation(
+        account.to_string(),
+        model.to_string(),
+        missing.clone(),
+    );
+    history.push(ChatMessage {
+        provider_state: Some(state),
+        role: "developer".into(),
+        content: None,
+        tool_calls: vec![],
+        tool_call_id: None,
+    });
+    Ok(missing)
+}
+
 fn budget_synthetic_value(reason: AgentStopReason) -> serde_json::Value {
     serde_json::json!({
         "ok": false,
@@ -305,19 +394,21 @@ pub async fn run_agent_loop(
 
     let measure = |governor: &crate::llm::context_budget::ContextBudgetGovernor,
                    messages: &[ChatMessage],
-                   tools: &[crate::llm::ToolDef],
+                   base_tools: &[crate::llm::ToolDef],
+                   active_tools: &[crate::llm::ToolDef],
                    overlay: u64| {
         if let Some(account) = client.account_label() {
-            governor.measure_subscription(
+            governor.measure_subscription_with_activation(
                 account,
                 model,
                 messages,
-                tools,
+                base_tools,
+                active_tools,
                 overlay,
                 client.responses_compact_threshold(),
             )
         } else {
-            governor.measure_with_overlay(messages, tools, overlay)
+            governor.measure_with_overlay(messages, active_tools, overlay)
         }
     };
     // Initialize HistoryManager
@@ -402,9 +493,26 @@ pub async fn run_agent_loop(
     // Share the conversation-owned Observation Store handle so
     // `observation_read` retrieves only this run's offloads.
     runtime.set_observation_store(history.observation_handle());
+    // Resume: restore persisted deferred activations into the catalog before
+    // legacy history reactivation. Sidecar holds names only; schemas resolve
+    // from the trusted catalog. Unknown tools (e.g. removed MCP) fail closed
+    // as session incompatibility rather than dispatching stale schemas.
+    {
+        let persisted: Vec<String> = history.activated_tools().iter().cloned().collect();
+        validate_activation_sidecar(history.activated_tools(), &runtime.tool_catalog, None)?;
+        if !persisted.is_empty() {
+            let newly = runtime.tool_catalog.activate(&persisted).await;
+            debug!(
+                restored = persisted.len(),
+                newly_activated = newly.len(),
+                "restored persisted tool activations"
+            );
+        }
+    }
     // Session resume compatibility: re-activate catalog tools referenced by
     // prior assistant tool calls so resumed history stays coherent even when
-    // those tools would otherwise start deferred.
+    // those tools would otherwise start deferred. Self-heals the sidecar for
+    // legacy sessions without `activated_tools`.
     let reactivated = runtime
         .tool_catalog
         .activate_known_from_history(history.as_slice())
@@ -414,7 +522,10 @@ pub async fn run_agent_loop(
             reactivated = reactivated.len(),
             "reactivated tools from resumed history"
         );
+        history.record_activated_tools(reactivated);
     }
+    // Stable Responses wire base: initial active set, never changes mid-run.
+    let base_tools_stable: Vec<crate::llm::ToolDef> = runtime.initial_active_tool_defs();
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
@@ -447,6 +558,7 @@ pub async fn run_agent_loop(
     // Partial-completion exit shared by every budget stop. Checkpoints the
     // canonical history, attempts one tools-free finalization when token and
     // elapsed permit it, and never converts cancellation into partial.
+    #[allow(clippy::too_many_arguments)]
     async fn partial_stop(
         client: &crate::llm::client_core::OpenAIClient,
         model: &str,
@@ -459,6 +571,8 @@ pub async fn run_agent_loop(
         ui_tx: &Option<std::sync::mpsc::Sender<String>>,
         reason: AgentStopReason,
         file_was_written: bool,
+        base_tools: &[crate::llm::ToolDef],
+        active_tools: &[crate::llm::ToolDef],
     ) -> Result<AgentRunResult> {
         if cancel_token.is_cancelled() {
             return Err(anyhow!(LlmErrorKind::Cancelled));
@@ -492,11 +606,12 @@ pub async fn run_agent_loop(
         let finalize_estimate: Option<u64> = (|| {
             let fp = if let Some(account) = client.account_label() {
                 budget_governor
-                    .measure_subscription(
+                    .measure_subscription_with_activation(
                         account,
                         model,
                         &finalize_messages,
-                        &[],
+                        base_tools,
+                        active_tools,
                         0,
                         client.responses_compact_threshold(),
                     )
@@ -560,19 +675,38 @@ pub async fn run_agent_loop(
         run_budget.finalization_attempted = true;
         let est = finalize_estimate.unwrap_or(0);
         let ledger_before = client.usage_snapshot();
+        let is_subscription = client.is_subscription();
         let final_res = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => Err(anyhow!(LlmErrorKind::Cancelled)),
-            res = crate::llm::tool_execution::requests::chat_tools_once(
-                client,
-                model,
-                &finalize_messages,
-                &[],
-                reasoning_controller_effort(cfg),
-                cfg.reasoning.mode,
-                Some(cancel_token.clone()),
-                ui_tx.clone(),
-            ) => res,
+            res = async {
+                if is_subscription {
+                    crate::llm::tool_execution::requests::chat_tools_once_with_activation(
+                        client,
+                        model,
+                        &finalize_messages,
+                        base_tools,
+                        active_tools,
+                        reasoning_controller_effort(cfg),
+                        cfg.reasoning.mode,
+                        Some(cancel_token.clone()),
+                        ui_tx.clone(),
+                    )
+                    .await
+                } else {
+                    crate::llm::tool_execution::requests::chat_tools_once(
+                        client,
+                        model,
+                        &finalize_messages,
+                        &[],
+                        reasoning_controller_effort(cfg),
+                        cfg.reasoning.mode,
+                        Some(cancel_token.clone()),
+                        ui_tx.clone(),
+                    )
+                    .await
+                }
+            } => res,
         };
         if cancel_token.is_cancelled() {
             return Err(anyhow!(LlmErrorKind::Cancelled));
@@ -754,6 +888,7 @@ pub async fn run_agent_loop(
         // Safe-boundary iteration/elapsed/token-exhausted check before any
         // new work. Off-by-one free: max_iterations=2 allows #1,#2, blocks #3.
         if let Some(reason) = run_budget.request_stop(0) {
+            let active_for_finalize = runtime.active_tool_defs().await;
             return partial_stop(
                 client,
                 model,
@@ -766,6 +901,8 @@ pub async fn run_agent_loop(
                 &ui_tx,
                 reason,
                 file_was_written,
+                &base_tools_stable,
+                &active_for_finalize,
             )
             .await;
         }
@@ -782,6 +919,42 @@ pub async fn run_agent_loop(
         // governor must measure this snapshot (not the previous usage)
         // before deciding any reduction.
         let active_tools = runtime.active_tool_defs().await;
+        // Post-compaction rebase for Responses: sidecar activations missing
+        // from wire history (native compaction pruned old markers) are
+        // re-appended as a developer marker before measurement/request.
+        // Safe boundary only: history currently ends with checkpointed tool
+        // results or user content, never a pending assistant call.
+        if let Some(account) = client.account_label() {
+            let base_names: std::collections::BTreeSet<String> = base_tools_stable
+                .iter()
+                .map(|t| t.function.name.clone())
+                .collect();
+            // Fail closed: a sidecar name outside the live active set never
+            // reaches the wire (same helper as the startup restore check).
+            let active_names: std::collections::BTreeSet<String> = active_tools
+                .iter()
+                .map(|t| t.function.name.clone())
+                .collect();
+            validate_activation_sidecar(
+                history.activated_tools(),
+                &runtime.tool_catalog,
+                Some(&active_names),
+            )?;
+            match rebase_missing_activations(&mut history, &base_names, account, model) {
+                Ok(missing) => {
+                    if !missing.is_empty() {
+                        debug!(
+                            rebased_tools = missing.len(),
+                            "rebased activations after compaction"
+                        );
+                        history.checkpoint()?;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "activation rebase failed; continuing with current wire history");
+                }
+            }
+        }
         let reasoning_effort = reasoning_controller.current_effort();
         let reasoning_mode = cfg.reasoning.mode;
         debug!(
@@ -836,11 +1009,18 @@ pub async fn run_agent_loop(
                     measure(
                         &budget_governor,
                         projected.as_slice(),
+                        &base_tools_stable,
                         &active_tools,
                         overlay_bytes,
                     )?
                 } else {
-                    measure(&budget_governor, history.as_slice(), &active_tools, 0)?
+                    measure(
+                        &budget_governor,
+                        history.as_slice(),
+                        &base_tools_stable,
+                        &active_tools,
+                        0,
+                    )?
                 };
                 let estimate = budget_governor.estimate(footprint);
                 let pressure = budget_governor.classify(estimate, effective_limit);
@@ -889,11 +1069,18 @@ pub async fn run_agent_loop(
                 measure(
                     &budget_governor,
                     projected.as_slice(),
+                    &base_tools_stable,
                     &active_tools,
                     overlay_bytes,
                 )
             } else {
-                measure(&budget_governor, history.as_slice(), &active_tools, 0)
+                measure(
+                    &budget_governor,
+                    history.as_slice(),
+                    &base_tools_stable,
+                    &active_tools,
+                    0,
+                )
             };
             match final_fp {
                 Ok(fp) => sent_footprint = Some(fp),
@@ -925,11 +1112,12 @@ pub async fn run_agent_loop(
                     measure(
                         &budget_governor,
                         projected.as_slice(),
+                        &base_tools_stable,
                         &active_tools,
                         overlay_b,
                     )
                 } else {
-                    measure(&budget_governor, hist, &active_tools, 0)
+                    measure(&budget_governor, hist, &base_tools_stable, &active_tools, 0)
                 }
             };
             let initial_footprint = measure_current(history.as_slice(), use_overlay, overlay_bytes);
@@ -1140,6 +1328,8 @@ pub async fn run_agent_loop(
                         &ui_tx,
                         reason,
                         file_was_written,
+                        &base_tools_stable,
+                        &active_tools,
                     )
                     .await;
                 }
@@ -1159,9 +1349,23 @@ pub async fn run_agent_loop(
                             history.as_slice(),
                             &runtime_context,
                         );
-                    measure(&budget_governor, projected.as_slice(), &active_tools, 0).ok()?
+                    measure(
+                        &budget_governor,
+                        projected.as_slice(),
+                        &base_tools_stable,
+                        &active_tools,
+                        0,
+                    )
+                    .ok()?
                 } else {
-                    measure(&budget_governor, history.as_slice(), &active_tools, 0).ok()?
+                    measure(
+                        &budget_governor,
+                        history.as_slice(),
+                        &base_tools_stable,
+                        &active_tools,
+                        0,
+                    )
+                    .ok()?
                 };
                 Some(budget_governor.estimate(fp).prompt_tokens)
             })()
@@ -1184,6 +1388,8 @@ pub async fn run_agent_loop(
                 &ui_tx,
                 reason,
                 file_was_written,
+                &base_tools_stable,
+                &active_tools,
             )
             .await;
         } else if current_estimate == 0
@@ -1201,6 +1407,8 @@ pub async fn run_agent_loop(
                 &ui_tx,
                 reason,
                 file_was_written,
+                &base_tools_stable,
+                &active_tools,
             )
             .await;
         }
@@ -1208,17 +1416,25 @@ pub async fn run_agent_loop(
         let ledger_before_request = client.usage_snapshot();
 
         // Prefix-stability diagnostics: fingerprint the exact cache-relevant
-        // components about to be sent (final active tools + canonical
-        // history + effort + model). Computed only when DEBUG is enabled;
-        // cache token counters themselves are always recorded via
+        // components about to be sent (canonical history + effort + model).
+        // Responses uses the stable base-tool prefix so deferred activation
+        // via `additional_tools` does not perturb the prefix; generic
+        // providers fingerprint the live active set. Computed only when
+        // DEBUG is enabled; cache token counters are always recorded via
         // `record_usage`. The leading-system hash excludes the one-shot
         // `<RuntimeContext>` overlay by construction.
+        let is_subscription = client.is_subscription();
+        let prefix_tools: &[crate::llm::ToolDef] = if is_subscription {
+            &base_tools_stable
+        } else {
+            &active_tools
+        };
         let current_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
             if tracing::enabled!(tracing::Level::DEBUG) {
                 Some(crate::llm::prompt_cache::compute_prefix_signature(
                     model,
                     history.as_slice(),
-                    &active_tools,
+                    prefix_tools,
                     reasoning_effort,
                 ))
             } else {
@@ -1244,10 +1460,11 @@ pub async fn run_agent_loop(
                     warn!("run_agent_loop cancelled before chat_tools_once");
                     Err(anyhow!(LlmErrorKind::Cancelled))
                 }
-                res = crate::llm::tool_execution::requests::chat_tools_once(
+                res = crate::llm::tool_execution::requests::chat_tools_once_with_activation(
                     client,
                     model,
                     request_messages.as_slice(),
+                    &base_tools_stable,
                     &active_tools,
                     reasoning_effort,
                     reasoning_mode,
@@ -1305,6 +1522,8 @@ pub async fn run_agent_loop(
                                 &ui_tx,
                                 reason,
                                 file_was_written,
+                                &base_tools_stable,
+                                &active_tools,
                             )
                             .await;
                         }
@@ -1435,6 +1654,9 @@ pub async fn run_agent_loop(
             let last_cache = client.last_prompt_cache_usage();
             let last_ratio = client.last_prompt_cache_hit_ratio();
             let session_ratio = client.prompt_cache_hit_ratio();
+            // Content-free append-only telemetry: activation itself must not
+            // look like it vanished when `tool_schema_changed` stays false.
+            let additional_appended = wire_exposed_additional(history.as_slice()).len();
             if last_cache.cached_tokens.is_some() || last_cache.cache_write_tokens.is_some() {
                 debug!(
                     prompt_tokens = client.get_prompt_tokens_used(),
@@ -1445,6 +1667,9 @@ pub async fn run_agent_loop(
                     last_cache_hit_ratio = ?last_ratio,
                     session_cache_hit_ratio = ?session_ratio,
                     tool_count = current.tool_count,
+                    base_tool_count = current.tool_count,
+                    additional_tools_appended = additional_appended,
+                    active_tool_count = active_tools.len(),
                     tool_schema_hash = %current.short_tool_hash(),
                     system_prefix_hash = %current.short_system_hash(),
                     tool_schema_changed = change.tool_schema_changed,
@@ -1457,6 +1682,9 @@ pub async fn run_agent_loop(
                 debug!(
                     prompt_tokens = client.get_prompt_tokens_used(),
                     tool_count = current.tool_count,
+                    base_tool_count = current.tool_count,
+                    additional_tools_appended = additional_appended,
+                    active_tool_count = active_tools.len(),
                     tool_schema_hash = %current.short_tool_hash(),
                     system_prefix_hash = %current.short_system_hash(),
                     tool_schema_changed = change.tool_schema_changed,
@@ -1632,6 +1860,8 @@ pub async fn run_agent_loop(
                 &ui_tx,
                 reason,
                 file_was_written,
+                &base_tools_stable,
+                &active_tools,
             )
             .await;
         }
@@ -1640,6 +1870,12 @@ pub async fn run_agent_loop(
         let mut loop_detected = false;
         let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
         let mut batch_stall_detected = false;
+        // Deferred activation rounds in this batch, in time order. Markers
+        // are appended only at the batch boundary (never between a batch's
+        // results) so tool-call pairing stays intact; crash recovery between
+        // the per-tool result checkpoint and the batch marker checkpoint
+        // re-derives markers via rebase from the sidecar.
+        let mut batch_activation_rounds: Vec<Vec<String>> = Vec::new();
         // Own the batch so remaining calls can be synthetically paired on
         // mid-batch budget expiry without losing IDs.
         let batch_calls = msg.tool_calls.clone();
@@ -1712,6 +1948,8 @@ pub async fn run_agent_loop(
                     &ui_tx,
                     reason,
                     file_was_written,
+                    &base_tools_stable,
+                    &active_tools,
                 )
                 .await;
             }
@@ -2149,6 +2387,30 @@ File modification detected. You MUST now verify your changes:
 
             // tool message to feed back to the LLM
             history.push_tool_result(tc.id.clone(), tool_message_content);
+            // Deferred activation sidecar: `tool_search` result's structured
+            // `activated[].name` (pre-truncation value, never wire text).
+            // Records here; Responses wire markers append at the batch
+            // boundary to keep batch pairing intact.
+            if tool_name == "tool_search"
+                && success
+                && let Some(value) = output_value
+                && let Some(activated) = value.get("activated").and_then(|v| v.as_array())
+            {
+                let mut newly: Vec<String> = activated
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect();
+                newly.sort();
+                newly.dedup();
+                if !newly.is_empty() {
+                    history.record_activated_tools(newly.clone());
+                    batch_activation_rounds.push(newly);
+                }
+            }
             history.checkpoint()?;
 
             // Loop Detection
@@ -2228,6 +2490,53 @@ File modification detected. You MUST now verify your changes:
                     });
                 }
             }
+        }
+        // Batch-boundary Responses activation markers: one `additional_tools`
+        // item per `tool_search` round, in time order, after all batch
+        // results. Never rewrites earlier markers; never duplicates.
+        if !batch_activation_rounds.is_empty() && client.is_subscription() {
+            // Validate against the trusted catalog (fail closed on tampered
+            // sidecar) and skip already-wired tools (duplicate guard).
+            let mut wire = wire_exposed_additional(history.as_slice());
+            let account = client.account_label().unwrap_or_default();
+            for round in batch_activation_rounds {
+                let mut fresh: Vec<String> = Vec::new();
+                for name in round {
+                    if !runtime.tool_catalog.contains(&name) {
+                        anyhow::bail!(
+                            "activation references unknown tool '{name}'; refusing session-tampered capability"
+                        );
+                    }
+                    if !runtime.is_tool_active(&name).await {
+                        anyhow::bail!(
+                            "activation marker for inactive tool '{name}'; refusing to wire"
+                        );
+                    }
+                    if wire.insert(name.clone()) {
+                        fresh.push(name);
+                    }
+                }
+                if fresh.is_empty() {
+                    continue;
+                }
+                fresh.sort();
+                let state = crate::features::openai_subscription::ProviderState::activation(
+                    account.to_string(),
+                    model.to_string(),
+                    fresh,
+                );
+                history.push(ChatMessage {
+                    provider_state: Some(state),
+                    role: "developer".into(),
+                    content: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
+            }
+            // Same canonical checkpoint carries tool results, provider
+            // markers, and the sidecar; never saves the sidecar alone ahead
+            // of its marker.
+            history.checkpoint()?;
         }
         for intervention in pending_interventions {
             history.push(intervention);
@@ -2686,5 +2995,149 @@ mod tests {
             "GC'd observation resurrected after restart"
         );
         assert!(restored.unseen_tool_results.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod append_only_agent_tests {
+    use super::*;
+    use crate::llm::types::{ChatMessage, ToolCall, ToolCallFunction};
+
+    fn user_msg(text: &str) -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some(text.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    fn activation_marker(names: Vec<&str>) -> ChatMessage {
+        let mut sorted: Vec<String> = names.into_iter().map(str::to_string).collect();
+        sorted.sort();
+        ChatMessage {
+            provider_state: Some(
+                crate::features::openai_subscription::ProviderState::activation(
+                    "acc".into(),
+                    "m".into(),
+                    sorted,
+                ),
+            ),
+            role: "developer".into(),
+            content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    fn test_history_manager() -> crate::llm::tool_execution::history::HistoryManager {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        // Leak dir to keep FsTools project_root alive? FsTools holds Arc<config> with owned PathBuf, no borrow, so dir can drop after? Config holds PathBuf owned, so safe.
+        crate::llm::tool_execution::history::HistoryManager::new(client, vec![], None, fs, config)
+    }
+
+    #[test]
+    fn test_wire_exposed_collects_markers() {
+        let msgs = vec![
+            user_msg("hi"),
+            activation_marker(vec!["edit"]),
+            activation_marker(vec!["apply_patch"]),
+        ];
+        let exposed = wire_exposed_additional(&msgs);
+        assert!(exposed.contains("edit"));
+        assert!(exposed.contains("apply_patch"));
+        assert_eq!(exposed.len(), 2);
+    }
+
+    #[test]
+    fn test_rebase_appends_missing() {
+        let mut history = test_history_manager();
+        history.push(user_msg("hi"));
+        history.record_activated_tools(vec!["edit".into()]);
+        let base: std::collections::BTreeSet<String> = ["fs_read", "tool_search"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let missing = rebase_missing_activations(&mut history, &base, "acc", "m").expect("rebase");
+        assert_eq!(missing, vec!["edit".to_string()]);
+        // Marker appended at tail, after user content, never between call/result.
+        let last = history.as_slice().last().expect("marker");
+        assert_eq!(last.role, "developer");
+        assert!(
+            last.provider_state
+                .as_ref()
+                .expect("state")
+                .is_activation_marker()
+        );
+        // Second rebase is idempotent (no duplicate).
+        let again = rebase_missing_activations(&mut history, &base, "acc", "m").expect("rebase2");
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn test_rebase_skips_base_tools() {
+        let mut history = test_history_manager();
+        history.record_activated_tools(vec!["fs_read".into()]);
+        let base: std::collections::BTreeSet<String> = ["fs_read", "tool_search"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let missing = rebase_missing_activations(&mut history, &base, "acc", "m").expect("rebase");
+        assert!(missing.is_empty(), "base tools never need markers");
+    }
+
+    #[test]
+    fn test_pending_batch_order_preserved() {
+        // Simulate assistant batch + results: rebase must not insert between
+        // call and result (it only appends at tail after results).
+        let mut history = test_history_manager();
+        history.push(ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: Some("c1".into()),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "fs_read".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                ToolCall {
+                    id: Some("c2".into()),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "fs_read".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+            ],
+            tool_call_id: None,
+        });
+        history.push_tool_result(Some("c1".into()), "one".into());
+        history.push_tool_result(Some("c2".into()), "two".into());
+        history.record_activated_tools(vec!["edit".into()]);
+        let base: std::collections::BTreeSet<String> = ["fs_read", "tool_search"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        rebase_missing_activations(&mut history, &base, "acc", "m").expect("rebase");
+        // Results stay contiguous: assistant, tool, tool, developer.
+        let roles: Vec<&str> = history.as_slice().iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool", "tool", "developer"]);
+        crate::llm::history::validate_tool_blocks(history.as_slice(), false)
+            .expect("valid pairing");
     }
 }

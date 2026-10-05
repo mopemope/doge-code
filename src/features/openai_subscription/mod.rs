@@ -22,6 +22,14 @@ pub struct ProviderState {
     pub account: String,
     pub model: String,
     pub output: Vec<serde_json::Value>,
+    /// Append-only deferred activation names for this conversation turn.
+    ///
+    /// Empty for assistant state; non-empty only for developer activation
+    /// markers (`role == "developer"`, `output` empty). Names only — schemas
+    /// resolve from the trusted `ToolCatalog`. Optional for v1 session
+    /// compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_tool_names: Vec<String>,
 }
 
 impl std::fmt::Debug for ProviderState {
@@ -31,6 +39,7 @@ impl std::fmt::Debug for ProviderState {
             .field("account", &self.account)
             .field("model", &self.model)
             .field("output_items", &self.output.len())
+            .field("additional_tool_count", &self.additional_tool_names.len())
             .finish()
     }
 }
@@ -47,6 +56,79 @@ impl ProviderState {
     /// pruning share one definition.
     pub fn latest_compaction_index(&self) -> Option<usize> {
         responses::latest_compaction_index(&self.output)
+    }
+
+    /// True for developer activation markers (`output` empty,
+    /// `additional_tool_names` non-empty).
+    pub fn is_activation_marker(&self) -> bool {
+        self.output.is_empty() && !self.additional_tool_names.is_empty()
+    }
+
+    /// True for assistant state (`output` non-empty, no activation names).
+    pub fn is_assistant_state(&self) -> bool {
+        !self.output.is_empty() && self.additional_tool_names.is_empty()
+    }
+
+    /// Assistant Responses output constructor.
+    pub fn assistant(account: String, model: String, output: Vec<serde_json::Value>) -> Self {
+        Self {
+            version: 1,
+            account,
+            model,
+            output,
+            additional_tool_names: Vec::new(),
+        }
+    }
+
+    /// Developer activation marker constructor. Names must already be
+    /// sorted/deduped by the caller; validation rejects mixed states.
+    pub fn activation(account: String, model: String, names: Vec<String>) -> Self {
+        Self {
+            version: 1,
+            account,
+            model,
+            output: Vec::new(),
+            additional_tool_names: names,
+        }
+    }
+
+    /// Fail-closed validation for the role semantics:
+    /// assistant XOR activation, never mixed, never tool/user roles
+    /// (role checked by the caller holding the `ChatMessage`).
+    pub fn validate_role_binding(&self, role: &str) -> anyhow::Result<()> {
+        match role {
+            "assistant" => {
+                anyhow::ensure!(
+                    self.is_assistant_state(),
+                    "assistant provider state must carry output without additional tools"
+                );
+                Ok(())
+            }
+            "developer" => {
+                anyhow::ensure!(
+                    self.is_activation_marker(),
+                    "developer provider state must carry additional tools without output"
+                );
+                // Sorted, unique, non-empty names.
+                anyhow::ensure!(
+                    !self.additional_tool_names.is_empty(),
+                    "activation marker must name at least one tool"
+                );
+                let mut sorted = self.additional_tool_names.clone();
+                sorted.sort();
+                sorted.dedup();
+                anyhow::ensure!(
+                    sorted.len() == self.additional_tool_names.len()
+                        && sorted == self.additional_tool_names,
+                    "activation marker tool names must be sorted and unique"
+                );
+                for name in &self.additional_tool_names {
+                    anyhow::ensure!(!name.is_empty(), "activation tool name must not be empty");
+                }
+                Ok(())
+            }
+            _ => anyhow::bail!("provider state is only valid on assistant or developer turns"),
+        }
     }
 }
 

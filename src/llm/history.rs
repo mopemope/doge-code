@@ -263,6 +263,7 @@ mod tests {
             account: "fixture".into(),
             model: "mock".into(),
             output: vec![serde_json::json!({"encrypted_content":"opaque"})],
+            additional_tool_names: Vec::new(),
         });
         let valid = vec![
             opaque,
@@ -353,6 +354,7 @@ mod tests {
             account: "test-account".into(),
             model: "test-model".into(),
             output: vec![serde_json::json!({"type": "reasoning", "id": "rs_1"})],
+            additional_tool_names: Vec::new(),
         };
         let mut h = ChatHistory::new();
         h.push_message(ChatMessage {
