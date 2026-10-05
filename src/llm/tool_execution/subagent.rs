@@ -229,10 +229,16 @@ async fn run_subagent_inner(
                 }
                 tracker.record_tool_call();
                 let dispatch = Box::pin(dispatch_subagent_tool_call(runtime, tc));
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled)),
-                    result = dispatch => result,
+                // Owned read workers must observe cancellation and finish before
+                // returning; an outer select would drop their cleanup future.
+                let result = if matches!(name, "fs_read" | "fs_read_many_files" | "search_text") {
+                    dispatch.await
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(anyhow!(crate::llm::LlmErrorKind::Cancelled)),
+                        result = dispatch => result,
+                    }
                 };
                 let (success, content) = match result {
                     Ok(output) => {

@@ -62,7 +62,15 @@ pub async fn fs_read(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Res
         mode: FsReadMode::from_optional_str(args.get("mode").and_then(|v| v.as_str())),
     };
 
-    match runtime.fs.fs_read(path, options) {
+    match runtime
+        .fs
+        .fs_read_async(
+            path.to_owned(),
+            options,
+            runtime.cancel_token.clone().unwrap_or_default(),
+        )
+        .await
+    {
         Ok(result) => {
             let value = json!({ "ok": true, "result": result });
             Ok(ToolOutput {
@@ -72,7 +80,16 @@ pub async fn fs_read(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Res
                 result_summary: format!("Read {} bytes from {}", result.content.len(), path),
             })
         }
-        Err(e) => Err(crate::tools::budget::bounded_read_error(e)),
+        Err(e) => Err(
+            if matches!(
+                e.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(crate::llm::LlmErrorKind::Cancelled)
+            ) {
+                e
+            } else {
+                crate::tools::budget::bounded_read_error(e)
+            },
+        ),
     }
 }
 
@@ -103,7 +120,13 @@ pub async fn search_text(
     };
     match runtime
         .fs
-        .search_text_with_options(search_pattern, file_glob, options)
+        .search_text_with_options_async(
+            search_pattern.to_owned(),
+            file_glob.map(str::to_owned),
+            options,
+            runtime.cancel_token.clone().unwrap_or_default(),
+        )
+        .await
     {
         Ok(result) => {
             let truncated = result.truncated;
@@ -149,7 +172,7 @@ pub async fn search_text(
                 },
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        Err(e) => Err(e),
     }
 }
 
@@ -245,7 +268,14 @@ pub async fn fs_read_many_files(
 
     match runtime
         .fs
-        .fs_read_many_files(paths, exclude, recursive, options)
+        .fs_read_many_files_async(
+            paths,
+            exclude,
+            recursive,
+            options,
+            runtime.cancel_token.clone().unwrap_or_default(),
+        )
+        .await
     {
         Ok(result) => {
             let value = json!({ "ok": true, "result": result });
@@ -255,7 +285,16 @@ pub async fn fs_read_many_files(
                 result_summary: format!("Read {} files", result.files.len()),
             })
         }
-        Err(e) => Err(crate::tools::budget::bounded_read_error(e)),
+        Err(e) => Err(
+            if matches!(
+                e.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(crate::llm::LlmErrorKind::Cancelled)
+            ) {
+                e
+            } else {
+                crate::tools::budget::bounded_read_error(e)
+            },
+        ),
     }
 }
 

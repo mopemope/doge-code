@@ -248,6 +248,188 @@ pub(crate) fn run_managed_stream<T>(
     })
 }
 
+/// Structured-stream async owner. Normal cancellation joins the parser and
+/// reaps the process; future drop signals a detached cleanup owner.
+pub(crate) async fn run_managed_stream_async<T, F>(
+    command: std::process::Command,
+    parent: CancellationToken,
+    consume: F,
+) -> anyhow::Result<Option<ManagedStreamOutput<T>>>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut dyn io::Read) -> anyhow::Result<(T, StreamStop)> + Send + 'static,
+{
+    struct StopOnDrop(CancellationToken);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    let guard = StopOnDrop(parent.child_token());
+    let token = guard.0.clone();
+    // Ownership remains in this task if a caller drops its join future.
+    let owner: JoinHandle<anyhow::Result<Option<ManagedStreamOutput<T>>>> = tokio::spawn(
+        async move {
+            use anyhow::Context;
+            use std::sync::{Arc, OnceLock};
+            static STREAMS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+            let permit = tokio::select! {
+                biased;
+                _ = token.cancelled() => return Ok(None),
+                permit = STREAMS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))).clone().acquire_owned() => permit?,
+            };
+            if token.is_cancelled() {
+                return Ok(None);
+            }
+            let mut command = Command::from(command);
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            configure_process_group(&mut command);
+            let mut child = command
+                .spawn()
+                .context("failed to spawn streaming process")?;
+            let mut group = ProcessGroupHandle::from_child(&child);
+            let stdout = child
+                .stdout
+                .take()
+                .context("failed to capture process stdout")?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .context("failed to capture process stderr")?;
+            let mut diagnostic = tokio::spawn(async move {
+                let mut prefix = Vec::new();
+                let mut bytes = [0u8; 4096];
+                loop {
+                    let count = stderr.read(&mut bytes).await?;
+                    if count == 0 {
+                        break;
+                    }
+                    let retain = count.min(4096usize.saturating_sub(prefix.len()));
+                    prefix.extend_from_slice(&bytes[..retain]);
+                }
+                Ok::<_, io::Error>(String::from_utf8_lossy(&prefix).into_owned())
+            });
+            struct Pipe {
+                stdout: tokio::process::ChildStdout,
+                handle: tokio::runtime::Handle,
+                token: CancellationToken,
+            }
+            impl io::Read for Pipe {
+                fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                    self.handle.block_on(async {
+                        tokio::select! {
+                            biased;
+                            _ = self.token.cancelled() => Err(io::Error::other("stream cancelled")),
+                            result = self.stdout.read(bytes) => result,
+                        }
+                    })
+                }
+            }
+            let mut pipe = Pipe {
+                stdout,
+                handle: tokio::runtime::Handle::current(),
+                token: token.clone(),
+            };
+            let _permit = permit; // Keep the slot until cleanup and joins finish.
+            let mut parser = tokio::task::spawn_blocking(move || consume(&mut pipe));
+            let mut canceled = false;
+            let parsed = tokio::select! {
+                biased;
+                _ = token.cancelled() => { canceled = true; None },
+                parsed = &mut parser => Some(parsed),
+            };
+            let stop = parsed
+                .as_ref()
+                .and_then(|value| value.as_ref().ok())
+                .and_then(|value| value.as_ref().ok())
+                .map_or(StreamStop::Limit, |(_, stop)| *stop);
+            let kill_requested = stop == StreamStop::Limit && matches!(child.try_wait(), Ok(None));
+            let status: anyhow::Result<_> = if canceled || stop == StreamStop::Limit {
+                // Use the same immediate SIGKILL intentional-stop contract as the
+                // synchronous stream adapter; cleanup still explicitly reaps.
+                drop(group);
+                let kill = child.start_kill();
+                let wait = child.wait().await;
+                wait.context("failed to reap streaming process")
+                    .and_then(|status| {
+                        // Already-exited processes can reject start_kill harmlessly.
+                        if kill_requested && status.success() {
+                            kill.context("failed to stop streaming process")?;
+                        }
+                        Ok(status)
+                    })
+            } else {
+                let waited = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => { canceled = true; None },
+                    status = child.wait() => Some(status),
+                };
+                if let Some(waited) = waited {
+                    let cleanup = cleanup_process_group_after_exit(&mut group).await;
+                    waited
+                        .context("failed to wait for streaming process")
+                        .and_then(|status| {
+                            cleanup?;
+                            Ok(status)
+                        })
+                } else {
+                    let cleanup = terminate_process_tree_with_group(&mut child, &mut group).await;
+                    child
+                        .wait()
+                        .await
+                        .context("failed to reap streaming process")
+                        .and_then(|status| {
+                            cleanup?;
+                            Ok(status)
+                        })
+                }
+            };
+            // Join on cancellation/errors too; never discard cleanup-owned work.
+            let parsed = match parsed {
+                Some(parsed) => parsed,
+                None => parser.await,
+            };
+            let diagnostic_result =
+                match tokio::time::timeout(Duration::from_secs(1), &mut diagnostic).await {
+                    Ok(result) => result
+                        .context("stderr task failed")?
+                        .context("failed to read process stderr"),
+                    Err(_) => {
+                        diagnostic.abort();
+                        let _ = diagnostic.await;
+                        Err(anyhow::anyhow!(
+                            "stderr did not close after process cleanup"
+                        ))
+                    }
+                };
+            status
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            if canceled || token.is_cancelled() {
+                return Ok(None);
+            }
+            let (value, stop) = parsed.context("stream parser task failed")??;
+            Ok(Some(ManagedStreamOutput {
+                value,
+                stop,
+                status: status?,
+                stderr: diagnostic_result?,
+                kill_requested,
+            }))
+        },
+    );
+    let result = owner.await??;
+    if guard.0.is_cancelled() {
+        Ok(None)
+    } else {
+        Ok(result)
+    }
+}
+
 /// Run one finite process tree through the shared managed lifecycle.
 ///
 /// The function does not apply execution policy. It always captures output in
@@ -750,6 +932,73 @@ mod tests {
             .and_then(|value| value.trim().parse::<u32>().ok())
         {
             assert!(!crate::execution::lifecycle::is_process_alive(pid));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stream_cancellation_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellable_stream_slot_is_held_until_child_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runs = Vec::new();
+        let mut tokens = Vec::new();
+        for index in 0..5 {
+            let token = CancellationToken::new();
+            let ready = dir.path().join(format!("ready-{index}"));
+            let mut cmd = std::process::Command::new("/bin/sh");
+            // Close stdout before sleeping: the parser finishes while the
+            // live child still owns its concurrency slot.
+            cmd.arg("-c").arg(format!(
+                "exec 1>&-; printf '%s' $$ > '{}'; sleep 5",
+                ready.display()
+            ));
+            runs.push(tokio::spawn(run_managed_stream_async(
+                cmd,
+                token.clone(),
+                |stdout| {
+                    std::io::copy(stdout, &mut std::io::sink())?;
+                    Ok(((), StreamStop::Eof))
+                },
+            )));
+            tokens.push(token);
+            if index < 4 {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !ready.exists() {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            !dir.path().join("ready-4").exists(),
+            "fifth child bypassed live-process bound"
+        );
+        let first_pid: u32 = std::fs::read_to_string(dir.path().join("ready-0"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        tokens[0].cancel();
+        assert!(runs.remove(0).await.unwrap().unwrap().is_none());
+        assert!(!crate::execution::is_process_alive(first_pid));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dir.path().join("ready-4").exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for token in tokens {
+            token.cancel();
+        }
+        for run in runs {
+            assert!(run.await.unwrap().unwrap().is_none());
         }
     }
 }
