@@ -2683,3 +2683,234 @@ fn append_only_post_compaction_rebase_shape() {
             .any(|i| i["type"] == "additional_tools")
     );
 }
+
+async fn retry_after_fixture(
+    hint: Option<&str>,
+    attempts: usize,
+    recover: bool,
+) -> (
+    httptest::Server,
+    tempfile::TempDir,
+    crate::llm::OpenAIClient,
+) {
+    use httptest::{Expectation, matchers::*, responders::*};
+    let server = httptest::ServerBuilder::new()
+        .bind_addr(([127, 0, 0, 1], 0).into())
+        .run()
+        .expect("fixture");
+    let mut failed = status_code(503);
+    if let Some(hint) = hint {
+        failed = failed.append_header("retry-after", hint);
+    }
+    let failed = failed.body(r#"{"error":{"code":"server_error"}}"#);
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response(vec![text_output()])})
+    );
+    let expectation =
+        Expectation::matching(request::method_path("POST", "/v1/responses")).times(attempts);
+    if recover {
+        server.expect(expectation.respond_with(cycle![failed,
+            status_code(200).append_header("content-type", "text/event-stream").body(wire)]));
+    } else {
+        server.expect(expectation.respond_with(failed));
+    }
+    let (temp, store) = temp_store();
+    store
+        .save(&registry())
+        .expect("save synthetic fixture credentials");
+    let mut handle = auth::AuthHandle::selected(store).expect("fixture auth");
+    handle.resource = server.url_str("/v1");
+    let mut client = crate::llm::OpenAIClient::new("https://api.openai.com/v1", "").unwrap();
+    client.subscription = Some(handle);
+    client.llm_cfg.retry_base_ms = 0;
+    client.llm_cfg.retry_jitter_ms = 0;
+    client.llm_cfg.request_timeout_ms = 500;
+    (server, temp, client)
+}
+
+#[tokio::test]
+async fn responses_retry_after_excessive_hint_declines_original_error_without_resend() {
+    for hint in ["301", "600", "18446744073709551615"] {
+        let (_server, _temp, client) = retry_after_fixture(Some(hint), 1, false).await;
+        let error = client
+            .chat_once("test-model", vec![user("hi")], None)
+            .await
+            .unwrap_err();
+        let provider = error
+            .downcast_ref::<ProviderError>()
+            .expect("original provider error");
+        assert_eq!(provider.status, Some(503));
+        assert_eq!(provider.code, "server_error");
+        assert_eq!(client.usage_snapshot().attempts, 1);
+        assert_eq!(client.usage_snapshot().usage_records, 0);
+    }
+}
+
+#[tokio::test]
+async fn responses_retry_after_disabled_uses_local_backoff() {
+    let (_server, _temp, mut client) = retry_after_fixture(Some("600"), 2, true).await;
+    client.llm_cfg.respect_retry_after = false;
+    assert_eq!(
+        client
+            .chat_once("test-model", vec![user("hi")], None)
+            .await
+            .unwrap()
+            .content
+            .as_str(),
+        "こんにちは"
+    );
+    assert_eq!(client.usage_snapshot().attempts, 2);
+    assert_eq!(client.usage_snapshot().usage_records, 1);
+}
+
+#[tokio::test]
+async fn responses_retry_after_zero_and_invalid_hints_use_bounded_retry() {
+    for hint in [
+        Some("0"),
+        None,
+        Some("invalid"),
+        Some("-1"),
+        Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+    ] {
+        let (_server, _temp, client) = retry_after_fixture(hint, 2, true).await;
+        client
+            .chat_once("test-model", vec![user("hi")], None)
+            .await
+            .unwrap();
+        assert_eq!(client.usage_snapshot().attempts, 2);
+        assert_eq!(client.usage_snapshot().usage_records, 1);
+    }
+}
+
+#[tokio::test]
+async fn responses_retry_after_retry_count_boundaries_preserve_original_error() {
+    for max_retries in [0, 1, 3, usize::MAX] {
+        let attempts = max_retries.min(3) + 1;
+        let (_server, _temp, mut client) = retry_after_fixture(Some("0"), attempts, false).await;
+        client.llm_cfg.max_retries = max_retries;
+        let error = client
+            .chat_once("test-model", vec![user("hi")], None)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ProviderError>().is_some());
+        assert_eq!(client.usage_snapshot().attempts, attempts as u64);
+        assert_eq!(client.usage_snapshot().usage_records, 0);
+    }
+}
+
+#[tokio::test]
+async fn responses_retry_after_long_hint_remains_under_total_deadline() {
+    for hint in ["60", "300"] {
+        let (_server, _temp, mut client) = retry_after_fixture(Some(hint), 1, false).await;
+        client.llm_cfg.request_timeout_ms = 100;
+        let error = client
+            .chat_once("test-model", vec![user("hi")], None)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("Responses request deadline exceeded"));
+        assert_eq!(client.usage_snapshot().attempts, 1);
+    }
+}
+
+#[tokio::test]
+async fn responses_retry_after_wait_is_cancellable_without_resend() {
+    use tracing::instrument::WithSubscriber;
+    for hint in ["60", "300"] {
+        let (_server, _temp, mut client) = retry_after_fixture(Some(hint), 1, false).await;
+        client.llm_cfg.request_timeout_ms = 5000;
+        let capture = crate::test_support::DiagnosticCapture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let task = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !capture.text().contains("Responses retry scheduled") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reach actual retry wait");
+            // The scheduled delay is the server's exact value, not the old30s cap.
+            assert!(capture.text().contains(&format!(
+                "retry_delay_ms={}",
+                hint.parse::<u64>().unwrap() * 1000
+            )));
+            canceller.cancel();
+        };
+        let (result, ()) = tokio::join!(
+            client
+                .chat_once("test-model", vec![user("hi")], Some(token))
+                .with_subscriber(subscriber),
+            task,
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(&crate::llm::LlmErrorKind::Cancelled)
+        );
+        assert_eq!(client.usage_snapshot().attempts, 1);
+        assert_eq!(client.usage_snapshot().usage_records, 0);
+    }
+}
+
+#[tokio::test]
+async fn responses_retry_after_delay_policy_does_not_multiply_server_hints() {
+    use tracing::instrument::WithSubscriber;
+    // Two retries exercise the second-attempt path with a real integer hint.
+    let (_server, _temp, mut client) = retry_after_fixture(Some("1"), 3, false).await;
+    client.llm_cfg.max_retries = 2;
+    client.llm_cfg.request_timeout_ms = 10000;
+    let capture = crate::test_support::DiagnosticCapture::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    let error = client
+        .chat_once("test-model", vec![user("hi")], None)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<ProviderError>().is_some());
+    assert_eq!(capture.text().matches("retry_delay_ms=1000").count(), 2);
+    assert_eq!(client.usage_snapshot().attempts, 3);
+}
+
+#[tokio::test]
+async fn responses_retry_after_local_backoff_uses_one_based_failures() {
+    use tracing::instrument::WithSubscriber;
+    let (_server, _temp, mut client) = retry_after_fixture(None, 4, false).await;
+    client.llm_cfg.retry_base_ms = 10;
+    client.llm_cfg.request_timeout_ms = 5000;
+    let capture = crate::test_support::DiagnosticCapture::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    let error = client
+        .chat_once("test-model", vec![user("hi")], None)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<ProviderError>().is_some());
+    let text = capture.text();
+    for (attempt, millis) in [(1, 10), (2, 20), (3, 40)] {
+        assert!(
+            text.contains(&format!("attempt={attempt} retry_delay_ms={millis}")),
+            "{text}"
+        );
+    }
+    assert_eq!(client.usage_snapshot().attempts, 4);
+}
