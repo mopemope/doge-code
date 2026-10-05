@@ -228,6 +228,7 @@ impl Default for LocalMcpServerConfig {
 
 /// Layered-config partial for `[mcp_server]` (global <- project merge).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialLocalMcpServerConfig {
     pub enabled: Option<bool>,
     pub address: Option<String>,
@@ -253,6 +254,7 @@ impl Default for McpServerConfig {
 /// Partial outbound MCP configuration used while merging global and project
 /// files. Project scalar fields win; project environment keys win per key.
 #[derive(Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialMcpServerConfig {
     pub name: Option<String>,
     pub enabled: Option<bool>,

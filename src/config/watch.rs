@@ -82,6 +82,7 @@ impl WatchConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialWatchConfig {
     pub include_patterns: Option<Vec<String>>,
     pub exclude_patterns: Option<Vec<String>>,

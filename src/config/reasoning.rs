@@ -4,7 +4,8 @@ use serde::Deserialize;
 ///
 /// v1 only uses `low` / `medium` / `high` to keep provider/model
 /// compatibility broad. The enum is left extensible for future levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Low,
     #[default]
@@ -20,19 +21,11 @@ impl ReasoningEffort {
             Self::High => "high",
         }
     }
-
-    pub fn from_optional_str(value: Option<&str>, fallback: Self) -> Self {
-        match value.map(|v| v.trim().to_ascii_lowercase()) {
-            Some(ref s) if s == "low" => Self::Low,
-            Some(ref s) if s == "medium" => Self::Medium,
-            Some(ref s) if s == "high" => Self::High,
-            _ => fallback,
-        }
-    }
 }
 
 /// Policy mode for reasoning budget control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasoningMode {
     #[default]
     Auto,
@@ -41,14 +34,6 @@ pub enum ReasoningMode {
 }
 
 impl ReasoningMode {
-    pub fn from_optional_str(value: Option<&str>) -> Self {
-        match value.map(|v| v.trim().to_ascii_lowercase()) {
-            Some(ref s) if s == "fixed" => Self::Fixed,
-            Some(ref s) if s == "off" => Self::Off,
-            _ => Self::Auto,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -84,27 +69,23 @@ impl Default for ReasoningConfig {
 
 impl ReasoningConfig {
     pub fn apply_partial(&mut self, partial: &PartialReasoningConfig) {
-        if let Some(mode) = &partial.mode {
-            self.mode = ReasoningMode::from_optional_str(Some(mode));
+        if let Some(mode) = partial.mode {
+            self.mode = mode;
         }
-        if let Some(v) = &partial.initial_effort {
-            self.initial_effort =
-                ReasoningEffort::from_optional_str(Some(v), ReasoningEffort::Medium);
+        if let Some(v) = partial.initial_effort {
+            self.initial_effort = v;
         }
-        if let Some(v) = &partial.routine_effort {
-            self.routine_effort = ReasoningEffort::from_optional_str(Some(v), ReasoningEffort::Low);
+        if let Some(v) = partial.routine_effort {
+            self.routine_effort = v;
         }
-        if let Some(v) = &partial.deliberative_effort {
-            self.deliberative_effort =
-                ReasoningEffort::from_optional_str(Some(v), ReasoningEffort::Medium);
+        if let Some(v) = partial.deliberative_effort {
+            self.deliberative_effort = v;
         }
-        if let Some(v) = &partial.recovery_effort {
-            self.recovery_effort =
-                ReasoningEffort::from_optional_str(Some(v), ReasoningEffort::High);
+        if let Some(v) = partial.recovery_effort {
+            self.recovery_effort = v;
         }
-        if let Some(v) = &partial.fixed_effort {
-            self.fixed_effort =
-                ReasoningEffort::from_optional_str(Some(v), ReasoningEffort::Medium);
+        if let Some(v) = partial.fixed_effort {
+            self.fixed_effort = v;
         }
     }
 }
@@ -126,13 +107,14 @@ pub fn merge_reasoning(
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialReasoningConfig {
-    pub mode: Option<String>,
-    pub initial_effort: Option<String>,
-    pub routine_effort: Option<String>,
-    pub deliberative_effort: Option<String>,
-    pub recovery_effort: Option<String>,
-    pub fixed_effort: Option<String>,
+    pub mode: Option<ReasoningMode>,
+    pub initial_effort: Option<ReasoningEffort>,
+    pub routine_effort: Option<ReasoningEffort>,
+    pub deliberative_effort: Option<ReasoningEffort>,
+    pub recovery_effort: Option<ReasoningEffort>,
+    pub fixed_effort: Option<ReasoningEffort>,
 }
 
 #[cfg(test)]
@@ -160,13 +142,13 @@ mod tests {
     #[test]
     fn test_merge_precedence_project_wins() {
         let file = PartialReasoningConfig {
-            mode: Some("fixed".to_string()),
-            routine_effort: Some("low".to_string()),
-            fixed_effort: Some("high".to_string()),
+            mode: Some(ReasoningMode::Fixed),
+            routine_effort: Some(ReasoningEffort::Low),
+            fixed_effort: Some(ReasoningEffort::High),
             ..Default::default()
         };
         let project = PartialReasoningConfig {
-            mode: Some("auto".to_string()),
+            mode: Some(ReasoningMode::Auto),
             routine_effort: None,
             ..Default::default()
         };
@@ -184,31 +166,20 @@ mod tests {
                routine_effort = "low""#,
         )
         .expect("parse reasoning section");
-        assert_eq!(cfg.mode.as_deref(), Some("fixed"));
-        assert_eq!(cfg.fixed_effort.as_deref(), Some("high"));
+        assert_eq!(cfg.mode, Some(ReasoningMode::Fixed));
+        assert_eq!(cfg.fixed_effort, Some(ReasoningEffort::High));
         let resolved = merge_reasoning(None, Some(&cfg));
         assert_eq!(resolved.mode, ReasoningMode::Fixed);
         assert_eq!(resolved.fixed_effort, ReasoningEffort::High);
     }
 
     #[test]
-    fn test_invalid_mode_falls_back_to_auto() {
-        let cfg = ReasoningMode::from_optional_str(Some("bogus"));
-        assert_eq!(cfg, ReasoningMode::Auto);
-        let cfg = ReasoningMode::from_optional_str(None);
-        assert_eq!(cfg, ReasoningMode::Auto);
+    fn test_invalid_mode_is_rejected() {
+        assert!(toml::from_str::<PartialReasoningConfig>(r#"mode = "bogus""#).is_err());
     }
 
     #[test]
-    fn test_invalid_effort_falls_back_without_panic() {
-        let resolved = {
-            let mut cfg = ReasoningConfig::default();
-            cfg.apply_partial(&PartialReasoningConfig {
-                routine_effort: Some("bogus".to_string()),
-                ..Default::default()
-            });
-            cfg
-        };
-        assert_eq!(resolved.routine_effort, ReasoningEffort::Low);
+    fn test_invalid_effort_is_rejected() {
+        assert!(toml::from_str::<PartialReasoningConfig>(r#"routine_effort = "bogus""#).is_err());
     }
 }

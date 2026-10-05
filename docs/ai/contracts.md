@@ -80,3 +80,9 @@ Observed directives and interpreted requirements are distinct provenance nodes.
 - Do not create new ad-hoc `Command::output()` / `wait_with_output()` paths for finite background commands. Use `src/execution/runner.rs` unless the process is intentionally long-lived or interactive (PTY, MCP transport, daemon/service, or another documented exception).
 - Do not infer remote MCP tool success from transport success. For a completed call, `CallToolResult.is_error` is authoritative: `Some(true)` maps to `ToolOutput.is_success = false`; `Some(false)` and `None` map to success. Protocol/transport errors remain typed errors.
 - Never log remote MCP arguments, full results, environment values, or credentials. Structured stdio uses `command` + argv and never a shell parser.
+
+## Configuration Contract
+
+Configuration is fail-closed.
+Unknown user/project keys and invalid policy values must fail startup.
+Do not silently clamp, ignore, rewrite, or fallback security/resource policy configuration.

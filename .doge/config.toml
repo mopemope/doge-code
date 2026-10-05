@@ -10,13 +10,9 @@
 # temperature = 0.1
 # auto_compact_prompt_token_threshold = 250000
 
-[project]
-exclude_patterns = ["target/", "resources/tree-sitter-language-pack/"]
-
 [mcp_server]
 address = "127.0.0.1:8000"
 
 [watch]
-enabled = true
-debounce_ms = 500
-patterns = ["*.rs"]
+include_patterns = ["**/*.rs"]
+debounce_delay_ms = 500
