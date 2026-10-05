@@ -89,6 +89,24 @@ class VerificationTests(unittest.TestCase):
         code, _ = self.run_fixture("Ran 3 tests in 0.005s\n\nOK", require_tests="unittest")
         self.assertEqual(code, 0)
 
+    def test_guidance_includes_test_integrity_checker(self):
+        commands = verify.commands("guidance", None, SCRIPTS.parent)
+        labels = [" ".join(argv) for argv, _ in commands]
+        positions = {}
+        for marker in ("check-sensitive-logging.py", "check-test-integrity.py"):
+            matches = [index for index, label in enumerate(labels) if marker in label]
+            self.assertEqual(len(matches), 1, marker)
+            positions[marker] = matches[0]
+        discovery = [
+            index for index, (_, value) in enumerate(commands) if value == "unittest"
+        ]
+        self.assertEqual(len(discovery), 1)
+        self.assertLess(
+            positions["check-sensitive-logging.py"],
+            positions["check-test-integrity.py"],
+        )
+        self.assertLess(positions["check-test-integrity.py"], discovery[0])
+
 
 class TuiDependencyTests(unittest.TestCase):
     def run_graph(self, direct, full, requirement="^0.29"):

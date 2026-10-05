@@ -546,7 +546,7 @@ mod tests {
     };
     use crate::llm::tool_def::default_tools_def;
     use crate::llm::types::{ToolDef, ToolFunctionDef};
-    use httptest::{Expectation, ServerBuilder, matchers::*, responders::*};
+    use httptest::{Expectation, matchers::*, responders::*};
 
     fn remote_fixture_entry(
         alias: &str,
@@ -664,27 +664,13 @@ mod tests {
         }]
     }
 
-    fn start_server() -> Option<httptest::Server> {
-        if std::env::var("DOGE_SKIP_HTTPTEST").is_ok() {
-            eprintln!("Skipping httptest-based test (DOGE_SKIP_HTTPTEST set)");
-            return None;
-        }
-        match ServerBuilder::new().run() {
-            Ok(server) => Some(server),
-            Err(err) => {
-                eprintln!("Skipping httptest-based test (server start failed: {err})");
-                None
-            }
-        }
-    }
-
     fn test_client_for(server: &httptest::Server) -> OpenAIClient {
         OpenAIClient::new(format!("{}/", server.url_str("")), "test-key").unwrap()
     }
 
     #[tokio::test]
     async fn test_first_payload_defers_remote_and_builtin_schemas() {
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         let catalog = deferred_fixture_catalog();
         // Sanity: remotes and non-core builtins really are deferred here.
         assert!(!catalog.is_active("mcp_github_get_pull_request").await);
@@ -738,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_activation_payload_advertises_remote_schema() {
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         let catalog = deferred_fixture_catalog();
         let newly = catalog
             .activate(&["mcp_github_get_pull_request".to_string()])
@@ -968,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reasoning_usage_recorded_from_response() {
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         server.expect(
             Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
                 .times(1)
@@ -995,7 +981,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reasoning_http_body_contains_effort_for_openrouter() {
-        let Some(server) = start_server() else { return };
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         // Verify the actual wire body carries `reasoning_effort` and no
         // nested `reasoning` object.
         server.expect(
