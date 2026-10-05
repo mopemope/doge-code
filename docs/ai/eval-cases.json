@@ -3,7 +3,14 @@
     "case_id": "docs-search-prerequisite",
     "prompt": "Document in README development instructions that search_text tests require ripgrep on PATH. Keep the note concise and avoid unrelated changes.",
     "expected_skills": ["dgc-verify"],
-    "acceptance": ["README contains the actionable prerequisite", "No runtime implementation changes", "Guidance checks pass"]
+    "acceptance": ["README contains the actionable prerequisite", "No runtime implementation changes", "Guidance checks pass"],
+    "post_checks": [
+      {
+        "name": "guidance",
+        "argv": ["python3", "scripts/check-agent-guidance.py"],
+        "timeout_seconds": 120
+      }
+    ]
   },
   {
     "case_id": "tool-exists",
@@ -39,6 +46,7 @@
     "case_id": "investigation-only-history",
     "prompt": "Investigate why an LLM cannot call search_history in this project. Report exact registration and dispatch evidence and possible remedies. Do not modify files.",
     "expected_skills": ["dgc-tool-dev"],
-    "acceptance": ["Identifies absent default schema and present internal dispatch", "Makes no workspace changes", "Does not claim the behavior was fixed"]
+    "acceptance": ["Identifies absent default schema and present internal dispatch", "Makes no workspace changes", "Does not claim the behavior was fixed"],
+    "workspace_policy": "read_only"
   }
 ]

@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""Regression tests for the runtime matched evaluation harness.
+
+Every test uses deterministic fake agents; no network, no live LLM, and no
+real provider credentials are required. Real `dgc` binaries are never
+executed here.
+"""
+
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
+
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+
+
+def load_module(name, filename):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+common = load_module("agent_eval_common", "agent_eval_common.py")
+runner = load_module("run_agent_evals", "run-agent-evals.py")
+evals = load_module("evals_compare", "compare-agent-evals.py")
+
+NEEDS_GIT = shutil.which("git") is None
+
+FAKE_AGENT = r"""#!/usr/bin/env python3
+import json, os, sys, time
+
+args = sys.argv[1:]
+log_path = os.environ.get("FAKE_ARGV_LOG")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+
+if len(args) >= 2 and args[0] == "session" and args[1] == "evidence":
+    if os.environ.get("FAKE_EVIDENCE_FAIL") == "1":
+        sys.stderr.write("evidence boom\n")
+        sys.exit(2)
+    if os.environ.get("FAKE_EVIDENCE_INVALID") == "1":
+        sys.stdout.write("not json evidence\n")
+        sys.exit(0)
+    sid = args[2] if len(args) > 2 else "unknown"
+    json.dump({"session": sid, "format": "json", "redacted": True}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+# Exec mode: never resume; the harness must not pass --resume.
+if any(a == "--resume" or a.startswith("--resume=") for a in args):
+    sys.stderr.write("resume is forbidden in eval runs\n")
+    sys.exit(42)
+if "exec" not in args or "--json" not in args:
+    sys.stderr.write("expected `<cmd> exec <prompt> --json` invocation\n")
+    sys.exit(43)
+
+sleep_seconds = float(os.environ.get("FAKE_SLEEP_SECONDS", "0"))
+if os.environ.get("FAKE_IGNORE_TERM") == "1":
+    import signal as _sig
+    _sig.signal(_sig.SIGTERM, _sig.SIG_IGN)
+if sleep_seconds > 0:
+    time.sleep(sleep_seconds)
+
+mode = os.environ.get("FAKE_STDOUT", "")
+if mode == "garbage":
+    sys.stdout.write("this is not json{{{")
+    sys.exit(0)
+if mode == "empty":
+    sys.exit(0)
+
+names = int(os.environ.get("FAKE_SESSIONS", "1"))
+for index in range(names):
+    session_dir = os.path.join(".doge", "sessions", f"fake-session-{index}")
+    os.makedirs(session_dir, exist_ok=True)
+    with open(os.path.join(session_dir, "session.json"), "w") as handle:
+        json.dump({"id": f"fake-session-{index}"}, handle)
+
+created = os.environ.get("FAKE_CREATE_FILE")
+if created:
+    with open(created, "w") as handle:
+        handle.write(os.environ.get("FAKE_CREATE_CONTENT", "fake untracked\n"))
+if os.environ.get("FAKE_MODIFY_TRACKED") == "1":
+    with open("tracked.txt", "a") as handle:
+        handle.write("fake agent edit\n")
+
+USAGE_OK = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+            "cached_tokens": 80, "attempts": 1, "usage_records": 1,
+            "unknown_usage_attempts": 0, "all_tracked_attempts_reported": True}
+BUDGET = {"iterations": 2, "tool_calls": 3, "charged_tokens": 120,
+          "elapsed_ms": 1000, "provider_reported_tokens": 120,
+          "estimated_tokens": 0, "request_attempts": 1, "usage_records": 1}
+payload = os.environ.get("FAKE_PAYLOAD", "ok")
+if payload == "no_usage":
+    doc = {"success": True, "status": "completed", "stop_reason": None,
+           "budget": dict(BUDGET), "response": "fake",
+           "tokens_used": 0, "tools_called": [], "conversation_length": 2}
+elif payload == "no_cache":
+    usage = dict(USAGE_OK)
+    del usage["cached_tokens"]
+    doc = {"success": True, "status": "completed", "stop_reason": None,
+           "budget": dict(BUDGET), "response": "fake",
+           "tokens_used": 120, "usage": usage,
+           "tools_called": [], "conversation_length": 2}
+elif payload == "reasoning":
+    usage = dict(USAGE_OK)
+    usage["reasoning_tokens"] = 50
+    doc = {"success": True, "status": "completed", "stop_reason": None,
+           "budget": dict(BUDGET), "response": "fake",
+           "tokens_used": 120, "usage": usage,
+           "tools_called": [], "conversation_length": 2}
+elif payload == "partial":
+    doc = {"success": True, "status": "partial", "stop_reason": "token_budget",
+           "budget": dict(BUDGET), "response": "fake partial",
+           "tokens_used": 120, "usage": dict(USAGE_OK),
+           "tools_called": [], "conversation_length": 2}
+elif payload == "fail":
+    doc = {"success": False, "error": "fake llm boom",
+           "tokens_used": 5, "usage": dict(USAGE_OK)}
+else:
+    doc = {"success": True, "status": "completed", "stop_reason": None,
+           "budget": dict(BUDGET), "response": "fake",
+           "tokens_used": 120, "usage": dict(USAGE_OK),
+           "tools_called": ["fs_read"], "conversation_length": 4}
+json.dump(doc, sys.stdout)
+sys.stdout.write("\n")
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+"""
+
+
+@contextmanager
+def fake_env(**overrides):
+    """Temporarily set FAKE_* environment variables for a child agent."""
+    saved = dict(os.environ)
+    for key, value in overrides.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+@contextmanager
+def changed_dir(path):
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+def git(*args, cwd):
+    result = subprocess.run(
+        ["git"] + list(args), cwd=str(cwd), capture_output=True, text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"git {args} failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+class HarnessCase(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    # -- fixtures -----------------------------------------------------
+    def make_repo(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        git("init", cwd=repo)
+        git("config", "user.email", "eval@example.com", cwd=repo)
+        git("config", "user.name", "eval", cwd=repo)
+        (repo / "tracked.txt").write_text("base content\n", encoding="utf-8")
+        git("add", "tracked.txt", cwd=repo)
+        git("commit", "-m", "base", cwd=repo)
+        return repo
+
+    def make_fake(self, name="fake-dgc"):
+        fake = self.root / name
+        fake.write_text(FAKE_AGENT, encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return fake
+
+    def write_cases(self, cases, name="cases.json"):
+        path = self.root / name
+        path.write_text(json.dumps(cases), encoding="utf-8")
+        return path
+
+    def base_case(self, **overrides):
+        case = {
+            "case_id": "fake-case",
+            "prompt": "Do the fake thing.",
+            "expected_skills": [],
+            "acceptance": ["fake acceptance holds"],
+        }
+        case.update(overrides)
+        return case
+
+    def write_manifest(self, fake, cases_path, **overrides):
+        manifest = {
+            "schema_version": 1,
+            "base_ref": "HEAD",
+            "cases": str(cases_path),
+            "trials": 1,
+            "model": "exact-model-id",
+            "provider": "openai-chatgpt",
+            "environment_id": "test-machine-v1",
+            "timeout_seconds": 60,
+            "termination_grace_seconds": 5,
+            "seed": 1,
+            "variants": [
+                {"name": "baseline", "agent_command": [str(fake)]},
+            ],
+        }
+        manifest.update(overrides)
+        path = self.root / "eval-run.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def load_harness(self, manifest_path):
+        manifest = common.load_manifest(manifest_path)
+        cases = common.load_cases(manifest["cases_path"])
+        return manifest, cases
+
+    def run_trial(self, repo, manifest, case, trial=1, variant="baseline",
+                  keep=False, out_name="out"):
+        out_root = self.root / out_name
+        settings = common.build_settings(manifest, "digest-for-tests")
+        variant_by_name = {v["name"]: v for v in manifest["variants"]}
+        metas = {
+            v["name"]: runner.variant_metadata(v) for v in manifest["variants"]
+        }
+        base_commit = git("rev-parse", "HEAD", cwd=repo)
+        return runner.run_single(
+            repo, manifest, variant_by_name, metas, {case["case_id"]: case},
+            {"variant": variant, "case_id": case["case_id"], "trial": trial},
+            base_commit, settings, out_root, keep,
+        ), out_root
+
+
+class ManifestTests(HarnessCase):
+    def test_manifest_rejects_duplicate_variants(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        with self.assertRaises(ValueError) as ctx:
+            self.write_manifest(fake, cases, variants=[
+                {"name": "same", "agent_command": [str(fake)]},
+                {"name": "same", "agent_command": [str(fake)]},
+            ])
+            common.load_manifest(self.root / "eval-run.json")
+        self.assertIn("duplicate variant", str(ctx.exception))
+
+    def test_manifest_rejects_zero_trials(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        path = self.write_manifest(fake, cases, trials=0)
+        with self.assertRaises(ValueError) as ctx:
+            common.load_manifest(path)
+        self.assertIn("trials", str(ctx.exception))
+
+    def test_manifest_rejects_unsafe_case_id(self):
+        path = self.write_cases([self.base_case(case_id="../escape")])
+        with self.assertRaises(ValueError) as ctx:
+            common.load_cases(path)
+        self.assertIn("case_id", str(ctx.exception))
+
+    def test_manifest_rejects_secret_cli_args(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        for secret in ("--api-key", "--api_key=sekret", "--bearer-token",
+                       "--token", "--token=sekret"):
+            with self.subTest(secret=secret):
+                path = self.root / "eval-run.json"
+                path.write_text(json.dumps({
+                    "schema_version": 1, "base_ref": "HEAD",
+                    "cases": str(cases), "trials": 1, "model": "m",
+                    "environment_id": "e", "timeout_seconds": 10,
+                    "termination_grace_seconds": 5, "seed": 1,
+                    "variants": [{"name": "v", "agent_command": [str(fake), secret]}],
+                }), encoding="utf-8")
+                with self.assertRaises(ValueError) as ctx:
+                    common.load_manifest(path)
+                self.assertIn("secret", str(ctx.exception))
+
+    def test_manifest_allows_token_prefixed_non_secret_flags(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        path = self.root / "eval-run.json"
+        path.write_text(json.dumps({
+            "schema_version": 1, "base_ref": "HEAD",
+            "cases": str(cases), "trials": 1, "model": "m",
+            "environment_id": "e", "timeout_seconds": 10,
+            "termination_grace_seconds": 5, "seed": 1,
+            "variants": [{"name": "v",
+                          "agent_command": [str(fake), "--token-budget", "100"]}],
+        }), encoding="utf-8")
+        manifest = common.load_manifest(path)
+        self.assertEqual(
+            manifest["variants"][0]["agent_command"],
+            [str(fake), "--token-budget", "100"],
+        )
+
+    def test_manifest_rejects_runner_managed_args(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        for extra in (["--model", "other"], ["exec"], ["--json"]):
+            with self.subTest(extra=extra):
+                path = self.root / "eval-run.json"
+                path.write_text(json.dumps({
+                    "schema_version": 1, "base_ref": "HEAD",
+                    "cases": str(cases), "trials": 1, "model": "m",
+                    "environment_id": "e", "timeout_seconds": 10,
+                    "termination_grace_seconds": 5, "seed": 1,
+                    "variants": [{"name": "v",
+                                  "agent_command": [str(fake)] + extra}],
+                }), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    common.load_manifest(path)
+
+    def test_manifest_paths_resolve_relative_to_manifest(self):
+        subdir = self.root / "nested"
+        subdir.mkdir()
+        (subdir / "cases.json").write_text(
+            json.dumps([self.base_case()]), encoding="utf-8")
+        (subdir / "eval.toml").write_text("[eval]\n", encoding="utf-8")
+        fake = self.make_fake()
+        path = subdir / "eval-run.json"
+        path.write_text(json.dumps({
+            "schema_version": 1, "base_ref": "HEAD", "cases": "cases.json",
+            "trials": 1, "model": "m", "environment_id": "e",
+            "timeout_seconds": 10, "termination_grace_seconds": 5, "seed": 1,
+            "variants": [{"name": "v", "agent_command": [str(fake)],
+                          "config": "eval.toml"}],
+        }), encoding="utf-8")
+        manifest = common.load_manifest(path)
+        self.assertEqual(manifest["cases_path"], str(subdir / "cases.json"))
+        self.assertEqual(
+            manifest["variants"][0]["config"], subdir / "eval.toml")
+
+    def test_version_probe_runs_outside_repository(self):
+        snitch = self.root / "snitch-dgc"
+        log = self.root / "probe-cwd.log"
+        snitch.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            f"open({str(log)!r}, 'a').write(os.getcwd() + chr(10))\n"
+            "print('snitch 1.0')\n",
+            encoding="utf-8",
+        )
+        snitch.chmod(snitch.stat().st_mode | stat.S_IXUSR)
+        meta = runner.variant_metadata(
+            {"agent_command": [str(snitch)], "config": None})
+        self.assertEqual(meta["agent_version"], "snitch 1.0")
+        cwd = Path(log.read_text(encoding="utf-8").strip()).resolve()
+        self.assertNotEqual(cwd, Path.cwd().resolve())
+        self.assertNotEqual(cwd, self.root.resolve())
+
+    def test_execution_order_is_seeded_and_interleaved(self):
+        manifest = {
+            "seed": 7, "trials": 2,
+            "variants": [{"name": "baseline"}, {"name": "candidate"}],
+        }
+        cases = [{"case_id": "a"}, {"case_id": "b"}]
+        first = common.execution_matrix(manifest, cases)
+        second = common.execution_matrix(manifest, cases)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 2 * 2 * 2)
+        # Variants must interleave per (case, trial): the first two entries
+        # cover the same case/trial with both variants, never one variant's
+        # whole block before the other.
+        self.assertEqual(
+            {(item["case_id"], item["trial"]) for item in first[:2]},
+            {("a", 1)},
+        )
+        self.assertEqual({item["variant"] for item in first[:2]},
+                         {"baseline", "candidate"})
+
+
+@unittest.skipIf(NEEDS_GIT, "git is required for worktree tests")
+class RunnerTests(HarnessCase):
+    def test_each_trial_starts_from_clean_base(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_CREATE_FILE="marker-from-trial-1"):
+            first, _ = self.run_trial(
+                repo, manifest, cases[0], trial=1, keep=True, out_name="out1")
+        self.assertEqual(first["run_status"], "completed")
+        trial1_ws = Path(first["workspace"])
+        self.assertTrue((trial1_ws / "marker-from-trial-1").exists())
+        with fake_env(FAKE_CREATE_FILE=None):
+            second, _ = self.run_trial(
+                repo, manifest, cases[0], trial=2, keep=True, out_name="out2")
+        self.assertEqual(second["run_status"], "completed")
+        trial2_ws = Path(second["workspace"])
+        self.assertNotEqual(trial1_ws, trial2_ws)
+        self.assertFalse((trial2_ws / "marker-from-trial-1").exists())
+        self.assertEqual(
+            (trial2_ws / "tracked.txt").read_text(encoding="utf-8"),
+            "base content\n",
+        )
+
+    def test_agent_invocation_uses_exec_json_without_resume(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        argv_log = self.root / "argv.log"
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_ARGV_LOG=str(argv_log)):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "completed")
+        invocations = [
+            json.loads(line) for line in argv_log.read_text().splitlines()
+        ]
+        agent_call = [a for a in invocations if "exec" in a][0]
+        self.assertNotIn("--resume", agent_call)
+        self.assertFalse(any(a.startswith("--resume") for a in agent_call))
+        self.assertEqual(agent_call[-1], "--json")
+        exec_index = agent_call.index("exec")
+        self.assertIn("--model", agent_call[:exec_index])
+        self.assertIn("exact-model-id", agent_call[:exec_index])
+        self.assertIn("--provider", agent_call[:exec_index])
+
+    def test_partial_run_is_preserved(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_PAYLOAD="partial"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "partial")
+        self.assertEqual(measurement["stop_reason"], "token_budget")
+        # The runner never invents review outcomes, even for partial runs.
+        self.assertIsNone(measurement["accepted"])
+        self.assertIsNone(measurement["rework_count"])
+        self.assertIsNone(measurement["contract_violations"])
+
+    def test_timeout_preserves_trial_and_continues(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(
+                fake, self.write_cases([self.base_case()]),
+                trials=2, timeout_seconds=1, termination_grace_seconds=2,
+            ))
+        with fake_env(FAKE_PAYLOAD="ok", FAKE_SLEEP_SECONDS="30",
+                       FAKE_SESSIONS="0"):
+            first, out_root = self.run_trial(
+                repo, manifest, cases[0], trial=1, out_name="out")
+            second, _ = self.run_trial(
+                repo, manifest, cases[0], trial=2, out_name="out")
+        for measurement in (first, second):
+            self.assertEqual(measurement["run_status"], "timed_out")
+            self.assertTrue(measurement["timed_out"])
+        run_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001"
+        self.assertTrue((run_dir / "stdout.txt").exists())
+        self.assertTrue((run_dir / "stderr.txt").exists())
+        self.assertTrue((run_dir / "run.json").exists())
+        # Disposable worktrees are removed even after timeouts.
+        self.assertEqual(git("worktree", "list", "--porcelain", cwd=repo).count("worktree"), 1)
+
+    def test_sigterm_ignored_agent_is_force_killed_after_grace(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(
+                fake, self.write_cases([self.base_case()]),
+                timeout_seconds=1, termination_grace_seconds=2,
+            ))
+        with fake_env(FAKE_SLEEP_SECONDS="30", FAKE_IGNORE_TERM="1",
+                       FAKE_SESSIONS="0"):
+            measurement, _ = self.run_trial(
+                repo, manifest, cases[0], out_name="out")
+        self.assertEqual(measurement["run_status"], "timed_out")
+        # SIGTERM was ignored, so the runner must have waited out the full
+        # grace period before force-killing the process group.
+        self.assertGreaterEqual(measurement["elapsed_seconds"], 2.5)
+
+    def test_nonzero_exit_is_preserved(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_PAYLOAD="fail", FAKE_EXIT="3"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "failed")
+        self.assertEqual(measurement["exit_code"], 3)
+
+    def test_malformed_stdout_is_preserved(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_STDOUT="garbage"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "harness_error")
+        self.assertIsNone(measurement["accepted"])
+
+    def test_empty_stdout_is_preserved(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_STDOUT="empty"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "harness_error")
+        self.assertIsNone(measurement["accepted"])
+
+    def test_patch_includes_tracked_and_untracked(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_MODIFY_TRACKED="1", FAKE_CREATE_FILE="new-file.txt",
+                       FAKE_CREATE_CONTENT="brand new\n"):
+            measurement, out_root = self.run_trial(
+                repo, manifest, cases[0], out_name="out")
+        run_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001"
+        patch = (run_dir / "agent.patch").read_text(encoding="utf-8")
+        self.assertIn("tracked.txt", patch)
+        self.assertIn("fake agent edit", patch)
+        self.assertIn("new-file.txt", patch)
+        self.assertIn("brand new", patch)
+        self.assertTrue((run_dir / "git-status.txt").read_text().strip())
+        self.assertTrue((run_dir / "diff-stat.txt").read_text().strip())
+
+    def test_patch_includes_newline_filenames(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        odd = "odd\nname.txt"
+        with fake_env(FAKE_CREATE_FILE=odd, FAKE_CREATE_CONTENT="odd content\n"):
+            measurement, out_root = self.run_trial(
+                repo, manifest, cases[0], out_name="out")
+        run_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001"
+        patch = (run_dir / "agent.patch").read_text(encoding="utf-8")
+        self.assertIn("odd content", patch)
+
+    def test_variant_config_resume_true_rejected_false_allowed(self):
+        fake = self.make_fake()
+        for content, rejected in (('[exec]\nresume = true\n', True),
+                                  ('resume = false\n', False)):
+            with self.subTest(content=content):
+                config = self.root / "eval.toml"
+                config.write_text(content, encoding="utf-8")
+                variant = {"name": "baseline",
+                           "agent_command": [str(fake)],
+                           "config": str(config)}
+                if rejected:
+                    with self.assertRaises(ValueError):
+                        runner.validate_agent_binary(variant)
+                else:
+                    runner.validate_agent_binary(variant)
+
+    def test_read_only_case_records_finding_without_acceptance(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([
+                self.base_case(workspace_policy="read_only")])))
+        with fake_env(FAKE_MODIFY_TRACKED="1"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertIn(
+            "workspace_modified_in_read_only_case",
+            measurement["machine_findings"],
+        )
+        self.assertIsNone(measurement["accepted"])
+
+    def test_post_checks_record_evidence(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        passing = {
+            "name": "passing",
+            "argv": [sys.executable, "-c", "import sys; sys.exit(0)"],
+            "timeout_seconds": 30,
+        }
+        failing = {
+            "name": "failing",
+            "argv": [sys.executable, "-c", "import sys; sys.exit(2)"],
+            "timeout_seconds": 30,
+        }
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([
+                self.base_case(post_checks=[passing, failing])])))
+        measurement, out_root = self.run_trial(
+            repo, manifest, cases[0], out_name="out")
+        by_name = {c["name"]: c for c in measurement["post_checks"]}
+        self.assertEqual(by_name["passing"]["exit_code"], 0)
+        self.assertFalse(by_name["passing"]["timed_out"])
+        self.assertEqual(by_name["failing"]["exit_code"], 2)
+        self.assertIn("elapsed_seconds", by_name["failing"])
+        self.assertFalse(measurement["required_checks_passed"])
+        self.assertIsNone(measurement["accepted"])
+        checks_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001" / "checks"
+        self.assertTrue((checks_dir / "passing.stdout.txt").exists())
+
+    def test_runner_leaves_review_null_and_compare_rejects_unreviewed(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        measurement, out_root = self.run_trial(
+            repo, manifest, cases[0], out_name="out")
+        self.assertIsNone(measurement["accepted"])
+        unreviewed = out_root / "unreviewed.jsonl"
+        unreviewed.write_text(json.dumps(measurement) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            evals.load_runs(unreviewed)
+        self.assertIn("has not been reviewed", str(ctx.exception))
+
+    def test_secret_values_are_never_recorded(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        config = self.root / "eval.toml"
+        secret = "hunter2-fake-secret-value"
+        config.write_text(f'[llm]\npassword = "{secret}"\n', encoding="utf-8")
+        manifest, cases = self.load_harness(
+            self.write_manifest(
+                fake, self.write_cases([self.base_case()]),
+                variants=[{"name": "baseline", "agent_command": [str(fake)],
+                           "config": str(config)}]))
+        with fake_env(OPENAI_API_KEY="sk-fake-secret-api-key"):
+            measurement, out_root = self.run_trial(
+                repo, manifest, cases[0], out_name="out")
+        runner.write_outputs(
+            out_root, manifest, ["baseline"], {"baseline": [measurement]},
+            {"variants": [{"name": "baseline",
+                           "agent_command_fingerprint": "abc"}]},
+        )
+        haystacks = []
+        for path in sorted(out_root.rglob("*")):
+            if path.is_file():
+                try:
+                    haystacks.append(path.read_bytes())
+                except OSError:
+                    pass
+        for blob in haystacks:
+            self.assertNotIn(b"sk-fake-secret-api-key", blob)
+            self.assertNotIn(secret.encode(), blob)
+        self.assertEqual(
+            measurement["variant_metadata"].get("config_sha256"),
+            common.sha256_file(config),
+        )
+
+    def test_evidence_status_when_no_single_session(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_SESSIONS="0"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["evidence_status"], "no_sessions")
+        self.assertEqual(measurement["run_status"], "completed")
+        with fake_env(FAKE_SESSIONS="2"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertTrue(
+            measurement["evidence_status"].startswith("ambiguous_sessions"))
+        self.assertEqual(measurement["run_status"], "completed")
+
+
+@unittest.skipIf(NEEDS_GIT, "git is required for worktree tests")
+class DryRunTests(HarnessCase):
+    def test_dry_run_calls_no_agent(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        sentinel = self.root / "agent-was-here"
+        cases = self.write_cases([self.base_case()])
+        manifest_path = self.write_manifest(
+            fake, cases,
+            variants=[
+                {"name": "baseline", "agent_command": [str(fake)]},
+                {"name": "candidate", "agent_command": [str(fake)]},
+            ],
+            trials=2,
+        )
+        out_root = self.root / "out"
+        with changed_dir(repo), fake_env(FAKE_CREATE_FILE=str(sentinel)):
+            code = runner.main([
+                "--manifest", str(manifest_path),
+                "--output", str(out_root),
+                "--dry-run",
+            ])
+        self.assertEqual(code, 0)
+        self.assertFalse(out_root.exists())
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(
+            git("worktree", "list", "--porcelain", cwd=repo).count("worktree"), 1)
+
+    def test_output_guard_refuses_implicit_overwrite(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        manifest_path = self.write_manifest(fake, cases)
+        out_root = self.root / "out"
+        existing = out_root / "baseline"
+        existing.mkdir(parents=True)
+        (existing / "measurements.jsonl").write_text("{}\n", encoding="utf-8")
+        with changed_dir(repo):
+            code = runner.main([
+                "--manifest", str(manifest_path),
+                "--output", str(out_root),
+            ])
+        self.assertEqual(code, 2)
+
+
+class TelemetryTests(unittest.TestCase):
+    def payload(self, **overrides):
+        usage = {"prompt_tokens": 100, "completion_tokens": 20,
+                 "total_tokens": 120, "cached_tokens": 80, "attempts": 1,
+                 "usage_records": 1, "unknown_usage_attempts": 0,
+                 "all_tracked_attempts_reported": True}
+        budget = {"iterations": 2, "tool_calls": 3, "charged_tokens": 120,
+                  "elapsed_ms": 1000, "provider_reported_tokens": 120,
+                  "estimated_tokens": 0, "request_attempts": 1,
+                  "usage_records": 1}
+        doc = {"success": True, "status": "completed", "stop_reason": None,
+               "budget": budget, "response": "x", "tokens_used": 120,
+               "usage": usage, "tools_called": [], "conversation_length": 4}
+        doc.update(overrides)
+        return doc
+
+    def test_complete_usage_maps_to_eval_tokens(self):
+        telemetry = common.extract_exec_telemetry(self.payload())
+        self.assertEqual(telemetry["input_tokens"], 100)
+        self.assertEqual(telemetry["output_tokens"], 20)
+        self.assertEqual(telemetry["cached_input_tokens"], 80)
+        self.assertEqual(telemetry["tool_calls"], 3)
+        self.assertEqual(telemetry["agent_elapsed_seconds"], 1.0)
+        self.assertEqual(telemetry["budget_charged_tokens"], 120)
+
+    def test_missing_usage_becomes_null_not_zero(self):
+        doc = self.payload()
+        del doc["usage"]
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertIsNone(telemetry["input_tokens"])
+        self.assertIsNone(telemetry["output_tokens"])
+        self.assertIsNone(telemetry["cached_input_tokens"])
+        # Budget internals stay separate and still parse.
+        self.assertEqual(telemetry["budget_charged_tokens"], 120)
+
+    def test_incomplete_usage_becomes_null_not_zero(self):
+        doc = self.payload()
+        doc["usage"]["unknown_usage_attempts"] = 1
+        doc["usage"]["all_tracked_attempts_reported"] = False
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertIsNone(telemetry["input_tokens"])
+        self.assertIsNone(telemetry["output_tokens"])
+
+    def test_missing_cache_usage_becomes_null(self):
+        doc = self.payload()
+        del doc["usage"]["cached_tokens"]
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertEqual(telemetry["input_tokens"], 100)
+        self.assertIsNone(telemetry["cached_input_tokens"])
+
+    def test_reasoning_not_double_counted(self):
+        doc = self.payload()
+        doc["usage"]["reasoning_tokens"] = 50
+        telemetry = common.extract_exec_telemetry(doc)
+        # output_tokens is exactly completion_tokens; reasoning is separate.
+        self.assertEqual(telemetry["output_tokens"], 20)
+        self.assertEqual(telemetry["reasoning_tokens"], 50)
+
+    def test_budget_estimate_kept_separate_from_provider_usage(self):
+        doc = self.payload()
+        doc["budget"]["estimated_tokens"] = 977
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertEqual(telemetry["budget_estimated_tokens"], 977)
+        self.assertEqual(telemetry["input_tokens"], 100)
+        self.assertEqual(telemetry["output_tokens"], 20)
+
+    def test_unparseable_exec_has_no_telemetry(self):
+        telemetry = common.extract_exec_telemetry(None)
+        self.assertIsNone(telemetry["input_tokens"])
+        self.assertIsNone(telemetry["tool_calls"])
+
+
+if __name__ == "__main__":
+    unittest.main()

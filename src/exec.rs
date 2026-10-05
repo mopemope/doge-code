@@ -25,6 +25,19 @@ pub enum ExecError {
     Timeout,
 }
 
+/// Whether desktop notifications are enabled for agent runs.
+///
+/// Bulk evaluation runs set `DGC_DISABLE_NOTIFICATIONS=1` to avoid
+/// notification spam across many trials. Unset (or any other value) keeps
+/// the default behavior so normal users are unaffected.
+pub fn notifications_enabled_for_value(var: Option<&str>) -> bool {
+    !matches!(var, Some("1"))
+}
+
+pub(crate) fn notifications_enabled() -> bool {
+    notifications_enabled_for_value(std::env::var("DGC_DISABLE_NOTIFICATIONS").ok().as_deref())
+}
+
 /// Executor for the `exec` subcommand.
 /// This struct holds the necessary components to interact with the LLM and tools.
 pub struct Executor {
@@ -379,7 +392,7 @@ impl Executor {
                     }
                 }
 
-                if !json {
+                if !json && notifications_enabled() {
                     // Send desktop notification on success
                     let summary = format!(
                         "Execution Completed Successfully\nTokens: {}\nSteps: {}",
@@ -418,14 +431,16 @@ impl Executor {
                     eprintln!("Total prompt tokens used: {}", tokens_used);
 
                     // Send desktop notification on failure
-                    let summary =
-                        format!("Execution Failed\nError: {}\nTokens: {}", e, tokens_used);
-                    if let Err(e) = Notification::new()
-                        .summary("Doge-Code Agent Failed")
-                        .body(&summary)
-                        .show()
-                    {
-                        tracing::warn!("Failed to send desktop notification: {}", e);
+                    if notifications_enabled() {
+                        let summary =
+                            format!("Execution Failed\nError: {}\nTokens: {}", e, tokens_used);
+                        if let Err(e) = Notification::new()
+                            .summary("Doge-Code Agent Failed")
+                            .body(&summary)
+                            .show()
+                        {
+                            tracing::warn!("Failed to send desktop notification: {}", e);
+                        }
                     }
                 }
                 return Err(e);
@@ -611,13 +626,14 @@ impl Executor {
 
                     // Send desktop notification on successful rewrite
                     let file_description = display_path.as_deref().unwrap_or("the file");
-                    if let Err(e) = Notification::new()
-                        .summary("Doge-Code Rewrite Completed")
-                        .body(&format!(
-                            "Successfully rewrote code in {}",
-                            file_description
-                        ))
-                        .show()
+                    if notifications_enabled()
+                        && let Err(e) = Notification::new()
+                            .summary("Doge-Code Rewrite Completed")
+                            .body(&format!(
+                                "Successfully rewrote code in {}",
+                                file_description
+                            ))
+                            .show()
                     {
                         tracing::warn!("Failed to send desktop notification: {}", e);
                     }
@@ -1030,6 +1046,17 @@ mod tests {
             &root,
         );
         assert_eq!(hint, "other.rs");
+    }
+
+    #[test]
+    fn test_notification_guard_defaults_to_enabled() {
+        // Pure parser: no environment manipulation, so parallel test
+        // execution cannot race on process-global env state.
+        assert!(super::notifications_enabled_for_value(None));
+        assert!(!super::notifications_enabled_for_value(Some("1")));
+        assert!(super::notifications_enabled_for_value(Some("0")));
+        assert!(super::notifications_enabled_for_value(Some("")));
+        assert!(super::notifications_enabled_for_value(Some("true")));
     }
 
     #[test]

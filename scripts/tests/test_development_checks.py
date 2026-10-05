@@ -294,6 +294,101 @@ class EvaluationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.load_fixture(records)
 
+    def v2_record(self, **overrides):
+        record = {
+            "schema_version": 2, "case_id": "fixture", "trial": 1,
+            "base_commit": "commit", "model": "model",
+            "settings": {"environment": "fixed"}, "variant": "baseline",
+            "run_status": "completed", "stop_reason": None,
+            "accepted": True, "input_tokens": 100, "output_tokens": 20,
+            "cached_input_tokens": 50, "elapsed_seconds": 3,
+            "tool_calls": 2, "rework_count": 0, "contract_violations": 0,
+        }
+        record.update(overrides)
+        return record
+
+    def test_unknown_tokens_are_not_zero(self):
+        summary = evals.summarize(self.load_fixture(
+            [self.v2_record(), self.v2_record(trial=2, input_tokens=None)]))
+        self.assertFalse(summary["token_metrics_complete"])
+        self.assertEqual(summary["token_complete_runs"], 1)
+        self.assertIsNone(summary["total_tokens"])
+        self.assertIsNone(summary["tokens_per_accepted_run"])
+        self.assertEqual(summary["known_total_tokens"], 120)
+
+    def test_partial_token_coverage_returns_null_efficiency(self):
+        summary = evals.summarize(self.load_fixture(
+            [self.v2_record(accepted=False), self.v2_record(trial=2)]))
+        self.assertEqual(summary["tokens_per_accepted_run"], 240)
+        missing = evals.summarize(self.load_fixture(
+            [self.v2_record(output_tokens=None)]))
+        self.assertIsNone(missing["tokens_per_accepted_run"])
+
+    def test_known_token_totals_still_compare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
+            baseline.write_text(json.dumps(self.v2_record()))
+            candidate.write_text(json.dumps(
+                self.v2_record(variant="candidate", input_tokens=80)))
+            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
+                       str(baseline), str(candidate)]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0)
+            compared = json.loads(result.stdout)
+            self.assertEqual(compared["candidate"]["total_tokens"], 100)
+            self.assertEqual(compared["baseline"]["completed_runs"], 1)
+
+    def test_unknown_cached_tokens_are_supported(self):
+        summary = evals.summarize(self.load_fixture(
+            [self.v2_record(cached_input_tokens=None)]))
+        self.assertEqual(summary["cached_token_complete_runs"], 0)
+        self.assertIsNone(summary["cached_input_tokens"])
+        self.assertEqual(summary["known_cached_input_tokens"], 0)
+
+    def test_unreviewed_record_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.load_fixture([self.v2_record(accepted=None)])
+        self.assertIn("has not been reviewed", str(ctx.exception))
+
+    def test_missing_run_status_is_rejected(self):
+        record = self.v2_record()
+        del record["run_status"]
+        with self.assertRaises(ValueError) as ctx:
+            self.load_fixture([record])
+        self.assertIn("run_status", str(ctx.exception))
+
+    def test_variant_metadata_may_differ(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
+            baseline.write_text(json.dumps(self.v2_record(
+                variant_metadata={"agent_command_fingerprint": "aaa"})))
+            candidate.write_text(json.dumps(self.v2_record(
+                variant="candidate",
+                variant_metadata={"agent_command_fingerprint": "bbb"})))
+            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
+                       str(baseline), str(candidate)]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0)
+
+    def test_matched_settings_must_still_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
+            baseline.write_text(json.dumps(self.v2_record()))
+            candidate.write_text(json.dumps(self.v2_record(
+                variant="candidate", settings={"environment": "other"})))
+            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
+                       str(baseline), str(candidate)]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 1)
+
+    def test_legacy_schema_v1_still_loads(self):
+        summary = evals.summarize(self.load_fixture([self.record]))
+        self.assertEqual(summary["total_tokens"], 120)
+        self.assertEqual(summary["tokens_per_accepted_run"], 120)
+
     def test_comparison_requires_matched_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
