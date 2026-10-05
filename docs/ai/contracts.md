@@ -110,3 +110,15 @@ Do not silently clamp, ignore, rewrite, or fallback security/resource policy con
 - Native compaction never causes a second token charge for the same provider response.
 - Context-governor calibration is reset after a native compaction boundary.
 - Observation GC fails closed while opaque compaction state may reference prior observations.
+
+## Diagnostic Logging Safety
+
+- Raw prompt/message bodies are never diagnostic log fields.
+- Application source/tool arguments/tool results are never diagnostic log fields.
+- Raw provider response/error bodies are never logged or embedded in propagated errors.
+- Encrypted Responses state is never logged.
+- Credentials/tokens are never logged.
+- Debug level does not weaken these rules.
+- Logs use structural counts, token usage, durations and sanitized identifiers.
+- Content inspection is an explicit evidence/session operation, not a logging level.
+- Project log files use restricted permissions where supported.

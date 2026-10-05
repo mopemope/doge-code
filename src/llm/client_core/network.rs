@@ -12,6 +12,7 @@ use crate::llm::retry::{
     compute_retry_delay, extract_provider_code, is_context_length_exceeded_code, kind_for_status,
     max_attempts, parse_retry_after, should_retry,
 };
+use crate::llm::telemetry::{self, PROTOCOL_CHAT_COMPLETIONS};
 use crate::llm::types::{ChatMessage, ChatRequest, ChatResponse, ChoiceMessage};
 
 pub async fn chat_once(
@@ -59,10 +60,26 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
             .map_err(|e| anyhow::anyhow!("Invalid API key: {}", e))?,
     );
 
-    if tracing::enabled!(tracing::Level::DEBUG)
-        && let Ok(payload) = serde_json::to_string_pretty(req)
-    {
-        debug!(payload = %payload, endpoint = %url, "sending chat.completions payload");
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let request_bytes = telemetry::measure_bytes(&value);
+        let summary = telemetry::summarize_request_value(
+            &value,
+            PROTOCOL_CHAT_COMPLETIONS,
+            request_bytes,
+            None,
+        );
+        debug!(
+            protocol = summary.protocol,
+            message_count = summary.message_count,
+            system_messages = summary.system_messages,
+            developer_messages = summary.developer_messages,
+            user_messages = summary.user_messages,
+            assistant_messages = summary.assistant_messages,
+            tool_messages = summary.tool_messages,
+            tool_schema_count = summary.tool_schema_count,
+            request_bytes = summary.request_bytes,
+            "sending chat.completions request"
+        );
     }
 
     let total_attempts = max_attempts(client.llm_cfg.max_retries);
@@ -89,13 +106,26 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 } else {
                     classify_transport(&e)
                 };
-                error!(attempt, total_attempts, err=%e, "llm chat_once send error");
+                let transport = telemetry::summarize_transport_error(&e);
+                let transport_timeout = transport.timeout;
+                let transport_connect = transport.connect;
+                let transport_request = transport.request;
+                let transport_has_body_error = transport.body;
+                error!(
+                    attempt,
+                    total_attempts,
+                    transport_timeout = transport_timeout,
+                    transport_connect = transport_connect,
+                    transport_request = transport_request,
+                    transport_body = transport_has_body_error,
+                    "llm chat_once send error"
+                );
                 let failure = RequestAttemptFailure::new(
                     kind.clone(),
                     None,
                     None,
                     None,
-                    anyhow::anyhow!(kind).context(format!("send chat request: {e}")),
+                    anyhow::anyhow!(kind).context("send chat request"),
                 );
                 if !should_retry(&failure) || attempt >= total_attempts {
                     if attempt >= total_attempts && should_retry(&failure) {
@@ -132,6 +162,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let request_id = telemetry::extract_request_id(resp.headers());
             let retry_after = parse_retry_after(resp.headers());
             let text = tokio::select! {
                 biased;
@@ -142,12 +173,17 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 res = resp.text() => res.unwrap_or_default(),
             };
             let trimmed = text.trim().to_owned();
+            let meta = telemetry::parse_provider_error_metadata(&trimmed, request_id.as_deref());
             let provider_code = extract_provider_code(&trimmed);
             error!(
                 attempt,
                 total_attempts,
                 status = status.as_u16(),
-                provider_code = provider_code.as_deref().unwrap_or(""),
+                provider_code = meta.code.as_deref().unwrap_or(""),
+                provider_type = meta.error_type.as_deref().unwrap_or(""),
+                body_bytes = meta.body_bytes,
+                body_is_json = meta.body_is_json,
+                request_id = request_id.as_deref().unwrap_or(""),
                 "llm chat_once non-success status"
             );
 
@@ -162,13 +198,13 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 return Err(anyhow::anyhow!(LlmErrorKind::ContextLengthExceeded));
             }
             let kind = kind_for_status(status);
-            let detail: String = trimmed.chars().take(500).collect();
+            let message = telemetry::provider_error_message(status.as_u16(), &meta);
             let failure = RequestAttemptFailure::new(
                 kind.clone(),
                 Some(status),
                 retry_after,
                 provider_code,
-                anyhow::anyhow!(kind).context(format!("chat error: {status} - {detail}")),
+                anyhow::anyhow!(kind).context(message),
             );
             if !should_retry(&failure) || attempt >= total_attempts {
                 if attempt >= total_attempts && should_retry(&failure) {
@@ -214,13 +250,26 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
             Ok(text) => text,
             Err(e) => {
                 let kind = classify_transport(&e);
-                error!(attempt, total_attempts, err=%e, "llm chat_once read body error");
+                let transport = telemetry::summarize_transport_error(&e);
+                let transport_timeout = transport.timeout;
+                let transport_connect = transport.connect;
+                let transport_request = transport.request;
+                let transport_has_body_error = transport.body;
+                error!(
+                    attempt,
+                    total_attempts,
+                    transport_timeout = transport_timeout,
+                    transport_connect = transport_connect,
+                    transport_request = transport_request,
+                    transport_body = transport_has_body_error,
+                    "llm chat_once read body error"
+                );
                 let failure = RequestAttemptFailure::new(
                     kind.clone(),
                     None,
                     None,
                     None,
-                    anyhow::anyhow!(kind).context(format!("read chat response body: {e}")),
+                    anyhow::anyhow!(kind).context("read chat response body"),
                 );
                 if !should_retry(&failure) || attempt >= total_attempts {
                     if attempt >= total_attempts && should_retry(&failure) {
@@ -248,7 +297,8 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
             }
         };
 
-        debug!("llm chat_once response");
+        let response_bytes = response_text.len();
+        let response_summary_placeholder = response_bytes;
 
         let mut parsed_response_text = response_text.as_str();
         let body: Result<ChatResponse, _> = serde_json::from_str(parsed_response_text);
@@ -278,8 +328,37 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 if let Some(usage) = &body.usage {
                     client.record_usage(usage);
                 }
-
-                if let Some(choice) = body.choices.into_iter().next() {
+                let usage_present = body.usage.is_some();
+                let choice_count = body.choices.len();
+                let first = body.choices.into_iter().next();
+                if let Some(choice) = first {
+                    // Refusal is detected from the raw JSON pointer (the typed
+                    // `ChoiceMessage` carries no refusal field). Compute it
+                    // before summarizing so telemetry reflects the refusal.
+                    let refusal_present =
+                        serde_json::from_str::<serde_json::Value>(parsed_response_text)
+                            .ok()
+                            .and_then(|v| v.pointer("/choices/0/message/refusal").cloned())
+                            .is_some_and(|value| !value.is_null());
+                    let summary = telemetry::summarize_response_message(
+                        Some(choice.message.content.as_str()),
+                        0,
+                        refusal_present.then_some("refusal"),
+                        usage_present,
+                        choice.finish_reason.as_deref(),
+                        response_summary_placeholder,
+                        choice_count,
+                    );
+                    debug!(
+                        protocol = PROTOCOL_CHAT_COMPLETIONS,
+                        response_bytes = summary.response_bytes,
+                        choice_count = summary.choice_count,
+                        assistant_content_chars = summary.assistant_content_chars,
+                        refusal_present = summary.refusal_present,
+                        usage_present = summary.usage_present,
+                        finish_reason = summary.finish_reason.as_deref().unwrap_or(""),
+                        "llm chat_once response"
+                    );
                     crate::llm::types::validate_completion(choice.finish_reason.as_deref(), false)?;
                     anyhow::ensure!(choice.message.role == "assistant", LlmErrorKind::Client);
                     // Refusal is optional on compatible endpoints; explicit
@@ -497,6 +576,90 @@ mod tests {
             .unwrap_err();
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(format!("{err:?}").contains("400"));
+    }
+
+    #[tokio::test]
+    async fn chat_once_error_body_secret_not_in_error() {
+        let secret = "SECRET_PROVIDER_BODY_123";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_chat_server(
+            vec![ScriptedChatResponse {
+                status: 400,
+                body: serde_json::json!({"error": {"code": "invalid_request", "message": secret}}),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = chat_test_client(url, 0);
+        let err = client
+            .chat_once("gpt", chat_messages(), None)
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:?} {}", err);
+        assert!(
+            !rendered.contains(secret),
+            "provider error body must not leak, got {rendered}"
+        );
+        assert!(
+            rendered.contains("400"),
+            "status must remain, got {rendered}"
+        );
+        assert!(
+            rendered.contains("invalid_request"),
+            "safe code must remain, got {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_once_plain_text_error_hides_body() {
+        let secret = "SECRET_PROVIDER_BODY_456";
+        // Plain-text bodies need a raw-string server (JSON helper would quote it).
+        async fn spawn_raw(status: u16, raw: String, counter: Arc<AtomicUsize>) -> String {
+            use axum::{
+                Router,
+                http::{HeaderMap, StatusCode},
+                response::IntoResponse,
+                routing::post,
+            };
+            let app = Router::new().route(
+                "/v1/chat/completions",
+                post(
+                    move |_headers: HeaderMap, _body: axum::body::Bytes| async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let status = StatusCode::from_u16(status)
+                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                        let mut headers = HeaderMap::new();
+                        headers.insert("content-type", "text/plain".parse().unwrap());
+                        (status, headers, raw.clone()).into_response()
+                    },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            format!("http://{addr}/")
+        }
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_raw(500, secret.to_owned(), counter.clone()).await;
+        let client = chat_test_client(url, 0);
+        let err = client
+            .chat_once("gpt", chat_messages(), None)
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:?} {}", err);
+        assert!(
+            !rendered.contains(secret),
+            "plain-text body must not leak, got {rendered}"
+        );
+        assert!(
+            rendered.contains("500"),
+            "status must remain, got {rendered}"
+        );
     }
 
     #[test]

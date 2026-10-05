@@ -1172,11 +1172,12 @@ impl HistoryManager {
         let (prefix, suffix_len, suffix_unseen) = match protect_start {
             None => (self.messages.clone(), 0usize, 0usize),
             Some(start) => {
-                if start >= self.messages.len() {
+                let history_len = self.messages.len();
+                if start >= history_len {
                     warn!(
                         unseen,
                         start,
-                        len = self.messages.len(),
+                        len = history_len,
                         "refusing compaction: protected suffix out of bounds"
                     );
                     return Ok(false);

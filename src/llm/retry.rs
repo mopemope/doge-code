@@ -80,13 +80,13 @@ pub(crate) fn max_attempts(max_retries: usize) -> usize {
 
 /// Extract `error.code` from an OpenAI-compatible error body, when present.
 /// Only structured `error.code` strings are used; no substring heuristics.
+/// The returned code is passed through the shared safe-identifier filter so
+/// it can appear in diagnostic logs without injection or content leakage.
 pub(crate) fn extract_provider_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value
-        .get("error")?
-        .get("code")?
-        .as_str()
-        .map(|s| s.to_owned())
+    let code = value.get("error")?.get("code")?.as_str()?;
+    let safe = crate::logging::safe_identifier(code);
+    if safe.is_empty() { None } else { Some(safe) }
 }
 
 /// True for the provider signal that must reach the agent loop untouched so
