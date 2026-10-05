@@ -324,7 +324,10 @@ model output, raw request/response bodies, provider error bodies, refusal
 bodies, encrypted Responses state, and credentials are never logged. Logs
 record shape and counts instead (message counts, request/response bytes,
 tool counts, token usage, retry metadata, provider codes, request IDs,
-durations). Older versions may have written such content to a repository-root
+durations). JSON parsing errors in Chat Completions responses, tool-call argument
+validation, and Responses usage report only their category and line/column
+position in logs and propagated errors; provider values and raw parser messages
+are omitted. Older versions may have written such content to a repository-root
 `debug.log`; that legacy file is ignored but never auto-deleted, so inspect
 and remove it yourself if present. To review content explicitly, use:
 
