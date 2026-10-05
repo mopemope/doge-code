@@ -352,7 +352,15 @@ glob; no resumable offset is claimed. When complete matches were collected,
 intentional result/byte limits retain partial results and pagination metadata.
 Stderr is drained concurrently with a bounded diagnostic prefix; each search
 owns and reaps its process, including errors and intentional early stops.
-Search still uses synchronous I/O; this does not add async cancellation.
+CLI/TUI/sub-agent and MCP request routes move file reads and glob expansion to
+bounded blocking workers. Cancellation is checked between read chunks, glob
+entries and files; normal cancellation waits for the worker to finish before
+returning, and canceled reads do not update active context. Search cancellation
+also stops quiet ripgrep processes, reaps the direct child and cleans up the
+owned Unix process group. MCP clients must send a request cancellation
+notification. The synchronous Rust APIs remain available. A filesystem call
+already blocked in the kernel cannot be interrupted immediately; a dropped
+read future requests cooperative stop without publishing a late result.
 
 `fs_read` and `fs_read_many_files` scan input in fixed-size UTF-8 chunks and
 retain only budgeted page/snippet candidates. Large lines and small output

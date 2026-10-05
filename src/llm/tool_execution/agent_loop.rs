@@ -1056,7 +1056,11 @@ pub async fn run_agent_loop(
             // started; dropping them after rename would lose undo/provenance.
             let res = if matches!(
                 tool_name,
-                "execute_process"
+                "task"
+                    | "fs_read"
+                    | "fs_read_many_files"
+                    | "search_text"
+                    | "execute_process"
                     | "execute_bash"
                     | "execute_shell"
                     | "run_workflow"

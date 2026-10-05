@@ -422,7 +422,6 @@ impl DogeMcpService {
         }
     }
 
-    #[tool(description = "Read the content of a text file ")]
     pub fn fs_read(
         &self,
         Parameters(params): Parameters<FsReadParams>,
@@ -444,7 +443,32 @@ impl DogeMcpService {
         }
     }
 
-    #[tool(description = "Read the content of multiple files ")]
+    #[tool(name = "fs_read", description = "Read the content of a text file ")]
+    pub async fn fs_read_routed(
+        &self,
+        Parameters(params): Parameters<FsReadParams>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        match crate::tools::read::fs_read_async(
+            params.path,
+            FsReadOptions {
+                start_line: params.start_line,
+                limit: params.limit,
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+                mode: FsReadMode::from_optional_str(params.mode.as_deref()),
+            },
+            self.state.config.clone(),
+            cancel,
+        )
+        .await
+        {
+            Ok(result) => self.format_json_result(result),
+            Err(e) => Ok(self.format_tool_error("Failed to read file", Some(json!(e.to_string())))),
+        }
+    }
+
     pub fn fs_read_many_files(
         &self,
         Parameters(params): Parameters<FsReadManyFilesParams>,
@@ -470,7 +494,39 @@ impl DogeMcpService {
         }
     }
 
-    #[tool(description = "Search for text within files using ripgrep ")]
+    #[tool(
+        name = "fs_read_many_files",
+        description = "Read the content of multiple files "
+    )]
+    pub async fn fs_read_many_files_routed(
+        &self,
+        Parameters(params): Parameters<FsReadManyFilesParams>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        match crate::tools::read_many::fs_read_many_files_async(
+            params.paths,
+            params.exclude,
+            params.recursive,
+            self.state.config.clone(),
+            FsReadManyOptions {
+                mode: FsReadMode::from_optional_str(params.mode.as_deref()),
+                cursor: params.cursor.map(|v| v as usize),
+                page_size: params.page_size.map(|v| v as usize),
+                max_entries: params.max_entries.map(|v| v as usize),
+                response_budget_chars: params.response_budget_chars.map(|v| v as usize),
+                snippet_max_chars: params.snippet_max_chars.map(|v| v as usize),
+            },
+            cancel,
+        )
+        .await
+        {
+            Ok(result) => self.format_json_result(result),
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to read files", Some(json!(e.to_string()))))
+            }
+        }
+    }
+
     pub fn search_text(
         &self,
         Parameters(params): Parameters<SearchTextParams>,
@@ -485,6 +541,50 @@ impl DogeMcpService {
             },
             &self.state.config,
         ) {
+            Ok(results) => {
+                let mut formatted_results: Vec<String> = results
+                    .rows
+                    .into_iter()
+                    .map(|(path, line, content)| {
+                        format!("{}:{}: {}", path.display(), line, content)
+                    })
+                    .collect();
+                if results.truncated {
+                    formatted_results
+                        .push(format!("[truncated] next_offset={:?}", results.next_offset));
+                }
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    formatted_results.join("\n"),
+                )]))
+            }
+            Err(e) => {
+                Ok(self.format_tool_error("Failed to search text", Some(json!(e.to_string()))))
+            }
+        }
+    }
+
+    #[tool(
+        name = "search_text",
+        description = "Search for text within files using ripgrep "
+    )]
+    pub async fn search_text_routed(
+        &self,
+        Parameters(params): Parameters<SearchTextParams>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        match crate::tools::search_text::search_text_with_options_async(
+            params.search_pattern,
+            params.file_glob,
+            crate::tools::search_text::SearchTextOptions {
+                max_results: params.max_results.map(|v| v as usize),
+                offset: params.offset.map(|v| v as usize),
+                response_budget_chars: None,
+            },
+            self.state.config.clone(),
+            cancel,
+        )
+        .await
+        {
             Ok(results) => {
                 let mut formatted_results: Vec<String> = results
                     .rows
@@ -702,5 +802,126 @@ impl ServerHandler for DogeMcpService {
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         self.list_resource_templates_impl().await
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use rmcp::{ServiceExt, service::PeerRequestOptions};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+
+    struct TrackingServer {
+        inner: DogeMcpService,
+        started: Arc<Notify>,
+        stopped: Arc<Notify>,
+    }
+    impl ServerHandler for TrackingServer {
+        fn get_info(&self) -> ServerConfig {
+            self.inner.get_info()
+        }
+        async fn call_tool(
+            &self,
+            params: CallToolRequestParams,
+            ctx: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            self.started.notify_one();
+            let result = self.inner.call_tool(params, ctx).await;
+            if let Ok(CallToolResponse::Complete(ref result)) = result {
+                assert_eq!(result.is_error, Some(true));
+                assert!(format!("{result:?}").contains("request cancelled"));
+            }
+            self.stopped.notify_one();
+            result
+        }
+        async fn list_tools(
+            &self,
+            params: Option<PaginatedRequestParams>,
+            ctx: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            self.inner.list_tools(params, ctx).await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellable_mcp_wire_request_stops_queued_worker_and_keeps_peer_usable() {
+        // Hold all read slots so the request is deterministically canceled
+        // while queued, with no timing-dependent large file fixture.
+        let blocker = CancellationToken::new();
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            workers.push(tokio::spawn(crate::tools::async_io::blocking(
+                blocker.clone(),
+                move |token| {
+                    let _ = started.send(());
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while !token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(())
+                },
+            )));
+            tokio::time::timeout(Duration::from_secs(3), ready)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_owned(),
+            ..Default::default()
+        });
+        let started = Arc::new(Notify::new());
+        let stopped = Arc::new(Notify::new());
+        let server = TrackingServer {
+            inner: DogeMcpService::new(Arc::new(McpServiceState::new(
+                config,
+                Arc::new(RwLock::new(None)),
+            ))),
+            started: started.clone(),
+            stopped: stopped.clone(),
+        };
+        let (server_io, client_io) = tokio::io::duplex(128 * 1024);
+        let server_task = tokio::spawn(async move {
+            let running = server.serve(server_io).await.unwrap();
+            let _ = running.waiting().await;
+        });
+        let client = ().serve(client_io).await.unwrap();
+        let params = CallToolRequestParams::new("fs_read").with_arguments(
+            json!({"path": dir.path().join("missing.txt").display().to_string()})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+        let handle = client
+            .peer()
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        handle
+            .cancel(Some("fixture cancellation".into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), stopped.notified())
+            .await
+            .unwrap();
+        let tools = client.list_all_tools().await.unwrap();
+        for name in ["fs_read", "fs_read_many_files", "search_text"] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(!format!("{:?}", tool.input_schema).contains("cancel"));
+        }
+        blocker.cancel();
+        for worker in workers {
+            let _ = worker.await;
+        }
+        client.cancel().await.unwrap();
+        server_task.await.unwrap();
     }
 }

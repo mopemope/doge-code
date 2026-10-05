@@ -50,6 +50,9 @@ pub struct SearchTextResult {
     pub warnings: Vec<String>,
 }
 
+type SearchRows = Vec<(PathBuf, usize, String)>;
+type CollectedMatches = (SearchRows, bool);
+
 struct SearchLocation {
     root: PathBuf,
     cwd: PathBuf,
@@ -362,6 +365,86 @@ pub fn search_text_with_options(
     )
 }
 
+pub async fn search_text_with_options_async(
+    search_pattern: String,
+    file_glob: Option<String>,
+    options: SearchTextOptions,
+    config: std::sync::Arc<AppConfig>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<SearchTextResult> {
+    search_with_program_async(
+        search_pattern,
+        file_glob,
+        options,
+        config,
+        cancel,
+        "rg".into(),
+    )
+    .await
+}
+
+async fn search_with_program_async(
+    search_pattern: String,
+    file_glob: Option<String>,
+    options: SearchTextOptions,
+    config: std::sync::Arc<AppConfig>,
+    cancel: tokio_util::sync::CancellationToken,
+    program: std::ffi::OsString,
+) -> Result<SearchTextResult> {
+    let (max_results, offset) = normalize_options(options);
+    let budget = options
+        .response_budget_chars
+        .unwrap_or(DEFAULT_SEARCH_BUDGET_CHARS)
+        .max(200);
+    let prep_config = config.clone();
+    let prepared = super::async_io::blocking(cancel.clone(), move |token| {
+        let location = search_location(file_glob.as_deref(), &prep_config)?;
+        super::async_io::check(Some(&token))?;
+        Ok(location.map(|location| {
+            (
+                search_command(&program, &search_pattern, &location),
+                location,
+            )
+        }))
+    })
+    .await?;
+    let Some((cmd, location)) = prepared else {
+        super::async_io::check(Some(&cancel))?;
+        return Ok(SearchTextResult {
+            rows: Vec::new(),
+            truncated: false,
+            next_offset: None,
+            offset,
+            max_results,
+            warnings: Vec::new(),
+        });
+    };
+    let parser_cancel = cancel.clone();
+    let streamed =
+        crate::execution::runner::run_managed_stream_async(cmd, cancel.clone(), move |stdout| {
+            // Check between records as well as pipe reads (BufReader may have data).
+            let reader = super::async_io::CancellableReader {
+                inner: stdout,
+                cancel: Some(&parser_cancel),
+            };
+            let mut reader = reader;
+            collect_matches(
+                &mut reader,
+                &location,
+                &config,
+                max_results,
+                offset,
+                Some(&parser_cancel),
+            )
+        })
+        .await;
+    super::async_io::check(Some(&cancel))?;
+    let streamed = streamed
+        .map_err(search_error)?
+        .ok_or_else(|| anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled))?;
+    finish_search(streamed, max_results, offset, budget)
+}
+
 fn search_with_program(
     search_pattern: &str,
     file_glob: Option<&str>,
@@ -385,6 +468,19 @@ fn search_with_program(
             warnings: Vec::new(),
         });
     };
+    let cmd = search_command(program, search_pattern, &location);
+    let streamed = crate::execution::runner::run_managed_stream(cmd, |stdout| {
+        collect_matches(stdout, &location, config, max_results, offset, None)
+    })
+    .map_err(search_error)?;
+    finish_search(streamed, max_results, offset, budget)
+}
+
+fn search_command(
+    program: &std::ffi::OsStr,
+    search_pattern: &str,
+    location: &SearchLocation,
+) -> Command {
     let mut cmd = Command::new(program);
     // Ambient rg configuration can add traversal roots or enable symlink
     // following. The tool owns these arguments so authorization stays valid.
@@ -405,43 +501,80 @@ fn search_with_program(
     } else {
         cmd.arg(".");
     }
-    let streamed = crate::execution::runner::run_managed_stream(cmd, |stdout| {
-        use crate::execution::runner::StreamStop;
-        let mut records = Records::new(stdout, MAX_OUTPUT_BYTES);
-        let mut results = Vec::new();
-        let mut match_index = 0usize;
-        loop {
-            let record = match records.next().context("failed to read ripgrep output")? {
-                RecordEvent::Eof => return Ok(((results, false), StreamStop::Eof)),
-                RecordEvent::Limit => {
-                    anyhow::ensure!(!results.is_empty(),
-                        "ripgrep output exceeded the 1048576-byte limit before a requested match could be returned; narrow the search pattern or file_glob (no resumable next_offset)");
-                    return Ok(((results, true), StreamStop::Limit));
-                }
-                RecordEvent::Record(record) => record,
-            };
-            let parsed: RipgrepJson = serde_json::from_slice(record)
-                .map_err(|error| search_error(format!("invalid ripgrep JSON record: {error}")))?;
-            if !matches!(parsed.r#type, RipgrepMessageType::Match) { continue; }
-            let (path_text, lines_text, line_number) = match (parsed.data.path, parsed.data.lines, parsed.data.line_number) {
+    cmd
+}
+
+fn collect_matches(
+    stdout: &mut dyn std::io::Read,
+    location: &SearchLocation,
+    config: &AppConfig,
+    max_results: usize,
+    offset: usize,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(CollectedMatches, crate::execution::runner::StreamStop)> {
+    use crate::execution::runner::StreamStop;
+    let mut records = Records::new(stdout, MAX_OUTPUT_BYTES);
+    let mut results = Vec::new();
+    let mut match_index = 0usize;
+    loop {
+        super::async_io::check(cancel)?;
+        let record = match records.next().context("failed to read ripgrep output")? {
+            RecordEvent::Eof => return Ok(((results, false), StreamStop::Eof)),
+            RecordEvent::Limit => {
+                anyhow::ensure!(
+                    !results.is_empty(),
+                    "ripgrep output exceeded the 1048576-byte limit before a requested match could be returned; narrow the search pattern or file_glob (no resumable next_offset)"
+                );
+                return Ok(((results, true), StreamStop::Limit));
+            }
+            RecordEvent::Record(record) => record,
+        };
+        let parsed: RipgrepJson = serde_json::from_slice(record)
+            .map_err(|error| search_error(format!("invalid ripgrep JSON record: {error}")))?;
+        if !matches!(parsed.r#type, RipgrepMessageType::Match) {
+            continue;
+        }
+        let (path_text, lines_text, line_number) =
+            match (parsed.data.path, parsed.data.lines, parsed.data.line_number) {
                 (Some(path), Some(lines), Some(number)) => (path, lines, number),
                 _ => anyhow::bail!("incomplete ripgrep match fields"),
             };
-            let raw_path = PathBuf::from(path_text.text);
-            let abs_path = if raw_path.is_absolute() { raw_path } else { location.cwd.join(raw_path) };
-            let abs_path = crate::tools::scope::ensure_in_project_scope(&abs_path, config)?;
-            if location.exact_file {
-                anyhow::ensure!(abs_path == location.root && abs_path.is_file(), "search result left its authorized exact file");
-            } else {
-                anyhow::ensure!(abs_path.starts_with(&location.root), "search result left its authorized traversal root");
-            }
-            // Authorization precedes skipping, budgeting and exposing match text.
-            match_index = match_index.saturating_add(1);
-            if match_index <= offset { continue; }
-            if results.len() >= max_results { return Ok(((results, false), StreamStop::Limit)); }
-            results.push((abs_path, line_number, lines_text.text.trim().to_string()));
+        let raw_path = PathBuf::from(path_text.text);
+        let abs_path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            location.cwd.join(raw_path)
+        };
+        let abs_path = crate::tools::scope::ensure_in_project_scope(&abs_path, config)?;
+        if location.exact_file {
+            anyhow::ensure!(
+                abs_path == location.root && abs_path.is_file(),
+                "search result left its authorized exact file"
+            );
+        } else {
+            anyhow::ensure!(
+                abs_path.starts_with(&location.root),
+                "search result left its authorized traversal root"
+            );
         }
-    }).map_err(search_error)?;
+        // Authorization precedes skipping, budgeting and exposing match text.
+        match_index = match_index.saturating_add(1);
+        if match_index <= offset {
+            continue;
+        }
+        if results.len() >= max_results {
+            return Ok(((results, false), StreamStop::Limit));
+        }
+        results.push((abs_path, line_number, lines_text.text.trim().to_string()));
+    }
+}
+
+fn finish_search(
+    streamed: crate::execution::runner::ManagedStreamOutput<CollectedMatches>,
+    max_results: usize,
+    offset: usize,
+    budget: usize,
+) -> Result<SearchTextResult> {
     check_search_exit(&streamed)?;
     let (mut results, byte_limited) = streamed.value;
     let truncated = streamed.stop == crate::execution::runner::StreamStop::Limit;
@@ -1395,6 +1528,158 @@ mod record_boundary_tests {
                 assert!(matches!(reader.next().unwrap(), RecordEvent::Record(b"b")));
             }
             assert!(matches!(reader.next().unwrap(), RecordEvent::Limit));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cancellation_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        config: Arc<AppConfig>,
+        program: std::ffi::OsString,
+    }
+    impl Fixture {
+        fn new(body: &str) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let program = dir.path().join("rg-fixture");
+            std::fs::write(dir.path().join("file.txt"), "fixture\n").unwrap();
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\nprintf '%s' $$ > '{}'\n{body}\n",
+                    dir.path().join("pid").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let config = Arc::new(AppConfig {
+                project_root: dir.path().to_owned(),
+                ..Default::default()
+            });
+            Self {
+                dir,
+                config,
+                program: program.into_os_string(),
+            }
+        }
+        async fn pid(&self) -> u32 {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(value) = std::fs::read_to_string(self.dir.path().join("pid"))
+                        && let Ok(pid) = value.parse()
+                    {
+                        return pid;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .unwrap()
+        }
+        fn search(
+            &self,
+            token: CancellationToken,
+        ) -> tokio::task::JoinHandle<Result<SearchTextResult>> {
+            let config = self.config.clone();
+            let program = self.program.clone();
+            tokio::spawn(search_with_program_async(
+                "fixture".into(),
+                None,
+                Default::default(),
+                config,
+                token,
+                program,
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellable_search_quiet_pipe_stops_reaps_and_keeps_timer_live() {
+        let fixture =
+            Fixture::new("(sleep 1; printf survived > escaped) >/dev/null 2>&1 &\nsleep 5");
+        let token = CancellationToken::new();
+        let work = fixture.search(token.clone());
+        let pid = fixture.pid().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        token.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), work)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(crate::llm::LlmErrorKind::Cancelled)
+            ),
+            "{error:#}"
+        );
+        assert!(
+            !crate::execution::is_process_alive(pid),
+            "direct child not reaped"
+        );
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(
+            !fixture.dir.path().join("escaped").exists(),
+            "descendant survived cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellable_search_precancel_never_spawns_and_drop_cleans_up() {
+        let fixture = Fixture::new("sleep 5");
+        let token = CancellationToken::new();
+        token.cancel();
+        let error = fixture.search(token).await.unwrap().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(crate::llm::LlmErrorKind::Cancelled)
+        ));
+        assert!(!fixture.dir.path().join("pid").exists());
+        let work = fixture.search(CancellationToken::new());
+        let pid = fixture.pid().await;
+        work.abort();
+        let _ = work.await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while crate::execution::is_process_alive(pid) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellable_search_preserves_rows_and_nonzero_errors() {
+        let row = r#"printf '%s\n' '{"type":"match","data":{"path":{"text":"file.txt"},"lines":{"text":"fixture\n"},"line_number":1}}'"#;
+        let fixture = Fixture::new(row);
+        let result = fixture
+            .search(CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].2, "fixture");
+        for body in [
+            format!("{row}\nprintf 'bad diagnostic' >&2\nexit 2"),
+            "kill -TERM $$".into(),
+            "printf '{partial'".into(),
+        ] {
+            let fixture = Fixture::new(&body);
+            assert!(
+                fixture
+                    .search(CancellationToken::new())
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
         }
     }
 }

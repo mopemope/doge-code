@@ -731,3 +731,72 @@ async fn test_review_task_output_bounded_after_json_escaping() {
     assert!(output.value["stop_reason"].is_null());
     server.abort();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellable_subagent_read_does_not_publish_late_context_or_result() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evidence.txt");
+    std::fs::write(&path, "actual evidence\n").unwrap();
+    let mut call = make_call("fs_read", "owned-read");
+    call.function.arguments = serde_json::json!({"path": path.display().to_string()}).to_string();
+    let (client, requests, server) = fixture(vec![(200, assistant(vec![call], None))]).await;
+    let cfg = Arc::new(crate::config::AppConfig {
+        project_root: dir.path().to_owned(),
+        mcp_servers: vec![],
+        ..Default::default()
+    });
+    let fs = crate::tools::FsTools::new(Arc::new(RwLock::new(None)), cfg);
+    let token = CancellationToken::new();
+    let runtime = ToolRuntime::build(&fs, Some(client.clone()), "fixture", Some(token.clone()))
+        .await
+        .unwrap();
+    let lock = fs.context_manager.write().await;
+    let canceller_token = token.clone();
+    let observed = requests.clone();
+    let canceller = tokio::spawn(async move {
+        while observed.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        canceller_token.cancel();
+    });
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_subagent(
+            &client,
+            "fixture",
+            &runtime,
+            "read",
+            "read evidence",
+            Some(token),
+            dir.path().to_str().unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .err()
+    .expect("cancelled subagent");
+    assert!(matches!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(crate::llm::LlmErrorKind::Cancelled)
+    ));
+    drop(lock);
+    canceller.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        fs.context_manager
+            .read()
+            .await
+            .get_context_prompt()
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "canceled result sent to provider"
+    );
+    server.abort();
+}

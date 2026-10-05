@@ -392,6 +392,61 @@ impl FsTools {
         list::fs_list(path, max_depth, pattern, &self.config, options)
     }
 
+    async fn update_read_context(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let mut context = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled)),
+            context = self.context_manager.write() => context,
+        };
+        super::async_io::check(Some(cancel))?;
+        for path in paths {
+            context.add_file(&path);
+        }
+        Ok(())
+    }
+
+    pub async fn fs_read_async(
+        &self,
+        path: String,
+        opts: read::FsReadOptions,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<read::FsReadResult> {
+        let result =
+            read::fs_read_async(path.clone(), opts, self.config.clone(), cancel.clone()).await?;
+        self.update_read_context([PathBuf::from(path)], &cancel)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn fs_read_many_files_async(
+        &self,
+        paths: Vec<String>,
+        exclude: Option<Vec<String>>,
+        recursive: Option<bool>,
+        options: read_many::FsReadManyOptions,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<read_many::FsReadManyResponse> {
+        let result = read_many::fs_read_many_files_async(
+            paths,
+            exclude,
+            recursive,
+            self.config.clone(),
+            options,
+            cancel.clone(),
+        )
+        .await?;
+        self.update_read_context(
+            result.files.iter().map(|file| PathBuf::from(&file.path)),
+            &cancel,
+        )
+        .await?;
+        Ok(result)
+    }
+
     pub fn fs_read(&self, path: &str, opts: read::FsReadOptions) -> Result<read::FsReadResult> {
         match read::fs_read(path, opts, &self.config) {
             Ok(result) => {
@@ -431,6 +486,23 @@ impl FsTools {
             search_text::SearchTextOptions::default(),
         )
         .map(|result| result.rows)
+    }
+
+    pub async fn search_text_with_options_async(
+        &self,
+        search_pattern: String,
+        file_glob: Option<String>,
+        options: search_text::SearchTextOptions,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<search_text::SearchTextResult> {
+        search_text::search_text_with_options_async(
+            search_pattern,
+            file_glob,
+            options,
+            self.config.clone(),
+            cancel,
+        )
+        .await
     }
 
     pub fn search_text_with_options(

@@ -110,6 +110,31 @@ pub fn fs_read_many_files(
     config: &AppConfig,
     options: FsReadManyOptions,
 ) -> Result<FsReadManyResponse> {
+    fs_read_many_cancellable(paths, exclude, config, options, None)
+}
+
+pub async fn fs_read_many_files_async(
+    paths: Vec<String>,
+    exclude: Option<Vec<String>>,
+    _recursive: Option<bool>,
+    config: std::sync::Arc<AppConfig>,
+    options: FsReadManyOptions,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<FsReadManyResponse> {
+    super::async_io::blocking(cancel, move |token| {
+        fs_read_many_cancellable(paths, exclude, &config, options, Some(&token))
+    })
+    .await
+}
+
+fn fs_read_many_cancellable(
+    paths: Vec<String>,
+    exclude: Option<Vec<String>>,
+    config: &AppConfig,
+    options: FsReadManyOptions,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<FsReadManyResponse> {
+    super::async_io::check(cancel)?;
     for (name, value) in [
         ("page_size", options.page_size),
         ("max_entries", options.max_entries),
@@ -122,7 +147,21 @@ pub fn fs_read_many_files(
     let mut all_paths = Vec::new();
 
     for path_pattern in paths {
-        for entry in glob(&path_pattern)? {
+        super::async_io::check(cancel)?;
+        // glob::Paths::next can traverse a whole unmatched subtree before
+        // yielding. Async reads use entry-level cooperative enumeration.
+        let entries: Box<dyn Iterator<Item = Result<std::path::PathBuf>>> =
+            if let Some(token) = cancel {
+                Box::new(
+                    super::cancellable_glob::expand(&path_pattern, token)?
+                        .into_iter()
+                        .map(Ok),
+                )
+            } else {
+                Box::new(glob(&path_pattern)?.map(|entry| entry.map_err(anyhow::Error::from)))
+            };
+        for entry in entries {
+            super::async_io::check(cancel)?;
             match entry {
                 Ok(path) => {
                     // Roots and target share one canonical-path contract.
@@ -141,9 +180,14 @@ pub fn fs_read_many_files(
 
     if let Some(exclude_patterns) = exclude {
         for pattern in exclude_patterns {
-            all_paths.retain(|path: &std::path::PathBuf| {
-                !path.to_str().unwrap_or("").contains(&pattern)
-            });
+            let mut retained = Vec::with_capacity(all_paths.len());
+            for path in all_paths {
+                super::async_io::check(cancel)?;
+                if !path.to_str().unwrap_or("").contains(&pattern) {
+                    retained.push(path);
+                }
+            }
+            all_paths = retained;
         }
     }
 
@@ -181,15 +225,17 @@ pub fn fs_read_many_files(
     let mut consumed = cursor;
     let mut file_indices = Vec::new();
     for (index, path) in all_paths.iter().enumerate().take(end_index).skip(cursor) {
+        super::async_io::check(cancel)?;
         if !path.is_file() {
             consumed = index + 1;
             continue;
         }
         let p = Path::new(path);
         anyhow::ensure!(p.is_absolute(), "Path must be absolute");
+        super::async_io::check(cancel)?;
         let f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
         let scanned = super::text_scan::read_snippet(
-            f,
+            super::async_io::CancellableReader { inner: f, cancel },
             (options.mode == FsReadMode::Summary).then_some(DEFAULT_MULTI_SNIPPET_LINES),
             snippet_cap.min(remaining_budget),
         )
