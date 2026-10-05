@@ -29,8 +29,8 @@ pub const MAX_SINGLE_OBSERVATION_BYTES: usize = 128 * 1024;
 /// Minimum tool-result chars worth offloading. Replacing a tiny result with
 /// a stub can make the prompt larger.
 pub const MIN_OBSERVABLE_TOOL_CHARS: usize = 200;
-/// Maximum chars returned per `observation_read` call (fits below the 8,000
-/// global tool-output cap after the header is added).
+/// Maximum raw bytes requested per `observation_read` call. The tool further
+/// budgets its serialized envelope so escaping and metadata fit the global cap.
 pub const MAX_OBSERVATION_READ_CHARS: usize = 6_000;
 
 /// Prefix identifying an offloaded reference stub in `role=tool` content.

@@ -131,44 +131,18 @@ pub async fn search_text(
         Ok(result) => {
             let truncated = result.truncated;
             let next_offset = result.next_offset;
-            let effective_offset = result.offset;
-            let effective_max_results = result.max_results;
-            let warnings = result.warnings;
-            let items: Vec<_> = result
-                .rows
-                .into_iter()
-                .map(|(p, ln, text)| {
-                    json!({
-                        "path": p.display().to_string(),
-                        "line": ln,
-                        "text": text,
-                    })
-                })
-                .collect();
-            let value = json!({
-                "ok": true,
-                "results": items,
-                "meta": {
-                    "offset": effective_offset,
-                    "max_results": effective_max_results,
-                    "returned": items.len(),
-                    "truncated": truncated,
-                    "next_offset": next_offset
-                },
-                "warnings": warnings
-            });
+            let returned = result.rows.len();
+            let value = result.tool_value();
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: true,
                 result_summary: if truncated {
                     format!(
                         "Found matches for '{}': returned {} (truncated, next_offset={:?})",
-                        search_pattern,
-                        items.len(),
-                        next_offset
+                        search_pattern, returned, next_offset
                     )
                 } else {
-                    format!("Found {} matches for '{}'", items.len(), search_pattern)
+                    format!("Found {} matches for '{}'", returned, search_pattern)
                 },
             })
         }
