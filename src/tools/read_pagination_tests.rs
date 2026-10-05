@@ -451,3 +451,112 @@ fn read_pagination_long_paths_scope_and_metadata_cap() {
     };
     assert!(!super::budget::read_result_fits(&oversized).unwrap());
 }
+
+#[tokio::test]
+async fn read_streaming_dispatch_and_mcp_keep_results_and_error_semantics() -> anyhow::Result<()> {
+    use crate::llm::tool_execution::dispatch_tool_call;
+    use crate::llm::tool_runtime::ToolRuntime;
+    use crate::llm::types::{ToolCall, ToolCallFunction};
+    use crate::mcp::service::{DogeMcpService, McpServiceState};
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let (_dir, config, path) = fixture("あ\r\n😀\r\nlast\r");
+    let config = Arc::new(config);
+    let fs = super::FsTools::new(Arc::new(RwLock::new(None)), config.clone());
+    let runtime = ToolRuntime::build(&fs, None, "fixture", None).await?;
+    runtime
+        .tool_catalog
+        .activate(&["fs_read".into(), "fs_read_many_files".into()])
+        .await;
+    let service = DogeMcpService::new(Arc::new(McpServiceState::new(
+        config,
+        Arc::new(RwLock::new(None)),
+    )));
+
+    for (bytes, budget, read_ok, many_ok) in [
+        ("あ\r\n😀\r\nlast\r".as_bytes().to_vec(), 20, true, true),
+        // A valid selected page/snippet does not conceal malformed unread content.
+        (b"ok\n\xff".to_vec(), 20, false, false),
+        (b"abcdef".to_vec(), 2, false, true),
+        (b"ok".to_vec(), 0, false, false),
+    ] {
+        std::fs::write(&path, bytes)?;
+        for (name, expected_ok) in [("fs_read", read_ok), ("fs_read_many_files", many_ok)] {
+            let args = json!({"path":path,"paths":[path],"page_size":1,"response_budget_chars":budget,"snippet_max_chars":10});
+            let call = ToolCall {
+                id: Some("bounded-read".into()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: name.into(),
+                    arguments: args.to_string(),
+                },
+            };
+            let dispatched = dispatch_tool_call(&runtime, &call).await;
+            assert_eq!(dispatched.is_ok(), expected_ok, "{name}: {dispatched:?}");
+            let mcp = if name == "fs_read" {
+                service.fs_read(Parameters(serde_json::from_value(args)?))?
+            } else {
+                service.fs_read_many_files(Parameters(serde_json::from_value(args)?))?
+            };
+            assert_eq!(mcp.is_error == Some(true), !expected_ok);
+            if let Ok(output) = dispatched {
+                let encoded = serde_json::to_value(&mcp)?;
+                let value: serde_json::Value =
+                    serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap())?;
+                assert_eq!(value, output.value["result"]);
+                if budget == 20 {
+                    if name == "fs_read" {
+                        assert_eq!(value["content"], "あ");
+                        assert_eq!(value["next_cursor"], 2);
+                    } else {
+                        assert_eq!(value["files"][0]["snippet"], "あ\n😀\nlast\r");
+                    }
+                } else {
+                    assert_eq!(value["files"][0]["snippet"], "ab");
+                    assert_eq!(value["files"][0]["truncated"], true);
+                }
+            } else if budget == 2 {
+                assert!(
+                    dispatched
+                        .unwrap_err()
+                        .to_string()
+                        .contains("requires at least 6 Unicode characters")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn read_streaming_many_full_keeps_original_line_separators_and_summary_boundary() {
+    use super::read::FsReadMode;
+    let content = (0..42).map(|i| format!("{i}あ\r\n")).collect::<String>();
+    let (_dir, config, path) = fixture(&content);
+    for mode in [FsReadMode::Full, FsReadMode::Summary] {
+        let result = fs_read_many_files(
+            vec![path.clone()],
+            None,
+            None,
+            &config,
+            FsReadManyOptions {
+                mode,
+                response_budget_chars: Some(40000),
+                snippet_max_chars: Some(40000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = if mode == FsReadMode::Full {
+            content.clone()
+        } else {
+            content.lines().take(40).collect::<Vec<_>>().join("\n")
+        };
+        assert_eq!(result.files[0].snippet, expected);
+        assert_eq!(result.files[0].total_lines, 42);
+        assert_eq!(result.files[0].truncated, mode == FsReadMode::Summary);
+    }
+}

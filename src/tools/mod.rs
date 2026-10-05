@@ -32,6 +32,7 @@ pub mod search_text;
 pub mod security;
 pub mod session_manager;
 pub mod task;
+mod text_scan;
 pub mod tool_search;
 pub mod undo;
 pub mod workflow;

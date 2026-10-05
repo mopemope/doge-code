@@ -6,7 +6,6 @@ use glob::glob;
 use serde::Serialize;
 use serde_json::json;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
@@ -188,20 +187,16 @@ pub fn fs_read_many_files(
         }
         let p = Path::new(path);
         anyhow::ensure!(p.is_absolute(), "Path must be absolute");
-        let mut f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)
-            .with_context(|| format!("read {}", p.display()))?;
-        let total_lines = s.lines().count();
-        let snippet = if options.mode == FsReadMode::Summary {
-            s.lines()
-                .take(DEFAULT_MULTI_SNIPPET_LINES)
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            s
-        };
-        let snippet_chars = snippet.chars().count();
+        let f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
+        let scanned = super::text_scan::read_snippet(
+            f,
+            (options.mode == FsReadMode::Summary).then_some(DEFAULT_MULTI_SNIPPET_LINES),
+            snippet_cap.min(remaining_budget),
+        )
+        .with_context(|| format!("read {}", p.display()))?;
+        let total_lines = scanned.total_lines;
+        let snippet = scanned.text;
+        let snippet_chars = scanned.chars;
         let mut wanted = snippet_chars.min(snippet_cap);
         if wanted > remaining_budget {
             if !response.files.is_empty() {
