@@ -9,6 +9,7 @@ use crate::llm::retry::{
     extract_provider_code, is_context_length_exceeded_code, kind_for_status, max_attempts,
     parse_retry_after, should_retry,
 };
+use crate::llm::telemetry::{self, PROTOCOL_CHAT_COMPLETIONS};
 use crate::llm::types::{ChatMessage, ToolDef};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -187,14 +188,6 @@ async fn chat_tools_once_attempt(
         resolve_reasoning_hint(&client.base_url, model, &reasoning_mode, reasoning_effort);
     let reasoning_effort_str = resolved.map(|e| e.as_api_str());
     let hint_sent = reasoning_effort_str.is_some();
-    debug!(
-        reasoning_mode = reasoning_mode.as_str(),
-        reasoning_effort = reasoning_effort.map(|e| e.as_api_str()),
-        reasoning_hint_sent = hint_sent,
-        endpoint = %url,
-        "reasoning decision for chat_tools_once",
-    );
-
     let req = ChatRequestWithToolsRef {
         model,
         messages,
@@ -203,6 +196,30 @@ async fn chat_tools_once_attempt(
         tool_choice: None,
         reasoning_effort: reasoning_effort_str,
     };
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let summary = telemetry::summarize_chat_request(
+            messages,
+            tools.len(),
+            telemetry::measure_bytes(&req),
+            reasoning_effort_str,
+        );
+        debug!(
+            protocol = PROTOCOL_CHAT_COMPLETIONS,
+            message_count = summary.message_count,
+            system_messages = summary.system_messages,
+            developer_messages = summary.developer_messages,
+            user_messages = summary.user_messages,
+            assistant_messages = summary.assistant_messages,
+            tool_messages = summary.tool_messages,
+            tool_schema_count = summary.tool_schema_count,
+            request_bytes = summary.request_bytes,
+            reasoning_mode = reasoning_mode.as_str(),
+            reasoning_hint_sent = hint_sent,
+            "reasoning decision for chat_tools_once",
+        );
+    }
+    // Keep the original requested effort available for future telemetry
+    // without logging content; the resolved hint above drives the wire.
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -260,7 +277,7 @@ async fn chat_tools_once_attempt(
                         None,
                         None,
                         None,
-                        anyhow!(kind).context(format!("send chat request (tools): {e}")),
+                        anyhow!(kind).context("send chat request (tools)"),
                     ));
                 }
                 Err(_) => {
@@ -279,6 +296,7 @@ async fn chat_tools_once_attempt(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let request_id = telemetry::extract_request_id(resp.headers());
         let retry_after = parse_retry_after(resp.headers());
         let text = tokio::select! {
             biased;
@@ -295,11 +313,16 @@ async fn chat_tools_once_attempt(
             res = resp.text() => res.unwrap_or_default(),
         };
         let trimmed = text.trim().to_owned();
+        let meta = telemetry::parse_provider_error_metadata(&trimmed, request_id.as_deref());
         let provider_code = extract_provider_code(&trimmed);
         // Never log full bodies or prompts; status + structured code only.
         error!(
             status = status.as_u16(),
-            provider_code = provider_code.as_deref().unwrap_or(""),
+            provider_code = meta.code.as_deref().unwrap_or(""),
+            provider_type = meta.error_type.as_deref().unwrap_or(""),
+            body_bytes = meta.body_bytes,
+            body_is_json = meta.body_is_json,
+            request_id = request_id.as_deref().unwrap_or(""),
             "llm chat_tools_once non-success status"
         );
 
@@ -329,13 +352,13 @@ async fn chat_tools_once_attempt(
         }
 
         let kind = kind_for_status(status);
-        let detail: String = trimmed.chars().take(500).collect();
+        let message = telemetry::provider_error_message(status.as_u16(), &meta);
         return Err(RequestAttemptFailure::new(
             kind.clone(),
             Some(status),
             retry_after,
             provider_code,
-            anyhow!(kind).context(format!("chat (tools) error: {status} - {detail}")),
+            anyhow!(kind).context(message),
         ));
     }
 
@@ -363,7 +386,7 @@ async fn chat_tools_once_attempt(
                         None,
                         None,
                         None,
-                        anyhow!(kind).context(format!("read chat response body (tools): {e}")),
+                        anyhow!(kind).context("read chat response body (tools)"),
                     ));
                 }
                 Err(_) => {
@@ -380,10 +403,8 @@ async fn chat_tools_once_attempt(
         }
     };
 
-    debug!(
-        response_len = response_text.len(),
-        "llm chat_tools_once response"
-    );
+    let response_bytes = response_text.len();
+
     let cleaned_text = clean_json_text(&response_text);
     let body: ChatResponseWithTools = match serde_json::from_str(&cleaned_text) {
         Ok(b) => b,
@@ -403,6 +424,8 @@ async fn chat_tools_once_attempt(
     if let Some(usage) = &body.usage {
         client.record_usage(usage);
     }
+    let usage_present = body.usage.is_some();
+    let choice_count = body.choices.len();
 
     let msg = match body.choices.into_iter().next() {
         Some(m) => m,
@@ -431,7 +454,28 @@ async fn chat_tools_once_attempt(
             .unwrap_or(LlmErrorKind::Client);
         return Err(RequestAttemptFailure::new(kind, None, None, None, error));
     }
-    debug!("llm response message {:?}", msg);
+    {
+        let summary = telemetry::summarize_response_message(
+            msg.message.content.as_deref(),
+            msg.message.tool_calls.len(),
+            msg.message.refusal.as_deref(),
+            usage_present,
+            msg.finish_reason.as_deref(),
+            response_bytes,
+            choice_count,
+        );
+        debug!(
+            protocol = PROTOCOL_CHAT_COMPLETIONS,
+            response_bytes = summary.response_bytes,
+            choice_count = summary.choice_count,
+            assistant_content_chars = summary.assistant_content_chars,
+            tool_call_count = summary.tool_call_count,
+            refusal_present = summary.refusal_present,
+            usage_present = summary.usage_present,
+            finish_reason = summary.finish_reason.as_deref().unwrap_or(""),
+            "llm chat_tools_once response"
+        );
+    }
     Ok(msg.message)
 }
 
@@ -1495,5 +1539,113 @@ mod tests {
         // Usage from the single successful response only; failed attempts
         // carry no usage. Double counting would show 300.
         assert_eq!(client.get_total_tokens_used(), 150);
+    }
+
+    #[tokio::test]
+    async fn tool_request_error_body_secret_not_in_error() {
+        let secret = "SECRET_PROVIDER_BODY_123";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 400,
+                body: serde_json::json!({"error": {"code": "invalid_request", "message": secret}}),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = tool_retry_client(url, 0);
+        let err = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{err:?} {}", err);
+        assert!(
+            !rendered.contains(secret),
+            "provider error body must not leak, got {rendered}"
+        );
+        assert!(rendered.contains("400"));
+        assert!(rendered.contains("invalid_request"));
+    }
+
+    #[tokio::test]
+    async fn tool_request_response_summary_hides_tool_arguments() {
+        let secret_arg = "SECRET_TOOL_ARGUMENT_76ef";
+        let secret_output = "SECRET_MODEL_OUTPUT_cd34";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(
+            vec![ScriptedToolResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "id": "test",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": secret_output,
+                            "tool_calls": [{
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "custom_tool",
+                                    "arguments": format!("{{\"content\":\"{secret_arg}\"}}")
+                                }
+                            }]
+                        }
+                    }]
+                }),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let tools = vec![crate::llm::types::ToolDef {
+            kind: "function".into(),
+            function: crate::llm::types::ToolFunctionDef {
+                name: "custom_tool".into(),
+                description: "test tool".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            },
+        }];
+        let client = tool_retry_client(url, 0);
+        let msg = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &tools,
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("tool response");
+        // Display path preserves content.
+        assert_eq!(msg.content.as_deref(), Some(secret_output));
+        assert!(msg.tool_calls[0].function.arguments.contains(secret_arg));
+        // Diagnostic summary must not retain either secret.
+        let summary = crate::llm::telemetry::summarize_response_message(
+            msg.content.as_deref(),
+            msg.tool_calls.len(),
+            msg.refusal.as_deref(),
+            false,
+            Some("tool_calls"),
+            1024,
+            1,
+        );
+        let rendered = format!("{summary:?}");
+        assert!(!rendered.contains(secret_arg));
+        assert!(!rendered.contains(secret_output));
+        assert_eq!(summary.tool_call_count, 1);
     }
 }

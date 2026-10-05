@@ -1471,12 +1471,22 @@ pub async fn run_agent_loop(
 
         // If assistant returned final content without tool calls, we are done.
         if msg.tool_calls.is_empty() {
-            // Send final assistant content to UI (if present)
+            // Send final assistant content to UI (if present). The UI
+            // channel carries user-visible content; diagnostics below
+            // record only shape and counts.
             if let Some(content) = &msg.content
                 && !content.is_empty()
                 && let Some(tx) = &ui_tx
             {
-                debug!(response_content = ?content, "Sending LLM response content (final).");
+                let size = crate::llm::telemetry::text_size(content);
+                debug!(
+                    response_chars = size.chars,
+                    response_bytes = size.bytes,
+                    tool_call_count = msg.tool_calls.len(),
+                    provider_state_present = msg.provider_state.is_some(),
+                    native_compaction_observed = native_compaction_occurred,
+                    "sending LLM response (final)"
+                );
                 let _ = tx.send(format!("::status:done:{}", content));
             }
 
@@ -1549,11 +1559,20 @@ pub async fn run_agent_loop(
         }
 
         // There are tool calls to process. Send intermediate content if available.
+        // UI delivery preserves content; diagnostics record only sizes.
         if let Some(content) = &msg.content
             && !content.is_empty()
             && let Some(tx) = &ui_tx
         {
-            debug!(response_content = ?content, "Sending intermediate LLM response content.");
+            let size = crate::llm::telemetry::text_size(content);
+            debug!(
+                response_chars = size.chars,
+                response_bytes = size.bytes,
+                tool_call_count = msg.tool_calls.len(),
+                provider_state_present = msg.provider_state.is_some(),
+                native_compaction_observed = native_compaction_occurred,
+                "sending intermediate LLM response"
+            );
             let _ = tx.send(content.clone());
         }
 

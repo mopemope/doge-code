@@ -57,7 +57,7 @@ impl std::io::Write for CountingWriter {
 ///
 /// Avoids `serde_json::to_vec(value)?.len()` which would allocate a second
 /// copy of an already-large request purely for diagnostics.
-pub fn serialized_size<T: serde::Serialize>(value: &T) -> Result<u64> {
+pub fn serialized_size<T: serde::Serialize + ?Sized>(value: &T) -> Result<u64> {
     let mut writer = CountingWriter::default();
     serde_json::to_writer(&mut writer, value)
         .map_err(|e| anyhow::anyhow!("serialize size measurement failed: {e}"))?;

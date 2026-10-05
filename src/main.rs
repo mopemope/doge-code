@@ -149,7 +149,7 @@ pub enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     // Evidence export uses current-directory storage without loading user
-    // credentials, creating default config/debug.log, or starting services.
+    // credentials, creating default config/project logs, or starting services.
     if let Some(Commands::Session {
         command: command @ session::cli::SessionCommands::Evidence { .. },
     }) = &cli.command

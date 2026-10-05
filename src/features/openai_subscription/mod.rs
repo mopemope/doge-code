@@ -130,10 +130,7 @@ impl ProviderError {
 }
 
 fn safe_identifier(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        .take(128)
-        .collect()
+    crate::logging::safe_identifier(s)
 }
 
 #[cfg(test)]

@@ -52,7 +52,17 @@ impl TuiApp {
 
         // Append received (sanitized) token to the parsing buffer for final processing
         self.llm_parsing_buffer.push_str(&clean);
-        debug!(appended_content = %clean, "Appended token to llm_parsing_buffer");
+        {
+            let size = crate::llm::telemetry::text_size(&clean);
+            let buffer_size = crate::llm::telemetry::text_size(&self.llm_parsing_buffer);
+            debug!(
+                appended_chars = size.chars,
+                appended_bytes = size.bytes,
+                stream_buffer_chars = buffer_size.chars,
+                stream_buffer_bytes = buffer_size.bytes,
+                "appended token to llm_parsing_buffer"
+            );
+        }
 
         if self.current_stream_start.is_none() {
             self.current_stream_start = Some(self.log.len());
@@ -147,7 +157,14 @@ impl TuiApp {
         };
 
         if should_add_content {
-            debug!(provided_content = %content, "Adding content");
+            {
+                let size = crate::llm::telemetry::text_size(&content);
+                debug!(
+                    provided_chars = size.chars,
+                    provided_bytes = size.bytes,
+                    "adding finalized LLM content"
+                );
+            }
 
             if let Some(start) = self.current_stream_start.take()
                 && start <= self.log.len()
@@ -165,5 +182,34 @@ impl TuiApp {
         // Reset the flag after the response has been fully added
         self.is_llm_response_active = false;
         debug!("Set is_llm_response_active to false");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> TuiApp {
+        TuiApp::new("test", None, "default").expect("test app")
+    }
+
+    #[test]
+    fn tui_telemetry_hides_secret_but_buffer_keeps_content() {
+        let secret = "SECRET_MODEL_OUTPUT_cd34";
+        let mut app = test_app();
+        app.append_stream_token_structured(secret);
+        // UI buffer preserves content for display.
+        assert!(app.llm_parsing_buffer.contains(secret));
+        assert!(
+            app.last_llm_response_content
+                .as_deref()
+                .is_some_and(|s| s.contains(secret))
+        );
+        // Telemetry metadata carries only sizes.
+        let size = crate::llm::telemetry::text_size(secret);
+        let rendered = format!("{size:?}");
+        assert!(!rendered.contains(secret));
+        assert_eq!(size.chars, secret.chars().count());
+        assert_eq!(size.bytes, secret.len());
     }
 }
