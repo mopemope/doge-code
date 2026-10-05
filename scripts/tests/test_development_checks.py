@@ -320,6 +320,7 @@ class EvaluationTests(unittest.TestCase):
             "settings": {"environment": "fixed"}, "variant": "baseline",
             "run_status": "completed", "stop_reason": None,
             "request_attempts": 1, "usage_records": 1, "unknown_usage_attempts": 0,
+            "cached_usage_records": 1,
             "accepted": True, "input_tokens": 100, "output_tokens": 20,
             "cached_input_tokens": 50, "elapsed_seconds": 3,
             "tool_calls": 2, "rework_count": 0, "contract_violations": 0,
@@ -370,7 +371,7 @@ class EvaluationTests(unittest.TestCase):
     def test_zero_attempt_usage_is_complete_when_explicit(self):
         summary = evals.summarize(self.load_fixture([self.v2_record(
             request_attempts=0, usage_records=0, unknown_usage_attempts=0,
-            input_tokens=0, output_tokens=0, cached_input_tokens=0)]))
+            input_tokens=0, output_tokens=0, cached_input_tokens=0, cached_usage_records=0)]))
         self.assertTrue(summary["token_metrics_complete"])
         self.assertEqual(summary["total_tokens"], 0)
         self.assertEqual(summary["tokens_per_accepted_run"], 0)
@@ -435,6 +436,60 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(summary["failed_runs"], 1)
                 self.assertEqual(summary["seconds_per_accepted_run"], 6)
                 self.assertEqual(summary["tool_calls"], 4)
+
+    def test_partial_cached_item_coverage_does_not_invalidate_normal_tokens(self):
+        summary = evals.summarize(self.load_fixture([self.v2_record(
+            request_attempts=2, usage_records=2, cached_usage_records=1,
+            input_tokens=200, output_tokens=40, cached_input_tokens=80)]))
+        self.assertEqual(summary["total_tokens"], 240)
+        self.assertEqual(summary["tokens_per_accepted_run"], 240)
+        self.assertEqual(summary["cached_token_complete_runs"], 0)
+        self.assertIsNone(summary["cached_input_tokens"])
+        self.assertEqual(summary["known_cached_input_tokens"], 80)
+
+    def test_legacy_cache_uses_original_field_even_with_new_extension(self):
+        record = dict(self.record, known_cached_input_tokens=0, cached_usage_records=0)
+        summary = evals.summarize(self.load_fixture([record]))
+        self.assertEqual(summary["cached_input_tokens"], 50)
+        self.assertEqual(summary["known_cached_input_tokens"], 50)
+        self.assertEqual(summary["cached_token_complete_runs"], 1)
+
+    def test_old_v2_and_inconsistent_cache_coverage_keep_known_subtotals(self):
+        for count in (None, 0, 2):
+            record = self.v2_record(cached_usage_records=count)
+            summary = evals.summarize(self.load_fixture([record]))
+            self.assertIsNone(summary["cached_input_tokens"])
+            self.assertEqual(summary["known_cached_input_tokens"], 50)
+            self.assertEqual(summary["total_tokens"], 120)
+        record = self.v2_record()
+        del record["cached_usage_records"]
+        summary = evals.summarize(self.load_fixture([record]))
+        self.assertIsNone(summary["cached_input_tokens"])
+        self.assertEqual(summary["known_cached_input_tokens"], 50)
+
+    def test_new_known_cache_is_counted_once_and_zero_is_not_missing(self):
+        for known, expected in ((0, 0), (40, 40), (None, 50)):
+            summary = evals.summarize(self.load_fixture([self.v2_record(
+                cached_usage_records=0, known_cached_input_tokens=known)]))
+            self.assertIsNone(summary["cached_input_tokens"])
+            self.assertEqual(summary["known_cached_input_tokens"], expected)
+        summary = evals.summarize(self.load_fixture([
+            self.v2_record(known_cached_input_tokens=50),
+            self.v2_record(trial=2, cached_input_tokens=None, cached_usage_records=0,
+                           known_cached_input_tokens=30)]))
+        self.assertEqual(summary["cached_token_complete_runs"], 1)
+        self.assertIsNone(summary["cached_input_tokens"])
+        self.assertEqual(summary["known_cached_input_tokens"], 80)
+        self.assertEqual(summary["total_tokens"], 240)
+
+    def test_invalid_optional_counter_or_known_subtotal_is_rejected(self):
+        for field in ("cached_usage_records", "reasoning_usage_records", "cache_write_usage_records",
+                      "known_cached_input_tokens", "known_reasoning_tokens", "known_cache_write_tokens"):
+            for value in (True, -1, 1.5, "1"):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.load_fixture([self.v2_record(**{field: value})])
+        with self.assertRaises(ValueError):
+            self.load_fixture([self.v2_record(known_cached_input_tokens=101)])
 
     def test_unknown_cached_tokens_are_supported(self):
         summary = evals.summarize(self.load_fixture(
