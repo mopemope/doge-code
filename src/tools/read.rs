@@ -87,6 +87,28 @@ pub struct FsReadResult {
 }
 
 pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<FsReadResult> {
+    fs_read_cancellable(path, opts, config, None)
+}
+
+pub async fn fs_read_async(
+    path: String,
+    opts: FsReadOptions,
+    config: std::sync::Arc<AppConfig>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<FsReadResult> {
+    super::async_io::blocking(cancel, move |token| {
+        fs_read_cancellable(&path, opts, &config, Some(&token))
+    })
+    .await
+}
+
+fn fs_read_cancellable(
+    path: &str,
+    opts: FsReadOptions,
+    config: &AppConfig,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<FsReadResult> {
+    super::async_io::check(cancel)?;
     let p = Path::new(path);
 
     // Ensure the path is absolute
@@ -104,6 +126,7 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         )
     })?;
 
+    super::async_io::check(cancel)?;
     let meta = fs::metadata(p).with_context(|| format!("metadata {}", p.display()))?;
     if !meta.is_file() {
         anyhow::bail!("not a file");
@@ -133,9 +156,15 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
             "response_budget_chars capped at 40000; serialized JSON overhead also applies".into(),
         );
     }
+    super::async_io::check(cancel)?;
     let f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    let page = super::text_scan::read_page(f, requested_start, line_limit, budget)
-        .with_context(|| format!("read {}", p.display()))?;
+    let page = super::text_scan::read_page(
+        super::async_io::CancellableReader { inner: f, cancel },
+        requested_start,
+        line_limit,
+        budget,
+    )
+    .with_context(|| format!("read {}", p.display()))?;
     let total_lines = page.total_lines;
     let start_index = requested_start.min(total_lines);
     if let Some(required) = page.oversized_first_line {
