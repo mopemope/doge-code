@@ -79,7 +79,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 | `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat; classified verification additionally returns a compact (<1000 chars) `verification_workspace` summary, with command success unchanged |
 | `execute_bash` / `execute_shell` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`) |
 | trusted `/test` / `/lint` diagnostics | raw managed capture is bounded per stream, then failure parsing runs before an internal ~32,000-character head+tail diagnostic budget; this is intentionally separate from the LLM 6,000-character tool budget |
-| `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars |
+| `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars; complete JSON records within 1 MiB total stdout (newlines counted), bounded stderr diagnostic prefix, explicit process/record errors; byte cap before any requested row is an error without a resumable offset |
 | `apply_patch` | unified diff only (no full-content echo), diff capped at 6,000 chars |
 | `edit` | diff capped at 6,000 chars (`diff_truncated` flag) |
 | `find_file` | Whole serialized JSON budget (default/cap 6,000 chars), at most 200 complete paths; stable sort/dedup, 0-based `cursor` and `next_cursor`, `returned`, `total_matches`, `truncated`, `applied_budget_chars`, `warnings`; one-path budget failure is an error. MCP emits the same compact JSON. |
