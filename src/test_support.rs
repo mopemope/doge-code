@@ -19,6 +19,40 @@
 /// when the pool is exhausted.
 pub(crate) static HTTP_SERVER_POOL: httptest::ServerPool = httptest::ServerPool::new(4);
 
+#[derive(Debug)]
+pub(crate) struct FixtureAttemptDenied;
+impl std::fmt::Display for FixtureAttemptDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("fixture attempt denied")
+    }
+}
+impl std::error::Error for FixtureAttemptDenied {}
+
+#[derive(Default)]
+pub(crate) struct SingleAttemptPolicy {
+    spent: std::sync::atomic::AtomicBool,
+    pub(crate) reported: std::sync::atomic::AtomicU64,
+}
+impl crate::llm::client_core::RequestAttemptPolicy for SingleAttemptPolicy {
+    fn before_attempt(&self) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        if self
+            .spent
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(anyhow::anyhow!(FixtureAttemptDenied));
+        }
+        Ok(())
+    }
+    fn observe_usage(&self, usage: &crate::llm::types::Usage) {
+        self.reported.fetch_add(
+            u64::from(usage.total_tokens),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
 /// Per-future tracing writer; no global subscriber or shared test log state.
 #[derive(Clone, Default)]
 pub(crate) struct DiagnosticCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

@@ -168,9 +168,10 @@ async fn run_subagent_inner(
                 break reason;
             }
             tracker.record_research_request();
-            let before = client.usage_totals_snapshot();
+            let policy = tracker.request_policy(estimate);
+            let request_client = client.with_request_attempt_policy(policy.clone());
             let response = crate::llm::tool_execution::requests::chat_tools_once(
-                client,
+                &request_client,
                 model,
                 &messages,
                 &tools,
@@ -180,24 +181,25 @@ async fn run_subagent_inner(
                 None,
             )
             .await;
+            if let Some(prompt_tokens) = tracker.charge(&policy) {
+                governor.observe_actual(footprint, prompt_tokens);
+            }
             check_cancel(&cancel)?;
             let msg = match response {
                 Ok(msg) => msg,
-                Err(error)
+                Err(error) => {
+                    if let Some(exceeded) = error.downcast_ref::<budget::RequestBudgetExceeded>() {
+                        break exceeded.0;
+                    }
                     if matches!(
                         error.downcast_ref::<crate::llm::LlmErrorKind>(),
                         Some(crate::llm::LlmErrorKind::ContextLengthExceeded)
-                    ) =>
-                {
-                    break SubagentStopReason::ProviderContextExceeded;
+                    ) {
+                        break SubagentStopReason::ProviderContextExceeded;
+                    }
+                    return Err(error.context("subagent research failed"));
                 }
-                Err(error) => return Err(error.context("subagent research failed")),
             };
-            if let Some(prompt_tokens) =
-                tracker.charge(estimate, before, client.usage_totals_snapshot())
-            {
-                governor.observe_actual(footprint, prompt_tokens);
-            }
             if msg.tool_calls.is_empty() {
                 return Ok(finish(
                     summarize_final(msg.content.as_deref().unwrap_or("")),
@@ -290,9 +292,10 @@ async fn run_subagent_inner(
         if tracker.request_stop(estimate, false).is_none() {
             check_cancel(&cancel)?;
             tracker.finalization_attempted = true;
-            let before = client.usage_totals_snapshot();
+            let policy = tracker.request_policy(estimate);
+            let request_client = client.with_request_attempt_policy(policy.clone());
             let result = crate::llm::tool_execution::requests::chat_tools_once(
-                client,
+                &request_client,
                 model,
                 &messages,
                 &[],
@@ -302,10 +305,10 @@ async fn run_subagent_inner(
                 None,
             )
             .await;
+            tracker.charge(&policy);
             check_cancel(&cancel)?;
             match result {
                 Ok(msg) => {
-                    tracker.charge(estimate, before, client.usage_totals_snapshot());
                     // Provider violations never trigger tool dispatch in finalization.
                     if msg.tool_calls.is_empty()
                         && msg.content.as_deref().is_some_and(|s| !s.trim().is_empty())
