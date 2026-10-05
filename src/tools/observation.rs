@@ -22,7 +22,7 @@ pub fn tool_def() -> ToolDef {
                 "properties": {
                     "id": {"type": "string", "description": "Observation id, e.g. obs-000001."},
                     "offset": {"type": "integer", "description": "Byte offset into the stored result (default 0)."},
-                    "limit": {"type": "integer", "description": "Maximum bytes to return (default 6000, max 6000)."}
+                    "limit": {"type": "integer", "description": "Maximum bytes to return (default 6000, max 6000); JSON escaping and metadata may reduce the page."}
                 },
                 "required": ["id"]
             }),
@@ -57,7 +57,47 @@ pub fn observation_read(
     let page = store
         .read_paged(id, offset, limit)
         .map_err(|e| anyhow!(e.to_string()))?;
-    Ok(ObservationReadResponse::from_page(&page))
+    let mut response = ObservationReadResponse::from_page(&page);
+    if super::budget::serialized_tool_output_fits(&response, OBSERVATION_READ_TOOL_NAME)? {
+        return Ok(response);
+    }
+    response
+        .warnings
+        .push("serialized JSON limit applied; request next_cursor for unread bytes".into());
+    let content = std::mem::take(&mut response.content);
+    let boundaries = std::iter::once(0)
+        .chain(
+            content
+                .char_indices()
+                .map(|(index, ch)| index + ch.len_utf8()),
+        )
+        .collect::<Vec<_>>();
+    let mut low = 0;
+    let mut high = boundaries.len() - 1;
+    // Prefix size is monotone, except at EOF where next_cursor disappears.
+    // The full EOF page was already tested; every shorter page keeps a cursor.
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        set_page_prefix(&mut response, &content, boundaries[mid]);
+        if super::budget::serialized_tool_output_fits(&response, OBSERVATION_READ_TOOL_NAME)? {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    set_page_prefix(&mut response, &content, boundaries[low]);
+    anyhow::ensure!(
+        low > 0
+            && super::budget::serialized_tool_output_fits(&response, OBSERVATION_READ_TOOL_NAME)?,
+        "observation metadata and one character cannot fit the serialized JSON limit; no bytes consumed"
+    );
+    Ok(response)
+}
+
+fn set_page_prefix(response: &mut ObservationReadResponse, content: &str, end: usize) {
+    response.content = content[..end].to_owned();
+    response.end_byte = response.start_byte + end;
+    response.next_cursor = (response.end_byte < response.total_bytes).then_some(response.end_byte);
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -129,6 +169,148 @@ mod tests {
             }
         }
         assert_eq!(out, original);
+    }
+
+    #[test]
+    fn observation_read_pages_survive_model_output_budget_losslessly() {
+        use crate::llm::truncate_tool_output;
+        let content = json!({"ok": true, "result": {"content": "\\".repeat(8_000)}}).to_string();
+        let mut store = ObservationStore::new();
+        let id = store
+            .insert(
+                "call".into(),
+                "fs_read".into(),
+                content.clone(),
+                content.len(),
+            )
+            .unwrap();
+        let mut recovered = String::new();
+        let mut offset = 0;
+        let mut pages = 0;
+        loop {
+            let page = observation_read(
+                &store,
+                ObservationReadArgs {
+                    id: id.clone(),
+                    offset: Some(offset),
+                    limit: None,
+                },
+            )
+            .unwrap();
+            let serialized = serde_json::to_string(&page).unwrap();
+            eprintln!(
+                "page={pages}, content_bytes={}, serialized_chars={}, cursor={:?}",
+                page.content.len(),
+                serialized.chars().count(),
+                page.next_cursor
+            );
+            let visible = truncate_tool_output(serialized.clone(), OBSERVATION_READ_TOOL_NAME);
+            assert_eq!(
+                visible, serialized,
+                "global fallback changed a recoverable page"
+            );
+            assert_eq!(page.start_byte, offset);
+            assert_eq!(page.end_byte, offset + page.content.len());
+            recovered.push_str(&page.content);
+            pages += 1;
+            if let Some(next) = page.next_cursor {
+                assert!(next > offset);
+                offset = next;
+            } else {
+                break;
+            }
+            assert!(pages < 20);
+        }
+        eprintln!(
+            "original_bytes={}, recovered_bytes={}, pages={pages}",
+            content.len(),
+            recovered.len()
+        );
+        assert_eq!(recovered, content);
+    }
+
+    #[test]
+    fn serialized_paging_edge_observation_unicode_tiny_limits_and_eof() {
+        for (content, limits) in [
+            ("😀\\\u{1}".repeat(2_000), vec![None]),
+            (
+                "😀\\\u{1}日\"終".to_owned(),
+                vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(500)],
+            ),
+        ] {
+            for limit in limits {
+                let mut store = ObservationStore::new();
+                let id = store
+                    .insert(
+                        "call".into(),
+                        "fs_read".into(),
+                        content.clone(),
+                        content.len(),
+                    )
+                    .unwrap();
+                let mut out = String::new();
+                let mut offset = 0;
+                loop {
+                    let page = observation_read(
+                        &store,
+                        ObservationReadArgs {
+                            id: id.clone(),
+                            offset: Some(offset),
+                            limit,
+                        },
+                    )
+                    .unwrap();
+                    assert!(
+                        super::super::budget::serialized_tool_output_fits(
+                            &page,
+                            OBSERVATION_READ_TOOL_NAME
+                        )
+                        .unwrap()
+                    );
+                    assert_eq!(page.end_byte, page.start_byte + page.content.len());
+                    assert!(content.is_char_boundary(page.end_byte));
+                    assert_eq!(page.content, content[page.start_byte..page.end_byte]);
+                    out.push_str(&page.content);
+                    if let Some(next) = page.next_cursor {
+                        assert!(next > offset);
+                        offset = next;
+                    } else {
+                        assert_eq!(page.end_byte, content.len());
+                        break;
+                    }
+                }
+                assert_eq!(out, content);
+                let eof = observation_read(
+                    &store,
+                    ObservationReadArgs {
+                        id: id.clone(),
+                        offset: Some(content.len()),
+                        limit,
+                    },
+                )
+                .unwrap();
+                assert!(eof.content.is_empty() && eof.next_cursor.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn serialized_paging_edge_observation_oversized_metadata_has_no_progress() {
+        let mut store = ObservationStore::new();
+        let id = store
+            .insert("call".into(), "\\".repeat(9_000), "😀".into(), 4)
+            .unwrap();
+        let error = observation_read(
+            &store,
+            ObservationReadArgs {
+                id: id.clone(),
+                offset: None,
+                limit: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no bytes consumed"));
+        assert_eq!(store.get(&id).unwrap().content, "😀");
     }
 
     #[test]

@@ -364,8 +364,10 @@ Exact filenames can use individually allowed files without granting access to
 neighboring files. Wildcards after a parent traversal must have an authorized
 literal prefix; parent components after a wildcard are rejected.
 Searches preserve nested globs, project-root aliases, pagination and output
-budgets. Omitting a glob searches only the project; ordinary absolute globs
-outside it retain their empty-result behavior. The tool ignores ambient
+budgets. Pages account for JSON escaping and metadata; `next_offset` advances
+only past the matches actually returned. Omitting a glob searches only the
+project; ordinary absolute globs outside it retain their empty-result behavior.
+The tool ignores ambient
 `RIPGREP_CONFIG_PATH` settings and does not follow symlinks while traversing.
 Ripgrep exit code 1 is a normal empty search; regex errors, other failing exit
 codes, malformed/incomplete JSON records and signals return bounded errors.
@@ -419,7 +421,7 @@ multi-file full mode preserves the original separators and final newline.
 - `tool_search`: Discover and activate deferred built-in/MCP tools on demand (see Tool Search below)
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
 - `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
-- `observation_read`: Retrieve an offloaded historical tool result (`obs-*`) without re-running the original tool
+- `observation_read`: Retrieve an offloaded historical tool result (`obs-*`) without re-running the original tool; byte pages may be shortened to fit their serialized JSON envelope, and `next_cursor` identifies the first unread byte.
 
 ### Read-only sub-agent budgets
 
