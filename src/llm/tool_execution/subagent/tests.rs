@@ -9,6 +9,18 @@ async fn fixture(
     std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    fixture_gated(script, None, None).await
+}
+
+async fn fixture_gated(
+    script: Vec<(u16, serde_json::Value)>,
+    barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
+    wait_usage: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+) -> (
+    crate::llm::client_core::OpenAIClient,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
     use axum::{Json, Router, http::StatusCode, routing::post};
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = requests.clone();
@@ -17,13 +29,30 @@ async fn fixture(
         post(move |Json(body): Json<serde_json::Value>| {
             let captured = captured.clone();
             let script = script.clone();
+            let barrier = barrier.clone();
+            let wait_usage = wait_usage.clone();
             async move {
-                let (status, body) = {
+                let (n, status, body) = {
                     let mut requests = captured.lock().expect("requests");
                     let n = requests.len();
                     requests.push(body);
-                    script.get(n).or(script.last()).expect("script").clone()
+                    let (status, body) = script.get(n).or(script.last()).expect("script").clone();
+                    (n, status, body)
                 };
+                if n == 0 {
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        if let Some(barrier) = barrier {
+                            barrier.wait().await;
+                        }
+                        if let Some(usage) = wait_usage {
+                            while usage.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("fixture synchronization");
+                }
                 if let Some(delay) = body.get("_fixture_delay_ms").and_then(|v| v.as_u64()) {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
@@ -93,6 +122,290 @@ async fn test_provider_context_overflow_fallback() {
     assert_eq!(requests.lock().expect("requests").len(), 2);
     assert!(requests.lock().expect("requests")[1].get("tools").is_none());
     server.abort();
+}
+
+async fn initial_fixture_estimate() -> u64 {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Arc::new(crate::config::AppConfig {
+        project_root: dir.path().to_owned(),
+        mcp_servers: vec![],
+        ..Default::default()
+    });
+    let fs = crate::tools::FsTools::new(Arc::new(RwLock::new(None)), cfg.clone());
+    let runtime = ToolRuntime::build(&fs, None, "test-model", None)
+        .await
+        .unwrap();
+    let governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
+    let messages = vec![
+        message("system", subagent_system_prompt("/fixture")),
+        message(
+            "user",
+            "Task description: fixture\n\nTask instructions:\ninvestigate".into(),
+        ),
+    ];
+    let footprint = governor
+        .measure(&messages, &subagent_tool_defs(&runtime))
+        .unwrap();
+    governor.estimate(footprint).prompt_tokens
+}
+
+#[tokio::test]
+async fn attempt_budget_context_failure_cannot_spend_finalization_budget_twice() {
+    let estimate = initial_fixture_estimate().await;
+    let (client, requests, server) = fixture(vec![
+        (
+            400,
+            serde_json::json!({"error":{"code":"context_length_exceeded"}}),
+        ),
+        (200, assistant(vec![], Some("Facts: final"))),
+    ])
+    .await;
+    let result = fixture_run(
+        &client,
+        crate::config::AppConfig {
+            subagent: crate::config::SubagentConfig {
+                max_total_tokens: Some(estimate),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .expect("partial");
+    server.abort();
+    assert_eq!(
+        result.stop_reason,
+        Some(SubagentStopReason::ProviderContextExceeded)
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "failed attempt must consume its internal estimate"
+    );
+    assert_eq!(client.usage_snapshot().usage_records, 0);
+}
+
+#[tokio::test]
+async fn attempt_budget_retry_cannot_send_after_the_first_estimate_exhausts_budget() {
+    let estimate = initial_fixture_estimate().await;
+    let (client, requests, server) = fixture(vec![
+        (503, serde_json::json!({"error":{"code":"server_error"}})),
+        (200, assistant(vec![], Some("Facts: retried"))),
+    ])
+    .await;
+    let client = client.with_llm_config(crate::config::LlmConfig {
+        max_retries: 2,
+        retry_base_ms: 1,
+        retry_jitter_ms: 0,
+        ..Default::default()
+    });
+    let result = fixture_run(
+        &client,
+        crate::config::AppConfig {
+            subagent: crate::config::SubagentConfig {
+                max_total_tokens: Some(estimate),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .expect("partial");
+    server.abort();
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "retry must pass the worker budget gate"
+    );
+    assert_eq!(result.stop_reason, Some(SubagentStopReason::TokenBudget));
+    assert_eq!(client.usage_snapshot().attempts, 1);
+    assert_eq!(client.usage_snapshot().usage_records, 0);
+}
+
+fn capture_subagent_diagnostics() -> (
+    crate::test_support::DiagnosticCapture,
+    impl tracing::Subscriber + Send + Sync,
+) {
+    let capture = crate::test_support::DiagnosticCapture::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    (capture, subscriber)
+}
+
+#[tokio::test]
+async fn attempt_budget_permitted_retry_accounts_unknown_and_reported_usage_separately() {
+    let estimate = initial_fixture_estimate().await;
+    for reported in [false, true] {
+        let mut success = assistant(vec![read_only_call()], None);
+        let total = estimate + 100;
+        if reported {
+            success["usage"] = serde_json::json!({"total_tokens":total,"prompt_tokens":estimate,"completion_tokens":100});
+        }
+        let (client, requests, server) = fixture(vec![
+            (503, serde_json::json!({"error":{"code":"server_error"}})),
+            (200, success),
+        ])
+        .await;
+        let client = client.with_llm_config(crate::config::LlmConfig {
+            max_retries: 2,
+            retry_base_ms: 1,
+            retry_jitter_ms: 0,
+            ..Default::default()
+        });
+        let run = fixture_run(
+            &client,
+            crate::config::AppConfig {
+                subagent: crate::config::SubagentConfig {
+                    max_total_tokens: Some(estimate * 2),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(run.status, SubagentRunStatus::Partial);
+        assert_eq!(run.stop_reason, Some(SubagentStopReason::TokenBudget));
+        assert_eq!(run.tool_calls, 0);
+        assert_eq!(run.iterations, 1);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        let usage = client.usage_snapshot();
+        assert_eq!(usage.attempts, 2);
+        assert_eq!(usage.usage_records, u64::from(reported));
+        assert_eq!(usage.total_tokens, if reported { total } else { 0 });
+    }
+}
+
+#[tokio::test]
+async fn attempt_budget_terminal_failure_and_cancel_keep_reservation_without_usage() {
+    use tracing::instrument::WithSubscriber;
+    let estimate = initial_fixture_estimate().await;
+    for phase in ["terminal", "before", "inflight", "backoff"] {
+        let mut response = assistant(vec![], Some("Facts: unused"));
+        let status = if matches!(phase, "terminal" | "backoff") {
+            503
+        } else {
+            200
+        };
+        if phase == "inflight" {
+            response["_fixture_delay_ms"] = 500.into();
+        }
+        let (client, requests, server) = fixture(vec![(status, response)]).await;
+        let client = client.with_llm_config(crate::config::LlmConfig {
+            max_retries: if phase == "backoff" { 2 } else { 0 },
+            retry_base_ms: 1000,
+            retry_jitter_ms: 0,
+            ..Default::default()
+        });
+        let token = CancellationToken::new();
+        if phase == "before" {
+            token.cancel();
+        }
+        let cancelling = token.clone();
+        let observed = requests.clone();
+        let (capture, subscriber) = capture_subagent_diagnostics();
+        let retry_diagnostics = capture.clone();
+        let canceller = tokio::spawn(async move {
+            if matches!(phase, "inflight" | "backoff") {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while observed.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                    if phase == "backoff" {
+                        while !retry_diagnostics
+                            .text()
+                            .contains("Retrying chat_tools_once")
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                cancelling.cancel();
+            }
+        });
+        let error = fixture_run(&client, Default::default(), Some(token))
+            .with_subscriber(subscriber)
+            .await
+            .err()
+            .expect("failure/cancel");
+        canceller.await.unwrap();
+        server.abort();
+        if phase != "terminal" {
+            assert_eq!(
+                error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(&crate::llm::LlmErrorKind::Cancelled)
+            );
+        }
+        let attempts = u64::from(phase != "before");
+        assert_eq!(requests.lock().unwrap().len() as u64, attempts);
+        assert_eq!(client.usage_snapshot().attempts, attempts);
+        assert_eq!(client.usage_snapshot().usage_records, 0);
+        assert_eq!(client.usage_snapshot().total_tokens, 0);
+        assert!(
+            capture
+                .text()
+                .contains(&format!("charged_tokens={}", estimate * attempts))
+        );
+    }
+}
+
+#[tokio::test]
+async fn attempt_budget_concurrent_workers_do_not_charge_each_others_usage() {
+    let estimate = initial_fixture_estimate().await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let total = estimate * 8;
+    let mut high = assistant(vec![read_only_call()], None);
+    high["usage"] = serde_json::json!({"total_tokens":total,"prompt_tokens":estimate,"completion_tokens":total-estimate});
+    let (client, a_requests, a_server) =
+        fixture_gated(vec![(200, high)], Some(barrier.clone()), None).await;
+    let unknown = assistant(vec![read_only_call()], None);
+    let (other, b_requests, b_server) = fixture_gated(
+        vec![
+            (200, unknown),
+            (200, assistant(vec![], Some("Facts: independent worker"))),
+        ],
+        Some(barrier),
+        Some(client.total_tokens_used.clone()),
+    )
+    .await;
+    let mut b_client = client.clone();
+    b_client.base_url = other.base_url;
+    let cfg = crate::config::AppConfig {
+        subagent: crate::config::SubagentConfig {
+            max_total_tokens: Some(estimate * 4),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (a, b) = tokio::join!(
+        fixture_run(&client, cfg.clone(), None),
+        fixture_run(&b_client, cfg, None)
+    );
+    a_server.abort();
+    b_server.abort();
+    assert_eq!(
+        a.unwrap().stop_reason,
+        Some(SubagentStopReason::TokenBudget)
+    );
+    assert_eq!(b.unwrap().status, SubagentRunStatus::Completed);
+    assert_eq!(a_requests.lock().unwrap().len(), 1);
+    assert_eq!(b_requests.lock().unwrap().len(), 2);
+    assert_eq!(client.usage_snapshot().attempts, 3);
+    assert_eq!(client.usage_snapshot().usage_records, 1);
+    assert_eq!(client.usage_snapshot().total_tokens, total);
 }
 
 #[tokio::test]

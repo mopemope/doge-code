@@ -1976,6 +1976,53 @@ async fn native_inference_sends_context_management_on_wire() -> Result<()> {
 }
 
 #[tokio::test]
+async fn attempt_budget_responses_scoped_hook_gates_send_and_preserves_usage() {
+    for native in [false, true] {
+        let wire = format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed","response":response(vec![text_output()])})
+        );
+        let (_server, _temp, parent) = if native {
+            mock_native_client(wire, 102_400).await
+        } else {
+            mock_client(wire).await
+        };
+        let policy = std::sync::Arc::new(crate::test_support::SingleAttemptPolicy::default());
+        let client = parent.with_request_attempt_policy(policy.clone());
+        for denied in [false, true] {
+            let result = crate::llm::tool_execution::requests::chat_tools_once(
+                &client,
+                "test-model",
+                &[user("fixture")],
+                &[],
+                None,
+                crate::config::ReasoningMode::Off,
+                None,
+                None,
+            )
+            .await;
+            if denied {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<crate::test_support::FixtureAttemptDenied>()
+                        .is_some()
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+        assert_eq!(parent.usage_snapshot().attempts, 1);
+        assert_eq!(parent.usage_snapshot().usage_records, 1);
+        assert_eq!(parent.usage_snapshot().total_tokens, 16);
+        assert_eq!(
+            policy.reported.load(std::sync::atomic::Ordering::SeqCst),
+            16
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_single_response_is_single_budget_charge() -> Result<()> {
     // Main-agent budget: one provider response with compaction is exactly
     // one usage record, never a second internal charge.

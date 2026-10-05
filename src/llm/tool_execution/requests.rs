@@ -278,8 +278,8 @@ async fn chat_tools_once_attempt(
 
     let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
     let resp_fut = tokio::time::timeout(timeout_duration, async {
-        client.record_request_attempt();
-        req_builder.send().await
+        client.begin_request_attempt()?;
+        Ok::<_, anyhow::Error>(req_builder.send().await)
     });
 
     let resp = tokio::select! {
@@ -296,8 +296,12 @@ async fn chat_tools_once_attempt(
         }
         res = resp_fut => {
             match res {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => {
+                Ok(Ok(Ok(resp))) => resp,
+                Ok(Err(error)) => {
+                    return Err(RequestAttemptFailure::new(LlmErrorKind::Client,
+                        None, None, None, error));
+                }
+                Ok(Ok(Err(e))) => {
                     let kind = if e.is_timeout() {
                         LlmErrorKind::Timeout
                     } else {

@@ -95,7 +95,10 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 info!("chat_once cancelled before send");
                 return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
             }
-            res = async { client.record_request_attempt(); req_builder.send().await } => res,
+            res = async {
+                client.begin_request_attempt()?;
+                Ok::<_, anyhow::Error>(req_builder.send().await)
+            } => res?,
         };
 
         // Transport failure: no HTTP status.
@@ -738,6 +741,45 @@ mod tests {
             .unwrap_err();
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(format!("{err:?}").contains("500"));
+    }
+
+    #[tokio::test]
+    async fn attempt_budget_chat_once_scoped_hook_gates_send_and_preserves_parent() {
+        use httptest::{Expectation, matchers::request, responders::json_encoded};
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let mut response = chat_ok_body();
+        response["usage"] =
+            serde_json::json!({"total_tokens":100,"prompt_tokens":80,"completion_tokens":20});
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(2)
+                .respond_with(json_encoded(response)),
+        );
+        let parent = chat_test_client(format!("{}/", server.url_str("")), 3);
+        let policy = Arc::new(crate::test_support::SingleAttemptPolicy::default());
+        let scoped = parent.with_request_attempt_policy(policy.clone());
+        scoped
+            .chat_once("fixture", chat_messages(), None)
+            .await
+            .unwrap();
+        let error = scoped
+            .chat_once("fixture", chat_messages(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::test_support::FixtureAttemptDenied>()
+                .is_some()
+        );
+        assert_eq!(parent.usage_snapshot().attempts, 1);
+        assert_eq!(policy.reported.load(Ordering::SeqCst), 100);
+        parent
+            .chat_once("fixture", chat_messages(), None)
+            .await
+            .unwrap();
+        assert_eq!(parent.usage_snapshot().attempts, 2);
+        assert_eq!(parent.usage_snapshot().total_tokens, 200);
+        assert_eq!(policy.reported.load(Ordering::SeqCst), 100);
     }
 
     #[tokio::test]
