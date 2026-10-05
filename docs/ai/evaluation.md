@@ -68,15 +68,20 @@ load. This is a schema illustration, not a measured result; replace every
 value with actual telemetry and review.
 
 ```json
-{"schema_version":2,"case_id":"investigation-only-history","trial":1,"base_commit":"full-starting-commit-sha","model":"exact-model-id","settings":{"provider":"openai-chatgpt","environment_id":"fixed-environment-id","timeout_seconds":900,"cases_digest":"sha256-of-case-file","seed":1},"variant":"baseline","variant_metadata":{"agent_command_fingerprint":"sha256-of-command"},"run_status":"completed","stop_reason":null,"input_tokens":1000,"output_tokens":200,"cached_input_tokens":800,"reasoning_tokens":50,"cache_write_tokens":null,"elapsed_seconds":10,"agent_elapsed_seconds":9,"tool_calls":3,"iterations":2,"request_attempts":2,"usage_records":2,"unknown_usage_attempts":0,"budget_charged_tokens":1200,"budget_provider_reported_tokens":1200,"budget_estimated_tokens":0,"accepted":false,"rework_count":0,"contract_violations":0}
+{"schema_version":2,"case_id":"investigation-only-history","trial":1,"base_commit":"full-starting-commit-sha","model":"exact-model-id","settings":{"provider":"openai-chatgpt","environment_id":"fixed-environment-id","timeout_seconds":900,"cases_digest":"sha256-of-case-file","seed":1},"variant":"baseline","variant_metadata":{"agent_command_fingerprint":"sha256-of-command"},"run_status":"completed","stop_reason":null,"input_tokens":1000,"output_tokens":200,"cached_input_tokens":800,"reasoning_tokens":50,"cache_write_tokens":null,"elapsed_seconds":10,"agent_elapsed_seconds":9,"tool_calls":3,"iterations":2,"request_attempts":2,"usage_records":2,"unknown_usage_attempts":0,"cached_usage_records":2,"reasoning_usage_records":2,"cache_write_usage_records":0,"known_cached_input_tokens":800,"known_reasoning_tokens":50,"known_cache_write_tokens":null,"budget_charged_tokens":1200,"budget_provider_reported_tokens":1200,"budget_estimated_tokens":0,"accepted":false,"rework_count":0,"contract_violations":0}
 ```
 
 Field provenance:
 
 - provider measured: `input_tokens`, `output_tokens`, `cached_input_tokens`,
   `reasoning_tokens`, `cache_write_tokens`, `usage_records`,
-  `unknown_usage_attempts` (from `dgc exec --json` usage; null whenever
-  provider coverage is incomplete, never zero).
+  `unknown_usage_attempts` (from `dgc exec --json` usage). Optional totals
+  additionally require every usage report to include that item; otherwise they
+  are null, while the reported subtotals stay in `known_cached_input_tokens`,
+  `known_reasoning_tokens`, and `known_cache_write_tokens`. Per-item
+  `cached_usage_records`, `reasoning_usage_records`, and `cache_write_usage_records`
+  preserve how many reports contained each metric, including explicit zero.
+  Missing optional metrics are unknown, not zero.
 - locally measured: `elapsed_seconds` (runner wall clock),
   `agent_elapsed_seconds` (main loop `budget.elapsed_ms`), `tool_calls`
   (main-agent dispatches), `iterations`, `request_attempts`, budget charge
@@ -107,7 +112,14 @@ attempt/report counts and zero unknown attempts. Missing, null, or inconsistent
 coverage prevents complete totals and token efficiency even when token fields
 contain numbers; supplied numeric subtotals remain in `known_total_tokens` and
 `known_cached_input_tokens`. These subtotals are not complete-run totals. Invalid
-counter types or negative values are rejected. Legacy v1 measured records retain
+counter types or negative values are rejected. Complete schema-v2 cache totals
+also require `cached_usage_records == usage_records`. Older schema-v2 records
+without item coverage remain readable: their numeric cache value contributes
+only to the known subtotal. New records store item counters and known subtotals
+as additive schema-v2 fields; the comparer uses the new known subtotal once,
+falling back to the old numeric cache value when the known field is absent/null.
+Ordinary input/output totals do not require optional cache/reasoning fields.
+Legacy v1 measured records retain
 their original comparison behavior. Variant metadata (binary and
 config hashes) may differ between files; matched settings must be equal.
 

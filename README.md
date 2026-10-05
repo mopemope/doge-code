@@ -1322,7 +1322,11 @@ The evaluation comparer requires explicit complete usage coverage for schema-v2
 records before reporting token totals or tokens per accepted run. Missing or
 inconsistent attempt/report counters leave these metrics unknown, even if the
 record supplies numeric token subtotals; `known_*` fields retain those subtotals.
-Legacy-v1 measured records keep their existing comparison behavior.
+Optional cache/reasoning/cache-write totals also require item-specific report
+coverage; reported subtotals and item counts are retained in schema-v2 records.
+Older schema-v2 cache values without item counters contribute to the known
+subtotal, while their complete cache total stays unknown. Ordinary input/output
+totals and legacy-v1 measured comparisons retain their existing behavior.
 
 ### Adding New Languages
 1. Add tree-sitter parser dependency to `Cargo.toml`
