@@ -73,6 +73,7 @@ impl ExecutionConfig {
 /// Project config wins over global/user config per field (same precedence as
 /// the rest of `FileConfig`).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialExecutionConfig {
     pub mode: Option<ExecutionMode>,
     pub allowed_programs: Option<Vec<String>>,

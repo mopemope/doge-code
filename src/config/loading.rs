@@ -15,6 +15,7 @@ use super::watch::PartialWatchConfig;
 use std::collections::HashMap;
 
 #[derive(Clone, Default, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub provider: Option<crate::features::openai_subscription::ProviderKind>,
     pub base_url: Option<String>,
@@ -248,6 +249,14 @@ fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
         subagent.validate().with_context(|| {
             format!(
                 "invalid subagent configuration in {}",
+                normalize_path_for_error(&source.path)
+            )
+        })?;
+    }
+    if let Some(tool_routing) = &cfg.tool_routing {
+        tool_routing.validate().with_context(|| {
+            format!(
+                "invalid tool_routing configuration in {}",
                 normalize_path_for_error(&source.path)
             )
         })?;

@@ -1,7 +1,8 @@
 use serde::Deserialize;
 
 /// Mode for the observation-aware preflight context governor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextBudgetMode {
     /// Measure the current request footprint and automatically reduce
     /// pressure (overlay drop -> recoverable offload -> unseen-safe
@@ -16,14 +17,6 @@ pub enum ContextBudgetMode {
 }
 
 impl ContextBudgetMode {
-    pub fn from_optional_str(value: Option<&str>) -> Self {
-        match value.map(|v| v.trim().to_ascii_lowercase()) {
-            Some(ref s) if s == "observe" => Self::Observe,
-            Some(ref s) if s == "off" => Self::Off,
-            _ => Self::Auto,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -54,8 +47,8 @@ impl ContextBudgetConfig {
     }
 
     pub fn apply_partial(&mut self, partial: &PartialContextBudgetConfig) {
-        if let Some(mode) = &partial.mode {
-            self.mode = ContextBudgetMode::from_optional_str(Some(mode));
+        if let Some(mode) = partial.mode {
+            self.mode = mode;
         }
     }
 }
@@ -77,8 +70,9 @@ pub fn merge_context_budget(
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialContextBudgetConfig {
-    pub mode: Option<String>,
+    pub mode: Option<ContextBudgetMode>,
 }
 
 #[cfg(test)]
@@ -93,35 +87,24 @@ mod tests {
 
     #[test]
     fn test_mode_parsing() {
-        assert_eq!(
-            ContextBudgetMode::from_optional_str(Some("auto")),
-            ContextBudgetMode::Auto
-        );
-        assert_eq!(
-            ContextBudgetMode::from_optional_str(Some("observe")),
-            ContextBudgetMode::Observe
-        );
-        assert_eq!(
-            ContextBudgetMode::from_optional_str(Some("off")),
-            ContextBudgetMode::Off
-        );
-        assert_eq!(
-            ContextBudgetMode::from_optional_str(Some("bogus")),
-            ContextBudgetMode::Auto
-        );
-        assert_eq!(
-            ContextBudgetMode::from_optional_str(None),
-            ContextBudgetMode::Auto
-        );
+        let auto: PartialContextBudgetConfig =
+            toml::from_str(r#"mode = "auto""#).expect("parse auto");
+        assert_eq!(auto.mode, Some(ContextBudgetMode::Auto));
+        let observe: PartialContextBudgetConfig =
+            toml::from_str(r#"mode = "observe""#).expect("parse observe");
+        assert_eq!(observe.mode, Some(ContextBudgetMode::Observe));
+        let off: PartialContextBudgetConfig = toml::from_str(r#"mode = "off""#).expect("parse off");
+        assert_eq!(off.mode, Some(ContextBudgetMode::Off));
+        assert!(toml::from_str::<PartialContextBudgetConfig>(r#"mode = "bogus""#).is_err());
     }
 
     #[test]
     fn test_merge_precedence_project_wins() {
         let file = PartialContextBudgetConfig {
-            mode: Some("observe".to_string()),
+            mode: Some(ContextBudgetMode::Observe),
         };
         let project = PartialContextBudgetConfig {
-            mode: Some("off".to_string()),
+            mode: Some(ContextBudgetMode::Off),
         };
         let merged = merge_context_budget(Some(&file), Some(&project));
         assert_eq!(merged.mode, ContextBudgetMode::Off);
@@ -131,7 +114,7 @@ mod tests {
     fn test_parses_toml_section() {
         let cfg: PartialContextBudgetConfig =
             toml::from_str(r#"mode = "observe""#).expect("parse context_budget section");
-        assert_eq!(cfg.mode.as_deref(), Some("observe"));
+        assert_eq!(cfg.mode, Some(ContextBudgetMode::Observe));
         let resolved = merge_context_budget(None, Some(&cfg));
         assert_eq!(resolved.mode, ContextBudgetMode::Observe);
     }

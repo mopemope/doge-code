@@ -23,6 +23,7 @@ impl Default for SubagentConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialSubagentConfig {
     pub max_iterations: Option<usize>,
     pub max_tool_calls: Option<usize>,

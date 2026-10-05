@@ -298,11 +298,11 @@ fn test_execution_config_parses_toml() {
 #[test]
 fn test_tool_routing_merge_project_wins() {
     let file = PartialToolRoutingConfig {
-        mode: Some("deferred".to_string()),
+        mode: Some(ToolRoutingMode::Deferred),
         search_result_limit: Some(3),
     };
     let project = PartialToolRoutingConfig {
-        mode: Some("eager".to_string()),
+        mode: Some(ToolRoutingMode::Eager),
         search_result_limit: None,
     };
     let merged = merge_tool_routing(Some(&file), Some(&project));
@@ -319,7 +319,7 @@ fn test_tool_routing_config_parses_toml() {
     "#;
     let cfg: FileConfig = toml::from_str(toml_str).expect("parse tool_routing config");
     let routing = cfg.tool_routing.expect("tool_routing section");
-    assert_eq!(routing.mode.as_deref(), Some("deferred"));
+    assert_eq!(routing.mode, Some(ToolRoutingMode::Deferred));
     assert_eq!(routing.search_result_limit, Some(7));
     let resolved = merge_tool_routing(None, Some(&routing));
     assert_eq!(resolved.mode, ToolRoutingMode::Deferred);
@@ -340,13 +340,13 @@ fn test_tool_routing_limit_clamped_on_resolve() {
 #[test]
 fn test_reasoning_merge_project_wins() {
     let file = PartialReasoningConfig {
-        mode: Some("fixed".to_string()),
-        routine_effort: Some("low".to_string()),
-        fixed_effort: Some("high".to_string()),
+        mode: Some(ReasoningMode::Fixed),
+        routine_effort: Some(ReasoningEffort::Low),
+        fixed_effort: Some(ReasoningEffort::High),
         ..Default::default()
     };
     let project = PartialReasoningConfig {
-        mode: Some("off".to_string()),
+        mode: Some(ReasoningMode::Off),
         ..Default::default()
     };
     let merged = merge_reasoning(Some(&file), Some(&project));
@@ -366,8 +366,8 @@ fn test_reasoning_config_parses_toml() {
     "#;
     let cfg: FileConfig = toml::from_str(toml_str).expect("parse reasoning config");
     let reasoning = cfg.reasoning.expect("reasoning section");
-    assert_eq!(reasoning.mode.as_deref(), Some("fixed"));
-    assert_eq!(reasoning.fixed_effort.as_deref(), Some("high"));
+    assert_eq!(reasoning.mode, Some(ReasoningMode::Fixed));
+    assert_eq!(reasoning.fixed_effort, Some(ReasoningEffort::High));
     let resolved = merge_reasoning(None, Some(&reasoning));
     assert_eq!(resolved.mode, ReasoningMode::Fixed);
     assert_eq!(resolved.fixed_effort, ReasoningEffort::High);
@@ -375,7 +375,7 @@ fn test_reasoning_config_parses_toml() {
 }
 
 #[test]
-fn test_file_config_ignores_unknown_fields() {
+fn test_file_config_rejects_unknown_fields() {
     let toml_str = r#"
         [llm]
         connect_timeout_ms = 1000
@@ -390,20 +390,18 @@ fn test_file_config_ignores_unknown_fields() {
 
     let config: Result<FileConfig, _> = toml::from_str(toml_str);
     assert!(
-        config.is_ok(),
-        "Should parse successfully confirming unknown fields are ignored"
+        config.is_err(),
+        "Unknown sections must be rejected, not silently ignored"
     );
-    let config = config.unwrap();
-    assert_eq!(config.llm.unwrap().connect_timeout_ms, Some(1000));
 }
 
 #[test]
 fn test_context_budget_merge_project_wins() {
     let file = PartialContextBudgetConfig {
-        mode: Some("observe".to_string()),
+        mode: Some(ContextBudgetMode::Observe),
     };
     let project = PartialContextBudgetConfig {
-        mode: Some("off".to_string()),
+        mode: Some(ContextBudgetMode::Off),
     };
     let merged = merge_context_budget(Some(&file), Some(&project));
     assert_eq!(merged.mode, ContextBudgetMode::Off);
@@ -417,7 +415,7 @@ fn test_context_budget_config_parses_toml() {
     "#;
     let cfg: FileConfig = toml::from_str(toml_str).expect("parse context_budget config");
     let budget = cfg.context_budget.expect("context_budget section");
-    assert_eq!(budget.mode.as_deref(), Some("observe"));
+    assert_eq!(budget.mode, Some(ContextBudgetMode::Observe));
     let resolved = merge_context_budget(None, Some(&budget));
     assert_eq!(resolved.mode, ContextBudgetMode::Observe);
 }
@@ -742,4 +740,208 @@ fn test_subagent_global_project_field_wise_loading() {
         ),
         (2, 12, 1000, Some(5000))
     );
+}
+
+fn write_temp_config(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    fs::write(&path, content).unwrap();
+    path
+}
+
+fn assert_load_error_without_mutation(path: &std::path::Path, before: &[u8], err: &str) {
+    assert!(
+        err.contains(&path.display().to_string()),
+        "error must include config path, got: {err}"
+    );
+    let after = fs::read(path).unwrap();
+    assert_eq!(
+        after, before,
+        "invalid config file must remain byte-for-byte unchanged"
+    );
+}
+
+#[test]
+fn unknown_top_level_key_is_error_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let content = "modle = \"gpt-5\"\napi_key = \"secret-value-123\"\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "unknown top-level key must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+    assert!(
+        !err.contains("secret-value-123"),
+        "error must not leak secret, got: {err}"
+    );
+}
+
+#[test]
+fn unknown_top_level_section_is_error() {
+    let dir = TempDir::new().unwrap();
+    let content = "[project]\nexclude_patterns = [\"target\"]\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "[project] section must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn execution_unknown_key_cannot_fall_back_to_unrestricted() {
+    for content in [
+        "[execution]\nmod = \"deny\"\n",
+        "[execution]\nmode = \"deny\"\nallow_shelll = false\n",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let path = write_temp_config(&dir, "config.toml", content);
+        let before = fs::read(&path).unwrap();
+        let result = load_file_config_from_candidates(Some(&path), &[]);
+        assert!(
+            result.is_err(),
+            "execution typo must fail, got content: {content}"
+        );
+        let err = format!("{:#}", result.expect_err("must error"));
+        assert_load_error_without_mutation(&path, &before, &err);
+    }
+}
+
+#[test]
+fn tool_routing_invalid_mode_is_error() {
+    let dir = TempDir::new().unwrap();
+    let content = "[tool_routing]\nmode = \"defered\"\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "invalid tool_routing mode must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn tool_routing_result_limit_out_of_range_is_error() {
+    for limit in [0, 11] {
+        let dir = TempDir::new().unwrap();
+        let content = format!("[tool_routing]\nsearch_result_limit = {limit}\n");
+        let path = write_temp_config(&dir, "config.toml", &content);
+        let before = fs::read(&path).unwrap();
+        let result = load_file_config_from_candidates(Some(&path), &[]);
+        assert!(
+            result.is_err(),
+            "search_result_limit={limit} must fail, not clamp"
+        );
+        let err = format!("{:#}", result.expect_err("must error"));
+        assert_load_error_without_mutation(&path, &before, &err);
+    }
+}
+
+#[test]
+fn context_budget_invalid_mode_is_error() {
+    let dir = TempDir::new().unwrap();
+    let content = "[context_budget]\nmode = \"atuo\"\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "invalid context_budget mode must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn reasoning_invalid_mode_is_error() {
+    let dir = TempDir::new().unwrap();
+    let content = "[reasoning]\nmode = \"atuo\"\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "invalid reasoning mode must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn reasoning_invalid_effort_is_error() {
+    for field in [
+        "initial_effort",
+        "routine_effort",
+        "deliberative_effort",
+        "recovery_effort",
+        "fixed_effort",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let content = format!("[reasoning]\n{field} = \"medum\"\n");
+        let path = write_temp_config(&dir, "config.toml", &content);
+        let before = fs::read(&path).unwrap();
+        let result = load_file_config_from_candidates(Some(&path), &[]);
+        assert!(result.is_err(), "invalid {field} must fail, not fallback");
+        let err = format!("{:#}", result.expect_err("must error"));
+        assert_load_error_without_mutation(&path, &before, &err);
+    }
+}
+
+#[test]
+fn watch_stale_keys_are_rejected() {
+    let dir = TempDir::new().unwrap();
+    let content = "[watch]\nenabled = true\ndebounce_ms = 500\npatterns = [\"*.rs\"]\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "stale watch keys must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn llm_unknown_key_is_error() {
+    let dir = TempDir::new().unwrap();
+    let content = "[llm]\nmax_retry = 3\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "llm typo must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn mcp_unknown_keys_are_rejected() {
+    let dir = TempDir::new().unwrap();
+    let outbound = "[[mcp_servers]]\nname = \"x\"\nenabled = true\ncall_timeout = 1000\n";
+    let path = write_temp_config(&dir, "config.toml", outbound);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "outbound MCP typo must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+
+    let dir = TempDir::new().unwrap();
+    let local = "[mcp_server]\nenabled = false\nport = 8000\n";
+    let path = write_temp_config(&dir, "config.toml", local);
+    let before = fs::read(&path).unwrap();
+    let result = load_file_config_from_candidates(Some(&path), &[]);
+    assert!(result.is_err(), "local MCP typo must fail");
+    let err = format!("{:#}", result.expect_err("must error"));
+    assert_load_error_without_mutation(&path, &before, &err);
+}
+
+#[test]
+fn mcp_env_arbitrary_keys_are_allowed() {
+    let dir = TempDir::new().unwrap();
+    let content = "[[mcp_servers]]\nname = \"x\"\nenabled = true\ntransport = \"stdio\"\ncommand = \"/bin/echo\"\n\n[mcp_servers.env]\nDOGE_CUSTOM_KEY = \"value\"\nANOTHER_KEY = \"another\"\n";
+    let path = write_temp_config(&dir, "config.toml", content);
+    let cfg = load_file_config_from_candidates(Some(&path), &[])
+        .expect("MCP env arbitrary keys must parse");
+    let servers = cfg.mcp_servers.expect("servers");
+    assert_eq!(servers[0].env.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn committed_repo_config_parses_under_strict_schema() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let before = fs::read(manifest_dir.join(".doge/config.toml")).expect("read repo config");
+    let cfg = load_project_config(&manifest_dir).expect("repo config must parse");
+    let after = fs::read(manifest_dir.join(".doge/config.toml")).expect("reread repo config");
+    assert_eq!(before, after, "repo config test must not rewrite the file");
+    let _ = cfg;
 }

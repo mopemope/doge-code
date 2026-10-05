@@ -1,7 +1,8 @@
 use serde::Deserialize;
 
 /// Routing mode for deferred tool exposure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolRoutingMode {
     /// Defer when the catalog is large enough, otherwise expose everything.
     #[default]
@@ -13,14 +14,6 @@ pub enum ToolRoutingMode {
 }
 
 impl ToolRoutingMode {
-    pub fn from_optional_str(value: Option<&str>) -> Self {
-        match value.map(|v| v.trim().to_ascii_lowercase()) {
-            Some(ref s) if s == "eager" => Self::Eager,
-            Some(ref s) if s == "deferred" => Self::Deferred,
-            _ => Self::Auto,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -58,8 +51,8 @@ impl ToolRoutingConfig {
     }
 
     pub fn apply_partial(&mut self, partial: &PartialToolRoutingConfig) {
-        if let Some(mode) = &partial.mode {
-            self.mode = ToolRoutingMode::from_optional_str(Some(mode));
+        if let Some(mode) = partial.mode {
+            self.mode = mode;
         }
         if let Some(limit) = partial.search_result_limit {
             self.search_result_limit = clamp_search_result_limit(limit as usize);
@@ -112,9 +105,26 @@ pub fn merge_tool_routing(
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialToolRoutingConfig {
-    pub mode: Option<String>,
+    pub mode: Option<ToolRoutingMode>,
     pub search_result_limit: Option<u32>,
+}
+
+impl PartialToolRoutingConfig {
+    /// Validate user-supplied configuration at the parse boundary.
+    /// `search_result_limit` is documented as `1..=10`; out-of-range
+    /// values are startup errors, never silently clamped.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(limit) = self.search_result_limit {
+            anyhow::ensure!(
+                (MIN_TOOL_SEARCH_RESULT_LIMIT as u32..=MAX_TOOL_SEARCH_RESULT_LIMIT as u32)
+                    .contains(&limit),
+                "tool_routing.search_result_limit must be within 1..=10"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -140,11 +150,11 @@ mod tests {
     #[test]
     fn test_merge_precedence_project_wins() {
         let file = PartialToolRoutingConfig {
-            mode: Some("deferred".to_string()),
+            mode: Some(ToolRoutingMode::Deferred),
             search_result_limit: Some(3),
         };
         let project = PartialToolRoutingConfig {
-            mode: Some("eager".to_string()),
+            mode: Some(ToolRoutingMode::Eager),
             search_result_limit: None,
         };
         let merged = merge_tool_routing(Some(&file), Some(&project));
@@ -159,7 +169,7 @@ mod tests {
                search_result_limit = 7"#,
         )
         .expect("parse tool_routing section");
-        assert_eq!(cfg.mode.as_deref(), Some("deferred"));
+        assert_eq!(cfg.mode, Some(ToolRoutingMode::Deferred));
         assert_eq!(cfg.search_result_limit, Some(7));
     }
 

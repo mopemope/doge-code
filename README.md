@@ -1056,6 +1056,13 @@ list_timeout_ms = 10000
 call_timeout_ms = 120000
 ```
 
+Configuration is fail-closed. Unknown top-level or nested keys are startup
+errors, as are invalid enum/policy values (for example `[tool_routing]`,
+`[context_budget]`, and `[reasoning]` modes/efforts) and
+`[tool_routing] search_result_limit` values outside `1..=10`. The config
+loader is read-only: invalid files are never auto-repaired or rewritten,
+and typos never silently fall back to defaults.
+
 ### MCP Servers (Local vs Remote)
 
 See [`docs/mcp-3x-migration.md`](docs/mcp-3x-migration.md) for the rmcp 3.x
