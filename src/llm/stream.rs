@@ -14,6 +14,7 @@ use crate::llm::retry::{
     compute_retry_delay, extract_provider_code, is_context_length_exceeded_code, kind_for_status,
     max_attempts, parse_retry_after, should_retry,
 };
+use crate::llm::telemetry::{self, PROTOCOL_CHAT_COMPLETIONS};
 use crate::llm::types::{ChatMessage, Usage};
 
 // Stream types
@@ -116,10 +117,20 @@ impl OpenAIClient {
             format!("Bearer {}", self.api_key).parse().unwrap(),
         );
 
-        if tracing::enabled!(tracing::Level::DEBUG)
-            && let Ok(payload) = serde_json::to_string_pretty(&req)
-        {
-            debug!(payload = %payload, endpoint = %url, "sending chat.completions payload (stream)");
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let request_bytes = telemetry::measure_bytes(&req);
+            let summary = telemetry::summarize_chat_request(messages, 0, request_bytes, None);
+            debug!(
+                protocol = PROTOCOL_CHAT_COMPLETIONS,
+                message_count = summary.message_count,
+                system_messages = summary.system_messages,
+                developer_messages = summary.developer_messages,
+                user_messages = summary.user_messages,
+                assistant_messages = summary.assistant_messages,
+                tool_messages = summary.tool_messages,
+                request_bytes = summary.request_bytes,
+                "sending chat.completions request (stream)"
+            );
         }
 
         let cancel_token = cancel.unwrap_or_default();
@@ -155,12 +166,13 @@ impl OpenAIClient {
                     } else {
                         classify_transport(&e)
                     };
+                    let transport = telemetry::summarize_transport_error(&e);
                     let failure = RequestAttemptFailure::new(
                         kind.clone(),
                         None,
                         None,
                         None,
-                        anyhow::anyhow!(kind).context(format!("send chat request (stream): {e}")),
+                        anyhow::anyhow!(kind).context("send chat request (stream)"),
                     );
                     if !should_retry(&failure) || attempt >= total_attempts {
                         if attempt >= total_attempts && should_retry(&failure) {
@@ -178,7 +190,15 @@ impl OpenAIClient {
                         }
                         RetryDelayDecision::Sleep(d) => d,
                     };
-                    warn!(attempt, total_attempts, err=%e, wait_ms=%delay.as_millis() as u64, "retrying stream establish after error");
+                    warn!(
+                        attempt,
+                        total_attempts,
+                        transport_timeout = transport.timeout,
+                        transport_connect = transport.connect,
+                        transport_request = transport.request,
+                        wait_ms = delay.as_millis() as u64,
+                        "retrying stream establish after error"
+                    );
                     if cancel_aware_sleep(delay, &cancel_token).await {
                         info!("chat_stream cancelled during retry sleep");
                         return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
@@ -189,6 +209,7 @@ impl OpenAIClient {
                 Ok(resp) => {
                     if !resp.status().is_success() {
                         let status = resp.status();
+                        let request_id = telemetry::extract_request_id(resp.headers());
                         let retry_after = parse_retry_after(resp.headers());
                         let text = tokio::select! {
                             biased;
@@ -199,6 +220,10 @@ impl OpenAIClient {
                             res = resp.text() => res.unwrap_or_default(),
                         };
                         let trimmed = text.trim().to_owned();
+                        let meta = telemetry::parse_provider_error_metadata(
+                            &trimmed,
+                            request_id.as_deref(),
+                        );
                         let provider_code = extract_provider_code(&trimmed);
                         if status.as_u16() == 401 || status.as_u16() == 403 {
                             return Err(anyhow::anyhow!(LlmErrorKind::Authentication)
@@ -211,14 +236,13 @@ impl OpenAIClient {
                             return Err(anyhow::anyhow!(LlmErrorKind::ContextLengthExceeded));
                         }
                         let kind = kind_for_status(status);
-                        let detail: String = trimmed.chars().take(500).collect();
+                        let message = telemetry::provider_error_message(status.as_u16(), &meta);
                         let failure = RequestAttemptFailure::new(
                             kind.clone(),
                             Some(status),
                             retry_after,
                             provider_code,
-                            anyhow::anyhow!(kind)
-                                .context(format!("chat error: {status} - {detail}")),
+                            anyhow::anyhow!(kind).context(message),
                         );
                         if !should_retry(&failure) || attempt >= total_attempts {
                             if attempt >= total_attempts && should_retry(&failure) {
@@ -272,7 +296,21 @@ impl OpenAIClient {
                     res = chunk_fut => {
                         match res {
                             Ok(Some(Ok(bytes))) => Ok(bytes),
-                            Ok(Some(Err(e))) => Err(anyhow::Error::new(e).context("byte stream read error")),
+                            Ok(Some(Err(e))) => {
+                                let transport = telemetry::summarize_transport_error(&e);
+                                let transport_timeout = transport.timeout;
+                                let transport_connect = transport.connect;
+                                let transport_request = transport.request;
+                                let transport_has_body_error = transport.body;
+                                debug!(
+                                    transport_timeout = transport_timeout,
+                                    transport_connect = transport_connect,
+                                    transport_request = transport_request,
+                                    transport_body = transport_has_body_error,
+                                    "stream byte read transport error"
+                                );
+                                Err(anyhow::Error::new(e).context("byte stream read error"))
+                            }
                             Ok(None) => break, // End of stream
                             Err(_) => Err(anyhow::anyhow!(LlmErrorKind::Timeout)),
                         }
@@ -282,7 +320,7 @@ impl OpenAIClient {
                 let chunk = match chunk_res {
                     Ok(chunk) => chunk,
                     Err(e) => {
-                        warn!(err=%e, "error reading chunk from byte stream");
+                        warn!("error reading chunk from byte stream");
                         Err(e)?;
                         break;
                     }
@@ -308,32 +346,72 @@ impl OpenAIClient {
                                 continue;
                             }
 
-                            debug!(response_chunk=%payload, "llm chat_stream response");
+                            match serde_json::from_str::<ChatStreamChunk>(payload) {
+                                Ok(json) => {
+                                    let mut content_delta_chars = 0usize;
+                                    let mut tool_call_delta_count = 0usize;
+                                    for choice in &json.choices {
+                                        content_delta_chars = content_delta_chars.saturating_add(
+                                            choice.delta.content.chars().count(),
+                                        );
+                                        tool_call_delta_count = tool_call_delta_count
+                                            .saturating_add(choice.delta.tool_calls.len());
+                                    }
+                                    let summary = telemetry::summarize_stream_chunk(
+                                        payload.len(),
+                                        json.choices.len(),
+                                        content_delta_chars,
+                                        tool_call_delta_count,
+                                        json.usage.is_some(),
+                                        true,
+                                    );
+                                    debug!(
+                                        protocol = PROTOCOL_CHAT_COMPLETIONS,
+                                        chunk_bytes = summary.chunk_bytes,
+                                        parsed = summary.parsed,
+                                        choice_count = summary.choice_count,
+                                        content_delta_chars = summary.content_delta_chars,
+                                        tool_call_delta_count = summary.tool_call_delta_count,
+                                        usage_present = summary.usage_present,
+                                        "llm chat_stream response"
+                                    );
+                                    if let Some(usage) = &json.usage {
+                                        client.record_usage(usage);
+                                    }
 
-                            if let Ok(json) = serde_json::from_str::<ChatStreamChunk>(payload) {
-                                if let Some(usage) = &json.usage {
-                                    client.record_usage(usage);
-                                }
-
-                                for ch in json.choices {
-                                    if let Some(reason) = ch.finish_reason
-                                        && reason == "stop"
-                                    {
-                                        continue;
-                                    }
-                                    let delta = ch.delta.content;
-                                    if !delta.is_empty() {
-                                        yield delta;
-                                    }
-                                    if !ch.delta.tool_calls.is_empty()
-                                        && let Ok(marker) =
-                                            serde_json::to_string(&ch.delta.tool_calls)
-                                    {
-                                        yield format!("__TOOL_CALLS_DELTA__:{}", marker);
+                                    for ch in json.choices {
+                                        if let Some(reason) = ch.finish_reason
+                                            && reason == "stop"
+                                        {
+                                            continue;
+                                        }
+                                        let delta = ch.delta.content;
+                                        if !delta.is_empty() {
+                                            yield delta;
+                                        }
+                                        if !ch.delta.tool_calls.is_empty()
+                                            && let Ok(marker) =
+                                                serde_json::to_string(&ch.delta.tool_calls)
+                                        {
+                                            yield format!("__TOOL_CALLS_DELTA__:{}", marker);
+                                        }
                                     }
                                 }
-                            } else {
-                                warn!(payload, "failed to parse stream chunk");
+                                Err(_) => {
+                                    let summary = telemetry::summarize_stream_chunk(
+                                        payload.len(),
+                                        0,
+                                        0,
+                                        0,
+                                        false,
+                                        false,
+                                    );
+                                    warn!(
+                                        chunk_bytes = summary.chunk_bytes,
+                                        parsed = summary.parsed,
+                                        "failed to parse stream chunk"
+                                    );
+                                }
                             }
                         }
                     }
@@ -587,5 +665,85 @@ mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_error_body_secret_not_in_error() {
+        let secret = "SECRET_PROVIDER_BODY_123";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let body = serde_json::json!({"error": {"code": "invalid_request", "message": secret}});
+        let url = spawn_scripted_stream_server(
+            vec![ScriptedStreamResponse {
+                status: 400,
+                body: serde_json::to_string(&body).expect("body"),
+                content_type: "application/json".into(),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = stream_test_client(url, 0);
+        let err = match client.chat_stream("gpt", &stream_messages(), None).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        let rendered = format!("{err:?} {}", err);
+        assert!(
+            !rendered.contains(secret),
+            "provider error body must not leak, got {rendered}"
+        );
+        assert!(rendered.contains("400"));
+        assert!(rendered.contains("invalid_request"));
+    }
+
+    #[tokio::test]
+    async fn stream_content_preserved_for_display_but_not_logged() {
+        use futures::StreamExt;
+        let secret = "SECRET_STREAM_OUTPUT_789";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_stream_server(
+            vec![ScriptedStreamResponse {
+                status: 200,
+                body: sse_done_body(secret),
+                content_type: "text/event-stream".into(),
+                retry_after: None,
+            }],
+            counter.clone(),
+        )
+        .await;
+        let client = stream_test_client(url, 0);
+        let mut stream = client
+            .chat_stream("gpt", &stream_messages(), None)
+            .await
+            .expect("stream");
+        let mut collected = String::new();
+        while let Some(item) = stream.next().await {
+            collected.push_str(&item.expect("chunk"));
+        }
+        // Display path preserves content.
+        assert!(collected.contains(secret));
+        // Diagnostic summary carries only counts.
+        let summary = crate::llm::telemetry::summarize_stream_chunk(
+            secret.len(),
+            1,
+            secret.chars().count(),
+            0,
+            false,
+            true,
+        );
+        let rendered = format!("{summary:?}");
+        assert!(!rendered.contains(secret));
+        assert_eq!(summary.content_delta_chars, secret.chars().count());
+    }
+
+    #[tokio::test]
+    async fn stream_malformed_chunk_secret_not_logged() {
+        let secret = "SECRET_STREAM_OUTPUT_789";
+        let malformed = format!("not-json {secret} {{{{");
+        let summary =
+            crate::llm::telemetry::summarize_stream_chunk(malformed.len(), 0, 0, 0, false, false);
+        let rendered = format!("{summary:?}");
+        assert!(!rendered.contains(secret));
+        assert!(!summary.parsed);
     }
 }

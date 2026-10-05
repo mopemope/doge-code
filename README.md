@@ -315,6 +315,23 @@ scan and 32 MiB per rendered report; exceeding a limit fails instead of silently
 truncating the artifact. The shared managed runner's capture limits also apply
 to Git commands, with a 10-second timeout per command.
 
+## Diagnostic Logging
+
+Diagnostic logs live at `.doge/logs/debug.log` with `0700` directories and
+`0600` files on Unix; a symlinked log path is refused. Even with
+`RUST_LOG=debug`, prompts, source/file content, tool arguments/results,
+model output, raw request/response bodies, provider error bodies, refusal
+bodies, encrypted Responses state, and credentials are never logged. Logs
+record shape and counts instead (message counts, request/response bytes,
+tool counts, token usage, retry metadata, provider codes, request IDs,
+durations). Older versions may have written such content to a repository-root
+`debug.log`; that legacy file is ignored but never auto-deleted, so inspect
+and remove it yourself if present. To review content explicitly, use:
+
+```bash
+dgc session evidence <SESSION_ID> --include-content
+```
+
 ## 🛠️ Tools and Commands
 
 ### File System Tools

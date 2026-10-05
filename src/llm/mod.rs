@@ -13,6 +13,7 @@ pub mod runtime_context;
 mod stream;
 mod stream_tools;
 mod symbol_edit;
+pub mod telemetry;
 mod tool_catalog;
 mod tool_def;
 pub mod tool_execution;

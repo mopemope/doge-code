@@ -80,7 +80,8 @@ class VerificationTests(unittest.TestCase):
             self.assertIn("--locked", command)
 
     def test_python_discovery_zero_tests_is_not_verification(self):
-        requirement = verify.commands("guidance", None, SCRIPTS.parent)[1][1]
+        commands = verify.commands("guidance", None, SCRIPTS.parent)
+        requirement = next(value for _, value in commands if value == "unittest")
         code, _ = self.run_fixture("Ran 0 tests in 0.000s\n\nOK", require_tests=requirement)
         self.assertEqual(code, 2)
 

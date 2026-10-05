@@ -28,6 +28,10 @@ target
 # but the committed dogfood config is tracked.
 .doge/*
 !.doge/config.toml
+# Legacy diagnostic log location. Older versions wrote prompt/source/tool
+# content to the repository root; never commit it if one remains.
+# New logs live under .doge/logs/ (already ignored above).
+/debug.log
 .serena
 .amazonq
 GEMINI.md
