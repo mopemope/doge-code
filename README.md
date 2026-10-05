@@ -1314,6 +1314,11 @@ Use `bash scripts/verify.sh msrv` for the installed MSRV toolchain,
 `bash scripts/verify.sh macos` for focused tests on macOS. See the
 [verification matrix](docs/ai/workflow.md) for required checks and
 [agent evaluation protocol](docs/ai/evaluation.md) for measuring guidance changes.
+The evaluation comparer requires explicit complete usage coverage for schema-v2
+records before reporting token totals or tokens per accepted run. Missing or
+inconsistent attempt/report counters leave these metrics unknown, even if the
+record supplies numeric token subtotals; `known_*` fields retain those subtotals.
+Legacy-v1 measured records keep their existing comparison behavior.
 
 ### Adding New Languages
 1. Add tree-sitter parser dependency to `Cargo.toml`

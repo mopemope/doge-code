@@ -100,7 +100,15 @@ pricing/charges; this harness does not infer prices from token counts.
 The comparer rejects duplicate runs, different case/trial/commit/model/
 settings sets, unreviewed records (null `accepted`/`rework_count`/
 `contract_violations`), nonfinite metrics, invalid cached-token counts,
-and accepted runs with contract violations. Variant metadata (binary and
+and accepted runs with contract violations. For schema v2, complete token and
+cached-token summaries additionally require explicit nonnegative integer
+`request_attempts`, `usage_records`, and `unknown_usage_attempts`, with equal
+attempt/report counts and zero unknown attempts. Missing, null, or inconsistent
+coverage prevents complete totals and token efficiency even when token fields
+contain numbers; supplied numeric subtotals remain in `known_total_tokens` and
+`known_cached_input_tokens`. These subtotals are not complete-run totals. Invalid
+counter types or negative values are rejected. Legacy v1 measured records retain
+their original comparison behavior. Variant metadata (binary and
 config hashes) may differ between files; matched settings must be equal.
 
 The fixture set, harness, and comparison utility make evaluation repeatable
