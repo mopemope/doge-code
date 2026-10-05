@@ -308,7 +308,14 @@ pub async fn run_agent_loop(
                    tools: &[crate::llm::ToolDef],
                    overlay: u64| {
         if let Some(account) = client.account_label() {
-            governor.measure_subscription(account, model, messages, tools, overlay)
+            governor.measure_subscription(
+                account,
+                model,
+                messages,
+                tools,
+                overlay,
+                client.responses_compact_threshold(),
+            )
         } else {
             governor.measure_with_overlay(messages, tools, overlay)
         }
@@ -485,7 +492,14 @@ pub async fn run_agent_loop(
         let finalize_estimate: Option<u64> = (|| {
             let fp = if let Some(account) = client.account_label() {
                 budget_governor
-                    .measure_subscription(account, model, &finalize_messages, &[], 0)
+                    .measure_subscription(
+                        account,
+                        model,
+                        &finalize_messages,
+                        &[],
+                        0,
+                        client.responses_compact_threshold(),
+                    )
                     .ok()
             } else {
                 budget_governor.measure(&finalize_messages, &[]).ok()
@@ -1259,6 +1273,20 @@ pub async fn run_agent_loop(
                         &ledger_before_request,
                         &ledger_after_fail,
                     );
+                    // Subscription native path never falls back to the local
+                    // Chat Completions compactor and never retries the same
+                    // oversized bytes unboundedly.
+                    if client.native_responses_compaction_enabled() {
+                        error!(
+                            responses_native_compaction_enabled = true,
+                            "subscription request exceeded provider context window despite native compaction"
+                        );
+                        let agent_error = AgentLoopError::Llm(e.to_string());
+                        handle_agent_error(&agent_error, &ui_tx);
+                        return Err(e.context(
+                            "Responses server-side compaction was enabled but the request still exceeded the provider context window. Verify [llm] context_window_size and the configured compaction threshold.",
+                        ).context(agent_error));
+                    }
                     if !reactive_guard.should_attempt() {
                         error!("context length exceeded after reactive compaction; not retrying");
                     } else {
@@ -1359,7 +1387,8 @@ pub async fn run_agent_loop(
         };
         // Reconcile the successful request: max(reported, estimate) plus one
         // estimate per missing retry attempt. Provider telemetry is never
-        // mutated with estimates.
+        // mutated with estimates. Server-side compaction is part of this
+        // same response: never a second charge.
         {
             let ledger_after_request = client.usage_snapshot();
             run_budget.charge_request(
@@ -1368,10 +1397,21 @@ pub async fn run_agent_loop(
                 &ledger_after_request,
             );
         }
-        // Calibrate before the sub-agent can overwrite the shared
-        // per-request counter, then mark results seen. Failed requests above
-        // never reach here so unseen results stay inline.
-        if let Some(fp) = sent_footprint {
+        // Native server-side compaction detection comes before calibration:
+        // a compacted response's pre-request footprint must not become a
+        // calibration sample. Ordering: usage -> detection -> mark seen ->
+        // push -> boundary -> checkpoint -> dispatch/return.
+        let native_compaction_occurred = msg
+            .provider_state
+            .as_ref()
+            .is_some_and(|state| state.contains_compaction());
+        if native_compaction_occurred {
+            budget_governor.reset_after_native_compaction();
+            debug!(
+                responses_native_compaction_observed = true,
+                "skipping calibration sample for native-compacted response"
+            );
+        } else if let Some(fp) = sent_footprint {
             budget_governor.observe_actual(fp, client.get_prompt_tokens_used());
         }
         reactive_guard.record_success();
@@ -1380,6 +1420,9 @@ pub async fn run_agent_loop(
         // assistant/tool messages; network errors above never reach here so
         // failed requests keep their results inline.
         history.mark_sent_tool_results_seen();
+        if native_compaction_occurred {
+            reasoning_controller.observe_compaction();
+        }
 
         // Prompt-cache telemetry + prefix-stability diagnostics (DEBUG only).
         // Token counters were already recorded via `record_usage` on every
@@ -1444,6 +1487,24 @@ pub async fn run_agent_loop(
                 tool_calls: msg.tool_calls.clone(),
                 tool_call_id: None,
             });
+            // Native compaction boundary before checkpoint so the next resume
+            // continues from compact state. Fail-closed: an apply error keeps
+            // the unpruned history rather than losing unseen results.
+            if native_compaction_occurred {
+                match history.apply_native_provider_compaction_boundary() {
+                    Ok(report) => {
+                        debug!(
+                            responses_native_compaction_observed = true,
+                            history_messages_pruned = report.pruned_messages,
+                            applied = report.applied,
+                            "native compaction boundary applied (final)"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "native compaction boundary refused; keeping full history");
+                    }
+                }
+            }
 
             // If files were written during tool execution, compute and send git diff
             if cfg.show_diff
@@ -1503,6 +1564,24 @@ pub async fn run_agent_loop(
             tool_calls: msg.tool_calls.clone(),
             tool_call_id: None,
         });
+        // Native compaction boundary before the pending-batch checkpoint so
+        // tool dispatch sees the canonical pruned history. Pairing is
+        // validated inside the apply; failures keep history unpruned.
+        if native_compaction_occurred {
+            match history.apply_native_provider_compaction_boundary() {
+                Ok(report) => {
+                    debug!(
+                        responses_native_compaction_observed = true,
+                        history_messages_pruned = report.pruned_messages,
+                        applied = report.applied,
+                        "native compaction boundary applied (tool batch)"
+                    );
+                }
+                Err(error) => {
+                    warn!(error = %error, "native compaction boundary refused; keeping full history");
+                }
+            }
+        }
         // Save pending calls before any side effect. Interrupted calls are
         // durable unknown outcomes and are never silently replayed.
         history.checkpoint()?;

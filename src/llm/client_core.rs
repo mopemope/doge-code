@@ -28,6 +28,10 @@ pub struct OpenAIClient {
     pub api_key: String,
     pub(crate) inner: reqwest::Client,
     pub llm_cfg: LlmConfig,
+    /// Resolved Responses `context_management.compact_threshold` for the
+    /// ChatGPT subscription route. `None` for OpenAI-compatible providers
+    /// (local compaction path unchanged).
+    pub(crate) responses_compact_threshold: Option<u32>,
     /// Tracks total tokens used by this client
     pub tokens_used: Arc<AtomicU32>,
     /// Tracks prompt tokens used by this client (for header display)
@@ -71,9 +75,17 @@ impl OpenAIClient {
         };
         if cfg.provider == ProviderKind::OpenaiChatgpt {
             let auth = AuthHandle::selected(CredentialStore::default_path()?)?;
+            let threshold = cfg.get_effective_compaction_limit();
+            crate::features::openai_subscription::responses::validate_compact_threshold(threshold)?;
             let mut client =
                 Self::new("https://api.openai.com/v1", "")?.with_llm_config(cfg.llm.clone());
             client.subscription = Some(auth);
+            client.responses_compact_threshold = Some(threshold);
+            tracing::debug!(
+                responses_native_compaction_enabled = true,
+                responses_compact_threshold = threshold,
+                "subscription native compaction configured"
+            );
             Ok(Some(client))
         } else {
             cfg.api_key
@@ -88,6 +100,28 @@ impl OpenAIClient {
     pub fn is_subscription(&self) -> bool {
         self.subscription.is_some()
     }
+
+    /// Resolved Responses native-compaction threshold, if this client uses
+    /// the ChatGPT subscription route.
+    pub fn responses_compact_threshold(&self) -> Option<u32> {
+        self.responses_compact_threshold
+    }
+
+    /// True when server-side Responses compaction is configured for this
+    /// client. Local Chat Completions summarization must not run then.
+    pub fn native_responses_compaction_enabled(&self) -> bool {
+        self.responses_compact_threshold.is_some()
+    }
+
+    /// Test/fixture override for the native-compaction threshold.
+    /// Rejects below-minimum values instead of clamping.
+    pub fn with_responses_compact_threshold(mut self, threshold: Option<u32>) -> Result<Self> {
+        if let Some(value) = threshold {
+            crate::features::openai_subscription::responses::validate_compact_threshold(value)?;
+        }
+        self.responses_compact_threshold = threshold;
+        Ok(self)
+    }
     pub fn account_label(&self) -> Option<&str> {
         self.subscription.as_ref().map(|a| a.account.as_str())
     }
@@ -101,6 +135,7 @@ impl OpenAIClient {
             api_key: api_key.into(),
             inner,
             llm_cfg: LlmConfig::default(),
+            responses_compact_threshold: None,
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -695,6 +730,7 @@ mod tests {
             api_key: "x".into(),
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
+            responses_compact_threshold: None,
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),
@@ -713,6 +749,7 @@ mod tests {
             api_key: "x".into(),
             inner: reqwest::Client::new(),
             llm_cfg: LlmConfig::default(),
+            responses_compact_threshold: None,
             tokens_used: Arc::new(AtomicU32::new(0)),
             prompt_tokens_used: Arc::new(AtomicU32::new(0)),
             total_tokens_used: Arc::new(AtomicU64::new(0)),

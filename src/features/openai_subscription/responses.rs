@@ -23,6 +23,79 @@ pub struct Request {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_management: Option<Vec<ContextManagement>>,
+}
+
+/// Server-side native compaction directive for `POST /responses`.
+///
+/// Sent as `context_management: [{type: "compaction", compact_threshold}]`
+/// with `store:false` / `stream:true` preserved. Never interpret, summarize,
+/// or rewrite the opaque compaction state server-side produces.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ContextManagement {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    compact_threshold: u32,
+}
+
+impl ContextManagement {
+    pub fn compaction(compact_threshold: u32) -> Self {
+        Self {
+            kind: "compaction",
+            compact_threshold,
+        }
+    }
+}
+
+/// Minimum `compact_threshold` accepted by the Responses API.
+pub const RESPONSES_MIN_COMPACT_THRESHOLD: u32 = 1_000;
+
+/// Validate a resolved native-compaction threshold without silent clamping.
+pub fn validate_compact_threshold(threshold: u32) -> Result<()> {
+    if threshold < RESPONSES_MIN_COMPACT_THRESHOLD {
+        bail!(
+            "Responses native compaction threshold {threshold} is below the API minimum {}; lower the configured auto-compaction threshold is not supported for openai-chatgpt",
+            RESPONSES_MIN_COMPACT_THRESHOLD
+        );
+    }
+    Ok(())
+}
+
+/// True when a Responses output item is an opaque server-side compaction item.
+pub fn is_compaction_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("compaction")
+}
+
+fn validate_compaction_item(item: &Value) -> Result<()> {
+    if item.get("type").and_then(Value::as_str) != Some("compaction") {
+        bail!("Responses compaction item must have type compaction");
+    }
+    let encrypted = item.get("encrypted_content").and_then(Value::as_str);
+    if encrypted.is_none_or(|s| s.is_empty()) {
+        bail!("Responses compaction item missing encrypted_content");
+    }
+    if let Some(id) = item.get("id")
+        && !id.is_string()
+    {
+        bail!("Responses compaction item id must be a string");
+    }
+    Ok(())
+}
+
+/// Index of the latest compaction item in a Responses output array, if any.
+pub fn latest_compaction_index(output: &[Value]) -> Option<usize> {
+    output.iter().rposition(is_compaction_item)
+}
+
+/// Canonical continuation output: everything from the latest compaction item
+/// onward (inclusive). Items before the boundary are not needed for
+/// continuation and must not be replayed or dispatched from.
+pub fn canonical_output(output: &[Value]) -> &[Value] {
+    match latest_compaction_index(output) {
+        Some(index) => &output[index..],
+        None => output,
+    }
 }
 
 impl std::fmt::Debug for Request {
@@ -41,7 +114,11 @@ pub fn build(
     messages: &[ChatMessage],
     tools: &[ToolDef],
     effort: Option<ReasoningEffort>,
+    compact_threshold: Option<u32>,
 ) -> Result<Request> {
+    if let Some(threshold) = compact_threshold {
+        validate_compact_threshold(threshold)?;
+    }
     let mut input = Vec::new();
     let mut calls = std::collections::HashSet::new();
     let mut outputs = std::collections::HashSet::new();
@@ -113,10 +190,17 @@ pub fn build(
         store: false,
         stream: true,
         reasoning: effort.map(|e| json!({"effort":e.as_api_str()})),
+        context_management: compact_threshold
+            .map(|threshold| vec![ContextManagement::compaction(threshold)]),
     })
 }
 
 fn validate_output(item: &Value) -> Result<()> {
+    // Opaque server-side compaction items carry no `status`; they must be
+    // accepted without interpreting the ciphertext.
+    if is_compaction_item(item) {
+        return validate_compaction_item(item);
+    }
     if item
         .get("status")
         .is_some_and(|status| status != "completed")
@@ -166,11 +250,15 @@ pub fn completed(
         .get("output")
         .and_then(Value::as_array)
         .context("Responses output missing")?;
+    // The latest compaction item is the canonical continuation boundary.
+    // Only items at/after it are validated, dispatched, and persisted.
+    // Pre-boundary tool calls must never dispatch from this response.
+    let canonical: Vec<Value> = canonical_output(output).to_vec();
     let mut text = String::new();
     let mut refusal = None;
     let mut tool_calls = Vec::new();
     let mut ids = std::collections::HashSet::new();
-    for item in output {
+    for item in &canonical {
         validate_output(item)?;
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
@@ -242,7 +330,7 @@ pub fn completed(
                 version: 1,
                 account: account.to_owned(),
                 model: model.to_owned(),
-                output: output.clone(),
+                output: canonical,
             }),
         },
         usage,
@@ -258,7 +346,22 @@ pub async fn infer(
     effort: Option<ReasoningEffort>,
     cancel: CancellationToken,
 ) -> Result<ChoiceMessageWithTools> {
-    let request = build(model, &auth.account, messages, tools, effort)?;
+    let compact_threshold = client.responses_compact_threshold();
+    let request = build(
+        model,
+        &auth.account,
+        messages,
+        tools,
+        effort,
+        compact_threshold,
+    )?;
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
+            responses_native_compaction_enabled = compact_threshold.is_some(),
+            responses_compact_threshold = compact_threshold.unwrap_or(0),
+            "responses request contract"
+        );
+    }
     let attempts = client.llm_cfg.max_retries.min(3) + 1;
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(client.llm_cfg.request_timeout_ms.max(1));
