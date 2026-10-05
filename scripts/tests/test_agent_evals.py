@@ -94,7 +94,7 @@ if os.environ.get("FAKE_MODIFY_TRACKED") == "1":
         handle.write("fake agent edit\n")
 
 USAGE_OK = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
-            "cached_tokens": 80, "attempts": 1, "usage_records": 1,
+            "cached_tokens": 80, "cached_usage_records": 1, "attempts": 1, "usage_records": 1,
             "unknown_usage_attempts": 0, "all_tracked_attempts_reported": True}
 BUDGET = {"iterations": 2, "tool_calls": 3, "charged_tokens": 120,
           "elapsed_ms": 1000, "provider_reported_tokens": 120,
@@ -111,9 +111,18 @@ elif payload == "no_cache":
            "budget": dict(BUDGET), "response": "fake",
            "tokens_used": 120, "usage": usage,
            "tools_called": [], "conversation_length": 2}
+elif payload == "partial_optional":
+    usage = dict(USAGE_OK, attempts=2, usage_records=2, cached_usage_records=1,
+                 prompt_tokens=200, completion_tokens=40, total_tokens=240,
+                 reasoning_tokens=30, reasoning_usage_records=1,
+                 cache_write_tokens=10, cache_write_usage_records=1)
+    budget = dict(BUDGET, request_attempts=2, usage_records=2)
+    doc = {"success": True, "status": "completed", "usage": usage,
+           "budget": budget, "tools_called": []}
 elif payload == "reasoning":
     usage = dict(USAGE_OK)
     usage["reasoning_tokens"] = 50
+    usage["reasoning_usage_records"] = 1
     doc = {"success": True, "status": "completed", "stop_reason": None,
            "budget": dict(BUDGET), "response": "fake",
            "tokens_used": 120, "usage": usage,
@@ -612,6 +621,32 @@ class RunnerTests(HarnessCase):
         checks_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001" / "checks"
         self.assertTrue((checks_dir / "passing.stdout.txt").exists())
 
+    def test_partial_optional_metrics_survive_runner_artifacts_and_comparison(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        with fake_env(FAKE_PAYLOAD="partial_optional"):
+            measurement, out_root = self.run_trial(repo, manifest, cases[0], out_name="out")
+        saved = json.loads((out_root / "baseline" / "runs" / "fake-case" /
+                            "trial-001" / "run.json").read_text())
+        for record in (measurement, saved):
+            for field, count, known, value in (
+                ("cached_input_tokens", "cached_usage_records", "known_cached_input_tokens", 80),
+                ("reasoning_tokens", "reasoning_usage_records", "known_reasoning_tokens", 30),
+                ("cache_write_tokens", "cache_write_usage_records", "known_cache_write_tokens", 10),
+            ):
+                self.assertIsNone(record[field])
+                self.assertEqual(record[count], 1)
+                self.assertEqual(record[known], value)
+        reviewed = dict(saved, accepted=True, rework_count=0, contract_violations=0)
+        path = out_root / "reviewed.jsonl"
+        path.write_text(json.dumps(reviewed))
+        summary = evals.summarize(evals.load_runs(path))
+        self.assertEqual(summary["total_tokens"], 240)
+        self.assertIsNone(summary["cached_input_tokens"])
+        self.assertEqual(summary["known_cached_input_tokens"], 80)
+
     def test_runner_leaves_review_null_and_compare_rejects_unreviewed(self):
         repo = self.make_repo()
         fake = self.make_fake()
@@ -724,7 +759,7 @@ class DryRunTests(HarnessCase):
 class TelemetryTests(unittest.TestCase):
     def payload(self, **overrides):
         usage = {"prompt_tokens": 100, "completion_tokens": 20,
-                 "total_tokens": 120, "cached_tokens": 80, "attempts": 1,
+                 "total_tokens": 120, "cached_tokens": 80, "cached_usage_records": 1, "attempts": 1,
                  "usage_records": 1, "unknown_usage_attempts": 0,
                  "all_tracked_attempts_reported": True}
         budget = {"iterations": 2, "tool_calls": 3, "charged_tokens": 120,
@@ -774,6 +809,7 @@ class TelemetryTests(unittest.TestCase):
     def test_reasoning_not_double_counted(self):
         doc = self.payload()
         doc["usage"]["reasoning_tokens"] = 50
+        doc["usage"]["reasoning_usage_records"] = 1
         telemetry = common.extract_exec_telemetry(doc)
         # output_tokens is exactly completion_tokens; reasoning is separate.
         self.assertEqual(telemetry["output_tokens"], 20)
@@ -786,6 +822,62 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry["budget_estimated_tokens"], 977)
         self.assertEqual(telemetry["input_tokens"], 100)
         self.assertEqual(telemetry["output_tokens"], 20)
+
+    def test_partial_optional_usage_keeps_known_subtotals_not_complete_totals(self):
+        doc = self.payload()
+        doc["usage"].update(attempts=2, usage_records=2, cached_usage_records=1,
+            reasoning_usage_records=1, cache_write_usage_records=1,
+            cached_tokens=80, reasoning_tokens=30, cache_write_tokens=10)
+        doc["budget"].update(request_attempts=2, usage_records=2)
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertEqual(telemetry["input_tokens"], 100)
+        self.assertEqual(telemetry["output_tokens"], 20)
+        for field, count, known, value in (
+            ("cached_input_tokens", "cached_usage_records", "known_cached_input_tokens", 80),
+            ("reasoning_tokens", "reasoning_usage_records", "known_reasoning_tokens", 30),
+            ("cache_write_tokens", "cache_write_usage_records", "known_cache_write_tokens", 10),
+        ):
+            self.assertIsNone(telemetry[field])
+            self.assertEqual(telemetry[count], 1)
+            self.assertEqual(telemetry[known], value)
+
+    def test_optional_usage_complete_zero_differs_from_missing_and_partial(self):
+        metrics = [("cached_tokens", "cached_input_tokens", "cached_usage_records", "known_cached_input_tokens"),
+                   ("reasoning_tokens", "reasoning_tokens", "reasoning_usage_records", "known_reasoning_tokens"),
+                   ("cache_write_tokens", "cache_write_tokens", "cache_write_usage_records", "known_cache_write_tokens")]
+        for raw, field, counter, known in metrics:
+            for count in (None, 0, 1):
+                doc = self.payload()
+                doc["usage"].update({raw: 0, counter: count})
+                with self.subTest(raw=raw, count=count):
+                    telemetry = common.extract_exec_telemetry(doc)
+                    self.assertEqual(telemetry[known], 0)
+                    self.assertEqual(telemetry[field], 0 if count == 1 else None)
+            doc = self.payload()
+            doc["usage"].pop(raw, None)
+            doc["usage"][counter] = 1
+            telemetry = common.extract_exec_telemetry(doc)
+            self.assertIsNone(telemetry[field])
+            self.assertIsNone(telemetry[known])
+
+    def test_optional_known_usage_survives_incomplete_attempt_coverage(self):
+        doc = self.payload()
+        doc["usage"].update(all_tracked_attempts_reported=False, unknown_usage_attempts=1,
+            attempts=2, cached_usage_records=1)
+        telemetry = common.extract_exec_telemetry(doc)
+        self.assertIsNone(telemetry["cached_input_tokens"])
+        self.assertEqual(telemetry["known_cached_input_tokens"], 80)
+        self.assertEqual(telemetry["cached_usage_records"], 1)
+
+    def test_optional_counter_invalid_types_never_invent_completeness(self):
+        for raw, field, counter, known in common.OPTIONAL_USAGE_METRICS:
+            for value in (True, False, -1, 1.5, "1", 2):
+                doc = self.payload()
+                doc["usage"].update({raw: 7, counter: value})
+                with self.subTest(field=field, count=value):
+                    telemetry = common.extract_exec_telemetry(doc)
+                    self.assertIsNone(telemetry[field])
+                    self.assertEqual(telemetry[known], 7)
 
     def test_unparseable_exec_has_no_telemetry(self):
         telemetry = common.extract_exec_telemetry(None)

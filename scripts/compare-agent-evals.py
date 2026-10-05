@@ -93,6 +93,17 @@ def load_runs(path):
                     raise ValueError(
                         f"{where}: {field} must be a nonnegative integer or null"
                     )
+            for field in ("known_cached_input_tokens", "known_reasoning_tokens",
+                          "known_cache_write_tokens", "cached_usage_records",
+                          "reasoning_usage_records", "cache_write_usage_records"):
+                if not _optional_nonnegative_int(run.get(field)):
+                    raise ValueError(
+                        f"{where}: {field} must be a nonnegative integer or null"
+                    )
+            if (run.get("input_tokens") is not None
+                and run.get("known_cached_input_tokens") is not None
+                and run["known_cached_input_tokens"] > run["input_tokens"]):
+                raise ValueError(f"{where}: known cached tokens exceed input tokens")
             status = run.get("run_status")
             if status is None:
                 raise ValueError(f"{where}: schema v2 run_status is required")
@@ -128,6 +139,22 @@ def _usage_coverage_complete(run):
     )
 
 
+def _cached_coverage_complete(run):
+    if _is_legacy(run):
+        return True
+    count = run.get("cached_usage_records")
+    return _usage_coverage_complete(run) and type(count) is int and count == run["usage_records"]
+
+
+def _known_cached_tokens(run):
+    if _is_legacy(run):
+        return run["cached_input_tokens"]
+    # New records separate subtotals from complete values. Older records
+    # retain their supplied numeric subtotal without claiming item coverage.
+    known = run.get("known_cached_input_tokens")
+    return known if type(known) is int else run.get("cached_input_tokens")
+
+
 def summarize(runs):
     values = list(runs.values())
     accepted = sum(1 for run in values if run["accepted"])
@@ -155,12 +182,12 @@ def summarize(runs):
     known_total = sum(run["input_tokens"] + run["output_tokens"] for run in token_known)
     total_tokens = known_total if token_metrics_complete else None
 
-    cached_known = [
-        run for run in values if type(run.get("cached_input_tokens")) is int
-    ]
-    cached_covered = [run for run in cached_known if _usage_coverage_complete(run)]
+    cached_known = [run for run in values if type(_known_cached_tokens(run)) is int]
+    cached_covered = [run for run in values
+                      if type(run.get("cached_input_tokens")) is int
+                      and _cached_coverage_complete(run)]
     cached_complete = len(cached_covered) == len(values)
-    known_cached = sum(run["cached_input_tokens"] for run in cached_known)
+    known_cached = sum(_known_cached_tokens(run) for run in cached_known)
 
     tool_known = [run for run in values if type(run.get("tool_calls")) is int]
     tool_complete = len(tool_known) == len(values)
@@ -177,7 +204,8 @@ def summarize(runs):
         "tokens_per_accepted_run": total_tokens / accepted
         if (accepted and total_tokens is not None) else None,
         "cached_token_complete_runs": len(cached_covered),
-        "cached_input_tokens": known_cached if cached_complete else None,
+        "cached_input_tokens": sum(run["cached_input_tokens"] for run in cached_covered)
+        if cached_complete else None,
         "known_cached_input_tokens": known_cached,
         "seconds_per_accepted_run": seconds / accepted if accepted else None,
         "tool_call_complete_runs": len(tool_known),
