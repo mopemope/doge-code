@@ -8,10 +8,10 @@ use serde_json::json;
 pub async fn task(runtime: &ToolRuntime<'_>, args: &serde_json::Value) -> Result<ToolOutput> {
     let params: crate::tools::task::TaskParams = serde_json::from_value(args.clone())?;
     let client = runtime
-        .subagent_client
+        .shared_llm_client
         .as_ref()
         .ok_or_else(|| anyhow!("LLM client is not configured for the task tool"))?;
-    let model = runtime.subagent_model.clone();
+    let model = runtime.shared_llm_model.clone();
     let cancel = runtime.cancel_token.clone();
 
     let run = crate::llm::tool_execution::subagent::run_subagent(
@@ -681,8 +681,18 @@ pub async fn doc_generate(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("path is required"))?;
     let symbol = args.get("symbol").and_then(|v| v.as_str());
+    let client = runtime
+        .shared_llm_client
+        .clone()
+        .ok_or_else(|| anyhow!("LLM client is not configured for the doc_generate tool"))?;
+    let model = runtime.shared_llm_model.clone();
+    let cancel = runtime.cancel_token.clone();
 
-    match runtime.fs.doc_generate(path, symbol).await {
+    match runtime
+        .fs
+        .doc_generate(path, symbol, client, &model, cancel)
+        .await
+    {
         Ok(result) => {
             let value = json!({ "ok": true, "doc": result });
             Ok(ToolOutput {
@@ -691,7 +701,11 @@ pub async fn doc_generate(
                 result_summary: format!("Generated docs for {}", path),
             })
         }
-        Err(e) => Err(anyhow!("{e}")),
+        // Preserve the typed error (notably `LlmErrorKind::Cancelled`): the
+        // agent loop downcasts dispatch errors to propagate cancellation
+        // instead of recording an ordinary tool failure. Formatting with
+        // `anyhow!("{e}")` here would erase that type.
+        Err(e) => Err(e),
     }
 }
 
@@ -945,5 +959,43 @@ mod task_output_tests {
         assert_eq!(value["iterations"], 2);
         assert_eq!(value["tool_calls"], 3);
         assert!(!value["summary"].as_str().expect("summary").is_empty());
+    }
+
+    #[tokio::test]
+    async fn doc_generate_dispatch_preserves_typed_cancellation() -> Result<()> {
+        // An already-cancelled token must surface typed `Cancelled` through
+        // the dispatch wrapper (not a stringified error) so the agent loop
+        // propagates cancellation instead of recording an ordinary failure.
+        use crate::llm::LlmErrorKind;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("lib.rs");
+        std::fs::write(&target, "pub fn foo() {}\n")?;
+        let config = std::sync::Arc::new(crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let fs_tools =
+            crate::tools::FsTools::new(std::sync::Arc::new(tokio::sync::RwLock::new(None)), config);
+        // No server needed: the cancelled token short-circuits before send.
+        let client = crate::llm::OpenAIClient::new("http://127.0.0.1:1/", "test-key")?;
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let runtime = crate::llm::tool_runtime::ToolRuntime::build(
+            &fs_tools,
+            Some(client),
+            "test-model",
+            Some(token),
+        )
+        .await?;
+        let args = serde_json::json!({"path": target.to_str().unwrap()});
+        let err = super::doc_generate(&runtime, &args)
+            .await
+            .expect_err("cancelled doc_generate must err");
+        assert!(
+            err.downcast_ref::<LlmErrorKind>()
+                .is_some_and(|k| *k == LlmErrorKind::Cancelled),
+            "dispatch must preserve Cancelled type, got: {err:?}"
+        );
+        Ok(())
     }
 }

@@ -449,6 +449,41 @@ impl SessionManager {
         Ok(())
     }
 
+    pub(crate) fn apply_usage_delta(
+        &mut self,
+        expected_session_id: &str,
+        delta: &crate::llm::usage_ledger::UsageLedger,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        use crate::session::store::SessionSaveOutcome;
+        // Empty provider activity must not touch timestamps or disk.
+        if !delta.has_activity() {
+            return Ok(SessionSaveOutcome::Durable);
+        }
+        let Some(session) = self.current_session.as_mut() else {
+            anyhow::bail!("no current session for usage attribution");
+        };
+        // Never attribute to a session other than the one active when the
+        // operation started. Fail closed without mutating either session.
+        anyhow::ensure!(
+            session.meta.id == expected_session_id,
+            "active session changed during LLM operation; usage attribution refused"
+        );
+        let usage = session
+            .usage
+            .get_or_insert(crate::llm::usage_ledger::UsageLedger {
+                historical_usage_unknown: true,
+                ..Default::default()
+            });
+        usage.add(delta);
+        session.token_count = session.token_count.saturating_add(delta.total_tokens);
+        session.requests = session.requests.saturating_add(delta.attempts);
+        session.timestamp = chrono::Utc::now().to_rfc3339();
+        // In-memory payload is complete here. A save failure leaves it in
+        // memory with Unsaved state; a later flush re-saves the same payload
+        // without reapplying the delta (exact-once).
+        self.flush_current_session()
+    }
+
     /// Manual compaction is disk-first. Unlike agent checkpoints, failed saves
     /// must leave the original in-memory payload available without a summary.
     /// The caller holds the conversation lock and rechecks its runtime snapshot.
@@ -1214,5 +1249,155 @@ mod tests {
         sm.flush_current_session().unwrap();
         assert!(!sm.store.session_dir(&id).exists());
         assert!(!sm.has_unsaved_current_session());
+    }
+
+    fn delta_for_test(
+        attempts: u64,
+        records: u64,
+        total: u64,
+    ) -> crate::llm::usage_ledger::UsageLedger {
+        crate::llm::usage_ledger::UsageLedger {
+            attempts,
+            usage_records: records,
+            prompt_tokens: total.saturating_sub(20),
+            completion_tokens: 20.min(total),
+            total_tokens: total,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apply_usage_delta_updates_usage_tokens_and_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        let delta = delta_for_test(1, 1, 150);
+        sm.apply_usage_delta(&id, &delta).unwrap();
+        let session = sm.current_session.as_ref().unwrap();
+        let usage = session.usage.as_ref().unwrap();
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(usage.usage_records, 1);
+        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(session.token_count, 150);
+        assert_eq!(session.requests, 1);
+        assert!(!usage.historical_usage_unknown);
+    }
+
+    #[test]
+    fn apply_usage_delta_preserves_optional_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        let usage_json = serde_json::json!({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":10}});
+        let reported: crate::llm::types::Usage = serde_json::from_value(usage_json).unwrap();
+        let mut ledger = crate::llm::usage_ledger::UsageLedger {
+            attempts: 1,
+            ..Default::default()
+        };
+        ledger.record(&reported);
+        sm.apply_usage_delta(&id, &ledger).unwrap();
+        let usage = sm.current_session.as_ref().unwrap().usage.as_ref().unwrap();
+        assert_eq!(usage.cached_tokens, Some(60));
+        assert_eq!(usage.cache_write_tokens, Some(10));
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.cached_usage_records, 1);
+    }
+
+    #[test]
+    fn legacy_session_remains_historical_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        sm.current_session.as_mut().unwrap().usage = None;
+        let delta = delta_for_test(1, 1, 50);
+        sm.apply_usage_delta(&id, &delta).unwrap();
+        let usage = sm.current_session.as_ref().unwrap().usage.as_ref().unwrap();
+        assert!(usage.historical_usage_unknown);
+        assert_eq!(usage.total_tokens, 50);
+    }
+
+    #[test]
+    fn wrong_session_rejects_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let before = serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap();
+        let delta = delta_for_test(1, 1, 150);
+        assert!(sm.apply_usage_delta("other-session", &delta).is_err());
+        assert_eq!(
+            serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn empty_delta_does_not_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        let path = sm.store.session_dir(&id).join("session.json");
+        let disk = std::fs::read(&path).unwrap();
+        let before = serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap();
+        sm.apply_usage_delta(&id, &crate::llm::usage_ledger::UsageLedger::default())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(sm.current_session.as_ref().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+    }
+
+    #[test]
+    fn save_failure_exact_once_then_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm =
+            SessionManager::with_store(SessionStore::new(dir.path().join("sessions")).unwrap());
+        sm.create_session(None).unwrap();
+        let id = sm.current_session_id().unwrap();
+        let path = sm.store.session_dir(&id).join("session.json");
+        let disk = std::fs::read(&path).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let delta = delta_for_test(1, 1, 150);
+        assert!(sm.apply_usage_delta(&id, &delta).is_err());
+        // In-memory delta retained as Unsaved; disk unchanged.
+        let session = sm.current_session.as_ref().unwrap();
+        assert_eq!(session.usage.as_ref().unwrap().total_tokens, 150);
+        assert_eq!(session.token_count, 150);
+        assert_eq!(session.requests, 1);
+        assert!(sm.has_unsaved_current_session());
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        {
+            permissions.set_readonly(false);
+        }
+        std::fs::set_permissions(&path, permissions).unwrap();
+        sm.flush_current_session().unwrap();
+        assert!(!sm.has_unsaved_current_session());
+        let session = sm.current_session.as_ref().unwrap();
+        assert_eq!(session.usage.as_ref().unwrap().total_tokens, 150);
+        assert_eq!(session.token_count, 150);
+        // Retry never reapplies: still exactly once, not 300.
+        sm.flush_current_session().unwrap();
+        let reloaded = sm.store.load(&id).unwrap();
+        assert_eq!(reloaded.usage.as_ref().unwrap().total_tokens, 150);
+        assert_eq!(reloaded.token_count, 150);
+        assert_eq!(reloaded.requests, 1);
     }
 }

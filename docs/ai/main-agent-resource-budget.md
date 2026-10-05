@@ -10,8 +10,10 @@ errors.
 
 Out of scope: evaluation harness, Responses-native compaction, cache/routing/
 reasoning policy changes, sandboxing, pricing/cost tables, session-wide quotas,
-manual `/compact` and independent `doc_generate` usage integration, subagent
-policy redesign, and default token tuning (deferred to measured evaluation).
+subagent policy redesign, and default token tuning (deferred to measured
+evaluation). Manual `/compact` and nested `doc_generate` usage are integrated
+into persisted session accounting; manual `/compact` stays outside the main-agent
+run budget.
 
 ## Config semantics
 
@@ -103,9 +105,10 @@ checkpoint canonical history before return.
 
 `task` counts once for the tool budget. Shared-client ledger deltas from
 subagent LLM calls are reconciled via `charge_internal` with the effective
-compaction limit as the bounded estimate. `SubagentBudgetTracker` is unchanged;
-main last-request telemetry restoration is preserved by the existing
-`LastRequestGuard`. No budget telemetry is added to the model-visible `task`
+compaction limit as the bounded estimate. Any nested LLM tool using the shared
+client is automatically reconciled into the run budget. `SubagentBudgetTracker`
+is unchanged; main last-request telemetry restoration is preserved by the
+existing `LastRequestGuard`. No budget telemetry is added to the model-visible `task`
 result.
 
 ## Test matrix

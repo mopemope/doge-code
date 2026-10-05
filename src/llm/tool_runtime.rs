@@ -11,11 +11,13 @@ pub struct ToolRuntime<'a> {
     pub tool_catalog: ToolCatalog,
     pub fs: &'a FsTools,
     // repomap is delegated to FsTools, removed here
-    /// LLM client used by the `task` sub-agent (same client as the main loop,
-    /// so token usage accumulates in one place).
-    pub subagent_client: Option<crate::llm::client_core::OpenAIClient>,
-    /// Model id passed to the sub-agent loop.
-    pub subagent_model: String,
+    /// Shared LLM client for nested model work (`task` sub-agent,
+    /// `doc_generate` and any future LLM-powered tool). Always the same
+    /// client as the main loop, so token usage accumulates in one ledger
+    /// and the run budget cannot be bypassed.
+    pub shared_llm_client: Option<crate::llm::client_core::OpenAIClient>,
+    /// Model id for nested LLM tools sharing the client above.
+    pub shared_llm_model: String,
     /// Cancellation token propagated to the sub-agent loop.
     pub cancel_token: Option<CancellationToken>,
     /// Per-turn provenance attribution (directive id, if any). Propagated to
@@ -30,14 +32,14 @@ pub struct ToolRuntime<'a> {
 impl<'a> ToolRuntime<'a> {
     pub async fn build(
         fs: &'a FsTools,
-        subagent_client: Option<crate::llm::client_core::OpenAIClient>,
-        subagent_model: impl Into<String>,
+        shared_llm_client: Option<crate::llm::client_core::OpenAIClient>,
+        shared_llm_model: impl Into<String>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Self> {
         Self::build_with_attribution(
             fs,
-            subagent_client,
-            subagent_model,
+            shared_llm_client,
+            shared_llm_model,
             cancel_token,
             ProvenanceAttribution::none(),
         )
@@ -46,8 +48,8 @@ impl<'a> ToolRuntime<'a> {
 
     pub async fn build_with_attribution(
         fs: &'a FsTools,
-        subagent_client: Option<crate::llm::client_core::OpenAIClient>,
-        subagent_model: impl Into<String>,
+        shared_llm_client: Option<crate::llm::client_core::OpenAIClient>,
+        shared_llm_model: impl Into<String>,
         cancel_token: Option<CancellationToken>,
         attribution: ProvenanceAttribution,
     ) -> Result<Self> {
@@ -81,8 +83,8 @@ impl<'a> ToolRuntime<'a> {
         Ok(Self {
             tool_catalog,
             fs,
-            subagent_client,
-            subagent_model: subagent_model.into(),
+            shared_llm_client,
+            shared_llm_model: shared_llm_model.into(),
             cancel_token,
             attribution,
             observation_store: crate::llm::observation::new_shared_store(),
@@ -95,8 +97,8 @@ impl<'a> ToolRuntime<'a> {
         Self {
             tool_catalog,
             fs,
-            subagent_client: None,
-            subagent_model: "test-model".to_string(),
+            shared_llm_client: None,
+            shared_llm_model: "test-model".to_string(),
             cancel_token: None,
             attribution: ProvenanceAttribution::none(),
             observation_store: crate::llm::observation::new_shared_store(),

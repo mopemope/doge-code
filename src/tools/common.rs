@@ -936,8 +936,24 @@ impl FsTools {
     pub async fn list_memories(&self) -> Result<String> {
         self.memory_tools.list_memories().await
     }
-    pub async fn doc_generate(&self, path: &str, symbol: Option<&str>) -> Result<String> {
-        crate::tools::doc::doc_generate(path, symbol, &self.config, self.repomap.clone()).await
+    pub async fn doc_generate(
+        &self,
+        path: &str,
+        symbol: Option<&str>,
+        client: crate::llm::OpenAIClient,
+        model: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String> {
+        crate::tools::doc::doc_generate(
+            path,
+            symbol,
+            client,
+            model,
+            &self.config.project_root,
+            self.repomap.clone(),
+            cancel,
+        )
+        .await
     }
 }
 
