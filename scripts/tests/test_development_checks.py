@@ -319,12 +319,62 @@ class EvaluationTests(unittest.TestCase):
             "base_commit": "commit", "model": "model",
             "settings": {"environment": "fixed"}, "variant": "baseline",
             "run_status": "completed", "stop_reason": None,
+            "request_attempts": 1, "usage_records": 1, "unknown_usage_attempts": 0,
             "accepted": True, "input_tokens": 100, "output_tokens": 20,
             "cached_input_tokens": 50, "elapsed_seconds": 3,
             "tool_calls": 2, "rework_count": 0, "contract_violations": 0,
         }
         record.update(overrides)
         return record
+
+    def test_incomplete_usage_cannot_produce_complete_token_or_cache_totals(self):
+        cases = [
+            {"request_attempts": 2, "usage_records": 1, "unknown_usage_attempts": 1},
+            {"request_attempts": 1, "usage_records": 1, "unknown_usage_attempts": 1},
+            {"request_attempts": 2, "usage_records": 1},
+            {"usage_records": 2},
+            {"request_attempts": None},
+            {"usage_records": None},
+            {"unknown_usage_attempts": None},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                summary = evals.summarize(self.load_fixture([self.v2_record(**fields)]))
+                self.assertFalse(summary["token_metrics_complete"])
+                self.assertEqual(summary["token_complete_runs"], 0)
+                self.assertIsNone(summary["total_tokens"])
+                self.assertIsNone(summary["tokens_per_accepted_run"])
+                self.assertIsNone(summary["cached_input_tokens"])
+                self.assertEqual(summary["cached_token_complete_runs"], 0)
+                self.assertEqual(summary["known_total_tokens"], 120)
+                self.assertEqual(summary["known_cached_input_tokens"], 50)
+                self.assertEqual(summary["acceptance_rate"], 1)
+                self.assertEqual(summary["seconds_per_accepted_run"], 3)
+                self.assertEqual(summary["tool_calls"], 2)
+
+    def test_missing_usage_coverage_fields_are_unknown(self):
+        for field in ("request_attempts", "usage_records", "unknown_usage_attempts"):
+            record = self.v2_record()
+            del record[field]
+            with self.subTest(field=field):
+                summary = evals.summarize(self.load_fixture([record]))
+                self.assertFalse(summary["token_metrics_complete"])
+                self.assertIsNone(summary["cached_input_tokens"])
+
+    def test_invalid_usage_coverage_counters_are_rejected(self):
+        for field in ("request_attempts", "usage_records", "unknown_usage_attempts"):
+            for value in (True, False, -1, 1.5, "1"):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.load_fixture([self.v2_record(**{field: value})])
+
+    def test_zero_attempt_usage_is_complete_when_explicit(self):
+        summary = evals.summarize(self.load_fixture([self.v2_record(
+            request_attempts=0, usage_records=0, unknown_usage_attempts=0,
+            input_tokens=0, output_tokens=0, cached_input_tokens=0)]))
+        self.assertTrue(summary["token_metrics_complete"])
+        self.assertEqual(summary["total_tokens"], 0)
+        self.assertEqual(summary["tokens_per_accepted_run"], 0)
+        self.assertEqual(summary["cached_input_tokens"], 0)
 
     def test_unknown_tokens_are_not_zero(self):
         summary = evals.summarize(self.load_fixture(
@@ -357,6 +407,34 @@ class EvaluationTests(unittest.TestCase):
             compared = json.loads(result.stdout)
             self.assertEqual(compared["candidate"]["total_tokens"], 100)
             self.assertEqual(compared["baseline"]["completed_runs"], 1)
+
+    def test_cli_mixed_coverage_preserves_quality_and_known_subtotals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
+            records = [self.v2_record(), self.v2_record(
+                trial=2, accepted=False, run_status="failed", request_attempts=2,
+                usage_records=1, unknown_usage_attempts=1)]
+            baseline.write_text("\n".join(json.dumps(record) for record in records))
+            candidate.write_text("\n".join(json.dumps(dict(record, variant="candidate"))
+                                           for record in records))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
+                 str(baseline), str(candidate)], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for summary in json.loads(result.stdout).values():
+                self.assertEqual(summary["token_complete_runs"], 1)
+                self.assertIsNone(summary["total_tokens"])
+                self.assertIsNone(summary["tokens_per_accepted_run"])
+                self.assertEqual(summary["known_total_tokens"], 240)
+                self.assertEqual(summary["cached_token_complete_runs"], 1)
+                self.assertIsNone(summary["cached_input_tokens"])
+                self.assertEqual(summary["known_cached_input_tokens"], 100)
+                self.assertEqual(summary["acceptance_rate"], 0.5)
+                self.assertEqual(summary["completed_runs"], 1)
+                self.assertEqual(summary["failed_runs"], 1)
+                self.assertEqual(summary["seconds_per_accepted_run"], 6)
+                self.assertEqual(summary["tool_calls"], 4)
 
     def test_unknown_cached_tokens_are_supported(self):
         summary = evals.summarize(self.load_fixture(
