@@ -31,7 +31,7 @@ pub async fn run_agent_streaming_once(
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await
-        .map(|(history, reply)| (history, Some(reply)));
+        .map(|run| (run.messages, Some(run.final_message)));
     }
     let cancel_token = cancel.unwrap_or_default();
 

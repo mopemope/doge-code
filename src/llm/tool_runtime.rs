@@ -7,13 +7,10 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-const MAX_ITERS: usize = 256;
-
 pub struct ToolRuntime<'a> {
     pub tool_catalog: ToolCatalog,
     pub fs: &'a FsTools,
     // repomap is delegated to FsTools, removed here
-    pub max_iters: usize,
     /// LLM client used by the `task` sub-agent (same client as the main loop,
     /// so token usage accumulates in one place).
     pub subagent_client: Option<crate::llm::client_core::OpenAIClient>,
@@ -84,7 +81,6 @@ impl<'a> ToolRuntime<'a> {
         Ok(Self {
             tool_catalog,
             fs,
-            max_iters: MAX_ITERS,
             subagent_client,
             subagent_model: subagent_model.into(),
             cancel_token,
@@ -99,7 +95,6 @@ impl<'a> ToolRuntime<'a> {
         Self {
             tool_catalog,
             fs,
-            max_iters: MAX_ITERS,
             subagent_client: None,
             subagent_model: "test-model".to_string(),
             cancel_token: None,

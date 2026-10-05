@@ -433,6 +433,28 @@ with `files_examined_truncated` indicating omitted or shortened paths. The entir
 serialized `task` output stays within 6,000 characters, accounting for JSON
 escaping; paths may be omitted and the summary shortened further to fit.
 
+### Main-agent run budgets
+
+`[agent_budget]` merges field by field: defaults, user configuration, then
+project configuration. Explicit zero values are startup errors.
+
+```toml
+[agent_budget]
+max_iterations = 256
+# Optional run-wide limits:
+# max_tool_calls = 256
+# max_elapsed_ms = 900000
+# max_total_tokens = 1000000
+```
+
+`max_iterations` defaults to 256 (the previous hard limit). The other three
+limits are unset by default and only enforce when configured. Budget stops are
+`partial` results, distinct from cancellation/errors. Token accounting uses
+provider total usage plus bounded estimates, never double-counts cached or
+reasoning subtotals, and includes `task` subagent usage via the shared client.
+One in-flight request may finish before the next-operation stop applies, so
+this is not a hard billing limit. Cached tokens are never subtracted.
+
 ## Directive-to-Evidence Traceability
 
 Doge-Code connects observed work as:
@@ -1017,6 +1039,12 @@ respect_retry_after = true
 
 [context_budget]
 mode = "auto"  # auto / observe / off
+
+[agent_budget]
+max_iterations = 256
+# max_tool_calls = 256
+# max_elapsed_ms = 900000
+# max_total_tokens = 1000000
 
 # Local MCP HTTP listener (Doge-Code's own server)
 [mcp_server]

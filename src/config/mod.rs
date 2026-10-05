@@ -14,6 +14,8 @@ pub use watch::*;
 pub mod mcp;
 pub use mcp::*;
 
+pub mod agent_budget;
+pub use agent_budget::*;
 pub mod app;
 pub use app::*;
 pub mod context_budget;

@@ -288,7 +288,8 @@ pub(crate) fn spawn_agent_turn(
         let tokens_used = client.get_prompt_tokens_used();
         let total_tokens = client.get_total_tokens_used();
         match res {
-            Ok((updated_messages, _final_msg)) => {
+            Ok(run) => {
+                let updated_messages = run.messages;
                 if let Some(tx) = ui_tx.clone() {
                     let _ = tx.send(format!(
                         "::tokens:prompt:{tokens_used},total:{total_tokens}"
@@ -300,6 +301,15 @@ pub(crate) fn spawn_agent_turn(
                         Some(n) => format!("::update_remaining_tokens:{n}"),
                         None => "::update_remaining_tokens".to_string(),
                     });
+                    if run.status == crate::llm::tool_execution::AgentRunStatus::Partial {
+                        let reason = run
+                            .stop_reason
+                            .map(|r| r.as_str().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let _ = tx.send(format!(
+                            "::status:warning:Agent stopped after reaching {reason} budget."
+                        ));
+                    }
                 }
                 if let Err(error) = persist_agent_turn_history(
                     &conversation_history,

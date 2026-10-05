@@ -9,9 +9,6 @@ pub enum AgentLoopError {
     #[error("LLM communication error: {0}")]
     Llm(String),
 
-    #[error("Max iterations reached: {0}")]
-    MaxIterations(usize),
-
     #[error("Diff collection failed: {0}")]
     DiffCollection(String),
 
@@ -49,12 +46,6 @@ pub fn handle_agent_error(error: &AgentLoopError, ui_tx: &Option<std::sync::mpsc
             error!(error = msg, "LLM communication error");
             if let Some(tx) = ui_tx {
                 let _ = tx.send(format!("::error:llm:{}", msg));
-            }
-        }
-        AgentLoopError::MaxIterations(iterations) => {
-            error!(iterations = iterations, "Max iterations reached");
-            if let Some(tx) = ui_tx {
-                let _ = tx.send(format!("::error:max_iterations:{}", iterations));
             }
         }
         AgentLoopError::DiffCollection(msg) => {
