@@ -156,6 +156,7 @@ fn request_has_namespace_and_preview_fields_only() {
             &[user("hello")],
             &tools(),
             None,
+            None,
         )
         .expect("request"),
     )
@@ -178,7 +179,7 @@ fn system_role_maps_to_developer_without_user_promotion() {
     let mut system = user("guidance");
     system.role = "system".into();
     let request = serde_json::to_value(
-        responses::build("m", "a", &[system, user("untrusted")], &[], None).expect("request"),
+        responses::build("m", "a", &[system, user("untrusted")], &[], None, None).expect("request"),
     )
     .expect("json");
     assert_eq!(request["input"][0]["role"], "developer");
@@ -260,8 +261,15 @@ fn raw_output_roundtrips_without_projection_duplication() {
         provider_state: None,
     };
     let request = serde_json::to_value(
-        responses::build("m", "a", &[user("hi"), restored, result], &tools(), None)
-            .expect("request"),
+        responses::build(
+            "m",
+            "a",
+            &[user("hi"), restored, result],
+            &tools(),
+            None,
+            None,
+        )
+        .expect("request"),
     )
     .expect("json");
     assert_eq!(request["input"].as_array().expect("input").len(), 4);
@@ -278,11 +286,11 @@ fn history_rejects_account_switch_and_orphan_results() {
         tool_call_id: None,
         provider_state: reply.provider_state,
     };
-    assert!(responses::build("m", "b", &[assistant], &[], None).is_err());
+    assert!(responses::build("m", "b", &[assistant], &[], None, None).is_err());
     let mut orphan = user("result");
     orphan.role = "tool".into();
     orphan.tool_call_id = Some("missing".into());
-    assert!(responses::build("m", "a", &[orphan], &[], None).is_err());
+    assert!(responses::build("m", "a", &[orphan], &[], None, None).is_err());
 }
 #[test]
 fn legacy_message_loads_without_provider_state() {
@@ -715,12 +723,12 @@ fn governor_does_not_tokenize_opaque_ciphertext() {
     });
     let governor = crate::llm::context_budget::ContextBudgetGovernor::new(Default::default());
     let first = governor
-        .measure_subscription("a", "m", &[assistant.clone()], &[], 0)
+        .measure_subscription("a", "m", &[assistant.clone()], &[], 0, None)
         .expect("measure");
     assistant.provider_state.as_mut().expect("state").output[0]["encrypted_content"] =
         json!("short");
     let second = governor
-        .measure_subscription("a", "m", &[assistant], &[], 0)
+        .measure_subscription("a", "m", &[assistant], &[], 0, None)
         .expect("measure");
     assert_eq!(first.total_json_bytes, second.total_json_bytes);
 }
@@ -976,6 +984,7 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
         "test-account",
         &restored,
         &[],
+        None,
         None,
     )?)?;
     assert_eq!(
@@ -1331,7 +1340,7 @@ async fn failed_followup_preserves_unseen_tool_results_in_durable_session() -> R
                 .is_some_and(|s| s.contains("retained result"))
     }));
     assert!(saved.unseen_tool_results.contains("retained"));
-    assert!(responses::build("test-model", "test-account", &messages, &[], None).is_ok());
+    assert!(responses::build("test-model", "test-account", &messages, &[], None, None).is_ok());
     Ok(())
 }
 
@@ -1387,7 +1396,7 @@ async fn interrupted_batch_checkpoint_retains_output_and_marks_unknown_calls() -
     }));
     assert!(saved.unseen_tool_results.contains("call_test"));
     assert!(saved.unseen_tool_results.contains("second_call"));
-    let request = responses::build("test-model", "test-account", &messages, &[], None)?;
+    let request = responses::build("test-model", "test-account", &messages, &[], None, None)?;
     assert!(!format!("{request:?}").contains("never-debug-this-ciphertext"));
     Ok(())
 }
@@ -1414,7 +1423,7 @@ fn completed_rejects_unfinished_items_and_non_assistant_messages() {
             output: vec![message],
         }),
     };
-    assert!(responses::build("m", "a", &[history], &[], None).is_err());
+    assert!(responses::build("m", "a", &[history], &[], None, None).is_err());
 }
 
 #[tokio::test]
@@ -1478,4 +1487,604 @@ fn oidc_accepts_es256_jwk_and_rejects_wrong_nonce() {
         "synthetic-subject"
     );
     assert!(auth::validate_id(&token, &keys, "test-client", "wrong-nonce").is_err());
+}
+
+// --- Responses native server-side compaction v1 ---
+
+fn compaction_item(id: &str) -> Value {
+    json!({"type":"compaction","id":id,"encrypted_content":"opaque-test"})
+}
+
+#[test]
+fn native_request_carries_context_management_without_legacy_fields() {
+    let request = serde_json::to_value(
+        responses::build("m", "a", &[user("hi")], &tools(), None, Some(102_400)).expect("request"),
+    )
+    .expect("json");
+    assert_eq!(request["store"], false);
+    assert_eq!(request["stream"], true);
+    assert_eq!(request["context_management"][0]["type"], "compaction");
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        102_400
+    );
+    for field in [
+        "previous_response_id",
+        "conversation",
+        "background",
+        "truncation",
+    ] {
+        assert!(
+            request.get(field).is_none(),
+            "forbidden field {field} must not be sent"
+        );
+    }
+}
+
+#[test]
+fn native_request_without_threshold_omits_context_management() {
+    let request = serde_json::to_value(
+        responses::build("m", "a", &[user("hi")], &tools(), None, None).expect("request"),
+    )
+    .expect("json");
+    assert!(request.get("context_management").is_none());
+    assert_eq!(request["store"], false);
+    assert_eq!(request["stream"], true);
+}
+
+#[test]
+fn native_threshold_minimum_is_enforced_without_clamp() {
+    assert!(
+        responses::validate_compact_threshold(999).is_err(),
+        "999 must be rejected, never clamped"
+    );
+    assert!(responses::validate_compact_threshold(1000).is_ok());
+    assert!(responses::validate_compact_threshold(102_400).is_ok());
+    assert!(responses::build("m", "a", &[user("hi")], &[], None, Some(999)).is_err());
+    assert!(responses::build("m", "a", &[user("hi")], &[], None, Some(1000)).is_ok());
+    // Client fixture override also rejects below-minimum values.
+    assert!(
+        crate::llm::OpenAIClient::new("https://example.invalid", "k")
+            .expect("client")
+            .with_responses_compact_threshold(Some(999))
+            .is_err()
+    );
+    let enabled = crate::llm::OpenAIClient::new("https://example.invalid", "k")
+        .expect("client")
+        .with_responses_compact_threshold(Some(1000))
+        .expect("threshold");
+    assert!(enabled.native_responses_compaction_enabled());
+    assert_eq!(enabled.responses_compact_threshold(), Some(1000));
+    let plain = crate::llm::OpenAIClient::new("https://example.invalid", "k").expect("client");
+    assert!(!plain.native_responses_compaction_enabled());
+    assert_eq!(plain.responses_compact_threshold(), None);
+}
+
+#[test]
+fn native_compaction_item_is_accepted_and_preserved() {
+    let (reply, _) = responses::completed(
+        &response(vec![compaction_item("cmp_test"), text_output()]),
+        "a",
+        "m",
+        &[],
+    )
+    .expect("reply");
+    let state = reply.provider_state.expect("state");
+    assert_eq!(state.version, 1, "serialization version must not change");
+    assert!(state.contains_compaction());
+    assert_eq!(state.latest_compaction_index(), Some(0));
+    assert_eq!(state.output[0]["encrypted_content"], "opaque-test");
+    // Visible text extraction is unaffected by the opaque item.
+    assert_eq!(reply.content.as_deref(), Some("こんにちは"));
+}
+
+#[test]
+fn native_compaction_item_validation_is_strict_but_opaque() {
+    // Empty ciphertext is rejected.
+    assert!(
+        responses::completed(
+            &response(vec![
+                json!({"type":"compaction","id":"x","encrypted_content":""})
+            ]),
+            "a",
+            "m",
+            &[],
+        )
+        .is_err()
+    );
+    // Missing ciphertext is rejected.
+    assert!(
+        responses::completed(
+            &response(vec![json!({"type":"compaction","id":"x"})]),
+            "a",
+            "m",
+            &[],
+        )
+        .is_err()
+    );
+    // Non-string id is rejected without inspecting ciphertext.
+    assert!(
+        responses::completed(
+            &response(vec![
+                json!({"type":"compaction","id":1,"encrypted_content":"opaque"})
+            ]),
+            "a",
+            "m",
+            &[],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn native_canonical_output_uses_latest_boundary_only() {
+    let output = vec![
+        json!({"type":"reasoning","id":"rs-old","encrypted_content":"old","summary":[]}),
+        json!({"type":"message","id":"msg-old","role":"assistant","status":"completed","content":[{"type":"output_text","text":"old"}]}),
+        json!({"type":"compaction","id":"cmp-1","encrypted_content":"opaque-1"}),
+        json!({"type":"reasoning","id":"rs-mid","encrypted_content":"mid","summary":[]}),
+        json!({"type":"compaction","id":"cmp-2","encrypted_content":"opaque-2"}),
+        json!({"type":"message","id":"msg-new","role":"assistant","status":"completed","content":[{"type":"output_text","text":"new"}]}),
+    ];
+    assert_eq!(
+        responses::latest_compaction_index(&output),
+        Some(4),
+        "latest compaction item wins, never the first"
+    );
+    let canonical = responses::canonical_output(&output);
+    assert_eq!(canonical.len(), 2);
+    assert_eq!(canonical[0]["id"], "cmp-2");
+    assert_eq!(canonical[1]["id"], "msg-new");
+    let (reply, _) = responses::completed(&response(output), "a", "m", &[]).expect("reply");
+    let state = reply.provider_state.expect("state");
+    assert_eq!(state.output.len(), 2);
+    assert_eq!(state.output[0]["id"], "cmp-2");
+    assert_eq!(state.output[1]["id"], "msg-new");
+    // Pre-boundary text must not leak into visible content.
+    assert_eq!(reply.content.as_deref(), Some("new"));
+}
+
+#[test]
+fn native_compaction_with_tool_call_preserves_pairing() {
+    let call = call_output();
+    let (reply, _) = responses::completed(
+        &response(vec![
+            compaction_item("cmp_tools"),
+            json!({"type":"reasoning","id":"rs","encrypted_content":"opaque","summary":[]}),
+            call.clone(),
+        ]),
+        "a",
+        "m",
+        &tools(),
+    )
+    .expect("reply");
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0].id.as_deref(), Some("call_test"));
+    let state = reply.provider_state.expect("state");
+    assert_eq!(state.output.len(), 3);
+    assert_eq!(state.output[0]["type"], "compaction");
+    assert_eq!(state.output[2]["call_id"], "call_test");
+    assert!(state.contains_compaction());
+}
+
+#[test]
+fn native_pre_boundary_tool_calls_never_dispatch() {
+    // A stale function call before the boundary must not dispatch; only the
+    // post-boundary call is returned.
+    let mut stale = call_output();
+    stale["call_id"] = json!("stale_call");
+    stale["id"] = json!("fc_stale");
+    let output = vec![stale, compaction_item("cmp-boundary"), call_output()];
+    let (reply, _) = responses::completed(&response(output), "a", "m", &tools()).expect("reply");
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0].id.as_deref(), Some("call_test"));
+    let state = reply.provider_state.expect("state");
+    assert!(
+        state
+            .output
+            .iter()
+            .all(|item| item["call_id"] != "stale_call"),
+        "pre-boundary calls must not persist"
+    );
+}
+
+#[test]
+fn native_round_trip_request_replays_compaction_byte_identical() {
+    let call = call_output();
+    let (reply, _) = responses::completed(
+        &response(vec![compaction_item("cmp_rt"), call.clone()]),
+        "test-account",
+        "test-model",
+        &tools(),
+    )
+    .expect("reply");
+    let assistant = ChatMessage {
+        role: reply.role,
+        content: reply.content,
+        tool_calls: reply.tool_calls,
+        tool_call_id: None,
+        provider_state: reply.provider_state,
+    };
+    // Byte-equivalent session persistence.
+    let restored: ChatMessage =
+        serde_json::from_value(serde_json::to_value(&assistant).expect("json")).expect("restore");
+    assert_eq!(
+        serde_json::to_value(&restored).expect("json"),
+        serde_json::to_value(&assistant).expect("json")
+    );
+    let state = restored.provider_state.as_ref().expect("state");
+    assert_eq!(state.account, "test-account");
+    assert_eq!(state.model, "test-model");
+    assert_eq!(state.output[0]["encrypted_content"], "opaque-test");
+    let result = ChatMessage {
+        role: "tool".into(),
+        content: Some("{}".into()),
+        tool_calls: vec![],
+        tool_call_id: Some("call_test".into()),
+        provider_state: None,
+    };
+    let next = ChatMessage {
+        role: "user".into(),
+        content: Some("next instruction".into()),
+        tool_calls: vec![],
+        tool_call_id: None,
+        provider_state: None,
+    };
+    let request = serde_json::to_value(
+        responses::build(
+            "test-model",
+            "test-account",
+            &[restored, result, next],
+            &tools(),
+            None,
+            Some(102_400),
+        )
+        .expect("request"),
+    )
+    .expect("json");
+    let input = request["input"].as_array().expect("input");
+    // Compaction item raw, function call raw, paired output, new user message.
+    assert_eq!(input[0]["type"], "compaction");
+    assert_eq!(input[0]["encrypted_content"], "opaque-test");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_test");
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "call_test");
+    assert_eq!(input[3]["role"], "user");
+    assert_eq!(input[3]["content"], "next instruction");
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        102_400
+    );
+}
+
+#[test]
+fn native_compacted_session_resume_replays_only_compact_state() {
+    let temp = tempfile::tempdir().expect("temp");
+    let store = crate::session::SessionStore::new(temp.path().join("sessions")).expect("store");
+    let mut manager = crate::session::SessionManager::with_store(store.clone());
+    manager.create_session(None).expect("session");
+    manager
+        .bind_inference("openai-chatgpt:test-account:test-model".into())
+        .expect("bind");
+    // Canonical pruned history: only the compaction assistant + follow-ups.
+    let (reply, _) = responses::completed(
+        &response(vec![compaction_item("cmp-resume"), text_output()]),
+        "test-account",
+        "test-model",
+        &[],
+    )
+    .expect("reply");
+    let compacted = ChatMessage {
+        role: reply.role,
+        content: reply.content,
+        tool_calls: reply.tool_calls,
+        tool_call_id: None,
+        provider_state: reply.provider_state,
+    };
+    let followup = user("continue from compact state");
+    manager
+        .update_current_session_with_history(&[compacted.clone(), followup.clone()])
+        .expect("save");
+    let id = manager.current_session_id().expect("id");
+    drop(manager);
+    let mut resumed = crate::session::SessionManager::with_store(store);
+    resumed.load_session(&id).expect("resume");
+    let loaded = resumed.current_session.as_ref().expect("resumed");
+    let messages: Vec<ChatMessage> =
+        serde_json::from_value(serde_json::to_value(&loaded.conversation).expect("json"))
+            .expect("messages");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0].provider_state.as_ref().expect("state").output[0]["encrypted_content"],
+        "opaque-test"
+    );
+    let request = serde_json::to_value(
+        responses::build(
+            "test-model",
+            "test-account",
+            &messages,
+            &[],
+            None,
+            Some(102_400),
+        )
+        .expect("request"),
+    )
+    .expect("json");
+    let input = request["input"].as_array().expect("input");
+    // No pre-compaction transcript: compaction + new user prompt only.
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[0]["type"], "compaction");
+    assert_eq!(input[1]["type"], "message");
+    assert_eq!(input[2]["role"], "user");
+}
+
+async fn mock_native_client(
+    body: String,
+    threshold: u32,
+) -> (
+    httptest::Server,
+    tempfile::TempDir,
+    crate::llm::OpenAIClient,
+) {
+    use httptest::{Expectation, matchers::*, responders::*};
+    let server = httptest::ServerBuilder::new()
+        .bind_addr(([127, 0, 0, 1], 0).into())
+        .run()
+        .expect("server");
+    // Assert the actual wire body carries server-side compaction alongside
+    // the preserved store/stream contract.
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/v1/responses"),
+            request::headers(contains(("authorization", "Bearer test-access-secret"))),
+            request::body(matches("context_management")),
+            request::body(matches("\"type\":\"compaction\"")),
+            request::body(matches(format!("\"compact_threshold\":{threshold}"))),
+            request::body(matches("\"store\":false")),
+            request::body(matches("\"stream\":true")),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200)
+                .append_header("content-type", "text/event-stream")
+                .body(body),
+        ),
+    );
+    let (temp, store) = temp_store();
+    store.save(&registry()).expect("save");
+    let mut handle = auth::AuthHandle::selected(store).expect("auth");
+    handle.resource = server.url_str("/v1");
+    let mut client =
+        crate::llm::OpenAIClient::new("https://api.openai.com/v1", "").expect("client");
+    client.subscription = Some(handle);
+    let client = client
+        .with_responses_compact_threshold(Some(threshold))
+        .expect("native threshold");
+    (server, temp, client)
+}
+
+#[tokio::test]
+async fn native_inference_sends_context_management_on_wire() -> Result<()> {
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response(vec![text_output()])})
+    );
+    let (_server, _temp, client) = mock_native_client(wire, 102_400).await;
+    let reply = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "test-model",
+        &[user("hi")],
+        &[],
+        None,
+        crate::config::ReasoningMode::Off,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(reply.content.as_deref(), Some("こんにちは"));
+    assert_eq!(client.get_total_tokens_used(), 16);
+    // The httptest expectation above already asserted the wire body carried
+    // `context_management` with the resolved threshold; a mismatch would
+    // have failed the request.
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_single_response_is_single_budget_charge() -> Result<()> {
+    // Main-agent budget: one provider response with compaction is exactly
+    // one usage record, never a second internal charge.
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response(vec![compaction_item("cmp-budget"), text_output()])})
+    );
+    let (_server, _temp, client) = mock_native_client(wire, 102_400).await;
+    let before = client.usage_snapshot();
+    let reply = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "test-model",
+        &[user("hi")],
+        &[],
+        None,
+        crate::config::ReasoningMode::Off,
+        None,
+        None,
+    )
+    .await?;
+    assert!(
+        reply
+            .provider_state
+            .as_ref()
+            .expect("state")
+            .contains_compaction()
+    );
+    let after = client.usage_snapshot();
+    assert_eq!(after.attempts, before.attempts + 1);
+    assert_eq!(after.usage_records, before.usage_records + 1);
+    assert_eq!(after.total_tokens, before.total_tokens + 16);
+    assert_eq!(client.get_total_tokens_used(), 16);
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_compaction_with_tools_keeps_batch_pairing() -> Result<()> {
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response(vec![compaction_item("cmp-batch"), call_output()])})
+    );
+    let (_server, _temp, client) = mock_native_client(wire, 102_400).await;
+    let reply = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "test-model",
+        &[user("search")],
+        &tools(),
+        None,
+        crate::config::ReasoningMode::Off,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0].id.as_deref(), Some("call_test"));
+    assert!(
+        reply
+            .provider_state
+            .as_ref()
+            .expect("state")
+            .contains_compaction()
+    );
+    // Pair the synthetic result and verify the next projection is valid.
+    let assistant = ChatMessage {
+        role: reply.role,
+        content: reply.content,
+        tool_calls: reply.tool_calls,
+        tool_call_id: None,
+        provider_state: reply.provider_state,
+    };
+    let result = ChatMessage {
+        role: "tool".into(),
+        content: Some("{}".into()),
+        tool_calls: vec![],
+        tool_call_id: Some("call_test".into()),
+        provider_state: None,
+    };
+    let request = serde_json::to_value(
+        responses::build(
+            "test-model",
+            "test-account",
+            &[user("hi"), assistant, result],
+            &tools(),
+            None,
+            Some(102_400),
+        )
+        .expect("request"),
+    )
+    .expect("json");
+    let input = request["input"].as_array().expect("input");
+    assert_eq!(input[1]["type"], "compaction");
+    assert_eq!(input[2]["call_id"], "call_test");
+    assert_eq!(input[3]["call_id"], "call_test");
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_cancellation_stays_cancelled() {
+    let (_temp, store) = temp_store();
+    store.save(&registry()).expect("save");
+    let mut client =
+        crate::llm::OpenAIClient::new("https://api.openai.com/v1", "").expect("client");
+    client.subscription = Some(auth::AuthHandle::selected(store).expect("auth"));
+    let client = client
+        .with_responses_compact_threshold(Some(102_400))
+        .expect("threshold");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = client
+        .chat_once("test-model", vec![user("hi")], Some(cancel))
+        .await
+        .expect_err("cancelled");
+    assert_eq!(
+        err.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(&crate::llm::LlmErrorKind::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn native_provider_errors_keep_retry_semantics() {
+    // Quota, auth, and stream-incomplete errors are unchanged by native mode.
+    let quota = format!(
+        "data: {}\n\n",
+        json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}})
+    );
+    let (_server, _temp, client) = mock_native_client(quota, 102_400).await;
+    let err = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "test-model",
+        &[user("hi")],
+        &[],
+        None,
+        crate::config::ReasoningMode::Off,
+        None,
+        None,
+    )
+    .await
+    .expect_err("quota");
+    assert!(err.downcast_ref::<ProviderError>().is_some());
+    assert_eq!(client.get_total_tokens_used(), 0);
+}
+
+#[tokio::test]
+async fn native_overflow_does_not_fallback_to_local_compactor() -> Result<()> {
+    use httptest::{Expectation, matchers::*, responders::*};
+    let temp = tempfile::tempdir()?;
+    let (cred_temp, store) = temp_store();
+    store.save(&registry())?;
+    let mut handle = auth::AuthHandle::selected(store)?;
+    // Overflow on first attempt; no second attempt may occur (no retry).
+    let server = httptest::ServerBuilder::new()
+        .bind_addr(([127, 0, 0, 1], 0).into())
+        .run()
+        .expect("server");
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/v1/responses"))
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .append_header("content-type", "text/event-stream")
+                    .body("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\"}}}\n\n"),
+            ),
+    );
+    handle.resource = server.url_str("/v1");
+    let mut client =
+        crate::llm::OpenAIClient::new("https://api.openai.com/v1", "").expect("client");
+    client.subscription = Some(handle);
+    let client = client
+        .with_responses_compact_threshold(Some(102_400))
+        .expect("threshold");
+    let (cfg, fs) = fixture_fs(temp.path());
+    let err = crate::llm::run_agent_loop(
+        &client,
+        "test-model",
+        &fs,
+        vec![user("overflow fixture")],
+        None,
+        None,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+    .expect_err("overflow must fail");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("Responses server-side compaction was enabled"),
+        "overflow must carry the native guidance, got: {text}"
+    );
+    assert_eq!(
+        err.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(&crate::llm::LlmErrorKind::ContextLengthExceeded),
+        "typed overflow must survive double context, got: {text}"
+    );
+    drop((cred_temp, server));
+    Ok(())
 }

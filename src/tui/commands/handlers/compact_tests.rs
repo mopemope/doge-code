@@ -808,3 +808,25 @@ async fn manual_compact_shutdown_cannot_terminalize_an_in_progress_commit_as_can
     executor.handle_compact_completed(&id.to_string(), &mut ui);
     assert_eq!(ui.status, Status::Ready);
 }
+
+#[test]
+fn subscription_compact_command_skips_provider_request() {
+    let (mut executor, mut ui, _dir) = fixture();
+    executor.client = Some(
+        crate::llm::OpenAIClient::new("https://api.openai.com/v1", "")
+            .unwrap()
+            .with_responses_compact_threshold(Some(102_400))
+            .unwrap(),
+    );
+    let before = memory(&executor);
+    executor.handle_compact_command(&mut ui);
+    // No foreground job is spawned for the subscription native path.
+    assert!(executor.jobs.foreground_id().is_none());
+    assert_eq!(memory(&executor), before);
+    let logs: Vec<String> = ui.log.iter().map(|entry| format!("{entry:?}")).collect();
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("automatic native compaction")),
+        "must explain native compaction, got: {logs:?}"
+    );
+}

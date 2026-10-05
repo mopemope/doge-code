@@ -98,3 +98,15 @@ Observed directives and interpreted requirements are distinct provenance nodes.
 Configuration is fail-closed.
 Unknown user/project keys and invalid policy values must fail startup.
 Do not silently clamp, ignore, rewrite, or fallback security/resource policy configuration.
+
+## Responses Native Compaction Contract
+
+- ChatGPT-plan Responses state is never summarized through the Chat Completions compactor.
+- Server-side compaction uses context_management.compact_threshold with store:false and stream:true.
+- previous_response_id remains unsupported in the direct plan route.
+- The latest compaction item is the canonical continuation boundary.
+- Opaque encrypted_content is stored and replayed byte-for-byte as JSON state.
+- Tool calls after the boundary retain exact call IDs and pairing.
+- Native compaction never causes a second token charge for the same provider response.
+- Context-governor calibration is reset after a native compaction boundary.
+- Observation GC fails closed while opaque compaction state may reference prior observations.

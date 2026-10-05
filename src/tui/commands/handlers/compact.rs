@@ -15,6 +15,13 @@ impl TuiExecutor {
             ui.push_log("[ERROR] LLM client is not configured. Cannot compact conversation.");
             return;
         };
+        // ChatGPT Responses uses automatic server-side native compaction;
+        // the local Chat Completions text summarizer never runs here and no
+        // provider request is issued.
+        if client.native_responses_compaction_enabled() {
+            ui.push_log("[INFO] ChatGPT Responses uses automatic native compaction; /compact does not run the local text summarizer for this provider.");
+            return;
+        }
         let snapshot = (|| -> anyhow::Result<_> {
             // Match the existing agent checkpoint lock order.
             let history =

@@ -892,7 +892,7 @@ async fn responses_pairing_survives_budget_synthetic() {
         tool_call_id: Some(call_id.to_string()),
     };
     let messages = vec![assistant, synthetic];
-    assert!(responses::build("test-model", "test-account", &messages, &[], None).is_ok());
+    assert!(responses::build("test-model", "test-account", &messages, &[], None, None).is_ok());
 }
 
 #[allow(dead_code)]

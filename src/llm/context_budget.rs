@@ -205,6 +205,8 @@ impl ContextBudgetGovernor {
 
     /// Measure the Responses wire projection, excluding opaque ciphertext from
     /// the text-token heuristic. Previous actual usage still calibrates pressure.
+    /// The `compact_threshold` must match the actual request so the projection
+    /// does not drift (`context_management` itself is tiny but part of the wire).
     pub fn measure_subscription(
         &self,
         account: &str,
@@ -212,9 +214,15 @@ impl ContextBudgetGovernor {
         messages: &[ChatMessage],
         tools: &[ToolDef],
         overlay: u64,
+        compact_threshold: Option<u32>,
     ) -> Result<RequestFootprint> {
         let mut request = crate::features::openai_subscription::responses::build(
-            model, account, messages, tools, None,
+            model,
+            account,
+            messages,
+            tools,
+            None,
+            compact_threshold,
         )?;
         let mut opaque_items = 0u64;
         for item in &mut request.input {
@@ -224,8 +232,17 @@ impl ContextBudgetGovernor {
                 opaque_items += 1;
             }
         }
-        let messages =
+        let mut messages =
             serialized_size(&request.input)?.saturating_add(opaque_items.saturating_mul(1536));
+        // Keep the projection honest with the actual request: include the
+        // tiny `context_management` envelope when native compaction is on.
+        if compact_threshold.is_some() {
+            let envelope = serialized_size(&serde_json::json!({
+                "context_management": [{"type": "compaction", "compact_threshold": compact_threshold}]
+            }))
+            .unwrap_or(0);
+            messages = messages.saturating_add(envelope);
+        }
         Ok(RequestFootprint::new(
             messages,
             serialized_size(&request.tools)?,
@@ -290,6 +307,18 @@ impl ContextBudgetGovernor {
             footprint_bytes: footprint.total_json_bytes,
             actual_prompt_tokens: prompt_tokens as u64,
         });
+    }
+
+    /// Reset calibration after a native server-side compaction boundary.
+    /// The pre-compaction byte footprint no longer predicts post-compaction
+    /// token usage, so the next normal response re-establishes the ratio.
+    pub fn reset_calibration(&mut self) {
+        self.previous_usage = None;
+    }
+
+    /// Alias honoring the spec's governor naming for native compaction.
+    pub fn reset_after_native_compaction(&mut self) {
+        self.reset_calibration();
     }
 }
 
@@ -770,5 +799,38 @@ mod tests {
             "newly activated MCP schemas must grow the measured footprint"
         );
         assert!(after_fp.total_json_bytes > before_fp.total_json_bytes);
+    }
+
+    #[test]
+    fn native_compaction_resets_calibration_and_recalibrates() {
+        let mut gov = governor();
+        // Pre-compaction calibration exists.
+        gov.observe_actual(RequestFootprint::new(100_000, 0, 0), 50_000);
+        assert!(gov.previous_usage().is_some());
+        // A native-compacted response must not become a sample.
+        gov.reset_after_native_compaction();
+        assert!(gov.previous_usage().is_none());
+        // The next normal response re-establishes calibration from the
+        // smaller canonical context.
+        let fp = RequestFootprint::new(10_000, 0, 0);
+        let expected_bytes = fp.total_json_bytes;
+        gov.observe_actual(fp, 5_000);
+        let usage = gov.previous_usage().expect("recalibrated");
+        assert_eq!(usage.footprint_bytes, expected_bytes);
+        assert_eq!(usage.actual_prompt_tokens, 5_000);
+    }
+
+    #[test]
+    fn subscription_projection_includes_context_management_envelope() {
+        let g = governor();
+        let messages = vec![msg("user", "hi")];
+        let without = g
+            .measure_subscription("a", "m", &messages, &[], 0, None)
+            .expect("without");
+        let with = g
+            .measure_subscription("a", "m", &messages, &[], 0, Some(102_400))
+            .expect("with");
+        // Envelope is tiny but present so the projection does not drift.
+        assert!(with.total_json_bytes >= without.total_json_bytes);
     }
 }

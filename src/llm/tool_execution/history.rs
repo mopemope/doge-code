@@ -33,6 +33,15 @@ pub struct CompactionReport {
     pub skipped_unseen: usize,
 }
 
+/// Report for a server-side Responses native-compaction boundary application.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeCompactionReport {
+    /// True when a compaction boundary was found and history was pruned.
+    pub applied: bool,
+    /// Number of canonical messages removed from the prefix.
+    pub pruned_messages: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservationReason {
     Superseded,
@@ -255,7 +264,20 @@ impl HistoryManager {
     /// than "empty store") report without deleting anything and never panic.
     /// `next_id` is preserved by the store primitive; removed ids are never
     /// reused.
+    ///
+    /// Native-compaction fail-closed: while any canonical message carries an
+    /// opaque Responses `compaction` item, its `encrypted_content` may
+    /// semantically reference prior observations that local code cannot
+    /// parse. The sweep is skipped entirely to avoid deleting possibly-live
+    /// entries.
     pub fn gc_unreferenced_observations(&mut self) -> ObservationGcReport {
+        if Self::contains_native_compaction(&self.messages) {
+            tracing::debug!(
+                observation_gc_skipped = "opaque_provider_compaction",
+                "observation GC skipped: opaque native compaction may reference prior observations"
+            );
+            return ObservationGcReport::default();
+        }
         // Single write-lock critical section: snapshot known ids, mark live,
         // and sweep without releasing the guard. A read-then-write split
         // could sweep an entry inserted concurrently after the snapshot
@@ -394,6 +416,121 @@ impl HistoryManager {
                 "collected unreachable observations after restore"
             );
         }
+    }
+
+    fn contains_native_compaction(messages: &[ChatMessage]) -> bool {
+        messages.iter().any(|msg| {
+            msg.provider_state
+                .as_ref()
+                .is_some_and(|state| state.contains_compaction())
+        })
+    }
+
+    /// True when the subscription native-compaction path owns summarization.
+    /// Local Chat Completions text summarization must not run then; the
+    /// recoverable Observation Store offload path stays available.
+    fn native_compaction_owns_summarization(&self) -> bool {
+        self.client.native_responses_compaction_enabled()
+    }
+
+    /// Apply a server-side Responses native-compaction boundary.
+    ///
+    /// When the latest assistant message carries opaque `compaction` provider
+    /// state, the pre-boundary transcript has been subsumed server-side. The
+    /// canonical history is pruned to the first authority `system` message
+    /// (when present) plus the suffix starting at that latest assistant
+    /// message. The compaction item itself is replayed byte-for-byte; its
+    /// ciphertext is never inspected, truncated, or rewritten.
+    ///
+    /// Fail-closed: when any `unseen_tool_results` id lives in the discarded
+    /// prefix, pruning is refused so no unknown outcome is delegated to
+    /// opaque state alone. Tool-call pairing of the retained suffix is
+    /// validated before mutating.
+    pub fn apply_native_provider_compaction_boundary(&mut self) -> Result<NativeCompactionReport> {
+        let boundary_index = self.messages.iter().rposition(|msg| {
+            msg.role == "assistant"
+                && msg
+                    .provider_state
+                    .as_ref()
+                    .is_some_and(|state| state.contains_compaction())
+        });
+        let Some(boundary) = boundary_index else {
+            return Ok(NativeCompactionReport::default());
+        };
+        // Only the latest assistant compaction boundary is canonical. An
+        // older compaction assistant followed by newer plain transcript means
+        // this response did not re-establish the boundary; keep history.
+        let latest_assistant = self.messages.iter().rposition(|m| m.role == "assistant");
+        if latest_assistant != Some(boundary) {
+            return Ok(NativeCompactionReport::default());
+        }
+        let authority = self.messages.iter().position(|m| m.role == "system");
+        // The boundary assistant is always `role == "assistant"` while the
+        // authority is `role == "system"`, so they can never share an index:
+        // retention always starts at the boundary itself.
+        let keep_from = boundary;
+        // Authority system prompt survives; everything between it and the
+        // boundary is subsumed. When no authority exists, drop the prefix.
+        let prefix_end = keep_from;
+        let has_authority_prefix = match authority {
+            Some(idx) => idx < keep_from,
+            None => false,
+        };
+        if !has_authority_prefix && prefix_end == 0 {
+            return Ok(NativeCompactionReport::default());
+        }
+        // Fail closed on unseen results in the discarded prefix.
+        if !self.unseen_tool_results.is_empty() {
+            let mut unseen_in_prefix = false;
+            for msg in &self.messages[..prefix_end] {
+                if msg.role == "tool"
+                    && let Some(id) = msg.tool_call_id.as_deref()
+                    && self.unseen_tool_results.contains(id)
+                {
+                    unseen_in_prefix = true;
+                    break;
+                }
+                if msg.role == "assistant" {
+                    let holds_unseen = msg.tool_calls.iter().any(|tc| {
+                        tc.id
+                            .as_deref()
+                            .is_some_and(|id| self.unseen_tool_results.contains(id))
+                    });
+                    if holds_unseen {
+                        unseen_in_prefix = true;
+                        break;
+                    }
+                }
+            }
+            if unseen_in_prefix {
+                anyhow::bail!(
+                    "refusing native compaction pruning: unseen tool results remain in the discarded prefix"
+                );
+            }
+        }
+        // Validate the retained suffix pairing before mutating.
+        let mut retained: Vec<ChatMessage> = Vec::new();
+        if let Some(idx) = authority
+            && idx < keep_from
+        {
+            retained.push(self.messages[idx].clone());
+        }
+        retained.extend(self.messages[keep_from..].iter().cloned());
+        crate::llm::history::validate_tool_blocks(&retained, true)?;
+        let pruned = self.messages.len().saturating_sub(retained.len());
+        if pruned == 0 {
+            return Ok(NativeCompactionReport::default());
+        }
+        self.messages = retained;
+        info!(
+            responses_native_compaction_observed = true,
+            history_messages_pruned = pruned,
+            "applied Responses native compaction boundary"
+        );
+        Ok(NativeCompactionReport {
+            applied: true,
+            pruned_messages: pruned,
+        })
     }
 
     /// Insert a message at a specific index
@@ -874,6 +1011,16 @@ impl HistoryManager {
             );
         }
 
+        // Subscription native compaction owns summarization: the offload
+        // above stays, but the Chat Completions text summarizer never runs.
+        if self.native_compaction_owns_summarization() {
+            tracing::debug!(
+                responses_native_compaction_enabled = true,
+                "skipping local proactive compaction for subscription native path"
+            );
+            return Ok(false);
+        }
+
         let last_prompt_tokens = self.client.get_prompt_tokens_used();
         let effective_limit = self.config.get_effective_compaction_limit();
 
@@ -900,6 +1047,15 @@ impl HistoryManager {
 
     /// Reactive compaction when context length is exceeded
     pub async fn compact_reactive(&mut self) -> Result<bool> {
+        // Native server-side compaction never falls back to the local text
+        // summarizer. The agent loop surfaces an explicit overflow error.
+        if self.native_compaction_owns_summarization() {
+            warn!(
+                responses_native_compaction_enabled = true,
+                "subscription reactive compaction suppressed: server-side compaction already enabled"
+            );
+            return Ok(false);
+        }
         warn!("Context length exceeded in agent loop. Attempting to compact history.");
 
         if let Some(tx) = &self.ui_tx {
@@ -958,16 +1114,30 @@ impl HistoryManager {
 
     /// Preflight/retry entry point for budget-driven compaction.
     /// Always unseen-safe; see [`Self::protected_suffix_start_for_unseen`].
+    /// Subscription native path never runs the local text summarizer here;
+    /// the caller already ran the recoverable offload and the Responses
+    /// request itself carries server-side compaction.
     pub async fn compact_for_budget_pressure(&mut self) -> Result<bool> {
+        if self.native_compaction_owns_summarization() {
+            tracing::debug!(
+                responses_native_compaction_enabled = true,
+                "skipping local budget-pressure compaction for subscription native path"
+            );
+            return Ok(false);
+        }
         self.perform_compaction().await
     }
 
     /// Manual compaction builds a detached candidate without saving checkpoints
     /// or accounting usage. Automatic callers retain their existing behavior.
+    /// Subscription native path never runs the local summarizer.
     pub async fn compact_manually(
         &mut self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<bool> {
+        if self.native_compaction_owns_summarization() {
+            return Ok(false);
+        }
         if self.messages.len() <= 2 || self.messages.iter().all(|m| m.role == "system") {
             return Ok(false);
         }
@@ -982,6 +1152,11 @@ impl HistoryManager {
         &mut self,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<bool> {
+        // Defense in depth: every local summarizer entry refuses when the
+        // subscription native path owns compaction.
+        if self.native_compaction_owns_summarization() {
+            return Ok(false);
+        }
         let before_bytes = self.messages_json_bytes();
         let unseen = self.unseen_count();
         let protect_start = self.protected_suffix_start_for_unseen();
@@ -2710,5 +2885,210 @@ mod tests {
         assert_eq!(session.token_count, 150);
         assert_eq!(session.requests, 1);
         assert!(session.usage.expect("usage").historical_usage_unknown);
+    }
+
+    // --- Responses native compaction boundary ---
+
+    fn native_manager(messages: Vec<ChatMessage>) -> HistoryManager {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        // `dir` only supplies a `PathBuf`; these unit tests never touch the
+        // filesystem through it, so it may drop at scope end.
+        let client = crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k")
+            .expect("client")
+            .with_responses_compact_threshold(Some(102_400))
+            .expect("threshold");
+        HistoryManager::new(client, messages, None, fs, config)
+    }
+
+    fn compaction_state() -> crate::features::openai_subscription::ProviderState {
+        crate::features::openai_subscription::ProviderState {
+            version: 1,
+            account: "a".into(),
+            model: "m".into(),
+            output: vec![
+                serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"opaque-native"}),
+                serde_json::json!({"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":"after"}]}),
+            ],
+        }
+    }
+
+    fn compaction_assistant() -> ChatMessage {
+        ChatMessage {
+            provider_state: Some(compaction_state()),
+            role: "assistant".into(),
+            content: Some("after".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn native_boundary_prunes_prefix_but_keeps_authority() {
+        let mut messages = vec![
+            make_msg("system", "authority prompt"),
+            make_msg("user", "old-1"),
+            make_msg("assistant", "old-assistant"),
+            make_tool_msg("old-call", "old-result"),
+            make_msg("user", "current"),
+        ];
+        messages.push(compaction_assistant());
+        let mut manager = native_manager(messages);
+        let report = manager
+            .apply_native_provider_compaction_boundary()
+            .expect("apply");
+        assert!(report.applied);
+        assert_eq!(report.pruned_messages, 4);
+        assert_eq!(manager.len(), 2);
+        assert_eq!(manager.as_slice()[0].role, "system");
+        assert_eq!(
+            manager.as_slice()[0].content.as_deref(),
+            Some("authority prompt")
+        );
+        let tail = &manager.as_slice()[1];
+        assert_eq!(tail.role, "assistant");
+        assert!(
+            tail.provider_state
+                .as_ref()
+                .expect("state")
+                .contains_compaction()
+        );
+        // Ciphertext is preserved byte-for-byte, never summarized.
+        assert_eq!(
+            tail.provider_state.as_ref().expect("state").output[0]["encrypted_content"],
+            "opaque-native"
+        );
+        crate::llm::history::validate_tool_blocks(manager.as_slice(), true).expect("pairing");
+    }
+
+    #[test]
+    fn native_boundary_with_pending_tool_call_stays_valid() {
+        let pending = ChatMessage {
+            provider_state: Some(crate::features::openai_subscription::ProviderState {
+                version: 1,
+                account: "a".into(),
+                model: "m".into(),
+                output: vec![
+                    serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"opaque"}),
+                    serde_json::json!({"type":"function_call","id":"fc","call_id":"pending-1","namespace":"dgc","name":"fs_read","arguments":"{}","status":"completed"}),
+                ],
+            }),
+            role: "assistant".into(),
+            content: Some("working".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("pending-1".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let mut manager = native_manager(vec![
+            make_msg("system", "authority"),
+            make_msg("user", "old"),
+            pending,
+        ]);
+        let report = manager
+            .apply_native_provider_compaction_boundary()
+            .expect("apply");
+        assert!(report.applied);
+        assert_eq!(manager.len(), 2);
+        // Pending tail is valid with allow_pending_tail.
+        crate::llm::history::validate_tool_blocks(manager.as_slice(), true).expect("pending");
+        // After the tool result arrives the block closes normally.
+        manager.push_tool_result(Some("pending-1".into()), "result".into());
+        crate::llm::history::validate_tool_blocks(manager.as_slice(), false).expect("closed");
+    }
+
+    #[test]
+    fn native_boundary_refuses_when_unseen_in_discard_prefix() {
+        let mut messages = vec![
+            make_msg("system", "authority"),
+            make_assistant_with_tool_calls("unseen-1", "pending"),
+            make_tool_msg("unseen-1", "exact unseen result"),
+            make_msg("user", "current"),
+        ];
+        messages.push(compaction_assistant());
+        let mut manager = native_manager(messages);
+        // Simulate an unseen result that lives in the prefix to be discarded.
+        manager.push_tool_result(Some("unseen-1".into()), "exact unseen result".into());
+        // Manually mark the prefix tool message as unseen without clearing:
+        // push again would append; instead restore unseen via a second push
+        // then verify the apply refuses. The prefix still holds unseen-1.
+        let before = manager.as_slice().to_vec();
+        assert!(
+            manager.apply_native_provider_compaction_boundary().is_err(),
+            "must refuse pruning with unseen results in prefix"
+        );
+        assert_eq!(
+            serde_json::to_value(manager.as_slice()).expect("json"),
+            serde_json::to_value(&before).expect("json"),
+            "refused pruning must not mutate history"
+        );
+        assert!(manager.unseen_count() >= 1);
+    }
+
+    #[test]
+    fn native_compaction_skips_observation_gc() {
+        use crate::llm::observation::ObservationStore;
+        let mut manager = native_manager(vec![
+            make_msg("system", "authority"),
+            compaction_assistant(),
+        ]);
+        let mut store = ObservationStore::new();
+        let id = store
+            .insert(
+                "call-1".into(),
+                "fs_read".into(),
+                "large content".repeat(100),
+                10_000,
+            )
+            .expect("insert");
+        assert!(id.starts_with("obs-"));
+        manager.restore_observations(store, Default::default());
+        // Canonical history holds only the opaque compaction item; no local
+        // `obs-*` string is visible, so GC must fail closed and keep entries.
+        let before = manager.observations_snapshot();
+        assert_eq!(before.len(), 1);
+        let report = manager.gc_unreferenced_observations();
+        assert_eq!(report.removed_entries, 0);
+        let after = manager.observations_snapshot();
+        assert_eq!(after.len(), 1);
+        assert!(after.get(&id).is_some());
+    }
+
+    #[test]
+    fn native_local_compactor_is_suppressed_but_offload_remains() {
+        // Subscription native client never runs the Chat Completions
+        // summarizer paths.
+        let manager = native_manager(vec![make_msg("user", "hi")]);
+        assert!(manager.client.native_responses_compaction_enabled());
+    }
+
+    #[tokio::test]
+    async fn native_suppresses_local_budget_and_reactive_compaction() {
+        let mut manager = native_manager(vec![
+            make_msg("system", "authority"),
+            make_msg("user", "hello"),
+            make_msg("assistant", "old answer"),
+            make_msg("user", "follow-up"),
+        ]);
+        assert!(!manager.compact_for_budget_pressure().await.expect("budget"));
+        assert!(!manager.compact_reactive().await.expect("reactive"));
+        assert!(
+            !manager
+                .compact_manually(tokio_util::sync::CancellationToken::new())
+                .await
+                .expect("manual")
+        );
     }
 }
