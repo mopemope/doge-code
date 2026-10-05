@@ -511,6 +511,7 @@ mod tests {
                 "type": "compaction",
                 "encrypted_content": SECRET_ENCRYPTED
             })],
+            additional_tool_names: Vec::new(),
         };
         let rendered = format!("{state:?}");
         assert!(!rendered.contains(SECRET_ENCRYPTED));

@@ -17,6 +17,7 @@ pub struct HistoryManager {
     config: crate::config::AppConfig,
     observations: SharedObservationStore,
     unseen_tool_results: BTreeSet<String>,
+    activated_tools: BTreeSet<String>,
     usage_checkpoint: std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>,
     expected_session_id: Option<String>,
     checkpoints_enabled: bool,
@@ -78,6 +79,18 @@ impl HistoryManager {
             .get_session_manager()
             .as_ref()
             .and_then(|manager| manager.lock().ok().and_then(|m| m.current_session_id()));
+        let activated_tools = fs_tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .as_ref()
+            .and_then(|manager| {
+                manager.lock().ok().and_then(|m| {
+                    m.current_session
+                        .as_ref()
+                        .map(|s| s.activated_tools.clone())
+                })
+            })
+            .unwrap_or_default();
         let usage_checkpoint = std::sync::Mutex::new(client.usage_snapshot());
         Self {
             usage_checkpoint,
@@ -90,6 +103,7 @@ impl HistoryManager {
             config,
             observations: new_shared_store(),
             unseen_tool_results: BTreeSet::new(),
+            activated_tools,
         }
     }
 
@@ -107,6 +121,7 @@ impl HistoryManager {
             return Ok(());
         };
         let (persisted, observations, mut unseen) = self.persistable();
+        let activated = self.activated_tools.clone();
         // Durable projection only: request-scoped system messages never
         // persist. Provider state, assistant function calls, function call
         // outputs, and unseen-result protection are preserved untouched.
@@ -129,11 +144,14 @@ impl HistoryManager {
                 && manager.current_session_id() == self.expected_session_id,
             "active session changed during agent turn; checkpoint refused"
         );
-        manager.update_current_session_with_history_observations_and_usage(
-            &messages,
-            Some(observations),
-            Some(unseen),
-            Some(delta),
+        manager.update_current_session_with_checkpoint_state(
+            crate::session::ConversationCheckpointState {
+                history: messages,
+                observations: Some(observations),
+                unseen: Some(unseen),
+                usage_delta: Some(delta),
+                activated_tools: Some(activated),
+            },
             || {
                 *cursor = now;
             },
@@ -153,6 +171,30 @@ impl HistoryManager {
         observations: ObservationStore,
         unseen_tool_results: BTreeSet<String>,
     ) -> Self {
+        Self::with_observations_and_activations(
+            client,
+            messages,
+            ui_tx,
+            fs_tools,
+            config,
+            observations,
+            unseen_tool_results,
+            BTreeSet::new(),
+        )
+    }
+
+    /// Full restore including the persisted `activated_tools` sidecar.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_observations_and_activations(
+        client: OpenAIClient,
+        messages: Vec<ChatMessage>,
+        ui_tx: Option<std::sync::mpsc::Sender<String>>,
+        fs_tools: crate::tools::FsTools,
+        config: crate::config::AppConfig,
+        observations: ObservationStore,
+        unseen_tool_results: BTreeSet<String>,
+        activated_tools: BTreeSet<String>,
+    ) -> Self {
         let expected_session_id = fs_tools
             .get_session_manager_wrapper()
             .get_session_manager()
@@ -170,6 +212,7 @@ impl HistoryManager {
             config,
             observations: std::sync::Arc::new(std::sync::RwLock::new(observations)),
             unseen_tool_results,
+            activated_tools,
         };
         this.reconcile_observations_after_restore("with_observations");
         this
@@ -217,6 +260,19 @@ impl HistoryManager {
 
     pub fn unseen_count(&self) -> usize {
         self.unseen_tool_results.len()
+    }
+
+    /// Conversation-local deferred activation sidecar. Names only; schemas
+    /// resolve from the trusted `ToolCatalog` on resume.
+    pub fn activated_tools(&self) -> &BTreeSet<String> {
+        &self.activated_tools
+    }
+
+    /// Idempotent activation tracking for the session sidecar.
+    pub fn record_activated_tools(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            self.activated_tools.insert(name);
+        }
     }
 
     /// Shared handle for the conversation-owned Observation Store. Cloned
@@ -557,6 +613,7 @@ impl HistoryManager {
             }
         }
         self.unseen_tool_results.clear();
+        self.activated_tools.clear();
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, ChatMessage> {
@@ -1081,6 +1138,19 @@ impl HistoryManager {
             self.observations_snapshot(),
             self.unseen_snapshot(),
         )
+    }
+
+    /// Full canonical checkpoint payload including the activation sidecar.
+    pub fn persistable_with_activations(
+        &self,
+    ) -> (
+        Vec<ChatMessage>,
+        ObservationStore,
+        BTreeSet<String>,
+        BTreeSet<String>,
+    ) {
+        let (messages, store, unseen) = self.persistable();
+        (messages, store, unseen, self.activated_tools.clone())
     }
 
     /// Oldest assistant `tool_calls` message holding an unseen result.
@@ -2436,6 +2506,7 @@ mod tests {
                 account: "test".into(),
                 model: "m".into(),
                 output,
+                additional_tool_names: Vec::new(),
             }),
             role: "assistant".into(),
             content: Some("done".into()),
@@ -2712,6 +2783,7 @@ mod tests {
             account: "fixture".into(),
             model: "mock".into(),
             output: vec![serde_json::json!({"encrypted_content":"opaque"})],
+            additional_tool_names: Vec::new(),
         });
         history.push(pending.clone());
         history.checkpoint().unwrap();
@@ -2918,6 +2990,7 @@ mod tests {
                 serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"opaque-native"}),
                 serde_json::json!({"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":"after"}]}),
             ],
+            additional_tool_names: Vec::new(),
         }
     }
 
@@ -2980,6 +3053,7 @@ mod tests {
                     serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"opaque"}),
                     serde_json::json!({"type":"function_call","id":"fc","call_id":"pending-1","namespace":"dgc","name":"fs_read","arguments":"{}","status":"completed"}),
                 ],
+                additional_tool_names: Vec::new(),
             }),
             role: "assistant".into(),
             content: Some("working".into()),
@@ -3091,5 +3165,161 @@ mod tests {
                 .await
                 .expect("manual")
         );
+    }
+}
+
+#[cfg(test)]
+mod append_only_activation_tests {
+    use super::*;
+    use crate::llm::types::ChatMessage;
+
+    fn test_manager(messages: Vec<ChatMessage>) -> HistoryManager {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        HistoryManager::new(client, messages, None, fs, config)
+    }
+
+    #[test]
+    fn test_record_is_idempotent() {
+        let mut mgr = test_manager(vec![]);
+        mgr.record_activated_tools(vec!["edit".into(), "edit".into()]);
+        mgr.record_activated_tools(vec!["apply_patch".into()]);
+        assert_eq!(mgr.activated_tools().len(), 2);
+        assert!(mgr.activated_tools().contains("edit"));
+    }
+
+    #[test]
+    fn test_persistable_with_activations_roundtrip() {
+        let mut mgr = test_manager(vec![]);
+        mgr.record_activated_tools(vec!["edit".into()]);
+        let (_, _, _, activated) = mgr.persistable_with_activations();
+        assert!(activated.contains("edit"));
+    }
+
+    #[test]
+    fn test_clear_resets_sidecar() {
+        let mut mgr = test_manager(vec![ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some("hi".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }]);
+        mgr.record_activated_tools(vec!["edit".into()]);
+        mgr.clear();
+        assert!(mgr.activated_tools().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod append_only_compaction_tests {
+    use super::*;
+    use crate::llm::types::ChatMessage;
+
+    fn manager_with_messages(messages: Vec<ChatMessage>) -> HistoryManager {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
+        HistoryManager::new(client, messages, None, fs, config)
+    }
+
+    fn compaction_assistant() -> ChatMessage {
+        ChatMessage {
+            provider_state: Some(crate::features::openai_subscription::ProviderState {
+                version: 1,
+                account: "a".into(),
+                model: "m".into(),
+                output: vec![
+                    serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"opaque-native"}),
+                    serde_json::json!({"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":"after"}]}),
+                ],
+                additional_tool_names: Vec::new(),
+            }),
+            role: "assistant".into(),
+            content: Some("after".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_native_compaction_preserves_sidecar() {
+        let mut mgr = manager_with_messages(vec![
+            ChatMessage {
+                provider_state: None,
+                role: "system".into(),
+                content: Some("authority".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            ChatMessage {
+                provider_state: None,
+                role: "user".into(),
+                content: Some("old".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            compaction_assistant(),
+        ]);
+        mgr.record_activated_tools(vec!["edit".into()]);
+        let report = mgr
+            .apply_native_provider_compaction_boundary()
+            .expect("apply");
+        assert!(report.applied);
+        assert!(mgr.activated_tools().contains("edit"));
+    }
+
+    #[test]
+    fn test_interrupted_batch_with_activation_stays_valid() {
+        let mut mgr = manager_with_messages(vec![ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("c1".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        }]);
+        // Interrupted: no tool result yet. Checkpoint repairs with unknown outcome.
+        mgr.record_activated_tools(vec!["edit".into()]);
+        // Simulate checkpoint repair (adds unknown result for pending).
+        let (persisted, _, _) = mgr.persistable();
+        let mut repaired = crate::llm::durable_conversation_messages(persisted);
+        let interrupted =
+            crate::llm::history::validate_tool_blocks(&repaired, true).expect("validate");
+        assert_eq!(interrupted, vec!["c1".to_string()]);
+        for id in interrupted {
+            repaired.push(ChatMessage {
+                provider_state: None,
+                role: "tool".into(),
+                content: Some("Tool execution interrupted; outcome unknown.".into()),
+                tool_calls: vec![],
+                tool_call_id: Some(id),
+            });
+        }
+        crate::llm::history::validate_tool_blocks(&repaired, false).expect("repaired valid");
+        assert!(mgr.activated_tools().contains("edit"));
     }
 }

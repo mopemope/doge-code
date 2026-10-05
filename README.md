@@ -977,6 +977,14 @@ Verification failures are returned to LLM for automatic correction.
 - Provider-independent (works with OpenAI / Anthropic / OpenRouter / any
   OpenAI-compatible provider) and deterministic: lexical ranking only, no
   embeddings.
+- Provider wiring differs:
+  - OpenAI-compatible: activated schemas move into the next request's
+    top-level tools.
+  - openai-chatgpt / Responses: initial top-level namespace stays stable;
+    activated functions are appended as additional_tools input items.
+- Doge-Code `tool_search` is a client-side local function. It is not the
+  OpenAI Responses native `type = "tool_search"`; the ChatGPT plan route
+  never emits the latter.
 - Config:
 
 ```toml

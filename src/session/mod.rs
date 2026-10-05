@@ -10,5 +10,5 @@ pub mod store;
 pub mod tests;
 
 pub use data::{SessionData, SessionMeta, SessionSummary};
-pub use manager::{SessionManager, SessionStorageContext};
+pub use manager::{ConversationCheckpointState, SessionManager, SessionStorageContext};
 pub use store::SessionStore;

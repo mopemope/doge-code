@@ -24,6 +24,20 @@ pub(crate) enum SessionSaveState {
     },
 }
 
+/// Canonical conversation checkpoint payload.
+///
+/// Groups history, observations, unseen results, usage, and deferred
+/// activation names so a single durable write keeps them atomic: the
+/// tool result, provider activation marker, and activation sidecar are
+/// never persisted separately.
+pub struct ConversationCheckpointState {
+    pub history: Vec<crate::llm::types::ChatMessage>,
+    pub observations: Option<crate::llm::observation::ObservationStore>,
+    pub unseen: Option<std::collections::BTreeSet<String>>,
+    pub usage_delta: Option<crate::llm::usage_ledger::UsageLedger>,
+    pub activated_tools: Option<std::collections::BTreeSet<String>>,
+}
+
 impl SessionManager {
     /// Create a new SessionManager with the default store location
     pub fn new() -> Result<Self> {
@@ -388,6 +402,35 @@ impl SessionManager {
         usage_delta: Option<crate::llm::usage_ledger::UsageLedger>,
         usage_applied: impl FnOnce(),
     ) -> Result<()> {
+        // Legacy entry point preserves the activation sidecar: pass `None`
+        // so existing callers that only persist messages never clear it.
+        let state = ConversationCheckpointState {
+            history: history.to_vec(),
+            observations,
+            unseen,
+            usage_delta,
+            activated_tools: None,
+        };
+        self.update_current_session_with_checkpoint_state(state, usage_applied)
+    }
+
+    /// Atomic checkpoint including the `activated_tools` sidecar.
+    ///
+    /// `activated_tools == None` leaves the stored sidecar untouched.
+    /// `Some(set)` replaces it (empty clears, e.g. after `/clear` via a
+    /// fresh `HistoryManager`).
+    pub fn update_current_session_with_checkpoint_state(
+        &mut self,
+        state: ConversationCheckpointState,
+        usage_applied: impl FnOnce(),
+    ) -> Result<()> {
+        let ConversationCheckpointState {
+            history,
+            observations,
+            unseen,
+            usage_delta,
+            activated_tools,
+        } = state;
         debug!(
             history_len = history.len(),
             has_current_session = self.current_session.is_some(),
@@ -428,6 +471,9 @@ impl SessionManager {
             }
             if let Some(unseen_set) = unseen {
                 session.unseen_tool_results = unseen_set;
+            }
+            if let Some(activated) = activated_tools {
+                session.activated_tools = activated;
             }
 
             if let Some(delta) = usage_delta {

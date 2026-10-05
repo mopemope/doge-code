@@ -720,6 +720,7 @@ fn governor_does_not_tokenize_opaque_ciphertext() {
         output: vec![
             json!({"type":"reasoning","id":"rs","encrypted_content":"a".repeat(50000),"summary":[]}),
         ],
+        additional_tool_names: Vec::new(),
     });
     let governor = crate::llm::context_budget::ContextBudgetGovernor::new(Default::default());
     let first = governor
@@ -1421,6 +1422,7 @@ fn completed_rejects_unfinished_items_and_non_assistant_messages() {
             account: "a".into(),
             model: "m".into(),
             output: vec![message],
+            additional_tool_names: Vec::new(),
         }),
     };
     assert!(responses::build("m", "a", &[history], &[], None, None).is_err());
@@ -2087,4 +2089,467 @@ async fn native_overflow_does_not_fallback_to_local_compactor() -> Result<()> {
     );
     drop((cred_temp, server));
     Ok(())
+}
+
+// --- Responses append-only tool activation (v1) ---
+
+fn fixture_tool_def(name: &str) -> ToolDef {
+    ToolDef {
+        kind: "function".into(),
+        function: crate::llm::types::ToolFunctionDef {
+            name: name.into(),
+            description: format!("{name} helper"),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            strict: Some(false),
+        },
+    }
+}
+
+fn append_only_base() -> Vec<ToolDef> {
+    vec![
+        fixture_tool_def("fs_read"),
+        crate::tools::tool_search::tool_def(),
+    ]
+}
+
+fn append_only_active_with(names: &[&str]) -> Vec<ToolDef> {
+    let mut defs = append_only_base();
+    for name in names {
+        defs.push(fixture_tool_def(name));
+    }
+    defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+    defs
+}
+
+fn tool_search_call(id: &str) -> ChatMessage {
+    ChatMessage {
+        provider_state: None,
+        role: "assistant".into(),
+        content: None,
+        tool_calls: vec![crate::llm::types::ToolCall {
+            id: Some(id.into()),
+            r#type: "function".into(),
+            function: crate::llm::types::ToolCallFunction {
+                name: "tool_search".into(),
+                arguments: "{\"query\":\"edit\"}".into(),
+            },
+        }],
+        tool_call_id: None,
+    }
+}
+
+fn tool_result(id: &str, content: &str) -> ChatMessage {
+    ChatMessage {
+        provider_state: None,
+        role: "tool".into(),
+        content: Some(content.into()),
+        tool_calls: vec![],
+        tool_call_id: Some(id.into()),
+    }
+}
+
+fn activation_marker(names: Vec<&str>) -> ChatMessage {
+    let sorted: Vec<String> = {
+        let mut v: Vec<String> = names.into_iter().map(str::to_string).collect();
+        v.sort();
+        v
+    };
+    ChatMessage {
+        provider_state: Some(ProviderState::activation("a".into(), "m".into(), sorted)),
+        role: "developer".into(),
+        content: None,
+        tool_calls: vec![],
+        tool_call_id: None,
+    }
+}
+
+#[test]
+fn append_only_first_request_has_stable_namespace_only() {
+    let base = append_only_base();
+    let active = append_only_base();
+    let req = responses::build_with_activation("m", "a", &[user("hi")], &base, &active, None, None)
+        .expect("build");
+    let v = serde_json::to_value(&req).expect("json");
+    assert_eq!(v["store"], false);
+    assert_eq!(v["stream"], true);
+    assert!(v.get("previous_response_id").is_none());
+    assert!(v.get("prompt_cache_key").is_none());
+    assert!(v.get("prompt_cache_options").is_none());
+    // Top-level is the initial namespace only.
+    assert_eq!(v["tools"].as_array().expect("tools").len(), 1);
+    assert_eq!(v["tools"][0]["type"], "namespace");
+    assert_eq!(v["tools"][0]["name"], "dgc");
+    // No additional_tools input on first request.
+    let input = v["input"].as_array().expect("input");
+    assert!(input.iter().all(|i| i["type"] != "additional_tools"));
+    // No Responses-native tool_search.
+    let raw = serde_json::to_string(&v).expect("raw");
+    assert!(
+        !raw.contains("\"type\":\"tool_search\""),
+        "native tool_search must never emit"
+    );
+    // Local function tool_search remains as type function.
+    assert!(raw.contains("tool_search"));
+}
+
+#[test]
+fn append_only_post_activation_keeps_top_level_stable() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![
+        user("do edit"),
+        tool_search_call("call_search"),
+        tool_result("call_search", "{\"ok\":true}"),
+        activation_marker(vec!["edit"]),
+    ];
+    let first = serde_json::to_value(
+        responses::build_with_activation("m", "a", &[user("hi")], &base, &base, None, None)
+            .expect("first"),
+    )
+    .expect("json");
+    let second = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("second"),
+    )
+    .expect("json");
+    assert_eq!(
+        first["tools"], second["tools"],
+        "top-level tools must be byte-equivalent"
+    );
+    let input = second["input"].as_array().expect("input").clone();
+    let pos_call = input
+        .iter()
+        .position(|i| i.get("call_id") == Some(&json!("call_search")))
+        .expect("call");
+    let pos_marker = input
+        .iter()
+        .position(|i| i["type"] == "additional_tools")
+        .expect("marker");
+    assert!(
+        pos_marker > pos_call,
+        "additional_tools must follow its tool_search result"
+    );
+    let marker = &input[pos_marker];
+    assert_eq!(marker["role"], "developer");
+    assert_eq!(marker["tools"].as_array().expect("tools").len(), 1);
+    assert_eq!(marker["tools"][0]["name"], "edit");
+    assert_eq!(marker["tools"][0]["type"], "function");
+}
+
+#[test]
+fn append_only_exact_ordering_call_output_additional() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![
+        tool_search_call("c1"),
+        tool_result("c1", "{}"),
+        activation_marker(vec!["edit"]),
+    ];
+    let req = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("req"),
+    )
+    .expect("json");
+    let input = req["input"].as_array().expect("input");
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[1]["type"], "function_call_output");
+    assert_eq!(input[2]["type"], "additional_tools");
+}
+
+#[test]
+fn append_only_third_request_does_not_duplicate() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![
+        user("hi"),
+        tool_search_call("c1"),
+        tool_result("c1", "{}"),
+        activation_marker(vec!["edit"]),
+        user("follow up"),
+    ];
+    let req = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("req"),
+    )
+    .expect("json");
+    let count = req["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .filter(|i| i["type"] == "additional_tools")
+        .count();
+    assert_eq!(count, 1, "same tool must not be re-appended");
+}
+
+#[test]
+fn append_only_multiple_rounds_preserve_time_order() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["apply_patch", "edit"]);
+    let history = vec![
+        tool_search_call("c1"),
+        tool_result("c1", "{}"),
+        activation_marker(vec!["edit"]),
+        tool_search_call("c2"),
+        tool_result("c2", "{}"),
+        activation_marker(vec!["apply_patch"]),
+    ];
+    let req = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("req"),
+    )
+    .expect("json");
+    let markers: Vec<_> = req["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .filter(|i| i["type"] == "additional_tools")
+        .collect();
+    assert_eq!(markers.len(), 2);
+    assert_eq!(markers[0]["tools"][0]["name"], "edit");
+    assert_eq!(markers[1]["tools"][0]["name"], "apply_patch");
+}
+
+#[test]
+fn append_only_duplicate_marker_rejected() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![
+        activation_marker(vec!["edit"]),
+        activation_marker(vec!["edit"]),
+    ];
+    assert!(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None).is_err()
+    );
+}
+
+#[test]
+fn append_only_unknown_tool_rejected() {
+    let base = append_only_base();
+    let active = append_only_base();
+    let history = vec![activation_marker(vec!["unknown-tool"])];
+    assert!(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None).is_err()
+    );
+}
+
+#[test]
+fn append_only_inactive_tampering_rejected() {
+    // `edit` is known to the catalog shape here but not in the passed active
+    // set: session-file tampering must fail closed.
+    let base = append_only_base();
+    let active = append_only_base();
+    let history = vec![activation_marker(vec!["edit"])];
+    assert!(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None).is_err()
+    );
+}
+
+#[test]
+fn append_only_legacy_repair_inserts_before_first_use() {
+    // Old session: edit called without any provider marker.
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![
+        tool_search_call("c1"),
+        tool_result("c1", "{}"),
+        ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: None,
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some("c2".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "edit".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        },
+    ];
+    let req = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("repair"),
+    )
+    .expect("json");
+    let input = req["input"].as_array().expect("input");
+    let marker_pos = input
+        .iter()
+        .position(|i| i["type"] == "additional_tools")
+        .expect("repair marker");
+    let edit_pos = input
+        .iter()
+        .position(|i| i.get("name") == Some(&json!("edit")))
+        .expect("edit call");
+    assert!(marker_pos < edit_pos);
+}
+
+#[test]
+fn append_only_completed_validates_namespaces() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    // Base tool with dgc namespace: accept.
+    let ok_base = response(vec![
+        json!({"type":"function_call","id":"fc1","call_id":"c1","namespace":"dgc","name":"fs_read","arguments":"{}","status":"completed"}),
+    ]);
+    assert!(responses::completed_with_activation(&ok_base, "a", "m", &base, &active).is_ok());
+    // Appended tool unnamespaced: accept.
+    let ok_add = response(vec![
+        json!({"type":"function_call","id":"fc2","call_id":"c2","name":"edit","arguments":"{}","status":"completed"}),
+    ]);
+    assert!(responses::completed_with_activation(&ok_add, "a", "m", &base, &active).is_ok());
+    // Unknown unnamespaced: reject.
+    let bad_unknown = response(vec![
+        json!({"type":"function_call","id":"fc3","call_id":"c3","name":"nope","arguments":"{}","status":"completed"}),
+    ]);
+    assert!(responses::completed_with_activation(&bad_unknown, "a", "m", &base, &active).is_err());
+    // Foreign namespace: reject.
+    let bad_ns = response(vec![
+        json!({"type":"function_call","id":"fc4","call_id":"c4","namespace":"foreign","name":"edit","arguments":"{}","status":"completed"}),
+    ]);
+    assert!(responses::completed_with_activation(&bad_ns, "a", "m", &base, &active).is_err());
+    // Base tool unnamespaced would be wrong (must be dgc): our strict path
+    // treats unnamespaced fs_read as unknown additional -> reject.
+    let bad_base_unnamespaced = response(vec![
+        json!({"type":"function_call","id":"fc5","call_id":"c5","name":"fs_read","arguments":"{}","status":"completed"}),
+    ]);
+    assert!(
+        responses::completed_with_activation(&bad_base_unnamespaced, "a", "m", &base, &active)
+            .is_err()
+    );
+}
+
+#[test]
+fn append_only_provider_state_role_validation() {
+    let assistant =
+        ProviderState::assistant("a".into(), "m".into(), vec![json!({"type":"message"})]);
+    assert!(assistant.validate_role_binding("assistant").is_ok());
+    assert!(assistant.validate_role_binding("developer").is_err());
+    let marker = ProviderState::activation("a".into(), "m".into(), vec!["edit".into()]);
+    assert!(marker.validate_role_binding("developer").is_ok());
+    assert!(marker.validate_role_binding("assistant").is_err());
+    assert!(marker.validate_role_binding("tool").is_err());
+    // Mixed state rejected.
+    let mut mixed =
+        ProviderState::assistant("a".into(), "m".into(), vec![json!({"type":"message"})]);
+    mixed.additional_tool_names = vec!["edit".into()];
+    assert!(mixed.validate_role_binding("assistant").is_err());
+    // Debug is content-free.
+    let rendered = format!("{marker:?}");
+    assert!(rendered.contains("additional_tool_count"));
+    assert!(!rendered.contains("edit"));
+}
+
+#[test]
+fn append_only_native_tool_search_never_emitted() {
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    let history = vec![activation_marker(vec!["edit"])];
+    let req = serde_json::to_value(
+        responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+            .expect("req"),
+    )
+    .expect("json");
+    let raw = serde_json::to_string(&req).expect("raw");
+    assert!(!raw.contains("\"type\":\"tool_search\""));
+}
+
+#[test]
+fn append_only_resume_activation_only_session() {
+    // Session: tool_search activated edit, but edit not yet called.
+    // Resume must: catalog active, input has additional, top-level stable.
+    use crate::config::{ToolRoutingConfig, ToolRoutingMode};
+    use crate::llm::{ToolCatalog, ToolCatalogEntry, ToolSource};
+    let defs = vec![fixture_tool_def("fs_read"), fixture_tool_def("edit")];
+    let entries: Vec<ToolCatalogEntry> = defs
+        .into_iter()
+        .map(|def| {
+            let text = crate::llm::build_searchable_text(&def, &ToolSource::Builtin);
+            ToolCatalogEntry {
+                definition: def,
+                source: ToolSource::Builtin,
+                searchable_text: text,
+            }
+        })
+        .collect();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    rt.block_on(async {
+        let catalog = ToolCatalog::from_entries(
+            entries,
+            &ToolRoutingConfig {
+                mode: ToolRoutingMode::Deferred,
+                search_result_limit: 5,
+            },
+        );
+        // Simulate persisted sidecar with edit (activation-only).
+        let persisted: std::collections::BTreeSet<String> =
+            ["edit".into()].into_iter().collect();
+        catalog.activate(&persisted.iter().cloned().collect::<Vec<_>>()).await;
+        assert!(catalog.is_active("edit").await);
+        let base = catalog.initial_active_tool_defs();
+        let active = catalog.active_tool_defs().await;
+        // Top-level stable: base does not contain edit.
+        assert!(!base.iter().any(|d| d.function.name == "edit"));
+        assert!(active.iter().any(|d| d.function.name == "edit"));
+        // Build resume request with marker.
+        let history = vec![
+            user("do edit"),
+            tool_search_call("c1"),
+            tool_result("c1", "{}"),
+            activation_marker(vec!["edit"]),
+        ];
+        let req = serde_json::to_value(
+            responses::build_with_activation("m", "a", &history, &base, &active, None, None)
+                .expect("resume build"),
+        )
+        .expect("json");
+        assert!(req["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .any(|i| i["type"] == "additional_tools"));
+        // Edit callable as unnamespaced additional.
+        let call = response(vec![json!({"type":"function_call","id":"fc","call_id":"c2","name":"edit","arguments":"{}","status":"completed"})]);
+        assert!(responses::completed_with_activation(&call, "a", "m", &base, &active).is_ok());
+    });
+}
+
+#[test]
+fn append_only_post_compaction_rebase_shape() {
+    // Compacted history lost old marker, but sidecar retains edit.
+    // Rebase must re-append without changing top-level.
+    let base = append_only_base();
+    let active = append_only_active_with(&["edit"]);
+    // Post-compaction history: only authority + new user (marker pruned).
+    let compacted_history = vec![user("follow up after compaction")];
+    let first = serde_json::to_value(
+        responses::build_with_activation("m", "a", &compacted_history, &base, &base, None, None)
+            .expect("pre-rebase"),
+    )
+    .expect("json");
+    // Rebase marker (simulating agent_loop rebase from sidecar).
+    let rebased_history = vec![
+        user("follow up after compaction"),
+        activation_marker(vec!["edit"]),
+    ];
+    let second = serde_json::to_value(
+        responses::build_with_activation("m", "a", &rebased_history, &base, &active, None, None)
+            .expect("post-rebase"),
+    )
+    .expect("json");
+    assert_eq!(
+        first["tools"], second["tools"],
+        "top-level must not change across rebase"
+    );
+    assert!(
+        second["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .any(|i| i["type"] == "additional_tools")
+    );
 }
