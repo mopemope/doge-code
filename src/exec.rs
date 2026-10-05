@@ -295,17 +295,32 @@ impl Executor {
             .unwrap_or(0);
 
         let res = match res {
-            Ok((updated_messages, final_msg)) => {
-                match self.commit_canonical_history(&updated_messages).await {
-                    Ok(()) => Ok((updated_messages, final_msg)),
-                    Err(error) => Err(error.context("failed to persist exec conversation history")),
-                }
-            }
+            Ok(run) => match self.commit_canonical_history(&run.messages).await {
+                Ok(()) => Ok(run),
+                Err(error) => Err(error.context("failed to persist exec conversation history")),
+            },
             Err(error) => Err(error),
         };
 
         match res {
-            Ok((updated_messages, final_msg)) => {
+            Ok(run) => {
+                let updated_messages = run.messages;
+                let final_msg = run.final_message;
+                let status_str = match run.status {
+                    crate::llm::tool_execution::AgentRunStatus::Completed => "completed",
+                    crate::llm::tool_execution::AgentRunStatus::Partial => "partial",
+                };
+                let stop_reason = run.stop_reason.map(|r| r.as_str().to_string());
+                let budget = serde_json::json!({
+                    "iterations": run.budget.iterations,
+                    "tool_calls": run.budget.tool_calls,
+                    "charged_tokens": run.budget.charged_tokens,
+                    "elapsed_ms": run.budget.elapsed_ms,
+                    "provider_reported_tokens": run.budget.provider_reported_tokens,
+                    "estimated_tokens": run.budget.estimated_tokens,
+                    "request_attempts": run.budget.request_attempts,
+                    "usage_records": run.budget.usage_records,
+                });
                 // Canonical result: replace the outer buffer and persist the
                 // whole durable conversation (never a count-based delta).
 
@@ -337,6 +352,9 @@ impl Executor {
                     let response = &final_msg.content;
                     let output = serde_json::json!({
                         "success": true,
+                        "status": status_str,
+                        "stop_reason": stop_reason,
+                        "budget": budget,
                         "response": response,
                         "tokens_used": tokens_used,
                         "usage": usage,
@@ -351,7 +369,14 @@ impl Executor {
                     );
                 } else {
                     println!("{}", final_msg.content);
-                    eprintln!("Total prompt tokens used: {}", tokens_used);
+                    if run.status == crate::llm::tool_execution::AgentRunStatus::Partial {
+                        eprintln!(
+                            "Agent stopped with partial result: {}",
+                            stop_reason.as_deref().unwrap_or("unknown")
+                        );
+                    } else {
+                        eprintln!("Total prompt tokens used: {}", tokens_used);
+                    }
                 }
 
                 if !json {
@@ -503,7 +528,9 @@ impl Executor {
         let tokens_used = client.get_total_prompt_tokens_used() as u32;
 
         match res {
-            Ok(Ok((updated_messages, final_msg))) => {
+            Ok(Ok(run)) => {
+                let updated_messages = run.messages;
+                let final_msg = run.final_message;
                 let tools_called = collect_tools_called(&updated_messages);
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
@@ -703,9 +730,9 @@ impl Executor {
         )
         .await;
         match res {
-            Ok((updated_messages, final_msg)) => {
-                self.commit_canonical_history(&updated_messages).await?;
-                Ok(final_msg.content)
+            Ok(run) => {
+                self.commit_canonical_history(&run.messages).await?;
+                Ok(run.final_message.content)
             }
             Err(e) => {
                 if let Err(recovery_error) = self.restore_history_after_failure().await {
@@ -883,6 +910,7 @@ mod tests {
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
             subagent: Default::default(),
+            agent_budget: Default::default(),
         };
 
         let executor = Executor::new(cfg).await;
@@ -929,6 +957,7 @@ mod tests {
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
             subagent: Default::default(),
+            agent_budget: Default::default(),
         };
 
         let mut executor = Executor::new(cfg).await.expect("Failed to create executor");

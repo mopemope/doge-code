@@ -1,3 +1,6 @@
+pub mod agent_budget;
+#[cfg(test)]
+mod agent_budget_tests;
 mod agent_loop;
 mod arguments;
 pub mod compaction;
@@ -10,6 +13,7 @@ mod streaming;
 pub mod subagent;
 pub mod ui_rendering;
 
+pub use agent_budget::{AgentBudgetUsage, AgentRunResult, AgentRunStatus, AgentStopReason};
 pub use agent_loop::run_agent_loop;
 pub use diff_collection::collect_diff_review_payload;
 pub use dispatch::{dispatch_subagent_tool_call, dispatch_tool_call};

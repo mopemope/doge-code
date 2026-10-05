@@ -929,7 +929,7 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
     );
     std::fs::write(temp.path().join("fixture.txt"), "fixture content")?;
     let (cfg, fs) = fixture_fs(temp.path());
-    let (history, reply) = crate::llm::run_agent_loop(
+    let run = crate::llm::run_agent_loop(
         &client,
         "test-model",
         &fs,
@@ -941,6 +941,8 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await?;
+    let history = run.messages;
+    let reply = run.final_message;
     assert_eq!(reply.content, "こんにちは");
     assert_eq!(history.iter().filter(|m| m.role == "tool").count(), 2);
     assert!(history.iter().filter(|m| m.role == "tool").all(|m| {

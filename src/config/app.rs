@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::agent_budget::{AgentBudgetConfig, merge_agent_budget};
 use super::context_budget::{ContextBudgetConfig, merge_context_budget};
 use super::execution::{ExecutionConfig, merge_execution};
 use super::llm::LlmConfig;
@@ -72,6 +73,8 @@ pub struct AppConfig {
     /// request footprint before sending; never evicts tools or observations.
     pub context_budget: ContextBudgetConfig,
     pub subagent: SubagentConfig,
+    /// Run-wide main-agent resource budget (`[agent_budget]`).
+    pub agent_budget: AgentBudgetConfig,
 }
 
 impl Default for AppConfig {
@@ -105,6 +108,7 @@ impl Default for AppConfig {
             reasoning: ReasoningConfig::default(),
             context_budget: ContextBudgetConfig::default(),
             subagent: SubagentConfig::default(),
+            agent_budget: AgentBudgetConfig::default(),
         }
     }
 }
@@ -303,6 +307,10 @@ impl AppConfig {
             merge_reasoning(file_cfg.reasoning.as_ref(), project_cfg.reasoning.as_ref());
 
         let subagent = merge_subagent(file_cfg.subagent.as_ref(), project_cfg.subagent.as_ref())?;
+        let agent_budget = merge_agent_budget(
+            file_cfg.agent_budget.as_ref(),
+            project_cfg.agent_budget.as_ref(),
+        )?;
         let context_budget = merge_context_budget(
             file_cfg.context_budget.as_ref(),
             project_cfg.context_budget.as_ref(),
@@ -373,6 +381,7 @@ impl AppConfig {
             reasoning,
             context_budget,
             subagent,
+            agent_budget,
         };
         if config.provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
             && config.get_context_window_size().is_none()

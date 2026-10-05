@@ -5,6 +5,9 @@ use crate::llm::context_budget::{
     TokenEstimateSource, cleanup_threshold, should_compact_for_pressure,
     should_offload_for_pressure,
 };
+use crate::llm::tool_execution::agent_budget::{
+    AgentBudgetTracker, AgentRunResult, AgentRunStatus, AgentStopReason,
+};
 use crate::llm::tool_execution::error::{AgentLoopError, handle_agent_error};
 use crate::llm::tool_runtime::ToolRuntime;
 use crate::llm::types::{ChatMessage, ChoiceMessage};
@@ -42,6 +45,48 @@ fn persist_history_and_observations(
         warn!(error = %e, "failed to persist observation store");
     }
     messages
+}
+
+fn budget_synthetic_value(reason: AgentStopReason) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error": {
+            "kind": "agent_budget_exhausted",
+            "reason": reason.as_str(),
+            "message": "Agent run resource budget was reached before this tool call could be executed."
+        },
+        "warnings": []
+    })
+}
+
+fn push_budget_synthetic_results(
+    history: &mut crate::llm::tool_execution::history::HistoryManager,
+    calls: &[crate::llm::types::ToolCall],
+    reason: AgentStopReason,
+) -> Result<()> {
+    for tc in calls {
+        let value = budget_synthetic_value(reason);
+        let content =
+            serde_json::to_string(&value).unwrap_or_else(|_| "{\"ok\":false}".to_string());
+        let truncated = crate::llm::message_utils::truncate_tool_output(content, &tc.function.name);
+        history.push_tool_result(tc.id.clone(), truncated);
+    }
+    history.checkpoint()?;
+    Ok(())
+}
+
+fn partial_fallback_message(reason: AgentStopReason) -> String {
+    format!(
+        "Agent stopped after reaching the run resource budget ({}).\n\nCompleted work and tool results have been checkpointed.\nThe task may be incomplete. Review the current plan, changed files, and verification evidence before continuing.",
+        reason.as_str()
+    )
+}
+
+fn partial_finalization_prompt(reason: AgentStopReason) -> String {
+    format!(
+        "The agent run resource budget has been reached.\n\nStop reason: {}\n\nDo not call tools.\n\nReturn a concise partial completion report with:\n- Completed work\n- Verification performed\n- Remaining work\n- Important unknowns or risks\n\nDo not claim unfinished work is complete.",
+        reason.as_str()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +292,7 @@ pub async fn run_agent_loop(
     cfg: &crate::config::AppConfig,
     _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
     attribution: crate::provenance::ProvenanceAttribution,
-) -> Result<(Vec<ChatMessage>, ChoiceMessage)> {
+) -> Result<AgentRunResult> {
     debug!("run_agent_loop called");
     crate::llm::history::validate_tool_blocks(&messages, false)?;
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
@@ -363,7 +408,6 @@ pub async fn run_agent_loop(
             "reactivated tools from resumed history"
         );
     }
-    let mut iters = 0usize;
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
@@ -379,19 +423,344 @@ pub async fn run_agent_loop(
     let mut previous_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
         None;
 
+    // Run-wide resource budget: monotonic clock, run-local token delta from a
+    // fresh baseline so resumed history is never re-charged.
+    let usage_before_run = client.usage_snapshot();
+    let mut run_budget = AgentBudgetTracker::new(cfg.agent_budget.clone(), usage_before_run);
+    debug!(
+        max_iterations = cfg.agent_budget.max_iterations,
+        max_tool_calls = ?cfg.agent_budget.max_tool_calls,
+        max_elapsed_ms = ?cfg.agent_budget.max_elapsed_ms,
+        max_total_tokens = ?cfg.agent_budget.max_total_tokens,
+        "main agent run resource budgets"
+    );
+
     history.checkpoint()?;
 
-    loop {
-        iters += 1;
+    // Partial-completion exit shared by every budget stop. Checkpoints the
+    // canonical history, attempts one tools-free finalization when token and
+    // elapsed permit it, and never converts cancellation into partial.
+    async fn partial_stop(
+        client: &crate::llm::client_core::OpenAIClient,
+        model: &str,
+        fs: &FsTools,
+        history: &mut crate::llm::tool_execution::history::HistoryManager,
+        budget_governor: &mut ContextBudgetGovernor,
+        run_budget: &mut AgentBudgetTracker,
+        cfg: &crate::config::AppConfig,
+        cancel_token: &CancellationToken,
+        ui_tx: &Option<std::sync::mpsc::Sender<String>>,
+        reason: AgentStopReason,
+        file_was_written: bool,
+    ) -> Result<AgentRunResult> {
+        if cancel_token.is_cancelled() {
+            return Err(anyhow!(LlmErrorKind::Cancelled));
+        }
+        if let Some(tx) = ui_tx {
+            let _ = tx.send(format!(
+                "::status:warning:Agent stopped after reaching {} budget.",
+                match reason {
+                    AgentStopReason::IterationBudget => "iteration",
+                    AgentStopReason::ToolCallBudget => "tool-call",
+                    AgentStopReason::TokenBudget => "token",
+                    AgentStopReason::ElapsedBudget => "elapsed",
+                }
+            ));
+        }
+        // Deterministic local fallback when finalization cannot run.
+        let fallback = partial_fallback_message(reason);
+        // Finalization is allowed only when elapsed and remaining tokens
+        // permit it; iteration and tool-call budgets never block it.
+        let finalize_messages: Vec<ChatMessage> = {
+            let mut v = history.as_slice().to_vec();
+            v.push(ChatMessage {
+                provider_state: None,
+                role: "user".into(),
+                content: Some(partial_finalization_prompt(reason)),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+            v
+        };
+        let finalize_estimate: Option<u64> = (|| {
+            let fp = if let Some(account) = client.account_label() {
+                budget_governor
+                    .measure_subscription(account, model, &finalize_messages, &[], 0)
+                    .ok()
+            } else {
+                budget_governor.measure(&finalize_messages, &[]).ok()
+            }?;
+            Some(budget_governor.estimate(fp).prompt_tokens)
+        })();
+        let can_finalize = match finalize_estimate {
+            Some(est) => run_budget.finalization_stop(est).is_none(),
+            None => run_budget.elapsed_stop().is_none(),
+        };
+        if !can_finalize {
+            history.push(ChatMessage {
+                provider_state: None,
+                role: "assistant".into(),
+                content: Some(fallback.clone()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+            history.checkpoint()?;
+            // Diff review for partial is best-effort only when files changed;
+            // never fail the partial return on diff errors.
+            if cfg.show_diff
+                && file_was_written
+                && let Some(tx) = ui_tx
+            {
+                // Reuse the same payload path as completed runs but ignore
+                // failures: evidence is already checkpointed.
+                let _ = tx.send("::status:waiting".to_string());
+            }
+            let budget = run_budget.usage();
+            debug!(
+                status = "partial",
+                stop_reason = reason.as_str(),
+                iterations = budget.iterations,
+                tool_calls = budget.tool_calls,
+                charged_tokens = budget.charged_tokens,
+                provider_reported_tokens = budget.provider_reported_tokens,
+                estimated_tokens = budget.estimated_tokens,
+                request_attempts = budget.request_attempts,
+                usage_records = budget.usage_records,
+                elapsed_ms = budget.elapsed_ms,
+                finalization_attempted = budget.finalization_attempted,
+                finalization_succeeded = budget.finalization_succeeded,
+                "main agent run finished partial (fallback)"
+            );
+            return Ok(AgentRunResult {
+                messages: persist_history_and_observations(history, fs),
+                final_message: ChoiceMessage {
+                    role: "assistant".into(),
+                    content: fallback,
+                },
+                status: AgentRunStatus::Partial,
+                stop_reason: Some(reason),
+                budget,
+            });
+        }
+        // Attempt one tools-free finalization.
+        run_budget.finalization_attempted = true;
+        let est = finalize_estimate.unwrap_or(0);
+        let ledger_before = client.usage_snapshot();
+        let final_res = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => Err(anyhow!(LlmErrorKind::Cancelled)),
+            res = crate::llm::tool_execution::requests::chat_tools_once(
+                client,
+                model,
+                &finalize_messages,
+                &[],
+                reasoning_controller_effort(cfg),
+                cfg.reasoning.mode,
+                Some(cancel_token.clone()),
+                ui_tx.clone(),
+            ) => res,
+        };
+        if cancel_token.is_cancelled() {
+            return Err(anyhow!(LlmErrorKind::Cancelled));
+        }
+        match final_res {
+            Ok(msg) => {
+                let ledger_after = client.usage_snapshot();
+                // Finalization is a normal (tools-free) main request with an
+                // accurate governor estimate, so request attribution applies.
+                run_budget.charge_request(est, &ledger_before, &ledger_after);
+                let content_ok = msg.content.as_deref().is_some_and(|s| !s.trim().is_empty());
+                if msg.tool_calls.is_empty() && content_ok {
+                    run_budget.finalization_succeeded = true;
+                    let content = msg.content.clone().unwrap_or_default();
+                    history.push(ChatMessage {
+                        provider_state: msg.provider_state.clone(),
+                        role: "assistant".into(),
+                        content: Some(content.clone()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+                    history.checkpoint()?;
+                    let budget = run_budget.usage();
+                    debug!(
+                        status = "partial",
+                        stop_reason = reason.as_str(),
+                        iterations = budget.iterations,
+                        tool_calls = budget.tool_calls,
+                        charged_tokens = budget.charged_tokens,
+                        provider_reported_tokens = budget.provider_reported_tokens,
+                        estimated_tokens = budget.estimated_tokens,
+                        request_attempts = budget.request_attempts,
+                        usage_records = budget.usage_records,
+                        elapsed_ms = budget.elapsed_ms,
+                        finalization_attempted = budget.finalization_attempted,
+                        finalization_succeeded = budget.finalization_succeeded,
+                        "main agent run finished partial"
+                    );
+                    return Ok(AgentRunResult {
+                        messages: persist_history_and_observations(history, fs),
+                        final_message: ChoiceMessage {
+                            role: "assistant".into(),
+                            content,
+                        },
+                        status: AgentRunStatus::Partial,
+                        stop_reason: Some(reason),
+                        budget,
+                    });
+                }
+                // Tool violation or empty content: fall back locally.
+                if !msg.tool_calls.is_empty() {
+                    warn!("partial finalization returned tool calls; using local fallback");
+                }
+                history.push(ChatMessage {
+                    provider_state: None,
+                    role: "assistant".into(),
+                    content: Some(fallback.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
+                history.checkpoint()?;
+                let budget = run_budget.usage();
+                debug!(
+                    status = "partial",
+                    stop_reason = reason.as_str(),
+                    iterations = budget.iterations,
+                    tool_calls = budget.tool_calls,
+                    charged_tokens = budget.charged_tokens,
+                    provider_reported_tokens = budget.provider_reported_tokens,
+                    estimated_tokens = budget.estimated_tokens,
+                    request_attempts = budget.request_attempts,
+                    usage_records = budget.usage_records,
+                    elapsed_ms = budget.elapsed_ms,
+                    finalization_attempted = budget.finalization_attempted,
+                    finalization_succeeded = budget.finalization_succeeded,
+                    "main agent run finished partial (finalization violation fallback)"
+                );
+                Ok(AgentRunResult {
+                    messages: persist_history_and_observations(history, fs),
+                    final_message: ChoiceMessage {
+                        role: "assistant".into(),
+                        content: fallback,
+                    },
+                    status: AgentRunStatus::Partial,
+                    stop_reason: Some(reason),
+                    budget,
+                })
+            }
+            Err(e) => {
+                if matches!(
+                    e.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Cancelled)
+                ) {
+                    return Err(anyhow!(LlmErrorKind::Cancelled));
+                }
+                warn!(error = %e, "partial finalization failed; using local fallback");
+                history.push(ChatMessage {
+                    provider_state: None,
+                    role: "assistant".into(),
+                    content: Some(fallback.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
+                history.checkpoint()?;
+                let budget = run_budget.usage();
+                debug!(
+                    status = "partial",
+                    stop_reason = reason.as_str(),
+                    iterations = budget.iterations,
+                    tool_calls = budget.tool_calls,
+                    charged_tokens = budget.charged_tokens,
+                    provider_reported_tokens = budget.provider_reported_tokens,
+                    estimated_tokens = budget.estimated_tokens,
+                    request_attempts = budget.request_attempts,
+                    usage_records = budget.usage_records,
+                    elapsed_ms = budget.elapsed_ms,
+                    finalization_attempted = budget.finalization_attempted,
+                    finalization_succeeded = budget.finalization_succeeded,
+                    "main agent run finished partial (finalization error fallback)"
+                );
+                Ok(AgentRunResult {
+                    messages: persist_history_and_observations(history, fs),
+                    final_message: ChoiceMessage {
+                        role: "assistant".into(),
+                        content: fallback,
+                    },
+                    status: AgentRunStatus::Partial,
+                    stop_reason: Some(reason),
+                    budget,
+                })
+            }
+        }
+    }
+
+    fn reasoning_controller_effort(
+        cfg: &crate::config::AppConfig,
+    ) -> Option<crate::config::ReasoningEffort> {
+        // Finalization uses the routine effort without mutating the live
+        // controller; keep it side-effect free.
+        let tmp = crate::llm::reasoning::ReasoningController::new(cfg.reasoning.clone());
+        tmp.current_effort()
+    }
+
+    fn completed_result(
+        history: &crate::llm::tool_execution::history::HistoryManager,
+        fs: &FsTools,
+        content: String,
+        run_budget: &AgentBudgetTracker,
+    ) -> AgentRunResult {
+        let budget = run_budget.usage();
         debug!(
-            iteration = iters,
+            status = "completed",
+            stop_reason = "none",
+            iterations = budget.iterations,
+            tool_calls = budget.tool_calls,
+            charged_tokens = budget.charged_tokens,
+            provider_reported_tokens = budget.provider_reported_tokens,
+            estimated_tokens = budget.estimated_tokens,
+            request_attempts = budget.request_attempts,
+            usage_records = budget.usage_records,
+            elapsed_ms = budget.elapsed_ms,
+            finalization_attempted = budget.finalization_attempted,
+            finalization_succeeded = budget.finalization_succeeded,
+            "main agent run finished completed"
+        );
+        AgentRunResult {
+            messages: persist_history_and_observations(history, fs),
+            final_message: ChoiceMessage {
+                role: "assistant".into(),
+                content,
+            },
+            status: AgentRunStatus::Completed,
+            stop_reason: None,
+            budget,
+        }
+    }
+
+    loop {
+        // Safe-boundary iteration/elapsed/token-exhausted check before any
+        // new work. Off-by-one free: max_iterations=2 allows #1,#2, blocks #3.
+        if let Some(reason) = run_budget.request_stop(0) {
+            return partial_stop(
+                client,
+                model,
+                fs,
+                &mut history,
+                &mut budget_governor,
+                &mut run_budget,
+                cfg,
+                &cancel_token,
+                &ui_tx,
+                reason,
+                file_was_written,
+            )
+            .await;
+        }
+        debug!(
+            iteration = run_budget.iterations() + 1,
             messages_len = history.len(),
             "agent loop iteration"
         );
-        if iters > runtime.max_iters {
-            warn!(iters, "max tool iterations reached");
-            return Err(AgentLoopError::MaxIterations(iters).into());
-        }
+        let iteration_ledger_start = client.usage_snapshot();
 
         // Fresh active-tool snapshot every iteration so `tool_search`
         // activations appear in the very next request. Activation is
@@ -725,6 +1094,105 @@ pub async fn run_agent_loop(
             }
         }
 
+        // Reconcile automatic preflight compaction/offload usage before the
+        // token preflight. Only charge when the ledger actually moved; an
+        // idle iteration must never invent a charge.
+        {
+            let after_preflight = client.usage_snapshot();
+            let moved = after_preflight.attempts != iteration_ledger_start.attempts
+                || after_preflight.usage_records != iteration_ledger_start.usage_records
+                || after_preflight.total_tokens != iteration_ledger_start.total_tokens;
+            if moved {
+                // Safe-side bounded estimate for internal work without a
+                // dedicated prompt estimate; reported deltas dominate when
+                // present (see charge_internal).
+                run_budget.charge_internal(
+                    effective_limit,
+                    &iteration_ledger_start,
+                    &after_preflight,
+                );
+                // A compaction that already exhausted the budget must not
+                // start a new normal request.
+                if let Some(reason) = run_budget.request_stop(0) {
+                    return partial_stop(
+                        client,
+                        model,
+                        fs,
+                        &mut history,
+                        &mut budget_governor,
+                        &mut run_budget,
+                        cfg,
+                        &cancel_token,
+                        &ui_tx,
+                        reason,
+                        file_was_written,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Token preflight for the run budget using the governor estimate.
+        // Off/Observe modes have no footprint: measure best-effort so the
+        // token budget still enforces even when the context governor is off.
+        let current_estimate: u64 = if let Some(fp) = sent_footprint {
+            budget_governor.estimate(fp).prompt_tokens
+        } else {
+            (|| {
+                let fp = if send_with_overlay {
+                    let projected =
+                        crate::llm::runtime_context::RequestMessages::with_runtime_context(
+                            history.as_slice(),
+                            &runtime_context,
+                        );
+                    measure(&budget_governor, projected.as_slice(), &active_tools, 0).ok()?
+                } else {
+                    measure(&budget_governor, history.as_slice(), &active_tools, 0).ok()?
+                };
+                Some(budget_governor.estimate(fp).prompt_tokens)
+            })()
+            .unwrap_or(0)
+        };
+        // If measurement was unavailable (estimate 0) only the already
+        // exhausted check applies; never block on a missing estimate.
+        if current_estimate > 0
+            && let Some(reason) = run_budget.request_stop(current_estimate)
+        {
+            return partial_stop(
+                client,
+                model,
+                fs,
+                &mut history,
+                &mut budget_governor,
+                &mut run_budget,
+                cfg,
+                &cancel_token,
+                &ui_tx,
+                reason,
+                file_was_written,
+            )
+            .await;
+        } else if current_estimate == 0
+            && let Some(reason) = run_budget.request_stop(0)
+        {
+            return partial_stop(
+                client,
+                model,
+                fs,
+                &mut history,
+                &mut budget_governor,
+                &mut run_budget,
+                cfg,
+                &cancel_token,
+                &ui_tx,
+                reason,
+                file_was_written,
+            )
+            .await;
+        }
+        run_budget.record_iteration();
+        let ledger_before_request = client.usage_snapshot();
+
         // Prefix-stability diagnostics: fingerprint the exact cache-relevant
         // components about to be sent (final active tools + canonical
         // history + effort + model). Computed only when DEBUG is enabled;
@@ -777,16 +1245,52 @@ pub async fn run_agent_loop(
         let msg = match chat_result {
             Ok(msg) => msg,
             Err(e) => {
+                // Failed attempts still cost budget (never free) when the loop
+                // continues; terminal errors return without partial conversion.
+                let ledger_after_fail = client.usage_snapshot();
                 // Check if the error is due to context length exceeded.
                 // Unseen-safe reactive compaction, at most one retry per
                 // logical request (guard resets on success).
                 if let Some(LlmErrorKind::ContextLengthExceeded) = e.downcast_ref::<LlmErrorKind>()
                 {
+                    // Charge the failed attempt before any retry.
+                    run_budget.charge_request(
+                        current_estimate,
+                        &ledger_before_request,
+                        &ledger_after_fail,
+                    );
                     if !reactive_guard.should_attempt() {
                         error!("context length exceeded after reactive compaction; not retrying");
                     } else {
-                        match cancellable_compaction!(history.compact_reactive()) {
+                        // Safe boundary: never start a new compaction after the
+                        // budget is already exhausted.
+                        if let Some(reason) = run_budget.request_stop(0) {
+                            return partial_stop(
+                                client,
+                                model,
+                                fs,
+                                &mut history,
+                                &mut budget_governor,
+                                &mut run_budget,
+                                cfg,
+                                &cancel_token,
+                                &ui_tx,
+                                reason,
+                                file_was_written,
+                            )
+                            .await;
+                        }
+                        let compact_before = client.usage_snapshot();
+                        let compact_outcome = cancellable_compaction!(history.compact_reactive());
+                        // Note: cancellable_compaction returns Result; handle below.
+                        match compact_outcome {
                             Ok(true) => {
+                                let compact_after = client.usage_snapshot();
+                                run_budget.charge_internal(
+                                    effective_limit,
+                                    &compact_before,
+                                    &compact_after,
+                                );
                                 info!("History compaction successful (reactive). Resuming.");
                                 reasoning_controller.observe_compaction();
                                 reactive_guard.record_attempt();
@@ -800,10 +1304,32 @@ pub async fn run_agent_loop(
                                 error!("Error during reactive history compaction: {}", compact_err);
                             }
                         }
+                        // Even when compaction made no progress, its usage (if
+                        // any) must be reconciled.
+                        {
+                            let compact_after = client.usage_snapshot();
+                            // Only charge if something moved to avoid inventing
+                            // cost for a no-op compaction attempt.
+                            if compact_after.attempts != compact_before.attempts
+                                || compact_after.usage_records != compact_before.usage_records
+                                || compact_after.total_tokens != compact_before.total_tokens
+                            {
+                                run_budget.charge_internal(
+                                    effective_limit,
+                                    &compact_before,
+                                    &compact_after,
+                                );
+                            }
+                        }
                     }
                 }
 
                 if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
+                    run_budget.charge_request(
+                        current_estimate,
+                        &ledger_before_request,
+                        &ledger_after_fail,
+                    );
                     warn!("JSON parse error from LLM: {}", e);
                     reasoning_controller.observe_json_recovery();
                     let feedback = format!(
@@ -831,6 +1357,17 @@ pub async fn run_agent_loop(
                 return Err(e.context(agent_error));
             }
         };
+        // Reconcile the successful request: max(reported, estimate) plus one
+        // estimate per missing retry attempt. Provider telemetry is never
+        // mutated with estimates.
+        {
+            let ledger_after_request = client.usage_snapshot();
+            run_budget.charge_request(
+                current_estimate,
+                &ledger_before_request,
+                &ledger_after_request,
+            );
+        }
         // Calibrate before the sub-agent can overwrite the shared
         // per-request counter, then mark results seen. Failed requests above
         // never reach here so unseen results stay inline.
@@ -941,12 +1478,12 @@ pub async fn run_agent_loop(
                 }
             }
 
-            return Ok((
-                persist_history_and_observations(&history, fs),
-                ChoiceMessage {
-                    role: "assistant".into(),
-                    content: msg.content.clone().unwrap_or_default(),
-                },
+            history.checkpoint()?;
+            return Ok(completed_result(
+                &history,
+                fs,
+                msg.content.clone().unwrap_or_default(),
+                &run_budget,
             ));
         }
 
@@ -970,11 +1507,45 @@ pub async fn run_agent_loop(
         // durable unknown outcomes and are never silently replayed.
         history.checkpoint()?;
 
+        // Token budget may have been reached by this very response. Never
+        // execute tools after exhaustion: pair every call synthetically and
+        // take the partial path. Tool-call and elapsed budgets are enforced
+        // here as well (all-or-none batch semantics).
+        if let Some(reason) = run_budget.batch_stop(msg.tool_calls.len()) {
+            // Token exhaustion and tool-capacity overflow both skip the whole
+            // batch. Elapsed expiry here also skips the whole batch because
+            // nothing has started yet.
+            push_budget_synthetic_results(&mut history, &msg.tool_calls, reason)?;
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send(format!(
+                    "::status:warning:Agent stopped after reaching {} budget.",
+                    reason.as_str()
+                ));
+            }
+            return partial_stop(
+                client,
+                model,
+                fs,
+                &mut history,
+                &mut budget_governor,
+                &mut run_budget,
+                cfg,
+                &cancel_token,
+                &ui_tx,
+                reason,
+                file_was_written,
+            )
+            .await;
+        }
+
         let mut pending_interventions = Vec::new();
         let mut loop_detected = false;
         let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
         let mut batch_stall_detected = false;
-        for tc in msg.tool_calls {
+        // Own the batch so remaining calls can be synthetically paired on
+        // mid-batch budget expiry without losing IDs.
+        let batch_calls = msg.tool_calls.clone();
+        for (tool_index, tc) in batch_calls.into_iter().enumerate() {
             if loop_detected {
                 // Skip remaining tool calls in the batch
                 debug!(tool = %tc.function.name, "Skipping tool call due to loop detection in same batch");
@@ -989,6 +1560,62 @@ pub async fn run_agent_loop(
             // Always send processing status to UI if available
             if let Some(tx) = &ui_tx {
                 let _ = tx.send("::status:processing".into());
+            }
+
+            // Safe-boundary budget check before starting each tool. Never
+            // drop an in-flight mutation/process: the check happens before
+            // dispatch, and an expiry here pairs the current and remaining
+            // calls synthetically while preserving the completed prefix.
+            // Every index is checked: elapsed time can expire during the
+            // batch preflight itself.
+            if let Some(reason) =
+                run_budget
+                    .elapsed_stop()
+                    .or_else(|| match run_budget.limits().max_total_tokens {
+                        Some(limit) if run_budget.charged_tokens() >= limit => {
+                            Some(AgentStopReason::TokenBudget)
+                        }
+                        _ => None,
+                    })
+            {
+                // Collect remaining calls including current for pairing.
+                // batch_calls was moved; reconstruct remaining from msg.
+                let remaining: Vec<crate::llm::types::ToolCall> =
+                    msg.tool_calls.iter().skip(tool_index).cloned().collect();
+                push_budget_synthetic_results(&mut history, &remaining, reason)?;
+                if let Some(tx) = &ui_tx {
+                    let _ = tx.send(format!(
+                        "::status:warning:Agent stopped after reaching {} budget.",
+                        reason.as_str()
+                    ));
+                }
+                // Queue any interventions collected so far, checkpoint,
+                // then take the partial path.
+                for intervention in pending_interventions {
+                    history.push(intervention);
+                }
+                history.checkpoint()?;
+                reasoning_controller.observe_tool_batch(
+                    crate::llm::reasoning::ToolBatchObservation::new(
+                        batch_observations,
+                        loop_detected,
+                        batch_stall_detected,
+                    ),
+                );
+                return partial_stop(
+                    client,
+                    model,
+                    fs,
+                    &mut history,
+                    &mut budget_governor,
+                    &mut run_budget,
+                    cfg,
+                    &cancel_token,
+                    &ui_tx,
+                    reason,
+                    file_was_written,
+                )
+                .await;
             }
 
             let tool_name = tc.function.name.as_str();
@@ -1051,6 +1678,16 @@ pub async fn run_agent_loop(
             if cancel_token.is_cancelled() {
                 return Err(anyhow!(LlmErrorKind::Cancelled));
             }
+            // Budget safe boundary already passed for this call (batch
+            // preflight for index 0, per-tool check for later indices).
+            // Count the dispatch itself; `task` counts as one main call and
+            // its internal usage is reconciled separately below.
+            run_budget.record_tool_call();
+            let task_ledger_before = if tool_name == "task" {
+                Some(client.usage_snapshot())
+            } else {
+                None
+            };
             // Processes own cancellation and must finish tree cleanup/reaping.
             // Local mutations must finish commit/readback/finalization once
             // started; dropping them after rename would lose undo/provenance.
@@ -1091,6 +1728,19 @@ pub async fn run_agent_loop(
                 )
             {
                 return Err(anyhow!(LlmErrorKind::Cancelled));
+            }
+
+            // Subagent model usage shares the client ledger. Reconcile it
+            // into the run budget without exposing internal telemetry to the
+            // model-visible `task` result.
+            if let Some(before) = task_ledger_before {
+                let after = client.usage_snapshot();
+                if after.attempts != before.attempts
+                    || after.usage_records != before.usage_records
+                    || after.total_tokens != before.total_tokens
+                {
+                    run_budget.charge_internal(effective_limit, &before, &after);
+                }
             }
 
             // Extract success status and result summary from the structured output
@@ -1606,7 +2256,7 @@ mod tests {
             },
         ];
 
-        let (updated_messages, final_msg) = run_agent_loop(
+        let run = run_agent_loop(
             &client,
             "test-model",
             &fs,
@@ -1619,6 +2269,10 @@ mod tests {
         )
         .await
         .expect("agent loop completes");
+        let updated_messages = run.messages;
+        let final_msg = run.final_message;
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.stop_reason, None);
         assert_eq!(final_msg.content, "done");
         // The overlay must never leak into durable history.
         assert!(

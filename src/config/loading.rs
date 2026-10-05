@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+use super::agent_budget::PartialAgentBudgetConfig;
 use super::context_budget::PartialContextBudgetConfig;
 use super::execution::PartialExecutionConfig;
 use super::llm::PartialLlmConfig;
@@ -45,6 +46,7 @@ pub struct FileConfig {
     pub reasoning: Option<PartialReasoningConfig>,
     pub context_budget: Option<PartialContextBudgetConfig>,
     pub subagent: Option<PartialSubagentConfig>,
+    pub agent_budget: Option<PartialAgentBudgetConfig>,
 }
 
 /// Configuration load contract (v1):
@@ -249,6 +251,14 @@ fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
         subagent.validate().with_context(|| {
             format!(
                 "invalid subagent configuration in {}",
+                normalize_path_for_error(&source.path)
+            )
+        })?;
+    }
+    if let Some(agent_budget) = &cfg.agent_budget {
+        agent_budget.validate().with_context(|| {
+            format!(
+                "invalid agent_budget configuration in {}",
                 normalize_path_for_error(&source.path)
             )
         })?;
