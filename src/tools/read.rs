@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 
 pub fn tool_def() -> ToolDef {
@@ -109,14 +108,6 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
     if !meta.is_file() {
         anyhow::bail!("not a file");
     }
-    let mut f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    let mut s = String::new();
-    f.read_to_string(&mut s)
-        .with_context(|| format!("read {}", p.display()))?;
-
-    let lines: Vec<&str> = s.lines().collect();
-    let total_lines = lines.len();
-
     for (name, value) in [
         ("start_line", opts.start_line),
         ("cursor", opts.cursor),
@@ -127,10 +118,10 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         super::budget::positive_read_option(name, value)?;
     }
     let requested = opts.cursor.or(opts.start_line).unwrap_or(1);
-    let start_index = requested.saturating_sub(1).min(total_lines);
+    let requested_start = requested.saturating_sub(1);
     let line_limit = opts.page_size.or(opts.limit).unwrap_or(match opts.mode {
         FsReadMode::Summary => DEFAULT_SUMMARY_LINES,
-        FsReadMode::Full => total_lines.saturating_sub(start_index),
+        FsReadMode::Full => usize::MAX,
     });
     let requested_budget = opts
         .response_budget_chars
@@ -142,28 +133,20 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
             "response_budget_chars capped at 40000; serialized JSON overhead also applies".into(),
         );
     }
-    let mut end_index = start_index;
-    let mut chars = 0usize;
-    for line in &lines[start_index..start_index.saturating_add(line_limit).min(total_lines)] {
-        let needed = line
-            .chars()
-            .count()
-            .saturating_add(usize::from(end_index > start_index));
-        if needed > budget.saturating_sub(chars) {
-            if end_index == start_index {
-                anyhow::bail!(
-                    "response_budget_chars too small: line {requested} requires at least {} Unicode characters; retry from the same start_line={requested} with a larger budget (maximum 40000, including a separate serialized JSON limit). Single-line offset pagination is unavailable",
-                    line.chars().count()
-                );
-            }
-            break;
-        }
-        chars += needed;
-        end_index += 1;
+    let f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
+    let page = super::text_scan::read_page(f, requested_start, line_limit, budget)
+        .with_context(|| format!("read {}", p.display()))?;
+    let total_lines = page.total_lines;
+    let start_index = requested_start.min(total_lines);
+    if let Some(required) = page.oversized_first_line {
+        anyhow::bail!(
+            "response_budget_chars too small: line {requested} requires at least {required} Unicode characters; retry from the same start_line={requested} with a larger budget (maximum 40000, including a separate serialized JSON limit). Single-line offset pagination is unavailable"
+        );
     }
+    let end_index = start_index.saturating_add(page.line_ends.len());
     let mut result = FsReadResult {
         path: path.to_string(),
-        content: lines[start_index..end_index].join("\n"),
+        content: page.content.clone(),
         start_line: if total_lines == 0 { 0 } else { requested },
         end_line: end_index,
         total_lines,
@@ -190,14 +173,14 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
         let mut high = end_index - 1;
         while low < high {
             let mid = low + (high - low).div_ceil(2);
-            set_page_end(&mut result, &lines, start_index, mid);
+            set_page_end(&mut result, &page, start_index, mid);
             if super::budget::read_result_fits(&result)? {
                 low = mid;
             } else {
                 high = mid - 1;
             }
         }
-        set_page_end(&mut result, &lines, start_index, low);
+        set_page_end(&mut result, &page, start_index, low);
         anyhow::ensure!(
             low > start_index && super::budget::read_result_fits(&result)?,
             "line {requested} cannot fit the 40000-character serialized JSON limit with its escaping and metadata; no lines consumed, retry the same start_line after reducing line size or path length. Single-line offset pagination is unavailable"
@@ -206,8 +189,17 @@ pub fn fs_read(path: &str, opts: FsReadOptions, config: &AppConfig) -> Result<Fs
     Ok(result)
 }
 
-fn set_page_end(result: &mut FsReadResult, lines: &[&str], start: usize, end: usize) {
-    result.content = lines[start..end].join("\n");
+fn set_page_end(
+    result: &mut FsReadResult,
+    page: &super::text_scan::Page,
+    start: usize,
+    end: usize,
+) {
+    let count = end - start;
+    let bytes = count
+        .checked_sub(1)
+        .map_or(0, |index| page.line_ends[index]);
+    result.content = page.content[..bytes].to_owned();
     result.end_line = end;
     result.truncated = end < result.total_lines;
     result.next_cursor = result.truncated.then(|| end.saturating_add(1));
