@@ -345,6 +345,14 @@ budgets. Omitting a glob searches only the project; ordinary absolute globs
 outside it retain their empty-result behavior. The tool ignores ambient
 `RIPGREP_CONFIG_PATH` settings and does not follow symlinks while traversing.
 
+`fs_read` and `fs_read_many_files` scan input in fixed-size UTF-8 chunks and
+retain only budgeted page/snippet candidates. Large lines and small output
+requests do not require keeping the entire file or an index of every line.
+Both still scan through EOF to report exact line counts and reject invalid
+UTF-8 anywhere in the file; output budgets do not limit total input I/O.
+`fs_read` and multi-file summary normalize CRLF to LF between returned lines;
+multi-file full mode preserves the original separators and final newline.
+
 ### Editing Tools
 - `apply_patch`: Apply a unified diff patch to a file (single `file_path`; read the file first)
 - `edit`: Replace specific code blocks
