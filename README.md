@@ -456,11 +456,18 @@ max_elapsed_ms = 180000
 These example values match the current defaults. `task` inputs remain
 `description` and `prompt`; the model cannot raise these limits. The request
 context ceiling also uses the model's effective compaction limit and applies
-even with `[context_budget] mode = "off"`. Each successful LLM request charges
-`max(reported total tokens, estimated prompt tokens)`; absent or ambiguous usage
-uses the local estimate without inventing provider usage. Cached tokens still
-count in full. A response may exceed the remaining budget; no further research
-request is started once exhausted.
+even with `[context_budget] mode = "off"`. Each transport attempt, including
+failed requests and internal retries, reserves its estimated prompt tokens before
+send. Reported usage raises that attempt's charge to
+`max(reported total tokens, estimated prompt tokens)`; missing usage retains the
+estimate without inventing provider usage or billing amounts. Retry attempts
+pass the remaining-token and elapsed-time gates. Charges belong to the worker,
+so another worker's reported usage cannot consume its local budget. Parent
+provider totals still include only reported usage. Cached tokens count in full.
+A response may exceed the remaining budget; no further attempt starts once
+exhausted. Research iterations count logical requests, not internal retries.
+Cancellation before send reserves nothing; an attempt entered before cancellation
+keeps its estimate because provider processing may already have started.
 
 Elapsed time uses a monotonic clock at safe boundaries before requests and tool
 dispatch. An operation already running is allowed to finish, so this is not a

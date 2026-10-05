@@ -1,5 +1,7 @@
 use crate::config::SubagentConfig;
-use crate::llm::client_core::UsageTotalsSnapshot;
+use crate::llm::client_core::RequestAttemptPolicy;
+use crate::llm::types::Usage;
+use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -108,45 +110,127 @@ impl SubagentBudgetTracker {
         self.executed_tool_calls = self.executed_tool_calls.saturating_add(1);
     }
 
-    /// Estimates only affect worker policy; they never enter provider telemetry.
-    /// Exactly one usage record is attributable under the serial dispatch contract.
-    pub fn charge(
-        &mut self,
-        estimate: u64,
-        before: UsageTotalsSnapshot,
-        after: UsageTotalsSnapshot,
-    ) -> Option<u32> {
-        let records = after.record_count.saturating_sub(before.record_count);
-        let reported = records == 1 && after.record_count > before.record_count;
-        let charge = if reported {
-            self.reported_usage_requests = self.reported_usage_requests.saturating_add(1);
-            estimate.max(after.total_tokens.saturating_sub(before.total_tokens))
+    pub fn request_policy(&self, estimate: u64) -> Arc<SubagentRequestPolicy> {
+        Arc::new(SubagentRequestPolicy {
+            estimate,
+            total_limit: self.total_limit,
+            started_at: self.started_at,
+            max_elapsed_ms: self.limits.max_elapsed_ms,
+            state: Mutex::new(RequestCharges {
+                charged_tokens: self.charged_tokens,
+                ..Default::default()
+            }),
+        })
+    }
+
+    /// Apply this operation's transport-local charges even on failure/cancel.
+    /// Shared provider ledger deltas are never used for worker attribution.
+    pub fn charge(&mut self, policy: &SubagentRequestPolicy) -> Option<u32> {
+        let state = policy
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        self.charged_tokens = state.charged_tokens;
+        self.reported_usage_requests = self.reported_usage_requests.saturating_add(state.reported);
+        self.estimated_usage_requests = self
+            .estimated_usage_requests
+            .saturating_add(state.estimated);
+        state.prompt_tokens
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RequestBudgetExceeded(pub SubagentStopReason);
+
+impl std::fmt::Display for RequestBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "subagent request budget exhausted: {}", self.0.as_str())
+    }
+}
+impl std::error::Error for RequestBudgetExceeded {}
+
+#[derive(Default)]
+struct RequestCharges {
+    charged_tokens: u64,
+    reported: usize,
+    estimated: usize,
+    prompt_tokens: Option<u32>,
+    awaiting_usage: bool,
+}
+
+pub(super) struct SubagentRequestPolicy {
+    estimate: u64,
+    total_limit: u64,
+    started_at: Instant,
+    max_elapsed_ms: u64,
+    state: Mutex<RequestCharges>,
+}
+
+impl RequestAttemptPolicy for SubagentRequestPolicy {
+    fn before_attempt(&self) -> anyhow::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let reason = if self.started_at.elapsed().as_millis() >= u128::from(self.max_elapsed_ms) {
+            Some(SubagentStopReason::ElapsedBudget)
+        } else if state.charged_tokens >= self.total_limit
+            || self.estimate > self.total_limit.saturating_sub(state.charged_tokens)
+        {
+            Some(SubagentStopReason::TokenBudget)
         } else {
-            if records > 1 {
-                tracing::debug!(
-                    usage_records = records,
-                    "ambiguous subagent usage attribution; using request estimate"
-                );
-            }
-            self.estimated_usage_requests = self.estimated_usage_requests.saturating_add(1);
-            estimate
+            None
         };
-        self.charged_tokens = self.charged_tokens.saturating_add(charge);
-        reported
-            .then(|| u32::try_from(after.prompt_tokens.saturating_sub(before.prompt_tokens)).ok())
-            .flatten()
+        if let Some(reason) = reason {
+            return Err(anyhow::anyhow!(RequestBudgetExceeded(reason)));
+        }
+        // Reserve before send. Failed/dropped attempts keep the reservation.
+        state.charged_tokens = state.charged_tokens.saturating_add(self.estimate);
+        state.estimated = state.estimated.saturating_add(1);
+        state.awaiting_usage = true;
+        Ok(())
+    }
+
+    fn observe_usage(&self, usage: &Usage) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.awaiting_usage {
+            return;
+        }
+        state.awaiting_usage = false;
+        state.charged_tokens = state
+            .charged_tokens
+            .saturating_add(u64::from(usage.total_tokens).saturating_sub(self.estimate));
+        state.estimated -= 1;
+        state.reported = state.reported.saturating_add(1);
+        state.prompt_tokens = Some(usage.prompt_tokens);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn snapshot(total: u64, prompt: u64, count: u64) -> UsageTotalsSnapshot {
-        UsageTotalsSnapshot {
-            total_tokens: total,
-            prompt_tokens: prompt,
-            record_count: count,
+    fn charge(
+        tracker: &mut SubagentBudgetTracker,
+        estimate: u64,
+        usage: Option<(u32, u32)>,
+        attempts: usize,
+    ) -> Option<u32> {
+        let policy = tracker.request_policy(estimate);
+        for _ in 0..attempts {
+            policy.before_attempt().unwrap();
         }
+        if let Some((total, prompt)) = usage {
+            policy.observe_usage(
+                &serde_json::from_value(serde_json::json!({
+                    "total_tokens":total,"prompt_tokens":prompt,"completion_tokens":total-prompt
+                }))
+                .unwrap(),
+            );
+        }
+        tracker.charge(&policy)
     }
     #[test]
     fn test_exact_iteration_limit() {
@@ -188,9 +272,9 @@ mod tests {
     #[test]
     fn test_estimate_fallback_and_exact_token_boundary() {
         let mut tracker = SubagentBudgetTracker::new(SubagentConfig::default(), 50_000);
-        tracker.charge(20_000, snapshot(0, 0, 0), snapshot(0, 0, 0));
+        charge(&mut tracker, 20_000, None, 1);
         assert_eq!(tracker.request_stop(30_000, true), None);
-        tracker.charge(30_000, snapshot(0, 0, 0), snapshot(0, 0, 0));
+        charge(&mut tracker, 30_000, None, 1);
         assert_eq!(tracker.charged_tokens, 50_000);
         assert_eq!(
             tracker.request_stop(1, false),
@@ -201,27 +285,19 @@ mod tests {
     fn test_reported_usage_max_without_double_counting() {
         let mut tracker = SubagentBudgetTracker::new(SubagentConfig::default(), 100_000);
         assert_eq!(
-            tracker.charge(10_000, snapshot(0, 0, 0), snapshot(15_000, 12_000, 1)),
+            charge(&mut tracker, 10_000, Some((15_000, 12_000)), 1),
             Some(12_000)
         );
-        tracker.charge(
-            15_000,
-            snapshot(15_000, 12_000, 1),
-            snapshot(25_000, 20_000, 2),
-        );
+        charge(&mut tracker, 15_000, Some((10_000, 8_000)), 1);
         assert_eq!(tracker.charged_tokens, 30_000);
-        tracker.charge(
-            1_000,
-            snapshot(25_000, 20_000, 2),
-            snapshot(99_000, 90_000, 4),
-        );
-        assert_eq!(tracker.charged_tokens, 31_000);
+        charge(&mut tracker, 1_000, None, 2);
+        assert_eq!(tracker.charged_tokens, 32_000);
         assert_eq!(
             (
                 tracker.reported_usage_requests,
                 tracker.estimated_usage_requests
             ),
-            (2, 1)
+            (2, 2)
         );
     }
     #[test]
@@ -238,9 +314,18 @@ mod tests {
             tracker.request_stop(101, true),
             Some(SubagentStopReason::ContextBudget)
         );
-        tracker.charge(u64::MAX, snapshot(0, 0, 0), snapshot(0, 0, 0));
-        tracker.charge(1, snapshot(0, 0, 0), snapshot(0, 0, 0));
+        charge(&mut tracker, u64::MAX, None, 1);
+        assert!(tracker.request_policy(1).before_attempt().is_err());
         assert_eq!(tracker.charged_tokens, u64::MAX);
+    }
+
+    #[test]
+    fn attempt_budget_retry_success_tops_up_only_the_reported_attempt() {
+        let mut tracker = SubagentBudgetTracker::new(SubagentConfig::default(), 1000);
+        assert_eq!(charge(&mut tracker, 100, Some((150, 100)), 2), Some(100));
+        assert_eq!(tracker.charged_tokens, 250);
+        assert_eq!(tracker.reported_usage_requests, 1);
+        assert_eq!(tracker.estimated_usage_requests, 1);
     }
     #[test]
     fn test_elapsed_safe_boundary() {
@@ -261,5 +346,27 @@ mod tests {
             tracker.request_stop(1, false),
             Some(SubagentStopReason::ElapsedBudget)
         );
+    }
+
+    #[test]
+    fn attempt_budget_elapsed_retry_denial_retains_failed_reservation() {
+        let mut tracker = SubagentBudgetTracker::new(
+            SubagentConfig {
+                max_elapsed_ms: 10,
+                ..Default::default()
+            },
+            100,
+        );
+        let mut policy = tracker.request_policy(20);
+        policy.before_attempt().unwrap();
+        Arc::get_mut(&mut policy).unwrap().started_at -= std::time::Duration::from_millis(10);
+        let error = policy.before_attempt().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<RequestBudgetExceeded>().unwrap().0,
+            SubagentStopReason::ElapsedBudget
+        );
+        assert_eq!(tracker.charge(&policy), None);
+        assert_eq!(tracker.charged_tokens, 20);
+        assert_eq!(tracker.estimated_usage_requests, 1);
     }
 }

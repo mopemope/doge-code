@@ -879,7 +879,7 @@ async fn execute_infer_request(
     let result = async {
         for attempt in 0..attempts {
             let bearer = auth.bearer(&cancel).await?;
-            client.record_request_attempt();
+            client.begin_request_attempt()?;
             let response = auth
                 .http
                 .post(format!("{}/responses", auth.resource))
