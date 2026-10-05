@@ -28,9 +28,9 @@ impl TuiExecutor {
     }
 
     /// Clear the persisted conversation context (messages, Observation Store,
-    /// unseen tool results) of the current session and the in-memory runtime
-    /// conversation together. The session id and metrics are preserved; the
-    /// next turn cannot resurrect the old conversation.
+    /// unseen tool results, deferred activation sidecar) of the current session
+    /// and the in-memory runtime conversation together. The session id and metrics
+    /// are preserved; the next turn cannot resurrect the old conversation.
     pub(crate) fn clear_runtime_conversation(
         &self,
     ) -> Result<crate::session::store::SessionSaveOutcome> {

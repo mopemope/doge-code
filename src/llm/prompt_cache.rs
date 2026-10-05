@@ -15,6 +15,14 @@
 //! Doge-Code-side prefix components changed between requests. Never log raw
 //! prompt / tool / user content from here; only short fingerprints, byte
 //! counts, tool counts, boolean flags, token counts, and ratios.
+//!
+//! Provider-dependent prefix: deferred `tool_search` activation changes the
+//! tool schema prefix for OpenAI-compatible Chat Completions (active schemas
+//! move into the next request's top-level `tools`), but not for
+//! `openai-chatgpt` Responses append-only wiring (stable base namespace;
+//! activations append as `additional_tools` input suffix). Callers must pass
+//! the wire-relevant tool set: stable base for Responses, live active for
+//! compatible.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -755,5 +763,67 @@ mod tests {
         let sig = compute_prefix_signature("m", &messages, &tools, None);
         assert_eq!(sig.diff(None), PromptPrefixChange::default());
         assert!(!sig.diff(None).any_changed());
+    }
+}
+
+#[cfg(test)]
+mod append_only_tests {
+    use super::*;
+
+    fn tool_def(name: &str) -> crate::llm::types::ToolDef {
+        crate::llm::types::ToolDef {
+            kind: "function".into(),
+            function: crate::llm::types::ToolFunctionDef {
+                name: name.into(),
+                description: format!("{name} helper"),
+                parameters: serde_json::json!({"type":"object"}),
+                strict: None,
+            },
+        }
+    }
+
+    fn sys_msg() -> ChatMessage {
+        ChatMessage {
+            provider_state: None,
+            role: "system".into(),
+            content: Some("stable".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_responses_base_stable_generic_changes() {
+        let base = vec![tool_def("fs_read"), tool_def("tool_search")];
+        let mut active = base.clone();
+        active.push(tool_def("edit"));
+        active.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+        let messages = vec![sys_msg()];
+        // Responses: stable base -> no change.
+        let before = compute_prefix_signature("m", &messages, &base, None);
+        let after = compute_prefix_signature("m", &messages, &base, None);
+        assert!(!after.diff(Some(&before)).tool_schema_changed);
+        // Generic: live active set -> change detected.
+        let before_g = compute_prefix_signature("m", &messages, &base, None);
+        let after_g = compute_prefix_signature("m", &messages, &active, None);
+        assert!(after_g.diff(Some(&before_g)).tool_schema_changed);
+    }
+
+    #[test]
+    fn test_cache_counters_preserve_explicit_zero_and_hits() {
+        let counters = PromptCacheCounters::default();
+        counters.record(Some(&crate::llm::types::PromptTokensDetails {
+            cached_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            extra: Default::default(),
+        }));
+        assert_eq!(counters.snapshot_last().cached_tokens, Some(0));
+        counters.record(Some(&crate::llm::types::PromptTokensDetails {
+            cached_tokens: Some(5000),
+            cache_write_tokens: None,
+            extra: Default::default(),
+        }));
+        assert_eq!(counters.snapshot_last().cached_tokens, Some(5000));
+        assert_eq!(counters.total_cached(), 5000);
     }
 }

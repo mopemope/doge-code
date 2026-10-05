@@ -116,6 +116,7 @@ pub struct ToolSearchResult {
 pub struct ToolCatalog {
     entries: BTreeMap<String, ToolCatalogEntry>,
     active: RwLock<BTreeSet<String>>,
+    initial_active: BTreeSet<String>,
     deferred: bool,
     search_result_limit: usize,
 }
@@ -203,7 +204,8 @@ impl ToolCatalog {
 
         Self {
             entries,
-            active: RwLock::new(initial),
+            active: RwLock::new(initial.clone()),
+            initial_active: initial,
             deferred,
             search_result_limit: routing.effective_limit(),
         }
@@ -234,7 +236,8 @@ impl ToolCatalog {
         let initial = initial_active_set(&map, deferred);
         Self {
             entries: map,
-            active: RwLock::new(initial),
+            active: RwLock::new(initial.clone()),
+            initial_active: initial,
             deferred,
             search_result_limit: routing.effective_limit(),
         }
@@ -289,6 +292,19 @@ impl ToolCatalog {
     pub async fn active_tool_defs(&self) -> Vec<ToolDef> {
         let active = self.active.read().await;
         active
+            .iter()
+            .filter_map(|name| self.entries.get(name))
+            .map(|e| e.definition.clone())
+            .collect()
+    }
+
+    /// Initial LLM-visible schemas for the Responses stable wire prefix.
+    ///
+    /// Deferred mode: core tools + `tool_search`. Eager mode: all real
+    /// tools. Never changes during a run, even as `activate()` grows the
+    /// live active set. Stable name order matches `active_tool_defs()`.
+    pub fn initial_active_tool_defs(&self) -> Vec<ToolDef> {
+        self.initial_active
             .iter()
             .filter_map(|name| self.entries.get(name))
             .map(|e| e.definition.clone())
@@ -1281,5 +1297,38 @@ mod tests {
         // Debug rendering must not embed a schema blob either.
         let rendered = format!("{hit:?}");
         assert!(!rendered.contains("parameters"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_active_stable_across_activation() {
+        // Responses stable base: byte-equivalent before/after activation.
+        let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
+        let before = catalog.initial_active_tool_defs();
+        let before_json = serde_json::to_string(&before).expect("serialize");
+        catalog.activate(&["edit".to_string()]).await;
+        catalog.activate(&["apply_patch".to_string()]).await;
+        let after = catalog.initial_active_tool_defs();
+        let after_json = serde_json::to_string(&after).expect("serialize");
+        assert_eq!(
+            before_json, after_json,
+            "initial wire base must never change"
+        );
+        // Eager mode: initial equals all real tools.
+        let eager = ToolCatalog::from_entries(core_entries(), &eager_routing());
+        let initial = eager.initial_active_tool_defs();
+        assert!(initial.iter().all(|d| d.function.name != "tool_search"));
+    }
+
+    #[tokio::test]
+    async fn test_active_grows_while_initial_stable() {
+        let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
+        let initial = catalog.initial_active_tool_defs();
+        let active_before = catalog.active_tool_defs().await;
+        assert_eq!(initial.len(), active_before.len());
+        catalog.activate(&["edit".to_string()]).await;
+        let active_after = catalog.active_tool_defs().await;
+        assert!(active_after.len() > initial.len());
+        assert!(active_after.iter().any(|d| d.function.name == "edit"));
+        assert!(!initial.iter().any(|d| d.function.name == "edit"));
     }
 }

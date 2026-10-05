@@ -121,6 +121,12 @@ impl<'a> ToolRuntime<'a> {
         self.tool_catalog.active_tool_defs().await
     }
 
+    /// Stable Responses wire base: initial active set, never changes mid-run.
+    /// OpenAI-compatible requests keep using `active_tool_defs()`.
+    pub fn initial_active_tool_defs(&self) -> Vec<ToolDef> {
+        self.tool_catalog.initial_active_tool_defs()
+    }
+
     /// Fail-closed gate: only active tools may execute. `tool_search`
     /// itself is active exactly when deferred routing has something to find.
     pub async fn is_tool_active(&self, name: &str) -> bool {

@@ -154,6 +154,11 @@ pub struct SessionData {
     /// Tool-call ids not yet confirmed seen by the model.
     #[serde(default)]
     pub unseen_tool_results: std::collections::BTreeSet<String>,
+    /// Deferred tools explicitly activated via `tool_search` in this
+    /// conversation. Names only; schemas are re-resolved from the trusted
+    /// `ToolCatalog` on resume. Empty for legacy sessions.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub activated_tools: std::collections::BTreeSet<String>,
 }
 
 impl SessionData {
@@ -184,6 +189,7 @@ impl SessionData {
             provenance_record_failures: 0,
             observations: crate::llm::observation::ObservationStore::new(),
             unseen_tool_results: std::collections::BTreeSet::new(),
+            activated_tools: std::collections::BTreeSet::new(),
         }
     }
 
@@ -346,6 +352,7 @@ impl SessionData {
         self.conversation.clear();
         self.observations = ObservationStore::new();
         self.unseen_tool_results.clear();
+        self.activated_tools.clear();
         self.timestamp = Utc::now().to_rfc3339();
     }
 }
@@ -672,6 +679,7 @@ mod tests {
             account: "acc".into(),
             model: "m".into(),
             output: vec![serde_json::json!({"type": "reasoning", "id": "rs_1"})],
+            additional_tool_names: Vec::new(),
         };
         session_data
             .replace_conversation_messages(&[ChatMessage {
@@ -742,5 +750,52 @@ mod tests {
         assert_eq!(session_data.token_count, 7);
         assert_eq!(session_data.requests, 1);
         assert_eq!(session_data.changed_files.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod append_only_tests {
+    use super::*;
+
+    #[test]
+    fn test_activated_tools_sidecar_persistence() {
+        let mut session = SessionData::new();
+        assert!(session.activated_tools.is_empty());
+        session.activated_tools.insert("edit".into());
+        session.activated_tools.insert("apply_patch".into());
+        let raw = serde_json::to_value(&session).expect("serialize");
+        let restored: SessionData = serde_json::from_value(raw).expect("deserialize");
+        assert!(restored.activated_tools.contains("edit"));
+        assert!(restored.activated_tools.contains("apply_patch"));
+    }
+
+    #[test]
+    fn test_legacy_session_loads_empty_sidecar() {
+        let legacy = serde_json::json!({
+            "meta": {"id": "sess-1", "created_at": "2026-01-01T00:00:00+00:00", "title": "t", "title_is_default": true},
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "conversation": [],
+            "token_count": 0,
+            "requests": 0,
+            "tool_calls": 0,
+            "lines_edited": 0,
+            "tool_call_successes": {},
+            "tool_call_failures": {},
+            "changed_files": []
+        });
+        let data: SessionData = serde_json::from_value(legacy).unwrap();
+        assert!(data.activated_tools.is_empty());
+    }
+
+    #[test]
+    fn test_clear_resets_sidecar_but_keeps_metrics() {
+        let mut session = SessionData::new();
+        session.activated_tools.insert("edit".into());
+        session.increment_token_count(7);
+        session.increment_requests();
+        session.clear_conversation_context();
+        assert!(session.activated_tools.is_empty());
+        assert_eq!(session.token_count, 7);
+        assert_eq!(session.requests, 1);
     }
 }

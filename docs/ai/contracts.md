@@ -124,6 +124,18 @@ Do not silently clamp, ignore, rewrite, or fallback security/resource policy con
 - Context-governor calibration is reset after a native compaction boundary.
 - Observation GC fails closed while opaque compaction state may reference prior observations.
 
+## Responses Append-Only Tool Exposure Contract
+
+- The initial Responses top-level tool namespace is immutable for a run.
+- Deferred tools are appended through provider-bound additional_tools input state.
+- Tool activation never rewrites an earlier Responses prefix.
+- Additional tool definitions come only from the trusted ToolCatalog.
+- Persisted activation names restore local dispatcher state after resume.
+- Native compaction may remove old activation items, but activation state survives and is rebased before the next request.
+- Provider visibility never bypasses local ToolCatalog activation checks.
+- Responses-native tool_search is never emitted on the ChatGPT plan route.
+- OpenAI-compatible providers retain their existing active-tools behavior.
+
 ## HTTP Test Integrity
 
 - Required HTTP fixture failures are test failures, never implicit skips.

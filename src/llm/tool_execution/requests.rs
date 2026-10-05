@@ -42,6 +42,36 @@ pub async fn chat_tools_once(
     cancel: Option<tokio_util::sync::CancellationToken>,
     ui_tx: Option<Sender<String>>,
 ) -> Result<ChoiceMessageWithTools> {
+    chat_tools_once_with_activation(
+        client,
+        model,
+        messages,
+        tools,
+        tools,
+        reasoning_effort,
+        reasoning_mode,
+        cancel,
+        ui_tx,
+    )
+    .await
+}
+
+/// Append-only Responses variant: `base_tools` is the stable top-level
+/// namespace, `active_tools` is the live catalog snapshot for
+/// `additional_tools` wiring and response validation. OpenAI-compatible
+/// providers ignore `base_tools` and use `active_tools` as before.
+#[allow(clippy::too_many_arguments)]
+pub async fn chat_tools_once_with_activation(
+    client: &OpenAIClient,
+    model: &str,
+    messages: &[ChatMessage],
+    base_tools: &[ToolDef],
+    active_tools: &[ToolDef],
+    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_mode: ReasoningMode,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    ui_tx: Option<Sender<String>>,
+) -> Result<ChoiceMessageWithTools> {
     crate::llm::history::validate_tool_blocks(messages, false)?;
     if let Some(auth) = &client.subscription {
         let effort = crate::llm::reasoning::resolve_reasoning_hint(
@@ -50,12 +80,13 @@ pub async fn chat_tools_once(
             &reasoning_mode,
             reasoning_effort,
         );
-        let message = crate::features::openai_subscription::responses::infer(
+        let message = crate::features::openai_subscription::responses::infer_with_activation(
             client,
             auth,
             model,
             messages,
-            tools,
+            base_tools,
+            active_tools,
             effort,
             cancel.unwrap_or_default(),
         )
@@ -70,7 +101,7 @@ pub async fn chat_tools_once(
                 error
             }
         })?;
-        validate_tool_message(&message, tools)?;
+        validate_tool_message_with_activation(&message, base_tools, active_tools)?;
         return Ok(message);
     }
     anyhow::ensure!(
@@ -88,7 +119,7 @@ pub async fn chat_tools_once(
             client,
             model,
             messages,
-            tools,
+            active_tools,
             reasoning_effort,
             reasoning_mode,
             Some(cancel_token.clone()),
@@ -481,6 +512,18 @@ async fn chat_tools_once_attempt(
 
 /// One preflight for both provider protocols, before any batch sibling executes.
 fn validate_tool_message(message: &ChoiceMessageWithTools, tools: &[ToolDef]) -> Result<()> {
+    validate_tool_message_with_activation(message, tools, tools)
+}
+
+/// Responses-aware preflight: for subscription responses the provider-side
+/// namespace check already ran in `completed_with_activation`; here we
+/// only ensure the batch is well-formed and within the union of base and
+/// active catalogs. Local dispatch still re-checks `is_tool_active`.
+fn validate_tool_message_with_activation(
+    message: &ChoiceMessageWithTools,
+    base_tools: &[ToolDef],
+    active_tools: &[ToolDef],
+) -> Result<()> {
     if message.refusal.is_some() {
         return Err(anyhow!(LlmErrorKind::Incomplete).context("provider refused the response"));
     }
@@ -500,9 +543,12 @@ fn validate_tool_message(message: &ChoiceMessageWithTools, tools: &[ToolDef]) ->
                 "invalid tool-call batch"
             );
             anyhow::ensure!(
-                tools
+                base_tools
                     .iter()
-                    .any(|tool| tool.function.name == call.function.name),
+                    .any(|tool| tool.function.name == call.function.name)
+                    || active_tools
+                        .iter()
+                        .any(|tool| tool.function.name == call.function.name),
                 "tool-call batch requested a tool outside the active catalog"
             );
             let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)?;

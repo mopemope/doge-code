@@ -871,6 +871,7 @@ async fn responses_pairing_survives_budget_synthetic() {
                 serde_json::json!({"type":"reasoning","id":"rs","summary":[],"encrypted_content":"opaque"}),
                 serde_json::json!({"type":"function_call","id":"fc_1","call_id":call_id,"namespace":"dgc","name":"fs_read","arguments":"{}","status":"completed"}),
             ],
+            additional_tool_names: Vec::new(),
         }),
         role: "assistant".into(),
         content: None,
