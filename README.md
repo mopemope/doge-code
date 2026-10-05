@@ -344,6 +344,15 @@ Searches preserve nested globs, project-root aliases, pagination and output
 budgets. Omitting a glob searches only the project; ordinary absolute globs
 outside it retain their empty-result behavior. The tool ignores ambient
 `RIPGREP_CONFIG_PATH` settings and does not follow symlinks while traversing.
+Ripgrep exit code 1 is a normal empty search; regex errors, other failing exit
+codes, malformed/incomplete JSON records and signals return bounded errors.
+Stdout is read as complete JSON records within a 1 MiB total byte cap including
+newlines. If the cap arrives before any requested match, narrow the pattern or
+glob; no resumable offset is claimed. When complete matches were collected,
+intentional result/byte limits retain partial results and pagination metadata.
+Stderr is drained concurrently with a bounded diagnostic prefix; each search
+owns and reaps its process, including errors and intentional early stops.
+Search still uses synchronous I/O; this does not add async cancellation.
 
 `fs_read` and `fs_read_many_files` scan input in fixed-size UTF-8 chunks and
 retain only budgeted page/snippet candidates. Large lines and small output
