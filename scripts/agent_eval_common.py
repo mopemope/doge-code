@@ -413,6 +413,22 @@ def usage_is_complete(usage):
     return True
 
 
+# (provider subtotal, evaluation total, item report count, known subtotal)
+OPTIONAL_USAGE_METRICS = (
+    ("cached_tokens", "cached_input_tokens", "cached_usage_records", "known_cached_input_tokens"),
+    ("reasoning_tokens", "reasoning_tokens", "reasoning_usage_records", "known_reasoning_tokens"),
+    ("cache_write_tokens", "cache_write_tokens", "cache_write_usage_records", "known_cache_write_tokens"),
+)
+
+
+def optional_usage_is_complete(usage, item_records):
+    if not usage_is_complete(usage):
+        return False
+    attempts = _as_optional_u64(usage.get("attempts"))
+    records = _as_optional_u64(usage.get("usage_records"))
+    return attempts is not None and attempts == records and item_records == records
+
+
 def extract_exec_telemetry(parsed):
     """Map `dgc exec --json` output to nullable measurement telemetry.
 
@@ -430,6 +446,12 @@ def extract_exec_telemetry(parsed):
         "cached_input_tokens": None,
         "reasoning_tokens": None,
         "cache_write_tokens": None,
+        "known_cached_input_tokens": None,
+        "known_reasoning_tokens": None,
+        "known_cache_write_tokens": None,
+        "cached_usage_records": None,
+        "reasoning_usage_records": None,
+        "cache_write_usage_records": None,
         "agent_elapsed_seconds": None,
         "tool_calls": None,
         "iterations": None,
@@ -458,13 +480,6 @@ def extract_exec_telemetry(parsed):
         if prompt_tokens is not None and completion_tokens is not None:
             telemetry["input_tokens"] = prompt_tokens
             telemetry["output_tokens"] = completion_tokens
-        telemetry["cached_input_tokens"] = _as_optional_u64(usage.get("cached_tokens"))
-        telemetry["reasoning_tokens"] = _as_optional_u64(
-            usage.get("reasoning_tokens")
-        )
-        telemetry["cache_write_tokens"] = _as_optional_u64(
-            usage.get("cache_write_tokens")
-        )
         telemetry["unknown_usage_attempts"] = _as_optional_u64(
             usage.get("unknown_usage_attempts")
         )
@@ -476,6 +491,15 @@ def extract_exec_telemetry(parsed):
             usage.get("unknown_usage_attempts")
         )
         telemetry["usage_records"] = _as_optional_u64(usage.get("usage_records"))
+
+    if isinstance(usage, dict):
+        for raw, field, counter, known in OPTIONAL_USAGE_METRICS:
+            subtotal = _as_optional_u64(usage.get(raw))
+            count = _as_optional_u64(usage.get(counter))
+            telemetry[known] = subtotal
+            telemetry[counter] = count
+            if count is not None and optional_usage_is_complete(usage, count):
+                telemetry[field] = subtotal
 
     budget = parsed.get("budget")
     if isinstance(budget, dict):
@@ -558,6 +582,12 @@ def base_measurement(case_id, trial, base_commit, model, settings, variant,
         "cached_input_tokens": None,
         "reasoning_tokens": None,
         "cache_write_tokens": None,
+        "known_cached_input_tokens": None,
+        "known_reasoning_tokens": None,
+        "known_cache_write_tokens": None,
+        "cached_usage_records": None,
+        "reasoning_usage_records": None,
+        "cache_write_usage_records": None,
         "elapsed_seconds": 0.0,
         "agent_elapsed_seconds": None,
         "tool_calls": None,
