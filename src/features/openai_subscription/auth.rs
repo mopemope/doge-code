@@ -423,7 +423,8 @@ impl AuthService {
             }
         }
         tokio::select! { _ = cancel.cancelled() => bail!(crate::llm::LlmErrorKind::Cancelled), result = open(url) => result? };
-        let callback = tokio::select! { _ = cancel.cancelled() => bail!(crate::llm::LlmErrorKind::Cancelled), result = tokio::time::timeout(Duration::from_secs(300), callback(listener, &state)) => result.context("ChatGPT login timed out")?? };
+        let callback =
+            wait_for_callback(listener, &state, Duration::from_secs(300), cancel).await?;
         let registered = previous
             .as_ref()
             .map(|p| p.client_id.as_str())
@@ -542,6 +543,103 @@ impl AuthService {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserLaunch {
+    Opened,
+    Unavailable,
+    Failed,
+    TimedOut,
+}
+
+// Browser launch is an intentional handoff to an interactive application, not a
+// finite worker tree. Reap/stop the launcher only; never kill the browser it opened.
+// Discard launcher output: it may echo the authorization URL or token hints.
+pub(crate) async fn launch_browser(
+    program: &std::path::Path,
+    url: &url::Url,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<BrowserLaunch> {
+    if cancel.is_cancelled() {
+        bail!(crate::llm::LlmErrorKind::Cancelled);
+    }
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(unix)]
+    command.process_group(0); // Keep terminal Ctrl-C away from the handed-off browser.
+    let mut child = match command
+        .arg(url.as_str())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(BrowserLaunch::Unavailable),
+    };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            child.kill().await.context("could not stop browser launcher")?;
+            bail!(crate::llm::LlmErrorKind::Cancelled);
+        }
+        result = tokio::time::timeout(timeout, child.wait()) => match result {
+            Ok(Ok(status)) if status.success() => Ok(BrowserLaunch::Opened),
+            Ok(Ok(_)) => Ok(BrowserLaunch::Failed),
+            Ok(Err(_)) => {
+                child.kill().await.context("could not stop browser launcher")?;
+                Ok(BrowserLaunch::Failed)
+            }
+            Err(_) => {
+                child.kill().await.context("could not stop browser launcher")?;
+                Ok(BrowserLaunch::TimedOut)
+            }
+        }
+    }
+}
+
+pub(crate) fn browser_instructions(url: &url::Url, outcome: Option<BrowserLaunch>) -> String {
+    // A re-login URL can carry a saved ID token. Manual sign-in needs only the
+    // same PKCE/state parameters; account identity is checked after token exchange.
+    let mut manual_url = url.clone();
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "id_token_hint")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    manual_url.query_pairs_mut().clear().extend_pairs(pairs);
+    let status = match outcome {
+        Some(BrowserLaunch::Opened) => {
+            "Browser launch requested. If no sign-in page appeared, open the URL below manually."
+        }
+        Some(BrowserLaunch::Unavailable) => {
+            "Could not start the default browser. Open the URL below manually."
+        }
+        Some(BrowserLaunch::Failed) => "The browser launcher failed. Open the URL below manually.",
+        Some(BrowserLaunch::TimedOut) => {
+            "The browser launcher timed out. Open the URL below manually."
+        }
+        None => "Open the URL below manually.",
+    };
+    format!(
+        "Continue with ChatGPT. {status}\nUse a browser on the same machine as dgc (127.0.0.1 callback). For SSH/remote sessions, run login on the browser's machine or configure loopback port forwarding.\nDo not share this temporary sign-in URL:\n{manual_url}\nWaiting up to 5 minutes for sign-in; press Ctrl-C to cancel."
+    )
+}
+
+pub(crate) async fn wait_for_callback(
+    listener: tokio::net::TcpListener,
+    state: &str,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<Callback> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!(crate::llm::LlmErrorKind::Cancelled),
+        result = tokio::time::timeout(timeout, callback(listener, state)) =>
+            result.context("ChatGPT login timed out waiting for the local browser callback; rerun dgc auth login openai --no-browser and open the URL on the same machine")?,
+    }
+}
+
 pub async fn login(
     store: CredentialStore,
     account: Option<&str>,
@@ -549,34 +647,36 @@ pub async fn login(
     enable_plan_usage: bool,
     cancel: &CancellationToken,
 ) -> Result<String> {
-    AuthService::production(store)?.login(account, enable_plan_usage, |url| async move {
-    // Only this explicit login command exposes the ephemeral authorization URL.
-    if no_browser {
-        eprintln!("Continue with ChatGPT. Open this URL in your browser (do not share it):\n{url}");
-    } else {
-        let program = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        let spec = crate::execution::runner::ManagedProcessSpec::new(
-            program,
-            vec![url.to_string()],
-            std::env::current_dir()?,
-        );
-        let result = crate::execution::runner::run_managed_process(
-            spec,
-            crate::execution::runner::ManagedRunOptions::new(Some(Duration::from_secs(15)))
-                .with_cancellation(Some(cancel.clone())),
+    AuthService::production(store)?
+        .login(
+            account,
+            enable_plan_usage,
+            |url| async move {
+                let outcome = if no_browser {
+                    None
+                } else {
+                    let program = if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    };
+                    Some(
+                        launch_browser(
+                            std::path::Path::new(program),
+                            &url,
+                            Duration::from_secs(15),
+                            cancel,
+                        )
+                        .await?,
+                    )
+                };
+                // Explicit login is the only command that displays the ephemeral URL.
+                eprintln!("{}", browser_instructions(&url, outcome));
+                Ok(())
+            },
+            cancel,
         )
-        .await?;
-        if !result.success() {
-            bail!("could not open browser; rerun with --no-browser");
-        }
-        eprintln!("Continue with ChatGPT in your browser.");
-    }
-        Ok(())
-    }, cancel).await
+        .await
 }
 
 pub(crate) struct Callback {
