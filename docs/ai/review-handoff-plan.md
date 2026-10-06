@@ -188,3 +188,16 @@ missing interpreter and module, argv separation and paths with spaces, pass/fail
 diagnostics, timeout/cancel lifecycle, shared observation/handoff unchanged.
 Focused/full Rust/guidance, independent review and real TUI recording precede a
 dedicated Draft PR and exact-head CI completion.
+
+## Follow-up: Preserve pytest failure node identities
+
+The prior whitespace/greedy summary regex dropped space-containing parameter IDs
+and folded class components into the file path. Split the first `::` into file
+and complete test path, recognizing diagnostic separators outside balanced
+parameter brackets. Do not infer a split for malformed/ambiguous metadata; keep
+raw stdout/stderr and command outcome. No count evidence or wire changes.
+Acceptance: actual multi-failure pytest summaries, classes/nested collectors,
+ordinary functions, file/parameter spaces, parameter separators/brackets,
+message separators/brackets, omitted messages and ambiguous forms. Preserve
+the managed workflow, capture and failure follow-up; independent review, focused
+and full Rust/guidance checks plus a TUI recording.

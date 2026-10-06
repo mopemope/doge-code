@@ -1092,6 +1092,11 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
   `python -m pytest`; historical links stay unchanged. Interpreter selection does
   not activate the environment for subprocess PATH lookup.
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
+- Python failed-test summaries preserve the file and complete class/test path,
+  including spaces in file names and balanced bracketed parameter IDs. Ambiguous
+  or malformed summary metadata may be omitted; raw diagnostics and the failing
+  command outcome are still passed to analysis. These summaries are not recorded
+  test counts or correctness judgments.
 - `/test` uses the configured `command_timeout_ms` (where `0` means unlimited) and the same managed process lifecycle as finite LLM commands, without applying the LLM execution allowlist.
 
 ## 🔄 Advanced Features
