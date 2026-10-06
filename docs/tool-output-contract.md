@@ -70,6 +70,11 @@ under it. Reference implementation: `src/tools/read.rs`
 `src/tools/read_many.rs`, `src/tools/list.rs`,
 `src/tools/search_repomap/repomap/repomap_filter.rs`.
 
+For `fs_read`, `start_line` and `cursor` are aliases for the same 1-based position.
+If both are supplied, they must be equal; conflicting values fail explicitly.
+To continue a page, supply the returned `next_cursor` as `cursor` and omit the
+previous `start_line` (or update both to the same value).
+
 Tools without a `response_budget_chars` parameter must still self-budget using
 the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 `head_truncate` for diffs/summaries; `DEFAULT_TOOL_BUDGET_CHARS` = 6,000):

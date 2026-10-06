@@ -53,10 +53,14 @@ pub struct SearchRepomapParams {
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsReadParams {
     pub path: String,
+    /// 1-based start position. Omit when using cursor, or provide the same value.
+    /// Conflicting start_line and cursor values are rejected.
     pub start_line: Option<usize>,
     pub limit: Option<usize>,
     pub mode: Option<String>,
     pub response_budget_chars: Option<u32>,
+    /// 1-based alias for start_line; use the returned next_cursor for pagination.
+    /// Omit start_line or update it to the same value when continuing a page.
     pub cursor: Option<u32>,
     pub page_size: Option<u32>,
 }
