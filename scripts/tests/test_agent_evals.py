@@ -228,7 +228,7 @@ class HarnessCase(unittest.TestCase):
             "cases": str(cases_path),
             "trials": 1,
             "model": "exact-model-id",
-            "provider": "openai-chatgpt",
+            "provider": "openai",
             "environment_id": "test-machine-v1",
             "timeout_seconds": 60,
             "termination_grace_seconds": 5,

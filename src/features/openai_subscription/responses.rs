@@ -55,7 +55,7 @@ pub const RESPONSES_MIN_COMPACT_THRESHOLD: u32 = 1_000;
 pub fn validate_compact_threshold(threshold: u32) -> Result<()> {
     if threshold < RESPONSES_MIN_COMPACT_THRESHOLD {
         bail!(
-            "Responses native compaction threshold {threshold} is below the API minimum {}; lower the configured auto-compaction threshold is not supported for openai-chatgpt",
+            "Responses native compaction threshold {threshold} is below the API minimum {}; lower the configured auto-compaction threshold is not supported for openai",
             RESPONSES_MIN_COMPACT_THRESHOLD
         );
     }

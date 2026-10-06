@@ -70,14 +70,14 @@ Windows では保護された資格情報ストアを実装・検証できるま
 ## 提案するユーザー操作
 
 ```text
-dgc auth login openai-chatgpt
-dgc auth status openai-chatgpt
-dgc auth list openai-chatgpt
-dgc auth use openai-chatgpt <account-label>
-dgc auth logout openai-chatgpt [account-label]
-dgc models --provider openai-chatgpt
-dgc --provider openai-chatgpt --model <catalog-slug> exec "このプロジェクトの構成を説明して"
-dgc --provider openai-chatgpt --model <catalog-slug>
+dgc auth login openai
+dgc auth status openai
+dgc auth list openai
+dgc auth use openai <account-label>
+dgc auth logout openai [account-label]
+dgc models --provider openai
+dgc --provider openai --model <catalog-slug> exec "このプロジェクトの構成を説明して"
+dgc --provider openai --model <catalog-slug>
 ```
 
 - `auth login` は新規登録と既存ラベルの再認証を区別する。既存アカウント用 `--account`、追加用 `--new-account` を設ける。
@@ -121,7 +121,7 @@ dgc --provider openai-chatgpt --model <catalog-slug>
 ### P2: OAuth と資格情報ライフサイクル
 
 - `AuthService` に `Clock`、`CredentialStore`、HTTP client、browser opener を注入し、テストで実 HOME/ブラウザを使わない。
-- ユーザー用保存先は `dirs::config_dir()/doge-code/openai-chatgpt/` を提案。Unix directory 0700/file 0600、原子的書換え、所有者/シンボリックリンク検査、ファイルサイズ上限を実装する。
+- ユーザー用保存先は `dirs::config_dir()/doge-code/openai/` を提案。Unix directory 0700/file 0600、原子的書換え、所有者/シンボリックリンク検査、ファイルサイズ上限を実装する。
 - host ID はランタイムに固定し、registration の識別子と分離。アカウント key は validated issuer/sub と issued client ID に紐付け、メールを一意キーにしない。
 - 初回 `dynamic_agent_client` → callback の issued client ID、再認証は保存済み ID。各試行の PKCE S256/state/nonce、callback URI、有効期限を一時状態として持つ。
 - loopback `127.0.0.1` の `/auth/callback`、試行中固定の port/URI を使用。state 不一致・重複 query・過大 request・期限切れ・callback 再利用を拒否し、listener を必ず回収する。

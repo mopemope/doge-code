@@ -740,17 +740,13 @@ fn provider_binding_survives_session_save_and_rejects_switch() {
     let mut manager = crate::session::SessionManager::with_store(store);
     manager.create_session(None).expect("session");
     manager
-        .bind_inference("openai-chatgpt:account-a:m".into())
+        .bind_inference("openai:account-a:m".into())
         .expect("bind");
     let id = manager.current_session_id().expect("id");
     manager.load_session(&id).expect("resume");
-    assert!(
-        manager
-            .bind_inference("openai-chatgpt:account-b:m".into())
-            .is_err()
-    );
+    assert!(manager.bind_inference("openai:account-b:m".into()).is_err());
     manager
-        .bind_inference("openai-chatgpt:account-a:m".into())
+        .bind_inference("openai:account-a:m".into())
         .expect("same");
 }
 
@@ -894,7 +890,7 @@ async fn declined_login_does_not_exchange_code_or_modify_active_account() -> Res
 
 fn fixture_fs(root: &std::path::Path) -> (crate::config::AppConfig, crate::tools::FsTools) {
     let cfg = crate::config::AppConfig {
-        provider: ProviderKind::OpenaiChatgpt,
+        provider: ProviderKind::Openai,
         model: "test-model".into(),
         project_root: root.to_path_buf(),
         tool_routing: crate::config::ToolRoutingConfig {
@@ -971,7 +967,7 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
     let store = crate::session::SessionStore::new(temp.path().join("sessions"))?;
     let mut manager = crate::session::SessionManager::with_store(store.clone());
     manager.create_session(None)?;
-    manager.bind_inference("openai-chatgpt:test-account:test-model".into())?;
+    manager.bind_inference("openai:test-account:test-model".into())?;
     manager.update_current_session_with_history(&history)?;
     let id = manager.current_session_id().expect("session");
     drop(manager); // Resume after the previous owner exits.
@@ -999,7 +995,7 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
     );
     assert!(
         resumed
-            .bind_inference("openai-chatgpt:other:test-model".into())
+            .bind_inference("openai:other:test-model".into())
             .is_err()
     );
     Ok(())
@@ -1767,7 +1763,7 @@ fn native_compacted_session_resume_replays_only_compact_state() {
     let mut manager = crate::session::SessionManager::with_store(store.clone());
     manager.create_session(None).expect("session");
     manager
-        .bind_inference("openai-chatgpt:test-account:test-model".into())
+        .bind_inference("openai:test-account:test-model".into())
         .expect("bind");
     // Canonical pruned history: only the compaction assistant + follow-ups.
     let (reply, _) = responses::completed(

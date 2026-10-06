@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
     Login {
-        #[arg(value_parser = ["openai-chatgpt"])]
+        #[arg(value_parser = ["openai"])]
         provider: String,
         #[arg(long, conflicts_with = "new_account")]
         account: Option<String>,
@@ -19,20 +19,20 @@ pub enum AuthCommand {
         enable_plan_usage: bool,
     },
     Status {
-        #[arg(value_parser = ["openai-chatgpt"])]
+        #[arg(value_parser = ["openai"])]
         provider: String,
     },
     List {
-        #[arg(value_parser = ["openai-chatgpt"])]
+        #[arg(value_parser = ["openai"])]
         provider: String,
     },
     Use {
-        #[arg(value_parser = ["openai-chatgpt"])]
+        #[arg(value_parser = ["openai"])]
         provider: String,
         account: String,
     },
     Logout {
-        #[arg(value_parser = ["openai-chatgpt"])]
+        #[arg(value_parser = ["openai"])]
         provider: String,
         account: Option<String>,
     },
@@ -65,7 +65,7 @@ pub async fn run(
             )
             .await?;
             println!(
-                "Signed in: {label}. Select --provider openai-chatgpt explicitly to use this account."
+                "Signed in: {label}. Select --provider openai explicitly to use this account."
             );
             let registry = store.load()?;
             if !registry
@@ -76,14 +76,14 @@ pub async fn run(
                 .is_some_and(|t| t.scopes.iter().any(|s| s == "chatgpt.tokens.use.direct"))
             {
                 println!(
-                    "Identity verified; ChatGPT plan usage was not granted. Run dgc auth login openai-chatgpt --account {label} --enable-plan-usage to request consent."
+                    "Identity verified; ChatGPT plan usage was not granted. Run dgc auth login openai --account {label} --enable-plan-usage to request consent."
                 );
             }
         }
         AuthCommand::List { .. } | AuthCommand::Status { .. } => {
             let registry = store.load()?;
             if registry.accounts.is_empty() {
-                println!("No ChatGPT registrations. Run dgc auth login openai-chatgpt.");
+                println!("No ChatGPT registrations. Run dgc auth login openai.");
             }
             for account in registry.accounts {
                 let state = match account.tokens {

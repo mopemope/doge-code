@@ -386,7 +386,7 @@ pub async fn run_agent_loop(
     crate::llm::history::validate_tool_blocks(&messages, false)?;
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
         let binding = match client.account_label() {
-            Some(account) => format!("openai-chatgpt:{account}:{model}"),
+            Some(account) => format!("openai:{account}:{model}"),
             None => "openai-compatible".to_owned(),
         };
         crate::utils::safe_std_lock(manager, "session_manager")?.bind_inference(binding)?;

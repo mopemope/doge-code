@@ -19,7 +19,7 @@
 //! Provider-dependent prefix: deferred `tool_search` activation changes the
 //! tool schema prefix for OpenAI-compatible Chat Completions (active schemas
 //! move into the next request's top-level `tools`), but not for
-//! `openai-chatgpt` Responses append-only wiring (stable base namespace;
+//! `openai` Responses append-only wiring (stable base namespace;
 //! activations append as `additional_tools` input suffix). Callers must pass
 //! the wire-relevant tool set: stable base for Responses, live active for
 //! compatible.

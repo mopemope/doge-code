@@ -68,7 +68,7 @@ impl CredentialStore {
         Ok(Self::at(
             dirs::config_dir()
                 .context("user configuration directory unavailable")?
-                .join("doge-code/openai-chatgpt"),
+                .join("doge-code/openai"),
         ))
     }
     pub fn at(root: PathBuf) -> Self {
