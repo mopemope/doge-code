@@ -1213,6 +1213,16 @@ mode = "auto"  # auto / observe / off
 - `auto` reduces automatically, `observe` logs the estimate but keeps legacy
   behavior, `off` disables the governor.
 
+API-compatible context sizing uses the documented capacity for the exact
+`gpt-4.1-mini` alias and `gpt-4.1-mini-2025-04-14` snapshot, including their
+`openai/` IDs. Their verified context window is 1,047,576 tokens
+([OpenAI model specification](https://developers.openai.com/api/docs/models/gpt-4.1-mini));
+the configured compaction threshold still caps automatic compaction. This is a
+local documented default, not a live provider capability check. Unknown names,
+future snapshots, and subscription model catalogs do not inherit this capacity.
+Set `[llm] context_window_size` for a custom endpoint with different limits; an
+explicit value takes precedence over model defaults.
+
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded
 - Historical tool results are offloaded recoverably to the Observation Store
