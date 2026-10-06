@@ -1190,9 +1190,30 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
         before.verifications[1].current_code_state.state,
         crate::features::verification_snapshot::CurrentState::MatchesStart
     );
+    assert_eq!(
+        before.review_handoff[0].matching_successful_observation_ids,
+        vec![before.verifications[1].id.clone()]
+    );
+    assert_eq!(
+        before.review_handoff[0].other_successful_observation_ids,
+        vec![before.verifications[0].id.clone()]
+    );
     fs::write(root.join("test.rs"), "test changed after success").expect("change only test");
     let after = report(&f, false).await;
     assert!(after.verifications[1].outcome.success);
+    assert!(
+        after.review_handoff[0]
+            .matching_successful_observation_ids
+            .is_empty()
+    );
+    assert_eq!(
+        after.review_handoff[0].other_successful_observation_ids,
+        after
+            .verifications
+            .iter()
+            .map(|v| v.id.clone())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         after.verifications[1].current_code_state.state,
         crate::features::verification_snapshot::CurrentState::DiffersFromStart
@@ -1207,4 +1228,144 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
     let json = render::render(&after, ReportFormat::Json).expect("json");
     assert!(json.contains("differs_from_start"));
     assert!(!json.contains("test changed after success"));
+}
+
+#[tokio::test]
+async fn review_handoff_preserves_legacy_successes_failures_and_explicit_links() {
+    let f = fixture(true);
+    verification(&f, false, true);
+    verification(&f, true, false);
+    let r = report(&f, false).await;
+    let row = &r.review_handoff[0];
+    assert_eq!(row.change_id, f.change);
+    assert!(row.matching_successful_observation_ids.is_empty());
+    assert_eq!(row.other_successful_observation_ids.len(), 2);
+    assert_eq!(row.failed_observation_ids.len(), 1);
+    assert_eq!(row.failed_observation_ids[0], r.verifications[1].id);
+    let json = serde_json::to_value(&r).expect("JSON");
+    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["review_handoff"][0]["change_id"], f.change);
+    let markdown = render::render(&r, ReportFormat::Markdown).expect("Markdown");
+    assert!(markdown.contains("## Review handoff by recorded change"));
+    assert!(markdown.contains("later successes do not erase it"));
+    assert!(markdown.contains(&r.verifications[1].id));
+    assert!(!markdown.contains("STDOUT-PRIVATE"));
+}
+
+#[tokio::test]
+async fn review_handoff_requires_current_active_matching_endpoints() {
+    use crate::features::verification_snapshot::{
+        CurrentState, Diagnostic, Differences, ExecutionWorkspace, RunState, Snapshot,
+    };
+    let f = fixture(true);
+    let mut r = report(&f, false).await;
+    // Exercise the derived classifier with explicit comparison states; endpoint
+    // capture and compare_current have their own filesystem regression coverage.
+    let snapshot = Snapshot::unavailable(Diagnostic::GitUnavailable);
+    r.verifications[0].execution_workspace = Some(Box::new(ExecutionWorkspace {
+        version: 1,
+        start: snapshot.clone(),
+        end: Some(snapshot),
+        run_state: RunState::StableEndpoints,
+        differences: Differences::default(),
+    }));
+    r.verifications[0].current_code_state.state = CurrentState::MatchesStart;
+    r.verifications[0]
+        .observed_change_ids
+        .push(f.change.clone());
+    let row = handoff::build(&r.changes, &r.verifications).remove(0);
+    assert_eq!(
+        row.matching_successful_observation_ids,
+        vec![r.verifications[0].id.clone()]
+    );
+    assert!(row.other_successful_observation_ids.is_empty());
+    for state in [
+        CurrentState::DiffersFromStart,
+        CurrentState::Indeterminate,
+        CurrentState::NotRecorded,
+    ] {
+        r.verifications[0].current_code_state.state = state;
+        let row = handoff::build(&r.changes, &r.verifications).remove(0);
+        assert!(row.matching_successful_observation_ids.is_empty());
+        assert_eq!(row.other_successful_observation_ids.len(), 1);
+    }
+    r.verifications[0].current_code_state.state = CurrentState::MatchesStart;
+    for state in [
+        RunState::ChangedBetweenEndpoints,
+        RunState::Indeterminate,
+        RunState::NotRecorded,
+    ] {
+        r.verifications[0]
+            .execution_workspace
+            .as_mut()
+            .expect("workspace")
+            .run_state = state;
+        assert!(
+            handoff::build(&r.changes, &r.verifications)[0]
+                .matching_successful_observation_ids
+                .is_empty()
+        );
+    }
+    r.verifications[0]
+        .execution_workspace
+        .as_mut()
+        .expect("workspace")
+        .run_state = RunState::StableEndpoints;
+    for state in [
+        ChangeState::Superseded,
+        ChangeState::Diverged,
+        ChangeState::Missing,
+        ChangeState::Reverted,
+        ChangeState::Unavailable,
+    ] {
+        r.changes[0].lifecycle_state = state;
+        assert!(
+            handoff::build(&r.changes, &r.verifications)[0]
+                .matching_successful_observation_ids
+                .is_empty()
+        );
+    }
+    r.changes[0].lifecycle_state = ChangeState::Active;
+    for state in [
+        FileMatch::Different,
+        FileMatch::NotRecorded,
+        FileMatch::Unavailable,
+    ] {
+        r.changes[0].current_file_match = state;
+        assert!(
+            handoff::build(&r.changes, &r.verifications)[0]
+                .matching_successful_observation_ids
+                .is_empty()
+        );
+    }
+    r.changes[0].current_file_match = FileMatch::Matched;
+    r.verifications[0].outcome.success = false;
+    let row = handoff::build(&r.changes, &r.verifications).remove(0);
+    assert_eq!(row.failed_observation_ids.len(), 1);
+    assert!(row.matching_successful_observation_ids.is_empty());
+    r.verifications[0].observed_change_ids = vec!["unlinked".into()];
+    let row = handoff::build(&r.changes, &r.verifications).remove(0);
+    assert!(row.failed_observation_ids.is_empty());
+    assert!(handoff::build(&[], &r.verifications).is_empty());
+}
+
+#[tokio::test]
+async fn review_handoff_escapes_recorded_links_and_empty_evidence() {
+    let f = fixture(true);
+    let mut r = report(&f, false).await;
+    r.changes[0].recorded.requirement_ids = vec!["<script>|[link](bad)".into()];
+    r.changes[0].recorded.plan_item_id = Some("<img src=x>".into());
+    let markdown = render::render(&r, ReportFormat::Markdown).expect("Markdown");
+    // The full typed JSON is intentionally included inside a fenced block.
+    let matrix = markdown
+        .split("## Items requiring attention")
+        .next()
+        .expect("matrix");
+    assert!(!matrix.contains("<script>"));
+    assert!(!matrix.contains("<img src=x>"));
+    assert!(matrix.contains("&#60;script&#62;"));
+    r.changes.clear();
+    r.review_handoff.clear();
+    let markdown = render::render(&r, ReportFormat::Markdown).expect("empty Markdown");
+    assert!(markdown.contains("No recorded changes. Empty evidence does not establish success."));
 }
