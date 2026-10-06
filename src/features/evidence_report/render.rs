@@ -70,6 +70,35 @@ fn markdown(r: &EvidenceReport, json: &str) -> String {
         cell(&r.snapshot.manifest_digest),
         r.snapshot.complete
     );
+    out.push_str("## Explicit local review judgments\n\n");
+    let _ = writeln!(
+        out,
+        "History: {:?}. These are explicitly entered local judgments, not identity authentication, command outcomes, correctness claims or GitHub approval. Closing/rolling back Diff Review never records a judgment.\n",
+        r.review_decision_state
+    );
+    if let Some(target) = &r.review_target {
+        let _ = writeln!(
+            out,
+            "Inspected snapshot: `{}`. Inspect the evidence below, then run from this project: `dgc session review {} <accept|request-changes> --snapshot {}`. Interactive confirmation is required. This snapshot covers all recorded session changes and observations, including failures/unknowns.\n",
+            cell(&target.token),
+            cell(&r.session.id),
+            cell(&target.token)
+        );
+    } else {
+        out.push_str("Review snapshot unavailable (no recorded changes, incomplete workspace, unavailable Git comparison or explicit --base). No judgment can be recorded for this export.\n\n");
+    }
+    out.push_str("| Decision | Kind | Snapshot correspondence | Supersedes |\n|---|---|---|---|\n");
+    for decision in &r.review_decisions {
+        let _ = writeln!(
+            out,
+            "| {} | {:?} | {:?} | {} |",
+            cell(&decision.recorded.id),
+            decision.recorded.kind,
+            decision.status,
+            cell(decision.recorded.supersedes.as_deref().unwrap_or("none"))
+        );
+    }
+    out.push('\n');
     out.push_str("## Review handoff by recorded change\n\n");
     out.push_str("Matching successes require an active change matching its recorded file, stable recorded execution endpoints and current selected files matching the execution start. These are observations, not requirement satisfaction or approval. Other successes include historical, changed and unknown correspondence. Every linked failure remains visible; later successes do not erase it. See command observations for each outcome and correspondence.\n\n");
     out.push_str("| Change | File | Lifecycle / file match | Recorded requirements / plan | Matching successful observations | Failed observations (all correspondence) | Other successful observations |\n|---|---|---|---|---|---|---|\n");

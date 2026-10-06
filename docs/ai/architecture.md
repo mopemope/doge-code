@@ -111,3 +111,9 @@ Budget/context stops return partial success with typed stable reasons. One
 budget-checked, tools-free finalization may run, then bounded local evidence is
 used on failure. Cancellation and non-context research provider errors propagate.
 No worker persistence, Observation Store, or LLM compaction is introduced.
+
+Explicit local review judgments live in `src/features/human_review/` and a separate
+session-scoped `human-review/v1/decisions/` append-only store. `session review`
+is an operator CLI with TTY confirmation; it is not an LLM tool or remote approval.
+Evidence reports bind decisions to versioned snapshot tokens and recheck stale
+correspondence; command outcomes and human judgments remain independent.

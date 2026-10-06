@@ -399,6 +399,51 @@ scan and 32 MiB per rendered report; exceeding a limit fails instead of silently
 truncating the artifact. The shared managed runner's capture limits also apply
 to Git commands, with a 10-second timeout per command.
 
+### Explicit local review judgments
+
+After inspecting `dgc session evidence <FULL_SESSION_ID>`, its JSON `review_target`
+and Markdown show a `review-v1:<digest>` snapshot token when selected workspace
+files and the Git comparison can be read completely and recorded changes exist.
+Close the owning CLI/TUI session before recording, then inspect fresh evidence.
+From the same project directory, run:
+
+```bash
+dgc session review <FULL_SESSION_ID> accept --snapshot review-v1:<digest>
+dgc session review <FULL_SESSION_ID> request-changes --snapshot review-v1:<digest>
+```
+
+The command requires a TTY and asks you to type the chosen kind exactly. Any other
+answer, EOF, or interruption before confirmation cancels without a judgment.
+There is no `--yes` or noninteractive bypass and no agent-facing review tool.
+`accept` means the operator explicitly entered a local acceptance judgment about
+this inspected snapshot; `request-changes` records a local request for changes.
+Neither proves the operator's identity or humanity, correctness, requirement
+satisfaction, test success, GitHub approval or merge authority. No external
+approval is posted and no files are reverted. Diff Review's existing `a` closes
+the diff and `r` rolls back captured changes; neither records a judgment.
+
+The target covers all recorded session changes and command observations, including
+failures and legacy unknowns, saved requirement/plan/obligation data, selected
+working-tree files and displayed Git comparison state. It does not approve the
+index contents, ignored files, submodule contents or an atomic repository snapshot.
+Explicit `--base` exports do not issue a recording token. Metadata/diff display
+options and export time do not change the token; judgment history itself is excluded.
+Changes to target inputs make old judgments `stale`; unavailable comparison or
+corrupt/unsupported judgment history is `unknown`. Historical judgments remain.
+Existing sessions with no decision are `not_recorded`, never implicitly accepted.
+
+Decisions use a separate append-only version-one store at
+`.doge/sessions/<id>/human-review/v1/decisions/`. Only IDs, hashes, kind, time and
+explicit supersession are recorded; no reviewer identity or free-text comments.
+Re-entering the same latest kind for the same snapshot is a no-op. Choosing a
+different kind appends a record superseding the previous one. Session ownership
+serializes writers; busy/unsafe/changed storage fails before publication. Files
+are published without overwrite through held directories on Unix and synced.
+A sync failure after publication is reported as durability unconfirmed, so inspect
+evidence before retrying. An external edit between comparison and publication
+may still occur; each later export rechecks correspondence. Confirmation starts
+a short publication step; interruption after confirmation may leave a record.
+
 ## Diagnostic Logging
 
 Diagnostic logs live at `.doge/logs/debug.log` with a `0700` log directory and

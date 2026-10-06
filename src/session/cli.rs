@@ -26,6 +26,14 @@ pub enum SessionCommands {
         #[arg(long)]
         include_content: bool,
     },
+    /// Record an explicitly confirmed local judgment for an inspected snapshot
+    Review {
+        id: String,
+        #[arg(value_enum)]
+        kind: crate::features::human_review::DecisionKind,
+        #[arg(long)]
+        snapshot: String,
+    },
     /// Delete a session
     Delete {
         id: String,
@@ -96,9 +104,71 @@ pub async fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
         std::io::stdout().lock().write_all(output.as_bytes())?;
         return Ok(());
     }
+    if let SessionCommands::Review { id, kind, snapshot } = &command {
+        // No --yes or noninteractive bypass: this action is not an agent tool.
+        if !stdin_is_tty() {
+            return Err(anyhow!(
+                "Local review requires interactive operator confirmation on a TTY; no decision recorded."
+            ));
+        }
+        let report = crate::features::evidence_report::inspect(&cfg.project_root, id).await?;
+        if report.session.id != *id
+            || report
+                .review_target
+                .as_ref()
+                .is_none_or(|t| t.token != *snapshot)
+        {
+            return Err(anyhow!(
+                "Review snapshot changed or unavailable; inspect fresh session evidence."
+            ));
+        }
+        if report.review_decision_state == crate::features::human_review::HistoryState::Unknown {
+            return Err(anyhow!(
+                "Review history is incomplete or unsupported; no decision recorded."
+            ));
+        }
+        let owner = SessionStore::new(cfg.project_root.join(".doge/sessions"))?;
+        let ready = owner.try_lease(id).map_err(|e|anyhow!("Cannot record review: {e}. Close the owning CLI/TUI session, then inspect fresh evidence."))?;
+        drop(ready);
+        eprintln!(
+            "Local judgment only; no identity authentication, requirement verdict, GitHub approval, or merge authority. Command failures and unknowns remain unchanged."
+        );
+        eprintln!(
+            "Session: {}. Changes: {}. Command successes: {}. Failures: {}. Incomplete evidence: {}.",
+            id,
+            report.changes.len(),
+            report.summary.verification_successes,
+            report.summary.verification_failures,
+            !report.summary.record_collection_complete
+        );
+        eprint!(
+            "Type '{}' to record this local judgment (anything else cancels): ",
+            kind.label()
+        );
+        use std::io::Write;
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer)? == 0 || answer.trim() != kind.label() {
+            println!("Cancelled; no decision recorded.");
+            return Ok(());
+        }
+        let (record, written) =
+            crate::features::human_review::record(&cfg.project_root, id, *kind, snapshot).await?;
+        println!(
+            "Local judgment {}: {} ({})",
+            if written {
+                "recorded"
+            } else {
+                "already recorded"
+            },
+            record.id,
+            kind.label()
+        );
+        return Ok(());
+    }
     let store = session_store(&cfg)?;
     match command {
-        SessionCommands::Evidence { .. } => {
+        SessionCommands::Evidence { .. } | SessionCommands::Review { .. } => {
             return Err(anyhow!(
                 "evidence command was not routed to its read-only handler"
             ));
