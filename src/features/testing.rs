@@ -1,3 +1,4 @@
+mod go_json;
 use crate::execution::{
     ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
 };
@@ -42,6 +43,12 @@ pub struct FailedTest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_test_result:
+        Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
+    /// Human diagnostics derived from Go JSON. Raw stdout remains the capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_stdout: Option<String>,
     #[serde(default)]
     pub execution_observed: bool,
     pub command: String,
@@ -164,7 +171,7 @@ pub fn get_test_configs(project_root: &Path) -> HashMap<String, TestConfig> {
         TestConfig {
             commands: vec![TestCommand {
                 command: "go".to_string(),
-                args: vec!["test".to_string(), "-v".to_string(), "./...".to_string()],
+                args: vec!["test".to_string(), "-json".to_string(), "./...".to_string()],
             }],
         },
     );
@@ -287,6 +294,8 @@ pub async fn run_test_command_with_cancel(
         Ok(output) => output,
         Err(error) => {
             return TestResult {
+                structured_test_result: None,
+                diagnostic_stdout: None,
                 execution_observed: false,
                 command,
                 stdout: String::new(),
@@ -307,6 +316,26 @@ pub async fn run_test_command_with_cancel(
         ManagedProcessTermination::TimedOut => (true, false, false),
         ManagedProcessTermination::Cancelled => (false, true, false),
     };
+    let structured_test_result = if cancelled {
+        None
+    } else {
+        crate::features::structured_test_results::observe(
+            cmd,
+            args,
+            &managed.stdout,
+            if timed_out {
+                crate::features::structured_test_results::CaptureState::TimedOut
+            } else if managed.capture_truncated || !managed.warnings.is_empty() {
+                crate::features::structured_test_results::CaptureState::Incomplete
+            } else {
+                crate::features::structured_test_results::CaptureState::Complete
+            },
+            success,
+        )
+    };
+    let diagnostic_stdout = structured_test_result
+        .as_ref()
+        .map(|_| go_json::diagnostics(&managed.stdout));
     let mut warnings = managed.warnings;
     if managed.capture_truncated {
         warnings.push("test output exceeded capture limits; head and tail preserved".to_string());
@@ -319,6 +348,8 @@ pub async fn run_test_command_with_cancel(
     }
 
     TestResult {
+        structured_test_result,
+        diagnostic_stdout,
         execution_observed: !cancelled,
         command,
         stdout: managed.stdout,
@@ -339,6 +370,7 @@ pub fn parse_test_output(result: &TestResult, language: &str) -> Vec<FailedTest>
 
     match (command_binary, language) {
         ("cargo", "rust") => parse_rust_test_output(&result.stdout, &result.stderr),
+        (_, "go") if result.structured_test_result.is_some() => go_json::failures(&result.stdout),
         ("go", "go") => parse_go_test_output(&result.stdout, &result.stderr),
         ("npm" | "npx", "typescript") => {
             parse_javascript_test_output(&result.stdout, &result.stderr)
@@ -755,5 +787,115 @@ mod tests {
         if let Some(pid) = pid {
             assert!(!is_process_alive(pid));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod go_workflow_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(stdout: &str, exit: u8) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("capture.jsonl"), stdout).unwrap();
+        let path = dir.path().join("go");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ncat capture.jsonl\nexit {exit}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (dir, path.to_string_lossy().into())
+    }
+    #[tokio::test]
+    async fn go_json_result_survives_diagnostic_budget_with_raw_capture_preserved() {
+        let output=(0..4).map(|_|serde_json::json!({"Action":"output","Package":"example.invalid/fixture","Output":format!("{}\n","x".repeat(9000))}).to_string()+"\n").collect::<String>();
+        let raw = format!(
+            "{{\"Action\":\"start\",\"Package\":\"example.invalid/fixture\"}}\n{output}{{\"Action\":\"skip\",\"Package\":\"example.invalid/fixture\"}}\n"
+        );
+        let (dir, go) = fixture(&raw, 0);
+        let result = run_test_command(
+            dir.path(),
+            &go,
+            &["test".into(), "-json".into(), "./...".into()],
+            10000,
+        )
+        .await;
+        assert!(result.success);
+        assert!(!result.output_truncated);
+        assert_eq!(result.stdout, raw);
+        assert_eq!(
+            result.structured_test_result.as_ref().unwrap().test_count(),
+            Some(0)
+        );
+        assert!(
+            result.diagnostic_stdout.as_ref().unwrap().chars().count()
+                <= DIAGNOSTIC_OUTPUT_BUDGET_CHARS
+        );
+        assert!(
+            !result
+                .diagnostic_stdout
+                .as_ref()
+                .unwrap()
+                .contains("\"Action\"")
+        );
+    }
+    #[tokio::test]
+    async fn go_json_package_failure_and_timed_out_capture_keep_outcomes_separate() {
+        let raw = "{\"Action\":\"start\",\"Package\":\"example.invalid/fixture\"}\n{\"Action\":\"output\",\"Package\":\"example.invalid/fixture\",\"Output\":\"TestMain failed\\n\"}\n{\"Action\":\"fail\",\"Package\":\"example.invalid/fixture\"}\n";
+        let (dir, go) = fixture(raw, 1);
+        let result =
+            run_test_command(dir.path(), &go, &["test".into(), "-json".into()], 10000).await;
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(1));
+        assert!(result.execution_observed);
+        assert!(parse_test_output(&result, "go").is_empty());
+        assert_eq!(
+            result.structured_test_result.as_ref().unwrap().test_count(),
+            Some(0)
+        );
+        assert!(
+            result
+                .diagnostic_stdout
+                .as_ref()
+                .unwrap()
+                .contains("TestMain failed")
+        );
+        std::fs::write(&go, "#!/bin/sh\ncat capture.jsonl\nsleep 30\n").unwrap();
+        let result = run_test_command(dir.path(), &go, &["test".into(), "-json".into()], 100).await;
+        assert!(result.timed_out);
+        assert_eq!(
+            result.structured_test_result.unwrap().observation,
+            crate::features::structured_test_results::ResultObservation::Unknown {
+                reason: crate::features::structured_test_results::UnknownReason::TimedOut
+            }
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = run_test_command_with_cancel(
+            dir.path(),
+            &go,
+            &["test".into(), "-json".into()],
+            10000,
+            Some(token),
+        )
+        .await;
+        assert!(result.cancelled);
+        assert!(!result.execution_observed);
+        assert!(result.structured_test_result.is_none());
+    }
+    #[test]
+    fn default_go_command_uses_existing_json_adapter_and_legacy_diagnostics_stay_compatible() {
+        let root = tempfile::tempdir().unwrap();
+        let configs = get_test_configs(root.path());
+        assert_eq!(
+            configs["go"].commands[0].args,
+            vec!["test", "-json", "./..."]
+        );
+        let result:TestResult=serde_json::from_value(serde_json::json!({"command":"go test -v ./...","stdout":"--- FAIL: TestLegacy (0.00s)\n    old_test.go:2: old detail\n","stderr":"","success":false,"exit_code":1,"failed_tests":[]})).unwrap();
+        assert!(result.structured_test_result.is_none());
+        assert!(result.diagnostic_stdout.is_none());
+        let failure = parse_test_output(&result, "go");
+        assert_eq!(failure[0].name, "TestLegacy");
+        assert_eq!(failure[0].message, "old detail");
     }
 }

@@ -399,6 +399,18 @@ scan and 32 MiB per rendered report; exceeding a limit fails instead of silently
 truncating the artifact. The shared managed runner's capture limits also apply
 to Git commands, with a 10-second timeout per command.
 
+The regular Go `/test` workflow now also runs `go test -json ./...`. Numeric
+observations are parsed from the bounded runner capture before diagnostic display
+is shortened. The TUI and failed-test follow-up show decoded `Output` text rather
+than JSON envelopes. Failed test names, file/line and messages are matched by
+package/test even when diagnostics arrive before `fail` or tests run in parallel.
+Raw JSON capture remains available under the existing evidence content opt-in;
+only counts/status are added to the numeric result. A truncated/warned/timed-out
+capture retains unknown counts, and a cancelled run is not recorded. Compiler or
+package-only failures still start the existing failure follow-up even with no
+named failed tests. Legacy verbose Go diagnostics and other language commands
+retain their existing behavior. This does not create a local review judgment.
+
 ### Explicit local review judgments
 
 After inspecting `dgc session evidence <FULL_SESSION_ID>`, its JSON `review_target`
@@ -1066,7 +1078,7 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 
 - `/test` command automatically detects the project type and runs appropriate test commands:
   - Rust: `cargo test`
-  - Go: `go test ./...`
+  - Go: `go test -json ./...`
   - Node.js: `npm test`
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
 - `/test` uses the configured `command_timeout_ms` (where `0` means unlimited) and the same managed process lifecycle as finite LLM commands, without applying the LLM execution allowlist.

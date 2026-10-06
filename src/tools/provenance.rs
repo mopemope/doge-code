@@ -443,10 +443,13 @@ pub fn record_tui_test_verification(
     capture_truncated: bool,
     extra_warnings: Vec<String>,
     context: crate::provenance::VerificationContext,
+    structured_test_result: Option<
+        Box<crate::features::structured_test_results::StructuredTestResult>,
+    >,
 ) -> bool {
     let event =
         crate::provenance::build_verification_event(crate::provenance::VerificationRecordInput {
-            structured_test_result: None,
+            structured_test_result,
             kind: crate::provenance::VerificationKind::Test,
             source: crate::provenance::VerificationSource::TuiTest,
             program,
@@ -1715,7 +1718,8 @@ mod tests {
             "",
             false,
             vec![],
-            context
+            context,
+            None,
         ));
         let before = provenance_read(&fs, ProvenanceReadArgs::default())
             .await
@@ -2479,6 +2483,7 @@ mod review_fix_tests {
             false,
             vec![],
             Default::default(),
+            None,
         );
         assert!(!ok);
         let sess = fs.get_current_session().unwrap();
@@ -2900,6 +2905,7 @@ mod review_fix_tests {
             false,
             vec![],
             ctx,
+            None,
         );
         assert!(ok);
         let loaded = load_current_events(&fs).unwrap().unwrap();
@@ -3054,5 +3060,67 @@ mod review_fix_tests {
             "warnings: {:?}",
             res.warnings
         );
+    }
+    #[test]
+    fn go_test_workflow_records_typed_counts_and_keeps_failure_and_frozen_links() {
+        let (_root, fs) = setup();
+        let raw = "{\"Action\":\"start\",\"Package\":\"example.invalid/fixture\"}\n{\"Action\":\"fail\",\"Package\":\"example.invalid/fixture\"}\n";
+        let args = vec!["test".into(), "-json".into(), "./...".into()];
+        let result = crate::features::structured_test_results::observe(
+            "go",
+            &args,
+            raw,
+            crate::features::structured_test_results::CaptureState::Complete,
+            false,
+        );
+        let context = crate::provenance::VerificationContext {
+            observed_change_ids: vec!["frozen-change".into()],
+            matched_obligations: vec![crate::provenance::VerificationObligationRef {
+                id: "frozen-obligation".into(),
+                binding_hash: "blake3:frozen".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(record_tui_test_verification(
+            &fs,
+            "go",
+            &args,
+            false,
+            "completed",
+            Some(1),
+            false,
+            raw,
+            "compile details",
+            false,
+            vec![],
+            context,
+            result
+        ));
+        let loaded = load_current_events(&fs).unwrap().unwrap();
+        let verification = loaded
+            .events
+            .iter()
+            .find_map(|e| match &e.event {
+                ProvenanceEvent::VerificationObserved(v) => Some(v),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            verification.source,
+            crate::provenance::VerificationSource::TuiTest
+        );
+        assert!(!verification.outcome.success);
+        assert_eq!(
+            verification
+                .structured_test_result
+                .as_ref()
+                .unwrap()
+                .test_count(),
+            Some(0)
+        );
+        assert_eq!(verification.observed_change_ids, vec!["frozen-change"]);
+        assert_eq!(verification.matched_obligations[0].id, "frozen-obligation");
+        assert!(verification.stdout_excerpt.contains("Action"));
+        assert_eq!(verification.stderr_excerpt, "compile details");
     }
 }
