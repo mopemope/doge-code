@@ -126,6 +126,25 @@ impl AppConfig {
             return Some(size);
         }
 
+        // Documented API capacity, verified 2026-10-06 against:
+        // https://developers.openai.com/api/docs/models/gpt-4.1-mini
+        // https://openrouter.ai/api/v1/models (id/canonical_slug/context_length).
+        // Match only these complete, verified IDs; a family substring, arbitrary
+        // vendor prefix, or future snapshot must not inherit a 1M-token window.
+        // Subscription catalogs have no capacity metadata and are not API IDs.
+        // Custom endpoints with smaller limits must use the explicit override.
+        if self.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+            && matches!(
+                self.model.as_str(),
+                "gpt-4.1-mini"
+                    | "gpt-4.1-mini-2025-04-14"
+                    | "openai/gpt-4.1-mini"
+                    | "openai/gpt-4.1-mini-2025-04-14"
+            )
+        {
+            return Some(1_047_576);
+        }
+
         let model_lower = self.model.to_lowercase();
         if model_lower.contains("gpt-4o") {
             Some(128_000)
