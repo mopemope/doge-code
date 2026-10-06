@@ -1,5 +1,6 @@
 //! Read-only, session-scoped evidence exports. No LLM or provenance writes.
 mod collect;
+mod handoff;
 mod model;
 mod render;
 mod workspace;
