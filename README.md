@@ -149,9 +149,14 @@ dgc --provider openai --model <catalog-slug>
 ```
 
 The explicit login command opens the system browser and listens on a temporary
-`127.0.0.1` callback port. Use `--no-browser` to open the displayed authorization
-URL manually. Do not share that URL. A successful identity sign-in without plan
-usage permission is shown separately and cannot make inference requests.
+`127.0.0.1` callback port. It also prints a temporary authorization URL for manual
+recovery if the sign-in page does not appear; browser launch failure falls back
+to this same flow. Use `--no-browser` to skip automatic browser launch. Open the
+URL on the machine running dgc: an SSH/remote session needs a browser there or
+loopback port forwarding. Sign-in waits up to five minutes; Ctrl-C cancels it.
+Do not share the URL. Printed URLs omit any saved ID-token hint. A successful
+identity sign-in without plan usage permission is shown separately and cannot
+make inference requests.
 Ordinary exec, watch and workflow commands never open a sign-in browser.
 
 Login does not change your existing provider configuration. The default remains
