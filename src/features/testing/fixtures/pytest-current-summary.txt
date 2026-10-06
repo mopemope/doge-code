@@ -1,0 +1,7 @@
+FAILED test_nodes with spaces.py::TestGroup::test_parameter[space id] - assert 1 == 99
+FAILED test_nodes with spaces.py::TestGroup::test_parameter[space - id] - assert 2 == 99
+FAILED test_nodes with spaces.py::TestGroup::test_parameter[nested [id]] - assert 3 == 99
+FAILED test_nodes with spaces.py::TestGroup::test_parameter[namespace::id] - assert 4 == 99
+FAILED test_nodes with spaces.py::TestGroup::test_parameter[日本 語] - assert 5 == 99
+FAILED test_nodes with spaces.py::TestGroup::test_plain - assert 1 == 2
+FAILED test_nodes with spaces.py::test_plain - assert 2 == 3
