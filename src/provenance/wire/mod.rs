@@ -1,7 +1,7 @@
 //! Wire (on-disk) provenance schemas.
 //!
 //! `wire::v1` freezes the legacy v1 JSON shape (read-only).
-//! `wire::v5` is the current write schema; v1 through v4 are frozen readers.
+//! `wire::v6` is the current write schema; v1 through v5 are frozen readers.
 //! The canonical in-memory representation lives in `super::types`.
 //!
 //! Never deserialize an event file directly into the canonical struct.
@@ -15,6 +15,7 @@ pub mod v2;
 pub mod v3;
 pub mod v4;
 pub mod v5;
+pub mod v6;
 
 use serde::{Deserialize, Serialize};
 

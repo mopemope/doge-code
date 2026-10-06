@@ -315,6 +315,29 @@ submodules, special files, unsafe paths and unreadable files cannot establish a
 match. Without Git, referenced files can be recorded but collection is partial.
 No file bodies, environment variables, toolchain probes or remote URLs are added.
 
+Managed verification now saves minimal execution context in provenance v6:
+OS family, architecture and the primary tool's numeric executable version when
+safely obtainable. This is separate from the command outcome and workspace
+endpoints. Version probes cover native system `cargo`, `python3` and `node` only;
+Go, wrappers (`npm`, `pytest`), home toolchains, unsupported platforms and rejected
+or failed probes retain an explicit unknown reason. The selected executable must
+be canonical under `/usr/bin`, root-owned and not group/world-writable, including
+its ancestors, and outside the project. Linux ELF executables are supported;
+other native formats remain unknown. Versions identify the selected executable,
+not dependencies, test counts or a complete reproducible environment.
+
+Probes clear inherited environment, use an empty temporary directory and fixed
+arguments, retain at most 1 KiB per output stream, and have a 500 ms execution
+limit (or a lower configured LLM limit), plus managed cleanup. LLM original and
+probe requests must both pass existing policy: basename permission alone does
+not authorize an absolute executable or the temporary directory. No policy is
+expanded to obtain metadata. Trusted `/test` and `/lint` retain their separate
+execution boundary. Raw probe output, errors, paths, host/user names and
+environment values are never saved in execution context. Probe failure does not
+change the verification outcome. Old v1–5 events stay unchanged with context
+unknown; export reads saved context without probing the current machine.
+Matching context never establishes correctness or reproducibility.
+
 Each endpoint is limited to 10,000 paths, 16 MiB per file, 128 MiB of reads and
 
 4 MiB serialized data, with a cooperative 10-second collection budget. Acquisition
@@ -577,7 +600,7 @@ Verification:
 - `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
 - `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification. It also freezes `matched_obligations` (id + binding hash) for structured runs.
 - Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
-- Storage: `.doge/sessions/<id>/provenance/v5/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
+- Storage: `.doge/sessions/<id>/provenance/v6/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 
@@ -599,11 +622,11 @@ step-2
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
 - A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
-- Tracked mutations (v5 writes, legacy v1–v4 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
+- Tracked mutations (v6 writes, legacy v1–v5 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
-- Storage: `.doge/sessions/<id>/provenance/v5/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Storage: `.doge/sessions/<id>/provenance/v6/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
 - Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
 
 ## Verification Obligations
