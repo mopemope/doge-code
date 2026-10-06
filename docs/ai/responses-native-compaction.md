@@ -1,6 +1,6 @@
 # Responses Native Compaction v1
 
-Server-side compaction for the `openai-chatgpt` provider via `POST /responses`
+Server-side compaction for the `openai` provider via `POST /responses`
 `context_management`.
 
 ## Why server-side
@@ -92,7 +92,7 @@ Server-side compaction for the `openai-chatgpt` provider via `POST /responses`
 
 ## `/compact` behavior
 
-- `openai-chatgpt`: informational message, no job, no provider request:
+- `openai`: informational message, no job, no provider request:
   `[INFO] ChatGPT Responses uses automatic native compaction; /compact does
   not run the local text summarizer for this provider.`
 - `openai-compatible`: existing local summarization unchanged.

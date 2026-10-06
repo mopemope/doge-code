@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderKind {
     #[default]
     OpenaiCompatible,
-    OpenaiChatgpt,
+    Openai,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

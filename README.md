@@ -138,14 +138,14 @@ use an eligible account's plan allowance with dgc. Account/workspace eligibility
 available models, app limits and service policy are enforced by OpenAI.
 
 ```bash
-dgc auth login openai-chatgpt
+dgc auth login openai
 # Earlier consent declined: explicitly request plan usage
-dgc auth login openai-chatgpt --account <account-label> --enable-plan-usage
-dgc auth status openai-chatgpt
-dgc models --provider openai-chatgpt
+dgc auth login openai --account <account-label> --enable-plan-usage
+dgc auth status openai
+dgc models --provider openai
 # Choose a slug from the model catalog:
-dgc --provider openai-chatgpt --model <catalog-slug> exec "Explain this project"
-dgc --provider openai-chatgpt --model <catalog-slug>
+dgc --provider openai --model <catalog-slug> exec "Explain this project"
+dgc --provider openai --model <catalog-slug>
 ```
 
 The explicit login command opens the system browser and listens on a temporary
@@ -155,19 +155,19 @@ usage permission is shown separately and cannot make inference requests.
 Ordinary exec, watch and workflow commands never open a sign-in browser.
 
 Login does not change your existing provider configuration. The default remains
-`openai-compatible` and uses your API key. Select `openai-chatgpt` with `--provider`,
-`DGC_PROVIDER`, or a top-level `provider = "openai-chatgpt"` configuration key
+`openai-compatible` and uses your API key. Select `openai` with `--provider`,
+`DGC_PROVIDER`, or a top-level `provider = "openai"` configuration key
 (CLI > environment > project > user > default). Always choose a model explicitly;
 the API-key default model is not reused for this provider. `--api-key` cannot be
 combined with the ChatGPT provider, and its requests always use the official
 Responses endpoint even if another base URL is configured.
 
 ```bash
-dgc auth list openai-chatgpt
-dgc auth login openai-chatgpt --new-account
-dgc auth login openai-chatgpt --account <account-label>
-dgc auth use openai-chatgpt <account-label>
-dgc auth logout openai-chatgpt [account-label]
+dgc auth list openai
+dgc auth login openai --new-account
+dgc auth login openai --account <account-label>
+dgc auth use openai <account-label>
+dgc auth logout openai [account-label]
 ```
 
 Start a new session when changing the ChatGPT account or model. Responses
@@ -192,8 +192,12 @@ Incorrect or unknown model context capacity can still cause context overflow;
 configure `[llm] context_window_size` when needed.
 
 Credentials are stored in the user's platform configuration directory under
-`doge-code/openai-chatgpt/`, separately from project `.doge/` state. Unix directories
+`doge-code/openai/`, separately from project `.doge/` state. Unix directories
 use 0700 and files use 0600, with atomic writes and process-wide file locking.
+Previous `openai-chatgpt` credentials under `doge-code/openai-chatgpt/` are not
+reused; sign in again with `dgc auth login openai`. Old `provider =
+"openai-chatgpt"` configs, `DGC_PROVIDER=openai-chatgpt`, and sessions bound
+to the old provider string are rejected; start a new session after switching.
 Local status reports expiry and granted permission; it does not prove current
 server eligibility. Refreshes replace rotating tokens together. An interrupted
 or uncertain renewal requires sign-in again instead of replaying the old token.
@@ -945,7 +949,7 @@ The TUI provides various slash commands for quick operations:
 | `/cancel [job-id]` | Cancel the current foreground job or a specific job (`/cancel job-12`) |
 | `/jobs` | List running and recent jobs |
 | `/evidence [id]` | Inspect saved evidence and show the session-specific export command |
-| `/compact` | Compact conversation history (OpenAI-compatible: LLM summarization; openai-chatgpt: automatic Responses native compaction, no local summarizer) |
+| `/compact` | Compact conversation history (OpenAI-compatible: LLM summarization; openai: automatic Responses native compaction, no local summarizer) |
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
 | `/test` | Run tests for the project |
@@ -1166,7 +1170,7 @@ Verification failures are returned to LLM for automatic correction.
 - Provider wiring differs:
   - OpenAI-compatible: activated schemas move into the next request's
     top-level tools.
-  - openai-chatgpt / Responses: initial top-level namespace stays stable;
+  - openai / Responses: initial top-level namespace stays stable;
     activated functions are appended as additional_tools input items.
 - Doge-Code `tool_search` is a client-side local function. It is not the
   OpenAI Responses native `type = "tool_search"`; the ChatGPT plan route

@@ -80,7 +80,7 @@ impl OpenAIClient {
         use crate::features::openai_subscription::{
             ProviderKind, auth::AuthHandle, credentials::CredentialStore,
         };
-        if cfg.provider == ProviderKind::OpenaiChatgpt {
+        if cfg.provider == ProviderKind::Openai {
             let auth = AuthHandle::selected(CredentialStore::default_path()?)?;
             let threshold = cfg.get_effective_compaction_limit();
             crate::features::openai_subscription::responses::validate_compact_threshold(threshold)?;

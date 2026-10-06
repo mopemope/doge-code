@@ -4,7 +4,7 @@
   "cases": "eval-cases.json",
   "trials": 3,
   "model": "exact-model-id",
-  "provider": "openai-chatgpt",
+  "provider": "openai",
   "environment_id": "local-eval-machine-v1",
   "timeout_seconds": 900,
   "termination_grace_seconds": 10,

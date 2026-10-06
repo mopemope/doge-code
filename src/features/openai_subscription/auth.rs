@@ -95,16 +95,14 @@ impl AuthHandle {
         let registry = store.load()?;
         let account = registry
             .active
-            .context("No ChatGPT account selected. Run dgc auth login openai-chatgpt.")?;
+            .context("No ChatGPT account selected. Run dgc auth login openai.")?;
         let entry = registry
             .accounts
             .iter()
             .find(|a| a.label == account)
             .context("selected ChatGPT account missing")?;
         if entry.tokens.is_none() {
-            bail!(
-                "ChatGPT account is signed out. Run dgc auth login openai-chatgpt --account {account}."
-            );
+            bail!("ChatGPT account is signed out. Run dgc auth login openai --account {account}.");
         }
         Ok(Self {
             store,

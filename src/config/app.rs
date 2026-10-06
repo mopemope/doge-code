@@ -178,21 +178,18 @@ impl AppConfig {
             project_cfg.provider,
             file_cfg.provider,
         )?;
-        if provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+        if provider == crate::features::openai_subscription::ProviderKind::Openai
             && cli.api_key.is_some()
         {
-            anyhow::bail!("--api-key cannot be combined with --provider openai-chatgpt");
+            anyhow::bail!("--api-key cannot be combined with --provider openai");
         }
         let explicit_model = !cli.model.is_empty()
             || std::env::var("OPENAI_MODEL").is_ok()
             || project_cfg.model.is_some()
             || file_cfg.model.is_some();
-        if provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
-            && !explicit_model
+        if provider == crate::features::openai_subscription::ProviderKind::Openai && !explicit_model
         {
-            anyhow::bail!(
-                "Select a ChatGPT model with --model. Run dgc models --provider openai-chatgpt."
-            );
+            anyhow::bail!("Select a ChatGPT model with --model. Run dgc models --provider openai.");
         }
         let api_key = cli
             .api_key
@@ -316,12 +313,10 @@ impl AppConfig {
             project_cfg.context_budget.as_ref(),
         );
 
-        let base_url = if provider
-            == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
-        {
+        let base_url = if provider == crate::features::openai_subscription::ProviderKind::Openai {
             if base_url != "https://api.openai.com/v1" {
                 eprintln!(
-                    "openai-chatgpt uses the official Responses endpoint; the configured base URL is not used."
+                    "openai uses the official Responses endpoint; the configured base URL is not used."
                 );
             }
             "https://api.openai.com/v1".to_owned()
@@ -383,7 +378,7 @@ impl AppConfig {
             subagent,
             agent_budget,
         };
-        if config.provider == crate::features::openai_subscription::ProviderKind::OpenaiChatgpt
+        if config.provider == crate::features::openai_subscription::ProviderKind::Openai
             && config.get_context_window_size().is_none()
         {
             eprintln!(
@@ -571,7 +566,7 @@ fn resolve_provider(
     if let Some(environment) = environment {
         return match environment {
             "openai-compatible" => Ok(ProviderKind::OpenaiCompatible),
-            "openai-chatgpt" => Ok(ProviderKind::OpenaiChatgpt),
+            "openai" => Ok(ProviderKind::Openai),
             _ => anyhow::bail!("invalid DGC_PROVIDER"),
         };
     }
@@ -582,38 +577,37 @@ fn resolve_provider(
 mod provider_tests {
     use super::*;
     use crate::features::openai_subscription::ProviderKind::{
-        OpenaiChatgpt as Chatgpt, OpenaiCompatible as Compatible,
+        Openai, OpenaiCompatible as Compatible,
     };
     #[test]
     fn explicit_provider_precedence_and_invalid_environment() {
         assert_eq!(
             resolve_provider(
-                Some(Chatgpt),
+                Some(Openai),
                 Some("invalid"),
                 Some(Compatible),
                 Some(Compatible)
             )
             .expect("CLI wins"),
-            Chatgpt
+            Openai
         );
         assert!(resolve_provider(None, Some("invalid"), None, None).is_err());
         assert_eq!(
-            resolve_provider(
-                None,
-                Some("openai-compatible"),
-                Some(Chatgpt),
-                Some(Chatgpt)
-            )
-            .expect("environment"),
+            resolve_provider(None, Some("openai"), None, None).expect("environment openai"),
+            Openai
+        );
+        assert_eq!(
+            resolve_provider(None, Some("openai-compatible"), Some(Openai), Some(Openai))
+                .expect("environment"),
             Compatible
         );
         assert_eq!(
-            resolve_provider(None, None, Some(Chatgpt), Some(Compatible)).expect("project"),
-            Chatgpt
+            resolve_provider(None, None, Some(Openai), Some(Compatible)).expect("project"),
+            Openai
         );
         assert_eq!(
-            resolve_provider(None, None, None, Some(Chatgpt)).expect("user"),
-            Chatgpt
+            resolve_provider(None, None, None, Some(Openai)).expect("user"),
+            Openai
         );
         assert_eq!(
             resolve_provider(None, None, None, None).expect("legacy"),
