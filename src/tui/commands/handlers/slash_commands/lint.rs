@@ -466,6 +466,14 @@ async fn lint_job_async(
                     )
                 });
                 if let Some(context) = &mut verification_context {
+                    context.execution_context = Some(
+                        crate::features::verification_context::capture_trusted(
+                            &project_root,
+                            &lint_cmd.command,
+                            Some(cancellation.child_token()),
+                        )
+                        .await,
+                    );
                     crate::tools::provenance::prepare_verification_snapshot(
                         &tools,
                         context,

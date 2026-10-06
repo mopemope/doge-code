@@ -218,6 +218,27 @@ fn markdown(r: &EvidenceReport, json: &str) -> String {
             v.current_code_state.state
         );
     }
+    out.push_str("\n## Recorded execution context\n\n| Observation | OS family | Architecture | Primary tool | Version observation |\n|---|---|---|---|---|\n");
+    for v in &r.verifications {
+        if let Some(c) = &v.execution_context {
+            let _ = writeln!(
+                out,
+                "| {} | {:?} | {:?} | {:?} | {} |",
+                cell(&v.id),
+                c.os_family,
+                c.architecture,
+                c.tool,
+                cell(&format!("{:?}", c.version))
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "| {} | unknown (not recorded) | unknown | unknown | unknown |",
+                cell(&v.id)
+            );
+        }
+    }
+    out.push_str("\nRecorded context is partial; matching context does not prove reproducibility or correctness. No context is reconstructed at export.\n");
     for v in &r.verifications {
         let differences = &v.current_code_state.differences;
         if differences.differs() || !differences.unknown.is_empty() {

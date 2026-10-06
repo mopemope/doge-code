@@ -210,6 +210,7 @@ pub struct Change {
 
 #[derive(Debug, Serialize)]
 pub struct Verification {
+    pub execution_context: Option<Box<crate::features::verification_context::ExecutionContext>>,
     pub execution_workspace:
         Option<Box<crate::features::verification_snapshot::ExecutionWorkspace>>,
     pub current_code_state: crate::features::verification_snapshot::CurrentComparison,
