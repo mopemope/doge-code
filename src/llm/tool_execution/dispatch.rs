@@ -165,6 +165,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conflicting_read_positions_dispatch_returns_actionable_error() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("numbered.txt");
+        std::fs::write(&path, "first\nsecond\nthird\n")?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["fs_read"]).await;
+        let call = ToolCall {
+            id: Some("read-conflict".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "fs_read".into(),
+                arguments: json!({"path": path, "start_line": 3, "cursor": 1}).to_string(),
+            },
+        };
+        let error = dispatch_tool_call(&runtime, &call)
+            .await
+            .expect_err("conflict");
+        assert!(error.to_string().contains("start_line=3"));
+        assert!(error.to_string().contains("cursor=1"));
+        assert!(error.to_string().contains("omit"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn read_pagination_dispatch_validates_numbers_and_preserves_serialized_cursor()
     -> Result<()> {
         let dir = tempdir()?;
