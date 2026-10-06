@@ -403,6 +403,104 @@ class ManifestTests(HarnessCase):
 
 @unittest.skipIf(NEEDS_GIT, "git is required for worktree tests")
 class RunnerTests(HarnessCase):
+    @unittest.skipUnless(os.name == "posix", "detached sessions require POSIX")
+    def test_detached_output_reader_stops_before_artifacts_are_returned(self):
+        import signal
+        import threading
+        import time
+        pidfile = self.root / "detached.pid"
+        child_code = (
+            "import os,pathlib,time; pathlib.Path(%r).write_text(str(os.getpid())); "
+            "time.sleep(0.6); print('late output', flush=True); time.sleep(0.2)"
+        ) % str(pidfile)
+        code = (
+            "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', %r], "
+            "start_new_session=True); time.sleep(0.1)"
+        ) % child_code
+        stdout, stderr = self.root / "stdout", self.root / "stderr"
+        threads_before = set(threading.enumerate())
+        try:
+            result = runner.stream_child(
+                [sys.executable, "-c", code], self.root, dict(os.environ),
+                2, 0.05, stdout, stderr,
+            )
+            self.assertIn("output_capture_incomplete", result[3])
+            self.assertFalse(set(threading.enumerate()) - threads_before)
+            captured = (stdout.read_bytes(), stderr.read_bytes())
+            time.sleep(0.8)
+            self.assertEqual((stdout.read_bytes(), stderr.read_bytes()), captured)
+        finally:
+            if pidfile.exists():
+                try:
+                    os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_stream_output_is_bounded_while_child_runs(self):
+        from unittest.mock import patch
+        stdout = self.root / "stdout.txt"
+        stderr = self.root / "stderr.txt"
+        with patch.object(runner, "MAX_STREAM_BYTES", 1024):
+            result = runner.stream_child(
+                [sys.executable, "-c", "import os; os.write(1, b'x'*4096); os.write(2, b'y'*4096)"],
+                self.root, dict(os.environ), 5, 0.1, stdout, stderr,
+            )
+        self.assertEqual(result[0], 0)
+        self.assertTrue(result[4])
+        self.assertEqual(stdout.stat().st_size, 1024)
+        self.assertEqual(stderr.stat().st_size, 1024)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_timeout_cleans_descendants_when_leader_exits_on_term(self):
+        import signal
+        import time
+        marker = self.root / "descendant-survived"
+        pidfile = self.root / "leader.pid"
+        child_code = "import time,pathlib; time.sleep(0.8); pathlib.Path(%r).write_text('alive')" % str(marker)
+        code = (
+            "import os,pathlib,subprocess,sys,time; "
+            "subprocess.Popen([sys.executable, '-c', %r]); "
+            "pathlib.Path(%r).write_text(str(os.getpid())); time.sleep(20)"
+        ) % (child_code, str(pidfile))
+        try:
+            result = runner.stream_child(
+                [sys.executable, "-c", code], self.root, dict(os.environ),
+                0.2, 0.1, self.root / "stdout", self.root / "stderr",
+            )
+            self.assertTrue(result[1])
+            self.assertTrue(pidfile.exists(), "fixture must start before timeout")
+            time.sleep(1)
+            self.assertFalse(marker.exists(), "descendant survived parent termination")
+        finally:
+            if pidfile.exists():
+                try:
+                    os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_committed_agent_edit_is_captured_and_read_only_violation(self):
+        repo = self.make_repo()
+        (repo / ".gitignore").write_text(".doge/\n")
+        git("add", ".gitignore", cwd=repo)
+        git("commit", "-qm", "ignore runtime state", cwd=repo)
+        fake = self.make_fake()
+        script = fake.read_text()
+        script = script.replace("args = sys.argv[1:]", '''args = sys.argv[1:]
+if "exec" in args:
+    import pathlib, subprocess
+    pathlib.Path("tracked.txt").write_text("committed agent change\\n")
+    subprocess.run(["git", "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "commit", "-qm", "agent change"], check=True)
+''')
+        fake.write_text(script)
+        manifest, cases = self.load_harness(self.write_manifest(
+            fake, self.write_cases([self.base_case(workspace_policy="read_only")]),
+        ))
+        measurement, out = self.run_trial(repo, manifest, cases[0])
+        self.assertIn("workspace_modified_in_read_only_case", measurement["machine_findings"])
+        patch = out / "baseline/runs/fake-case/trial-001/agent.patch"
+        self.assertIn("+committed agent change", patch.read_text())
+
     def test_each_trial_starts_from_clean_base(self):
         repo = self.make_repo()
         fake = self.make_fake()
