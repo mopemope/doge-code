@@ -505,7 +505,7 @@ dgc session evidence <SESSION_ID> --include-content
 ## 🛠️ Tools and Commands
 
 ### File System Tools
-- `fs_read`: Read files with optional summary mode for large files
+- `fs_read`: Read files with optional summary mode for large files. `start_line` and `cursor` are 1-based aliases: provide one, or equal values for both; conflicting values return an error instead of silently reading a different page.
 - `fs_write`: Create or overwrite files
 - `fs_list`: List directory contents with pagination
 - `find_file`: Search files by glob or substring, with complete paths and bounded cursor pages (`cursor`, `page_size`, `response_budget_chars`)
