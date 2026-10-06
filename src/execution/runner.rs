@@ -441,6 +441,25 @@ pub async fn run_managed_process(
     spec: ManagedProcessSpec,
     options: ManagedRunOptions,
 ) -> Result<ManagedProcessOutput, ManagedProcessError> {
+    run_managed_process_inner(spec, options, false, None).await
+}
+
+/// Environment-free runner for narrowly scoped metadata probes. Existing callers
+/// retain environment inheritance and the ordinary diagnostic capture budget.
+pub(crate) async fn run_managed_probe(
+    spec: ManagedProcessSpec,
+    options: ManagedRunOptions,
+    capture_bytes: usize,
+) -> Result<ManagedProcessOutput, ManagedProcessError> {
+    run_managed_process_inner(spec, options, true, Some(capture_bytes)).await
+}
+
+async fn run_managed_process_inner(
+    spec: ManagedProcessSpec,
+    options: ManagedRunOptions,
+    clear_env: bool,
+    capture_bytes: Option<usize>,
+) -> Result<ManagedProcessOutput, ManagedProcessError> {
     let cancellation = options.cancellation.unwrap_or_default();
     if cancellation.is_cancelled() {
         return Ok(empty_output(ManagedProcessTermination::Cancelled));
@@ -462,6 +481,9 @@ pub async fn run_managed_process(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if clear_env {
+        command.env_clear();
+    }
     for (key, value) in &spec.env {
         command.env(key, value);
     }
@@ -476,8 +498,8 @@ pub async fn run_managed_process(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = spawn_capture(stdout);
-    let stderr_task = spawn_capture(stderr);
+    let stdout_task = spawn_capture(stdout, capture_bytes);
+    let stderr_task = spawn_capture(stderr, capture_bytes);
 
     let wait_decision = wait_for_process(&mut child, options.timeout, &cancellation).await;
 
@@ -646,7 +668,10 @@ struct CaptureTaskResult {
     warnings: Vec<String>,
 }
 
-fn spawn_capture<R>(reader: Option<R>) -> JoinHandle<CaptureTaskResult>
+fn spawn_capture<R>(
+    reader: Option<R>,
+    capture_bytes: Option<usize>,
+) -> JoinHandle<CaptureTaskResult>
 where
     R: AsyncRead + Send + Unpin + 'static,
 {
@@ -658,7 +683,10 @@ where
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) => break,
-                    Ok(count) => capture.push(&buffer[..count]),
+                    Ok(count) => match capture_bytes {
+                        Some(limit) => capture.push_with_limits(&buffer[..count], limit, 0),
+                        None => capture.push(&buffer[..count]),
+                    },
                     Err(error) => {
                         warnings.push(format!("process output reader failed: {error}"));
                         break;
@@ -1000,5 +1028,70 @@ mod stream_cancellation_tests {
         for run in runs {
             assert!(run.await.unwrap().unwrap().is_none());
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::*;
+    #[tokio::test]
+    async fn probe_clears_inherited_environment_and_bounds_capture() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let spec = ManagedProcessSpec::new(
+            "/bin/sh",
+            vec!["-c".into(), "printf '%s' \"${HOME-unset}\"".into()],
+            cwd.path().into(),
+        );
+        let out = run_managed_probe(
+            spec.clone(),
+            ManagedRunOptions::new(Some(Duration::from_secs(1))),
+            1024,
+        )
+        .await
+        .expect("isolated");
+        assert_eq!(out.stdout, "unset");
+        let inherited =
+            run_managed_process(spec, ManagedRunOptions::new(Some(Duration::from_secs(1))))
+                .await
+                .expect("ordinary");
+        assert_ne!(inherited.stdout, "unset");
+        let noisy = ManagedProcessSpec::new(
+            "/bin/sh",
+            vec!["-c".into(), "while :; do printf '0123456789'; done".into()],
+            cwd.path().into(),
+        );
+        let out = run_managed_probe(
+            noisy,
+            ManagedRunOptions::new(Some(Duration::from_millis(50))),
+            1024,
+        )
+        .await
+        .expect("bounded");
+        assert_eq!(out.termination, ManagedProcessTermination::TimedOut);
+        assert!(out.capture_truncated);
+        assert!(out.stdout.len() < 1200);
+    }
+    #[tokio::test]
+    async fn probe_cancel_stops_owned_process() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let token = CancellationToken::new();
+        let child = token.clone();
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            child.cancel();
+        });
+        let out = run_managed_probe(
+            ManagedProcessSpec::new(
+                "/bin/sh",
+                vec!["-c".into(), "sleep 30".into()],
+                cwd.path().into(),
+            ),
+            ManagedRunOptions::new(Some(Duration::from_secs(2))).with_cancellation(Some(token)),
+            1024,
+        )
+        .await
+        .expect("cancelled");
+        trigger.await.expect("trigger");
+        assert_eq!(out.termination, ManagedProcessTermination::Cancelled);
     }
 }

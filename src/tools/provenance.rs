@@ -1638,6 +1638,7 @@ mod tests {
     fn test_verification_context_race_snapshot() {
         // Change A captured; Change B lands before completion; observed keeps A only.
         let ctx_a = crate::provenance::VerificationContext {
+            execution_context: None,
             execution_workspace: None,
             plan_item_id: Some("step-1".into()),
             observed_change_ids: vec!["change-A".to_string()],
@@ -2214,6 +2215,7 @@ mod provenance_extra_tests {
                 stderr: "",
                 capture_truncated: false,
                 context: crate::provenance::VerificationContext {
+                    execution_context: None,
                     execution_workspace: None,
                     plan_item_id: Some("step-1".into()),
                     observed_change_ids: vec![change_env.event_id.clone()],
@@ -2624,6 +2626,7 @@ mod review_fix_tests {
         // Verification observing the change with correct binding.
         let binding = crate::provenance::obligations::obligation_binding_hash("step-1", &[], &ob);
         let ctx = crate::provenance::VerificationContext {
+            execution_context: None,
             execution_workspace: None,
             directive_id: None,
             plan_item_id: Some("step-1".to_string()),

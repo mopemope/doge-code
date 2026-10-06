@@ -100,6 +100,14 @@ pub async fn execute_process(
         )
     });
     if let Some(context) = &mut verification_context {
+        context.execution_context = Some(
+            crate::features::verification_context::capture_for_request(
+                runtime.fs.config.clone(),
+                &params.clone().into_request(),
+                runtime.cancel_token.clone(),
+            )
+            .await,
+        );
         crate::tools::provenance::prepare_verification_snapshot(
             runtime.fs,
             context,
