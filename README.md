@@ -55,7 +55,12 @@ typed built-in mutation/process arguments. It is not a transaction that rolls
 back earlier valid operations after a later runtime failure, nor a full validator
 for arbitrary remote MCP schemas.
 The complete project/system authority prompt is retained during compaction, even
-when retaining it prevents further context reduction.
+when retaining it prevents further context reduction. API-compatible local
+compaction also retains every original user turn, including later corrections and
+constraints, unchanged. Generated summaries remain assistant observations. A
+large set of user instructions can therefore prevent further context reduction;
+compaction does not silently replace them with a model-generated goal. Earlier
+sessions with user-role summaries retain those messages conservatively.
 
 #### 3. MCP Server Mode
 ```bash
