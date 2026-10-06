@@ -1544,3 +1544,319 @@ async fn recorded_context_export_is_separate_and_legacy_remains_unknown() {
     assert!(markdown.contains("does not prove reproducibility or correctness"));
     assert_eq!(r.verifications[position].outcome.success, observed_outcome);
 }
+
+#[tokio::test]
+async fn human_review_is_explicit_idempotent_and_keeps_judgment_history() {
+    use crate::features::human_review::{
+        self as hr, DecisionKind as K, DecisionStatus as S, HistoryState as H,
+    };
+    let f = fixture(true);
+    verification(&f, false, false);
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decision_state, H::NotRecorded);
+    assert!(r.review_decisions.is_empty());
+    let target = r.review_target.unwrap();
+    assert_eq!(target.change_ids, vec![f.change.clone()]);
+    assert_eq!(target.verification_ids.len(), 2);
+    assert_eq!(
+        target.token,
+        report(&f, true).await.review_target.unwrap().token
+    );
+    let (first, written) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    assert!(written);
+    let current = report(&f, false).await;
+    assert_eq!(current.review_target.unwrap().token, target.token);
+    assert_eq!(current.review_decisions[0].status, S::Current);
+    assert_eq!(current.summary.verification_failures, 1);
+    assert!(current.verifications.iter().all(|v| v.test_count.is_none())); // legacy unknown unchanged
+    let (same, written) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    assert!(!written);
+    assert_eq!(same.id, first.id);
+    let (second, _) = hr::record(
+        f.dir.path(),
+        &f.session.meta.id,
+        K::RequestChanges,
+        &target.token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.supersedes, Some(first.id));
+    let (third, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    assert_eq!(third.supersedes, Some(second.id));
+    let result = report(&f, false).await;
+    assert_eq!(result.review_decisions.len(), 3);
+    assert_eq!(
+        result
+            .review_decisions
+            .iter()
+            .map(|v| v.status)
+            .collect::<Vec<_>>(),
+        vec![S::Superseded, S::Superseded, S::Current]
+    );
+    let dir = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join("human-review/v1/decisions");
+    let bytes = fs::read_to_string(dir.join(format!("{}.json", third.id))).unwrap();
+    for secret in [
+        "DIRECTIVE-PRIVATE",
+        "DIFF-PRIVATE",
+        "STDOUT-PRIVATE",
+        "code.rs",
+        "test@example",
+    ] {
+        assert!(!bytes.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn human_review_rejects_old_or_other_session_targets_and_preserves_stale_history() {
+    use crate::features::human_review::{self as hr, DecisionKind as K, DecisionStatus as S};
+    let f = fixture(true);
+    let other = fixture(true);
+    let target = report(&f, false).await.review_target.unwrap();
+    assert!(
+        hr::record(
+            other.dir.path(),
+            &other.session.meta.id,
+            K::Accept,
+            &target.token
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !other
+            .store
+            .session_dir(&other.session.meta.id)
+            .join("human-review")
+            .exists()
+    );
+    let (_r, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    fs::write(f.dir.path().join("code.rs"), "fn changed() {}\n").unwrap();
+    assert!(
+        hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+            .await
+            .is_err()
+    );
+    assert_eq!(report(&f, false).await.review_decisions[0].status, S::Stale);
+    let changed = report(&f, false).await.review_target.unwrap();
+    verification(&f, true, false);
+    assert_ne!(
+        changed.token,
+        report(&f, false).await.review_target.unwrap().token
+    );
+    assert_eq!(report(&f, false).await.review_decisions.len(), 1);
+}
+
+#[tokio::test]
+async fn human_review_payload_edits_unknown_versions_and_busy_storage_fail_closed() {
+    use crate::features::human_review::{
+        self as hr, DecisionKind as K, DecisionStatus as S, HistoryState as H,
+    };
+    let f = fixture(true);
+    let target = report(&f, false).await.review_target.unwrap();
+    let (first, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    let events = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join("provenance/v7/events");
+    let p = events.join(format!("{}.json", f.change));
+    let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    event["event"]["lines_added"] = serde_json::json!(12);
+    fs::write(&p, serde_json::to_vec(&event).unwrap()).unwrap();
+    assert_eq!(report(&f, false).await.review_decisions[0].status, S::Stale);
+    let token = report(&f, false).await.review_target.unwrap().token;
+    let lease = f.store.try_lease(&f.session.meta.id).unwrap();
+    assert!(
+        hr::record(f.dir.path(), &f.session.meta.id, K::RequestChanges, &token)
+            .await
+            .is_err()
+    );
+    drop(lease);
+    let p = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join(format!("human-review/v1/decisions/{}.json", first.id));
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    record["schema_version"] = serde_json::json!(0);
+    fs::write(p, serde_json::to_vec(&record).unwrap()).unwrap();
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decision_state, H::Unknown);
+    assert!(r.review_decisions.is_empty());
+    assert!(
+        hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &token)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn human_review_unavailable_or_unsafe_storage_never_records() {
+    use crate::features::human_review::{self as hr, DecisionKind as K};
+    let unavailable = fixture(false);
+    assert!(report(&unavailable, false).await.review_target.is_none());
+    assert!(
+        hr::record(
+            unavailable.dir.path(),
+            &unavailable.session.meta.id,
+            K::Accept,
+            &format!("review-v1:{}", "0".repeat(64))
+        )
+        .await
+        .is_err()
+    );
+    let f = fixture(true);
+    let token = report(&f, false).await.review_target.unwrap().token;
+    let p = f.store.session_dir(&f.session.meta.id).join("human-review");
+    fs::write(&p, "storage failure fixture").unwrap();
+    assert!(
+        hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &token)
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(p).unwrap(), "storage failure fixture");
+}
+
+#[tokio::test]
+async fn human_review_plan_and_future_format_changes_are_distinct_from_command_success() {
+    use crate::features::human_review::{
+        self as hr, DecisionKind as K, DecisionStatus as S, HistoryState as H,
+    };
+    let f = fixture(true);
+    let token = report(&f, false).await.review_target.unwrap().token;
+    hr::record(f.dir.path(), &f.session.meta.id, K::RequestChanges, &token)
+        .await
+        .unwrap();
+    let p = f
+        .dir
+        .path()
+        .join(format!(".doge/plans/{}.json", f.session.meta.id));
+    let mut plan: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    plan["items"][0]["content"] = serde_json::json!("different plan");
+    fs::write(p, serde_json::to_vec(&plan).unwrap()).unwrap();
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decisions[0].status, S::Stale);
+    assert_eq!(r.summary.verification_successes, 1);
+    let current = r.review_target.unwrap().token;
+    let dir = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join("human-review/v2");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("future.json"), "{}").unwrap();
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decision_state, H::Unknown);
+    assert_eq!(r.review_decisions[0].status, S::Unknown);
+    assert!(
+        hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &current)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn human_review_orders_clock_rollback_by_explicit_chain_and_rejects_private_metadata() {
+    use crate::features::human_review::{
+        self as hr, DecisionKind as K, DecisionStatus as S, HistoryState as H,
+    };
+    let f = fixture(true);
+    let token = report(&f, false).await.review_target.unwrap().token;
+    let (first, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &token)
+        .await
+        .unwrap();
+    let (second, _) = hr::record(f.dir.path(), &f.session.meta.id, K::RequestChanges, &token)
+        .await
+        .unwrap();
+    let p = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join(format!("human-review/v1/decisions/{}.json", second.id));
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    record["timestamp"] = serde_json::json!("2020-01-01T00:00:00Z");
+    fs::write(&p, serde_json::to_vec(&record).unwrap()).unwrap();
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decision_state, H::Recorded);
+    assert_eq!(r.review_decisions[0].recorded.id, first.id);
+    assert_eq!(r.review_decisions[1].status, S::Current);
+    record["target"]["change_ids"] = serde_json::json!(["PRIVATE-IDENTITY"]);
+    fs::write(&p, serde_json::to_vec(&record).unwrap()).unwrap();
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decision_state, H::Unknown);
+    assert!(
+        !serde_json::to_string(&r)
+            .unwrap()
+            .contains("PRIVATE-IDENTITY")
+    );
+}
+
+#[tokio::test]
+async fn human_review_staging_and_repeat_workspace_edits_change_the_snapshot() {
+    let f = fixture(true);
+    let first = report(&f, false).await.review_target.unwrap().token;
+    git(f.dir.path(), &["add", "code.rs"]);
+    let staged = report(&f, false).await.review_target.unwrap().token;
+    assert_ne!(first, staged);
+    git(f.dir.path(), &["reset", "-q", "HEAD", "--", "code.rs"]);
+    assert_eq!(first, report(&f, false).await.review_target.unwrap().token);
+    fs::write(f.dir.path().join("code.rs"), "fn later_one() {}\n").unwrap();
+    let changed = report(&f, false).await.review_target.unwrap().token;
+    fs::write(f.dir.path().join("code.rs"), "fn later_two() {}\n").unwrap();
+    assert_ne!(
+        changed,
+        report(&f, false).await.review_target.unwrap().token
+    );
+}
+
+#[tokio::test]
+async fn human_review_noncanonical_legacy_event_id_cannot_issue_an_unreadable_decision() {
+    let f = fixture(true);
+    let p = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join(format!("provenance/v7/events/{}.json", f.change));
+    let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    event["event_id"] = serde_json::json!("legacy-event-id");
+    fs::write(&p, serde_json::to_vec(&event).unwrap()).unwrap();
+    let r = report(&f, false).await;
+    assert!(r.review_target.is_none());
+    assert!(r.review_decisions.is_empty());
+}
+
+#[tokio::test]
+async fn human_review_valid_but_changed_target_metadata_cannot_be_an_idempotent_retry() {
+    use crate::features::human_review::{self as hr, DecisionKind as K, DecisionStatus as S};
+    let f = fixture(true);
+    let target = report(&f, false).await.review_target.unwrap();
+    let (first, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    let p = f
+        .store
+        .session_dir(&f.session.meta.id)
+        .join(format!("human-review/v1/decisions/{}.json", first.id));
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    record["target"]["workspace_manifest"] =
+        serde_json::json!(format!("blake3:{}", "0".repeat(64)));
+    fs::write(p, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(report(&f, false).await.review_decisions[0].status, S::Stale);
+    let (next, written) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
+        .await
+        .unwrap();
+    assert!(written);
+    assert_eq!(next.supersedes, Some(first.id));
+    assert_eq!(next.target, target);
+    let r = report(&f, false).await;
+    assert_eq!(r.review_decisions.len(), 2);
+    assert_eq!(r.review_decisions[1].status, S::Current);
+}
