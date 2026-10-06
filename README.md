@@ -217,6 +217,15 @@ and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-
 
 ## Export evidence for review
 
+The report starts with a per-change review handoff: explicit requirement/plan
+links and linked command observation IDs. Matching successful observations require
+an active change matching its recorded file, stable execution endpoints and
+current selected files matching the execution start. Historical or unknown
+successes appear separately; all linked failures remain visible even after later
+successes. Empty evidence does not establish success or approval. JSON schema v2
+adds `review_handoff`; existing fields and persisted records are unchanged.
+
+
 Export a saved session's requirements, changes and recorded command outcomes
 without an API key or an LLM call:
 

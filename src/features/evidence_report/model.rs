@@ -32,6 +32,7 @@ pub struct EvidenceReport {
     pub changes: Vec<Change>,
     pub verifications: Vec<Verification>,
     pub workspace_comparison: Vec<WorkspaceChange>,
+    pub review_handoff: Vec<ReviewChange>,
     pub summary: Summary,
     pub warnings: Vec<ReportWarning>,
     pub limitations: Vec<String>,
@@ -291,4 +292,13 @@ pub fn warn(warnings: &mut Vec<ReportWarning>, code: WarningCode, message: impl 
         code,
         message: message.into(),
     });
+}
+
+/// Derived links for review; these observations never establish readiness.
+#[derive(Debug, Serialize)]
+pub struct ReviewChange {
+    pub change_id: String,
+    pub matching_successful_observation_ids: Vec<String>,
+    pub failed_observation_ids: Vec<String>,
+    pub other_successful_observation_ids: Vec<String>,
 }

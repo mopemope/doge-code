@@ -38,6 +38,14 @@ fn cell(text: &str) -> String {
     out
 }
 
+fn observation_ids(ids: &[String]) -> String {
+    if ids.is_empty() {
+        "none recorded".into()
+    } else {
+        cell(&ids.join(", "))
+    }
+}
+
 fn markdown(r: &EvidenceReport, json: &str) -> String {
     let mut out = String::from("# Dgc evidence report\n\n");
     let _ = writeln!(
@@ -62,6 +70,34 @@ fn markdown(r: &EvidenceReport, json: &str) -> String {
         cell(&r.snapshot.manifest_digest),
         r.snapshot.complete
     );
+    out.push_str("## Review handoff by recorded change\n\n");
+    out.push_str("Matching successes require an active change matching its recorded file, stable recorded execution endpoints and current selected files matching the execution start. These are observations, not requirement satisfaction or approval. Other successes include historical, changed and unknown correspondence. Every linked failure remains visible; later successes do not erase it. See command observations for each outcome and correspondence.\n\n");
+    out.push_str("| Change | File | Lifecycle / file match | Recorded requirements / plan | Matching successful observations | Failed observations (all correspondence) | Other successful observations |\n|---|---|---|---|---|---|---|\n");
+    for (change, row) in r.changes.iter().zip(&r.review_handoff) {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {:?} / {:?} | {} / {} | {} | {} | {} |",
+            cell(&row.change_id),
+            cell(&change.recorded.file),
+            change.lifecycle_state,
+            change.current_file_match,
+            cell(&change.recorded.requirement_ids.join(", ")),
+            cell(
+                change
+                    .recorded
+                    .plan_item_id
+                    .as_deref()
+                    .unwrap_or("not recorded")
+            ),
+            observation_ids(&row.matching_successful_observation_ids),
+            observation_ids(&row.failed_observation_ids),
+            observation_ids(&row.other_successful_observation_ids)
+        );
+    }
+    if r.review_handoff.is_empty() {
+        out.push_str("No recorded changes. Empty evidence does not establish success.\n");
+    }
+    out.push_str("\nUnlinked command observations and unattributed workspace files remain in the sections below. An empty matching-success cell requires review; it is not a failed test result.\n\n");
     out.push_str("## Items requiring attention\n\n");
     for w in &r.warnings {
         let _ = writeln!(out, "- {}", cell(&w.message));

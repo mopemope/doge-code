@@ -500,6 +500,7 @@ pub(super) fn build(
         .filter(|f| f.attribution == Attribution::Unattributed)
         .count();
     summary.record_collection_complete = inputs.warnings.is_empty() && snapshot.complete;
+    let review_handoff = super::handoff::build(&changes, &verifications);
     EvidenceReport {
         schema_version: 2, generator: format!("dgc/{}", env!("CARGO_PKG_VERSION")), generated_at,
         session: ReportSession { id: inputs.session.meta.id, updated_at: inputs.session.timestamp,
@@ -511,7 +512,7 @@ pub(super) fn build(
                 "outside project root".into(), "submodule contents".into()] },
         repository: git.repository, snapshot, directives, requirements, plan: inputs.plan,
         plan_available: inputs.plan_available, obligations, changes, verifications, workspace_comparison: git.files,
-        summary, warnings: inputs.warnings,
+        review_handoff, summary, warnings: inputs.warnings,
         limitations: vec![
             "Observed passing is a command outcome, not a correctness proof or requirement satisfaction.".into(),
             "Requirement coverage does not imply all verification obligations passed.".into(),
