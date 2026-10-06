@@ -220,6 +220,7 @@ async fn run_test_job(
                     result.output_truncated,
                     result.warnings.clone(),
                     verification_context,
+                    result.structured_test_result.clone(),
                 ) {
                     ui_tx.send_logged(
                         "[provenance][warning] Test ran, but provenance recording failed."
@@ -243,7 +244,12 @@ async fn run_test_job(
                             "none".to_string()
                         }
                     }),
-                testing::budget_diagnostic_output(&result.stdout),
+                testing::budget_diagnostic_output(
+                    result
+                        .diagnostic_stdout
+                        .as_deref()
+                        .unwrap_or(&result.stdout)
+                ),
                 testing::budget_diagnostic_output(&result.stderr)
             ));
 
@@ -270,7 +276,12 @@ async fn run_test_job(
             if !result.stdout.is_empty() {
                 ui_tx.send_logged(format!(
                     "::shell_output:Output:\n{}",
-                    testing::budget_diagnostic_output(&result.stdout)
+                    testing::budget_diagnostic_output(
+                        result
+                            .diagnostic_stdout
+                            .as_deref()
+                            .unwrap_or(&result.stdout)
+                    )
                 ));
             }
 

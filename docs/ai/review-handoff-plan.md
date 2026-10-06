@@ -156,3 +156,19 @@ Exit status and reported test events are not coverage measurements or review
 acceptance. Further adapters require format-specific trust/bounds/compatibility
 design. Human reviewer decisions are covered by the explicit local judgment slice above. Never parse arbitrary output into correctness or treat command success
 as human approval. These follow-ups are not included in the first adapter PR.
+
+## Follow-up: Connect the Go adapter to the regular test workflow
+
+The first adapter was reached only by explicit execute_process requests; the
+regular Go `/test` still selected verbose text. Run Go `/test` with `-json`, parse
+its bounded raw capture before display budgets, and carry the typed result to
+the shared observation writer. Preserve raw-capture digest/content semantics.
+Decode Output events for human diagnostics and match failed-test information by
+(Package, Test), including messages emitted before terminal failure. Counts may
+be unknown while compiler/test diagnostics remain usable. Keep legacy/custom Go
+verbose parsing, other languages, frozen links, timeout/cancel and deferred
+failure handoff behavior. No new result format, schema migration or judgment.
+Acceptance: readable pass/fail/build failure, parallel/subtest attribution,
+known zero versus package failure, cache, pre-display count retention, capture
+warnings/timeout unknown, cancelled runs unrecorded, writer failure visibility.
+Focused/full Rust/guidance, independent review and TUI terminal recording.
