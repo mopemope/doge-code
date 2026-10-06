@@ -215,6 +215,7 @@ pub async fn collect_diff_review_payload(
     debug!(files = ?files, "Collected diff review payload");
 
     Ok(Some(DiffReviewPayload {
+        session_id: None,
         review_id: None,
         reject_reason: None,
         diff: combined_diff,

@@ -2,6 +2,7 @@ use crate::diff_review::{DiffFileEvidence, DiffReviewPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffReviewState {
+    pub session_id: Option<String>,
     pub review_id: Option<String>,
     pub reject_reason: Option<String>,
     pub files: Vec<DiffFileState>,
@@ -81,6 +82,7 @@ impl DiffReviewState {
         }
 
         Self {
+            session_id: payload.session_id,
             review_id: payload.review_id,
             reject_reason: payload.reject_reason,
             files,
@@ -221,6 +223,7 @@ mod tests {
     #[test]
     fn test_builds_review_state_from_single_file_payload() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff:
@@ -243,6 +246,7 @@ mod tests {
     #[test]
     fn test_groups_multiple_files() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n+hello\n\ndiff --git a/bar.txt b/bar.txt\n--- a/bar.txt\n+++ b/bar.txt\n+world\n".to_string(),
@@ -266,6 +270,7 @@ mod tests {
         // `git diff --no-index /dev/null bar.txt` produces paths like
         // "a//dev/null b/bar.txt"; the file list should win over the header path.
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a//dev/null b/bar.txt\n--- /dev/null\n+++ b/bar.txt\n@@ -0,0 +1 @@\n+new file\n"
@@ -284,6 +289,7 @@ mod tests {
     #[test]
     fn test_empty_diff_falls_back_to_workspace_entry() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: String::new(),
@@ -301,6 +307,7 @@ mod tests {
     #[test]
     fn test_file_paths_returns_all_paths() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a/a.txt b/a.txt\n+x\ndiff --git a/b.txt b/b.txt\n+y\n".to_string(),
@@ -316,6 +323,7 @@ mod tests {
     fn evidence_payload() -> DiffReviewPayload {
         use crate::diff_review::{DiffFileEvidence, DiffObligationEvidence};
         DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a/a.txt b/a.txt\n+x\ndiff --git a/b.txt b/b.txt\n+y\n".to_string(),
@@ -399,6 +407,7 @@ mod tests {
     #[test]
     fn test_legacy_payload_without_evidence_renders() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a/a.txt b/a.txt\n+x\n".to_string(),

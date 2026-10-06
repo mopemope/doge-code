@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffReviewPayload {
+    /// Session captured with this review, never inferred from the current UI.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub review_id: Option<String>,
     #[serde(default)]
@@ -243,6 +246,7 @@ pub fn enrich_diff_review_with_evidence(
         build_diff_review_evidence(project_root, events, plan_items, &payload.files);
     warnings.extend(payload.evidence_warnings.clone());
     DiffReviewPayload {
+        session_id: payload.session_id,
         review_id: payload.review_id,
         reject_reason: payload.reject_reason,
         diff: payload.diff,
@@ -270,6 +274,7 @@ mod tests {
     #[test]
     fn test_evidence_roundtrip() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "d".to_string(),

@@ -426,11 +426,11 @@ impl TuiApp {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
-            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, a accept, r reject, q dismiss"
+            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, e evidence, a accept, r reject, q dismiss"
                 .to_string()
         } else {
             format!(
-                "View only: {} | a accept, q dismiss",
+                "View only: {} | e evidence, a accept, q dismiss",
                 review
                     .reject_reason
                     .as_deref()
