@@ -77,18 +77,24 @@ resolve concrete visible-behavior decisions before implementation.
 
 ## P2 / PR 3: Record bounded execution context
 
-Gap: current reports explicitly mark toolchain, test counts and environment as
-unrecorded. Design an allowlisted execution-context shape for managed checks
-before changing the durable wire. Consider OS family/architecture and explicit
-tool versions only; exclude host/user names, home paths, environment variables,
-credentials and remote URLs. Bounded probes must use the managed runner and its
-policy/deadline/cancellation; no paid calls. Files: execution observation writer,
-provenance wire adapters, snapshot/report models and documentation. Requires an
-explicit versioned adapter; legacy context remains unknown rather than being
-reconstructed from the exporting machine. Acceptance: bounds and cancellation,
-privacy fixtures, old/new wire loading, no fabricated environment/test counts.
-Independent wire/privacy review and focused/full Rust checks required. Separate
-PR after P0; context scope remains a product decision.
+Implementation slice: v6 records frozen OS family/architecture and an optional
+primary-tool numeric version. Probe only the selected root-owned native ELF
+system executable, outside the project, with fixed arguments, cleared environment,
+empty temporary cwd, 1 KiB retained per stream and 500 ms execution deadline
+(or lower configured LLM cap), preserving managed cleanup/cancellation. Original
+and additional LLM requests independently pass existing policy. Cargo/Python3/Node
+are eligible; Go delegation and wrappers/home shims remain unknown. No raw output,
+paths, host/user/env values are persisted. v1–5 stay frozen and are never filled
+from the exporting host. JSON schema-v2 adds execution_context; the existing
+execution_environment field remains reserved/null. Markdown shows context apart
+from outcome. No test counts, dependency versions or correctness/reproducibility
+claims. Focused policy/privacy/runner/wire/report tests and full Rust/guidance
+checks plus independent review precede the dedicated draft PR.
+
+Remaining boundary: complete toolchain/dependency identities, test counts and
+format-specific result adapters are not recorded by P2. Metadata absence never
+fabricates evidence, and future context changes require a new explicit format.
+Structured test results and human decisions remain separate P3 work.
 
 ## P3 / separate future PRs: Structured results and reviewer decisions
 

@@ -27,31 +27,36 @@ impl BoundedCapture {
     /// Feed a chunk. Memory stays bounded: at most
     /// `CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES` are retained.
     pub fn push(&mut self, chunk: &[u8]) {
+        self.push_with_limits(chunk, CAPTURE_HEAD_BYTES, CAPTURE_TAIL_BYTES);
+    }
+
+    /// The runner uses a fixed smaller budget for the entire probe stream.
+    pub(crate) fn push_with_limits(&mut self, chunk: &[u8], head_limit: usize, tail_limit: usize) {
         if chunk.is_empty() {
             return;
         }
         self.total_bytes += chunk.len() as u64;
-        if self.head.len() < CAPTURE_HEAD_BYTES {
-            let take = (CAPTURE_HEAD_BYTES - self.head.len()).min(chunk.len());
+        if self.head.len() < head_limit {
+            let take = (head_limit - self.head.len()).min(chunk.len());
             self.head.extend_from_slice(&chunk[..take]);
             if take == chunk.len() {
                 return;
             }
-            self.push_tail(&chunk[take..]);
+            self.push_tail(&chunk[take..], tail_limit);
         } else {
-            self.push_tail(chunk);
+            self.push_tail(chunk, tail_limit);
         }
-        if self.total_bytes > (CAPTURE_HEAD_BYTES + CAPTURE_TAIL_BYTES) as u64 {
+        if self.total_bytes > (head_limit + tail_limit) as u64 {
             self.truncated = true;
         }
     }
 
     /// Append to the tail window, evicting the oldest bytes past the limit.
     /// One `drain` per call, proportional to the chunk (read in 8KB units).
-    fn push_tail(&mut self, chunk: &[u8]) {
+    fn push_tail(&mut self, chunk: &[u8], tail_limit: usize) {
         self.tail.extend_from_slice(chunk);
-        if self.tail.len() > CAPTURE_TAIL_BYTES {
-            let excess = self.tail.len() - CAPTURE_TAIL_BYTES;
+        if self.tail.len() > tail_limit {
+            let excess = self.tail.len() - tail_limit;
             self.tail.drain(..excess);
             self.truncated = true;
         }

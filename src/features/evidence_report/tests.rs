@@ -233,6 +233,7 @@ fn verification(f: &Fixture, success: bool, timeout: bool) {
         .append(
             &f.session.meta.id,
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_context: None,
                 execution_workspace: None,
                 directive_id: Some(f.directive.clone()),
                 plan_item_id: Some("step-1".into()),
@@ -1460,4 +1461,67 @@ fn review_link_uses_exact_id_arguments_and_escapes_project_control_characters() 
     assert!(ReviewLink::new(root, "latest").is_none());
     assert!(ReviewLink::new(root, "../../other").is_none());
     assert!(ReviewLink::new(root, "/evidence injected").is_none());
+}
+
+#[tokio::test]
+async fn recorded_context_export_is_separate_and_legacy_remains_unknown() {
+    let f = fixture(true);
+    let r = report(&f, false).await;
+    assert!(r.verifications[0].execution_context.is_none());
+    let legacy = render::render(&r, ReportFormat::Markdown).expect("legacy");
+    assert!(legacy.contains("unknown (not recorded)"));
+    let observed_outcome = r.verifications[0].outcome.success;
+    let mut observed = f
+        .provenance
+        .load_all()
+        .expect("saved observations")
+        .events
+        .into_iter()
+        .find_map(|e| match e.event {
+            ProvenanceEvent::VerificationObserved(v) => Some(v),
+            _ => None,
+        })
+        .expect("verification");
+    observed.execution_context = Some(Box::new(
+        crate::features::verification_context::ExecutionContext {
+            format_version: 1,
+            os_family: crate::features::verification_context::OsFamily::Linux,
+            architecture: crate::features::verification_context::Architecture::X86_64,
+            tool: Some(crate::features::verification_context::Tool::Python3),
+            version: crate::features::verification_context::VersionObservation::Observed {
+                major: 3,
+                minor: 13,
+                patch: 3,
+            },
+        },
+    ));
+    f.provenance
+        .append(
+            &f.session.meta.id,
+            ProvenanceEvent::VerificationObserved(observed),
+        )
+        .expect("v6 context");
+    let r = report(&f, false).await;
+    let position = r
+        .verifications
+        .iter()
+        .position(|v| v.execution_context.is_some())
+        .expect("collected saved context");
+    let value: serde_json::Value =
+        serde_json::from_str(&render::render(&r, ReportFormat::Json).expect("json"))
+            .expect("value");
+    assert_eq!(
+        value["verifications"][position]["execution_context"]["version"]["status"],
+        "observed"
+    );
+    assert_eq!(
+        value["verifications"][position]["execution_context"]["version"]["minor"],
+        13
+    );
+    assert!(value["verifications"][position]["execution_environment"].is_null());
+    assert!(value["verifications"][position]["test_count"].is_null());
+    let markdown = render::render(&r, ReportFormat::Markdown).expect("markdown");
+    assert!(markdown.contains("Recorded execution context"));
+    assert!(markdown.contains("does not prove reproducibility or correctness"));
+    assert_eq!(r.verifications[position].outcome.success, observed_outcome);
 }

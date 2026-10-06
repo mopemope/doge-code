@@ -149,6 +149,14 @@ async fn run_test_job(
                     &test_cmd.command,
                     &test_cmd.args,
                 );
+            verification_context.execution_context = Some(
+                crate::features::verification_context::capture_trusted(
+                    &project_root,
+                    &test_cmd.command,
+                    Some(cancellation.child_token()),
+                )
+                .await,
+            );
             crate::tools::provenance::prepare_verification_snapshot(
                 &tools,
                 &mut verification_context,

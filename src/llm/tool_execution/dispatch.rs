@@ -1971,7 +1971,25 @@ mod tests {
         }
         let events = crate::tools::provenance::load_current_events(&fs_tools)?.expect("session");
         assert_eq!(events.events.len(), 4);
-        assert!(events.events.iter().all(|env| env.schema_version == 5));
+        assert!(
+            events
+                .events
+                .iter()
+                .all(|env| env.schema_version == crate::provenance::PROVENANCE_SCHEMA_VERSION)
+        );
+        for event in &events.events {
+            if let crate::provenance::ProvenanceEvent::VerificationObserved(v) = &event.event {
+                let context = v
+                    .execution_context
+                    .as_ref()
+                    .expect("captured context before run");
+                assert_eq!(context.format_version, 1);
+                assert_eq!(
+                    context.version,
+                    crate::features::verification_context::VersionObservation::Unsupported
+                );
+            }
+        }
         let missing = root.path().join("missing/pytest");
         let call = ToolCall {
             id: Some("spawn-failed".into()),

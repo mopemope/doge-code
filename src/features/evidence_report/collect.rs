@@ -429,6 +429,7 @@ pub(super) fn build(
                 });
             }
             Event::VerificationObserved(v) => verifications.push(Verification {
+                execution_context: v.execution_context.clone(),
                 execution_workspace: v.execution_workspace.clone(),
                 current_code_state: crate::features::verification_snapshot::compare_current(
                     v.execution_workspace.as_deref(),
@@ -516,7 +517,7 @@ pub(super) fn build(
         limitations: vec![
             "Observed passing is a command outcome, not a correctness proof or requirement satisfaction.".into(),
             "Requirement coverage does not imply all verification obligations passed.".into(),
-            "Execution environment, toolchain, test count, and dependency-wide execution snapshots were not recorded. Version-five execution workspace endpoints cover selected project files only; legacy observations have no recorded endpoints.".into(),
+            "Execution context covers recorded OS family/architecture and a bounded allowlisted primary-tool version only. Missing legacy context and unavailable versions remain unknown; test counts and dependency-wide snapshots are not recorded. Context equality never proves reproducibility or correctness. Version-five execution workspace endpoints cover selected project files only; legacy observations have no recorded endpoints.".into(),
             "Endpoint equality does not establish atomic snapshots or unchanged inputs throughout execution; changes restored between observations may be missed. Historical coverage remains independent of current code correspondence.".into(),
             "The manifest identifies selected files at export time; it is not a repository tree, execution snapshot, signature, or reproducibility guarantee.".into(),
             "Before/after comparison is optimistic and does not provide an atomic filesystem snapshot.".into(),
