@@ -102,7 +102,9 @@ pub fn detect_project_languages(project_root: &Path) -> Vec<String> {
     // Also scan for source files
     scan_directory_for_languages(project_root, &mut languages, 0);
 
-    languages.into_iter().collect()
+    let mut languages: Vec<_> = languages.into_iter().collect();
+    languages.sort_unstable();
+    languages
 }
 
 fn scan_directory_for_languages(
@@ -126,6 +128,7 @@ fn scan_directory_for_languages(
                         "target"
                             | "node_modules"
                             | ".git"
+                            | ".doge"
                             | "vendor"
                             | "__pycache__"
                             | ".venv"
@@ -157,6 +160,77 @@ fn scan_directory_for_languages(
                     scan_directory_for_languages(&path, languages, depth + 1);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod language_detection_tests {
+    use super::*;
+
+    fn write(root: &Path, path: &str) {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "fixture\n").unwrap();
+    }
+
+    #[test]
+    fn internal_doge_files_do_not_add_test_languages() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            ".doge/scratch/internal.go",
+            ".doge/scratch/internal.py",
+            ".doge/scratch/internal.js",
+            ".doge/scratch/internal.rs",
+            "src/.doge/internal.go",
+        ] {
+            write(root.path(), path);
+        }
+        assert!(detect_project_languages(root.path()).is_empty());
+        write(root.path(), "Cargo.toml");
+        write(root.path(), "src/lib.rs");
+        assert_eq!(detect_project_languages(root.path()), ["rust"]);
+    }
+
+    #[test]
+    fn real_languages_are_deduplicated_and_sorted_with_existing_exclusions() {
+        let root = tempfile::tempdir().unwrap();
+        for path in ["Cargo.toml", "src/lib.rs", "src/other.rs"] {
+            write(root.path(), path);
+        }
+        for excluded in [
+            "target",
+            "node_modules",
+            ".git",
+            "vendor",
+            "__pycache__",
+            ".venv",
+            "venv",
+        ] {
+            write(root.path(), &format!("{excluded}/internal.go"));
+        }
+        assert_eq!(detect_project_languages(root.path()), ["rust"]);
+        for path in [
+            "tools/helper.go",
+            "tests/test_helper.py",
+            "web/helper.ts",
+            "web/other.js",
+        ] {
+            write(root.path(), path);
+        }
+        // Source-only languages must be detected even without their manifests.
+        assert_eq!(
+            detect_project_languages(root.path()),
+            ["go", "python", "rust", "typescript"]
+        );
+        for path in ["go.mod", "pyproject.toml", "package.json"] {
+            write(root.path(), path);
+        }
+        for _ in 0..32 {
+            assert_eq!(
+                detect_project_languages(root.path()),
+                ["go", "python", "rust", "typescript"]
+            );
         }
     }
 }

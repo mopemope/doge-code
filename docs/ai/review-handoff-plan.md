@@ -201,3 +201,17 @@ ordinary functions, file/parameter spaces, parameter separators/brackets,
 message separators/brackets, omitted messages and ambiguous forms. Preserve
 the managed workflow, capture and failure follow-up; independent review, focused
 and full Rust/guidance checks plus a TUI recording.
+
+## Follow-up: Exclude internal files from test language detection
+
+The trusted `/test` scanner included `.doge` source-like files, which could select
+an unrelated command and failure analysis; its HashSet enumeration also made
+execution order vary. Add `.doge` to the existing scanner exclusions and sort the
+deduplicated languages before return. Preserve root manifest/source detection,
+scan depth, existing exclusions and command/job semantics. Do not change `/lint`
+or adopt another feature's ignore configuration in this slice.
+Acceptance: root/nested internal files do not add languages; real mixed sources
+remain detected once in stable order; existing excluded directories remain
+excluded. Real TUI Rust project plus internal Go file runs Cargo only without
+Go or failure follow-up. Focused/full Rust/guidance, independent review and a
+terminal recording precede dedicated Draft PR and final-head CI completion.
