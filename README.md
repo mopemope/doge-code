@@ -1080,6 +1080,17 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
   - Rust: `cargo test`
   - Go: `go test -json ./...`
   - Node.js: `npm test`
+  - Python: the interpreter in `.venv` (preferred) or `venv`, identified by
+    `pyvenv.cfg`, runs `-m pytest -v` without requiring activation. Without a
+    project environment, use PATH `python3` (`python` on Windows).
+- A selected Python environment that cannot start or lacks pytest reports that
+  failure; `/test` does not install packages or retry in another environment.
+  [Python venv](https://docs.python.org/3/library/venv.html) supports invoking the
+  environment interpreter directly; [pytest module invocation](https://docs.pytest.org/en/stable/how-to/usage.html#calling-pytest-through-python-m-pytest)
+  also adds the current project directory to Python's import path.
+- Existing explicit `pytest` plan command matchers are not rewritten to match
+  `python -m pytest`; historical links stay unchanged. Interpreter selection does
+  not activate the environment for subprocess PATH lookup.
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
 - `/test` uses the configured `command_timeout_ms` (where `0` means unlimited) and the same managed process lifecycle as finite LLM commands, without applying the LLM execution allowlist.
 

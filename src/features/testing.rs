@@ -234,22 +234,182 @@ fn typescript_test_commands(project_root: &Path) -> Vec<TestCommand> {
 }
 
 fn python_test_commands(project_root: &Path) -> Vec<TestCommand> {
-    // Check if pytest is available
-    if project_root.join("pytest.ini").exists()
-        || project_root.join("pyproject.toml").exists()
-        || project_root.join("setup.cfg").exists()
-    {
-        return vec![TestCommand {
-            command: "pytest".to_string(),
-            args: vec!["-v".to_string()],
-        }];
-    }
-
-    // Fallback to python -m pytest
+    // Configuration files do not establish which interpreter owns pytest.
+    // Prefer a project virtual environment without requiring shell activation.
+    // Keep its symlink path: resolving the interpreter itself would bypass venv.
+    let interpreter = [".venv", "venv"].into_iter().find_map(|directory| {
+        let environment = project_root.join(directory);
+        environment.join("pyvenv.cfg").is_file().then(|| {
+            environment.join(if cfg!(windows) {
+                "Scripts/python.exe"
+            } else {
+                "bin/python"
+            })
+        })
+    });
+    let command = match interpreter {
+        Some(path) => std::path::absolute(&path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned(),
+        None => if cfg!(windows) { "python" } else { "python3" }.to_string(),
+    };
+    // A broken selected environment must surface its error, not silently run
+    // tests in another environment or install dependencies.
     vec![TestCommand {
-        command: "python".to_string(),
+        command,
         args: vec!["-m".to_string(), "pytest".to_string(), "-v".to_string()],
     }]
+}
+
+#[cfg(test)]
+mod python_environment_tests {
+    use super::*;
+
+    fn interpreter(root: &Path, directory: &str) -> std::path::PathBuf {
+        root.join(directory).join(if cfg!(windows) {
+            "Scripts/python.exe"
+        } else {
+            "bin/python"
+        })
+    }
+
+    fn mark_environment(root: &Path, directory: &str) {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+        std::fs::write(root.join(directory).join("pyvenv.cfg"), "home = fixture\n").unwrap();
+    }
+
+    #[test]
+    fn python_environment_precedence_is_independent_of_pytest_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let default = python_test_commands(root.path());
+        assert_eq!(
+            default[0].command,
+            if cfg!(windows) { "python" } else { "python3" }
+        );
+        assert_eq!(default[0].args, ["-m", "pytest", "-v"]);
+        // A source directory with a familiar name is not itself a virtualenv.
+        std::fs::create_dir(root.path().join(".venv")).unwrap();
+        assert_eq!(
+            python_test_commands(root.path())[0].command,
+            default[0].command
+        );
+        mark_environment(root.path(), "venv");
+        assert_eq!(
+            python_test_commands(root.path())[0].command,
+            interpreter(root.path(), "venv").to_string_lossy()
+        );
+        mark_environment(root.path(), ".venv");
+        assert_eq!(
+            python_test_commands(root.path())[0].command,
+            interpreter(root.path(), ".venv").to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_program(root: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = interpreter(root, ".venv");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_python_path_with_spaces_keeps_argv_and_failure_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project with spaces");
+        mark_environment(&root, ".venv");
+        let program = write_program(
+            &root,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > argv.txt\nprintf 'FAILED tests/test_local.py::test_local - AssertionError: local detail\\n'\nexit 1\n",
+        );
+        let config = python_test_commands(&root);
+        assert_eq!(config[0].command, program.to_string_lossy());
+        let result = run_test_command(&root, &config[0].command, &config[0].args, 10000).await;
+        assert!(!result.success);
+        assert!(result.execution_observed);
+        assert_eq!(result.exit_code, Some(1));
+        assert_eq!(
+            std::fs::read_to_string(root.join("argv.txt")).unwrap(),
+            "-m\npytest\n-v\n"
+        );
+        let failures = parse_test_output(&result, "python");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "test_local");
+        assert_eq!(
+            failures[0].file_path.as_deref(),
+            Some("tests/test_local.py")
+        );
+        assert_eq!(failures[0].message, "AssertionError: local detail");
+        assert!(result.structured_test_result.is_none());
+        assert!(result.diagnostic_stdout.is_none());
+        // Retain standard interpreter symlinks instead of turning them into
+        // system interpreter invocations that bypass the environment.
+        let target = root.join("fixture-python");
+        std::fs::rename(&program, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &program).unwrap();
+        assert_eq!(
+            python_test_commands(&root)[0].command,
+            program.to_string_lossy()
+        );
+        let result = run_test_command(&root, &config[0].command, &config[0].args, 10000).await;
+        assert_eq!(parse_test_output(&result, "python").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_selected_python_environment_never_changes_environments() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_environment(dir.path(), ".venv");
+        mark_environment(dir.path(), "venv");
+        let command = python_test_commands(dir.path()).remove(0);
+        let missing = run_test_command(dir.path(), &command.command, &command.args, 10000).await;
+        assert!(!missing.success);
+        assert!(!missing.execution_observed);
+        assert!(missing.stderr.contains("Failed to run tests:"));
+        write_program(
+            dir.path(),
+            "#!/bin/sh\nprintf 'No module named pytest\\n' >&2\nexit 1\n",
+        );
+        let module = run_test_command(dir.path(), &command.command, &command.args, 10000).await;
+        assert!(!module.success);
+        assert!(module.execution_observed);
+        assert_eq!(module.exit_code, Some(1));
+        assert!(module.stderr.contains("No module named pytest"));
+        assert!(parse_test_output(&module, "python").is_empty());
+        assert!(module.structured_test_result.is_none());
+    }
+
+    #[test]
+    fn selecting_python_does_not_rewrite_old_pytest_obligation_matchers() {
+        use crate::provenance::{
+            VerificationCommandMatcher, VerificationKind, VerificationObligation,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let command = python_test_commands(root.path()).remove(0);
+        let obligation = VerificationObligation {
+            id: "pytest-original".into(),
+            description: "Run the original explicit command".into(),
+            kind: VerificationKind::Test,
+            command: Some(VerificationCommandMatcher {
+                program: "pytest".into(),
+                args_prefix: vec!["-v".into()],
+            }),
+        };
+        assert!(
+            !crate::provenance::obligations::obligation_matches_invocation(
+                &obligation,
+                VerificationKind::Test,
+                &command.command,
+                &command.args
+            )
+        );
+        assert_eq!(obligation.command.unwrap().program, "pytest");
+    }
 }
 
 /// Run a trusted internal test command through the common managed lifecycle.
@@ -375,7 +535,9 @@ pub fn parse_test_output(result: &TestResult, language: &str) -> Vec<FailedTest>
         ("npm" | "npx", "typescript") => {
             parse_javascript_test_output(&result.stdout, &result.stderr)
         }
-        ("pytest" | "python", "python") => parse_pytest_output(&result.stdout, &result.stderr),
+        // Python workflow commands all invoke pytest. Their interpreter may be
+        // a full venv path containing spaces, which a display string cannot tokenize.
+        (_, "python") => parse_pytest_output(&result.stdout, &result.stderr),
         _ => Vec::new(),
     }
 }
