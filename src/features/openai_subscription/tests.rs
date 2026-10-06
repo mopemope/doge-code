@@ -758,6 +758,27 @@ async fn mock_login(
     enable_plan: bool,
     declined: bool,
 ) -> Result<String> {
+    mock_login_with_browser_failure(
+        store,
+        selected,
+        subject,
+        grant_plan,
+        enable_plan,
+        declined,
+        false,
+    )
+    .await
+}
+
+async fn mock_login_with_browser_failure(
+    store: CredentialStore,
+    selected: Option<&str>,
+    subject: &str,
+    grant_plan: bool,
+    enable_plan: bool,
+    declined: bool,
+    browser_failure: bool,
+) -> Result<String> {
     use httptest::{Expectation, matchers::*, responders::*};
     let server = httptest::ServerBuilder::new()
         .bind_addr(([127, 0, 0, 1], 0).into())
@@ -793,6 +814,14 @@ async fn mock_login(
         let old = old.clone();
         let discovery = discovery.clone();
         async move {
+        let url = if browser_failure {
+            let temp = tempfile::tempdir()?;
+            let outcome = auth::launch_browser(&temp.path().join("missing-browser"), &url, std::time::Duration::from_secs(1), &CancellationToken::new()).await?;
+            assert_eq!(outcome, auth::BrowserLaunch::Unavailable);
+            let message = auth::browser_instructions(&url, Some(outcome));
+            let manual = message.lines().find(|line| line.starts_with("http://")).expect("manual URL");
+            url::Url::parse(manual)?
+        } else { url };
         let params: std::collections::HashMap<_, _> = url.query_pairs().map(|(k,v)| (k.into_owned(), v.into_owned())).collect();
         assert_eq!(params["client_id"], expected_client);
         assert_eq!(params.get("prompt").map(String::as_str), enable_plan.then_some("consent"));
@@ -2909,4 +2938,209 @@ async fn responses_retry_after_local_backoff_uses_one_based_failures() {
         );
     }
     assert_eq!(client.usage_snapshot().attempts, 4);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn browser_handoff_keeps_launched_child_alive() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let launcher = temp.path().join("fake-browser-launcher");
+    let marker = temp.path().join("browser-still-alive");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\n(sleep 0.2; touch '{}') </dev/null >/dev/null 2>&1 &\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))
+        .expect("permissions");
+    let result = auth::launch_browser(
+        &launcher,
+        &url::Url::parse("https://example.invalid/auth").expect("url"),
+        std::time::Duration::from_secs(2),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("launch");
+    assert_eq!(result, auth::BrowserLaunch::Opened);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("browser child must outlive its launcher");
+}
+
+#[cfg(unix)]
+fn fake_browser(temp: &tempfile::TempDir, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = temp.path().join("fake-launcher");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("permissions");
+    path
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn browser_launch_failure_and_timeout_allow_manual_sign_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let url = url::Url::parse("https://example.invalid/auth?state=ephemeral").expect("url");
+    let cancel = CancellationToken::new();
+    let missing = temp.path().join("missing");
+    assert_eq!(
+        auth::launch_browser(&missing, &url, std::time::Duration::from_secs(1), &cancel)
+            .await
+            .expect("missing"),
+        auth::BrowserLaunch::Unavailable
+    );
+    let failed = fake_browser(&temp, "echo sensitive-url >&2; exit 3");
+    assert_eq!(
+        auth::launch_browser(&failed, &url, std::time::Duration::from_secs(1), &cancel)
+            .await
+            .expect("failed"),
+        auth::BrowserLaunch::Failed
+    );
+    let slow = fake_browser(&temp, "exec sleep 10");
+    assert_eq!(
+        auth::launch_browser(&slow, &url, std::time::Duration::from_millis(30), &cancel)
+            .await
+            .expect("timeout"),
+        auth::BrowserLaunch::TimedOut
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn browser_launch_cancellation_stays_cancelled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let launched = temp.path().join("launched");
+    let program = fake_browser(
+        &temp,
+        &format!("echo $$ > '{}'; exec sleep 10", launched.display()),
+    );
+    let url = url::Url::parse("https://example.invalid/auth").expect("url");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = auth::launch_browser(&program, &url, std::time::Duration::from_secs(2), &cancel)
+        .await
+        .expect_err("cancelled before launch");
+    assert!(matches!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(crate::llm::LlmErrorKind::Cancelled)
+    ));
+    assert!(!launched.exists());
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let marker = launched.clone();
+    let task = tokio::spawn(async move {
+        let pid: i32 = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok())
+                {
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("launcher PID");
+        // SAFETY: read process-group IDs only; no signal is sent to the test runner.
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        assert_ne!(unsafe { libc::getpgrp() }, pid);
+        trigger.cancel();
+    });
+    let error = auth::launch_browser(&program, &url, std::time::Duration::from_secs(2), &cancel)
+        .await
+        .expect_err("cancelled during launch");
+    task.await.expect("canceller");
+    assert!(matches!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(crate::llm::LlmErrorKind::Cancelled)
+    ));
+}
+
+#[test]
+fn browser_instructions_preserve_manual_recovery_without_saved_tokens() {
+    let url = url::Url::parse("https://example.invalid/auth?state=test-state&code_challenge=test-challenge&id_token_hint=saved-id-secret&redirect_uri=http%3A%2F%2F127.0.0.1%3A12345%2Fauth%2Fcallback").expect("url");
+    for outcome in [
+        None,
+        Some(auth::BrowserLaunch::Opened),
+        Some(auth::BrowserLaunch::Unavailable),
+        Some(auth::BrowserLaunch::Failed),
+        Some(auth::BrowserLaunch::TimedOut),
+    ] {
+        let message = auth::browser_instructions(&url, outcome);
+        assert!(message.contains("state=test-state"));
+        assert!(message.contains("code_challenge=test-challenge"));
+        assert!(!message.contains("saved-id-secret"));
+        assert!(!message.contains("id_token_hint"));
+        assert!(message.contains("same machine"));
+        assert!(message.contains("5 minutes"));
+        assert!(message.contains("Ctrl-C"));
+    }
+    assert!(
+        url.as_str().contains("saved-id-secret"),
+        "do not mutate the browser URL"
+    );
+}
+
+#[tokio::test]
+async fn login_callback_timeout_and_cancellation_are_actionable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let error = auth::wait_for_callback(
+        listener,
+        "state",
+        std::time::Duration::from_millis(20),
+        &CancellationToken::new(),
+    )
+    .await
+    .err()
+    .expect("timeout");
+    assert!(error.to_string().contains("--no-browser"));
+    assert!(error.to_string().contains("same machine"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = auth::wait_for_callback(
+        listener,
+        "state",
+        std::time::Duration::from_secs(1),
+        &cancel,
+    )
+    .await
+    .err()
+    .expect("cancel");
+    assert!(matches!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(crate::llm::LlmErrorKind::Cancelled)
+    ));
+}
+
+#[tokio::test]
+async fn failed_browser_launch_can_finish_mock_login_using_manual_url() -> Result<()> {
+    let (_temp, store) = temp_store();
+    let label = mock_login_with_browser_failure(
+        store.clone(),
+        None,
+        "manual-sub",
+        true,
+        false,
+        false,
+        true,
+    )
+    .await?;
+    let saved = store.load()?;
+    assert_eq!(saved.active.as_deref(), Some(label.as_str()));
+    assert_eq!(saved.accounts[0].subject, "manual-sub");
+    Ok(())
 }
