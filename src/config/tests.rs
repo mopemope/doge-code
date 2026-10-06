@@ -1003,3 +1003,90 @@ fn committed_repo_config_parses_under_strict_schema() {
     assert_eq!(before, after, "repo config test must not rewrite the file");
     let _ = cfg;
 }
+
+fn model_context_fixture(model: &str) -> (TempDir, AppConfig) {
+    let root = TempDir::new().expect("tempdir");
+    let cfg = AppConfig {
+        model: model.into(),
+        project_root: root.path().to_path_buf(),
+        ..Default::default()
+    };
+    (root, cfg)
+}
+
+#[test]
+fn verified_gpt_4_1_mini_aliases_and_snapshot_use_documented_capacity() {
+    for model in [
+        "gpt-4.1-mini",
+        "gpt-4.1-mini-2025-04-14",
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-mini-2025-04-14",
+    ] {
+        let (_root, cfg) = model_context_fixture(model);
+        assert_eq!(cfg.get_context_window_size(), Some(1_047_576), "{model}");
+        assert_eq!(
+            cfg.get_effective_compaction_limit(),
+            250_000,
+            "keep the configured threshold, not the full capacity"
+        );
+    }
+}
+
+#[test]
+fn verified_model_does_not_compact_an_ordinary_calibrated_prompt() {
+    use crate::llm::context_budget::{
+        BudgetPressure, ContextBudgetGovernor, TokenEstimate, TokenEstimateSource,
+    };
+    let (_root, cfg) = model_context_fixture("openai/gpt-4.1-mini");
+    let pressure = ContextBudgetGovernor::new(Default::default()).classify(
+        TokenEstimate {
+            prompt_tokens: 10_000,
+            source: TokenEstimateSource::Calibrated,
+        },
+        u64::from(cfg.get_effective_compaction_limit()),
+    );
+    assert_eq!(pressure, BudgetPressure::Healthy);
+    assert!(!crate::llm::context_budget::should_compact_for_pressure(
+        pressure,
+        TokenEstimateSource::Calibrated
+    ));
+}
+
+#[test]
+fn verified_model_capacity_keeps_explicit_context_and_threshold_overrides() {
+    let (_root, mut cfg) = model_context_fixture("openai/gpt-4.1-mini");
+    cfg.llm.context_window_size = Some(20_000);
+    assert_eq!(cfg.get_context_window_size(), Some(20_000));
+    assert_eq!(cfg.get_effective_compaction_limit(), 16_000);
+    cfg.auto_compact_prompt_token_threshold_overrides
+        .insert(cfg.model.clone(), 900);
+    assert_eq!(cfg.get_effective_compaction_limit(), 900);
+}
+
+#[test]
+fn context_catalog_does_not_expand_unknown_model_names_or_native_provider() {
+    for model in [
+        "acme/gpt-4.1-mini",
+        "gpt-4.1-mini-future",
+        "gpt-4.1-mini-2026-10-07",
+        "prefix-gpt-4.1-mini",
+        "OPENAI/GPT-4.1-MINI",
+    ] {
+        let (_root, cfg) = model_context_fixture(model);
+        assert_eq!(
+            cfg.get_context_window_size(),
+            Some(8_192),
+            "preserve conservative legacy behavior for {model}"
+        );
+    }
+    let (_root, unknown) = model_context_fixture("unknown-private-model");
+    assert_eq!(unknown.get_context_window_size(), None);
+    assert_eq!(unknown.get_effective_compaction_limit(), 102_400);
+    let (_root, mut native) = model_context_fixture("gpt-4.1-mini");
+    native.provider = crate::features::openai_subscription::ProviderKind::Openai;
+    assert_eq!(
+        native.get_context_window_size(),
+        Some(8_192),
+        "API metadata must not infer a subscription model's capacity"
+    );
+}
