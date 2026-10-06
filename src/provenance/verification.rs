@@ -271,6 +271,8 @@ pub fn capture_verification_context_full(
 
 /// Input for building a `VerificationObserved` event from a finished process.
 pub struct VerificationRecordInput<'a> {
+    pub structured_test_result:
+        Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
     pub kind: VerificationKind,
     pub source: VerificationSource,
     pub program: &'a str,
@@ -311,7 +313,23 @@ pub fn build_verification_event(input: VerificationRecordInput<'_>) -> Verificat
         );
     }
 
+    let structured_test_result = input.structured_test_result.or_else(|| {
+        crate::features::structured_test_results::observe(
+            input.program,
+            input.args,
+            input.stdout,
+            if input.timed_out {
+                crate::features::structured_test_results::CaptureState::TimedOut
+            } else if input.capture_truncated || !warnings.is_empty() {
+                crate::features::structured_test_results::CaptureState::Incomplete
+            } else {
+                crate::features::structured_test_results::CaptureState::Complete
+            },
+            input.success,
+        )
+    });
     VerificationObservedEvent {
+        structured_test_result,
         execution_context: input.context.execution_context.clone().map(Box::new),
         execution_workspace: input.context.execution_workspace.clone().map(Box::new),
         directive_id: input.context.directive_id.clone(),
@@ -500,6 +518,7 @@ mod tests {
     fn test_verification_event_budget_and_digest() {
         let big_stdout = "x".repeat(10_000);
         let event = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
             kind: VerificationKind::Test,
             source: VerificationSource::ExecuteProcess,
             program: "cargo",
@@ -529,6 +548,7 @@ mod tests {
         assert_eq!(event.observed_change_ids, vec!["chg-1".to_string()]);
         // Deterministic digest.
         let again = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
             kind: VerificationKind::Test,
             source: VerificationSource::ExecuteProcess,
             program: "cargo",
@@ -582,5 +602,60 @@ mod tests {
         }];
         // Never infer from completed items.
         assert_eq!(current_in_progress_plan_item(&completed), None);
+    }
+}
+
+#[cfg(test)]
+mod structured_result_tests {
+    use super::*;
+    use crate::features::structured_test_results::{
+        CaptureState, ResultObservation, UnknownReason,
+    };
+    #[test]
+    fn reader_warning_suppresses_fallback_counts_but_not_pre_budget_result() {
+        let stdout =
+            "{\"Action\":\"start\",\"Package\":\"p\"}\n{\"Action\":\"skip\",\"Package\":\"p\"}\n";
+        let args = vec!["test".into(), "-json".into()];
+        for supplied in [false, true] {
+            let event = build_verification_event(VerificationRecordInput {
+                structured_test_result: supplied.then(|| {
+                    crate::features::structured_test_results::observe(
+                        "go",
+                        &args,
+                        stdout,
+                        CaptureState::Complete,
+                        true,
+                    )
+                    .expect("eligible")
+                }),
+                kind: VerificationKind::Test,
+                source: VerificationSource::TuiTest,
+                program: "go",
+                args: &args,
+                cwd_relative: None,
+                success: true,
+                status: "completed",
+                exit_code: Some(0),
+                timed_out: false,
+                stdout,
+                stderr: "",
+                capture_truncated: false,
+                context: VerificationContext::default(),
+                extra_warnings: vec!["process output reader failed".into()],
+            });
+            let result = event.structured_test_result.expect("observed format");
+            if supplied {
+                assert_eq!(result.test_count(), Some(0));
+            } else {
+                assert_eq!(result.test_count(), None);
+                assert!(matches!(
+                    result.observation,
+                    ResultObservation::Unknown {
+                        reason: UnknownReason::CaptureIncomplete
+                    }
+                ));
+            }
+            assert!(event.outcome.success);
+        }
     }
 }

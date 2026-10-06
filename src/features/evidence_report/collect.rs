@@ -429,6 +429,7 @@ pub(super) fn build(
                 });
             }
             Event::VerificationObserved(v) => verifications.push(Verification {
+                structured_test_result: v.structured_test_result.clone(),
                 execution_context: v.execution_context.clone(),
                 execution_workspace: v.execution_workspace.clone(),
                 current_code_state: crate::features::verification_snapshot::compare_current(
@@ -454,7 +455,15 @@ pub(super) fn build(
                 matched_obligations: v.matched_obligations.clone(),
                 output_digest: v.output_digest.clone(),
                 output_truncated: v.output_truncated,
-                test_count: None,
+                test_count: v
+                    .structured_test_result
+                    .as_ref()
+                    .and_then(|r| r.test_count()),
+                test_count_unit: v
+                    .structured_test_result
+                    .as_ref()
+                    .and_then(|r| r.test_count())
+                    .map(|_| "go_test_terminal_events_including_subtests"),
                 execution_environment: None,
                 warnings: v.warnings.clone(),
                 stdout_excerpt: include_content.then(|| v.stdout_excerpt.clone()),
@@ -517,7 +526,7 @@ pub(super) fn build(
         limitations: vec![
             "Observed passing is a command outcome, not a correctness proof or requirement satisfaction.".into(),
             "Requirement coverage does not imply all verification obligations passed.".into(),
-            "Execution context covers recorded OS family/architecture and a bounded allowlisted primary-tool version only. Missing legacy context and unavailable versions remain unknown; test counts and dependency-wide snapshots are not recorded. Context equality never proves reproducibility or correctness. Version-five execution workspace endpoints cover selected project files only; legacy observations have no recorded endpoints.".into(),
+            "Execution context covers recorded OS family/architecture and a bounded allowlisted primary-tool version only. Missing legacy context and unavailable versions remain unknown; test counts are reported Go JSON terminal-event counts only when complete, while other formats and dependency-wide snapshots remain unknown. Context equality never proves reproducibility or correctness. Version-five execution workspace endpoints cover selected project files only; legacy observations have no recorded endpoints.".into(),
             "Endpoint equality does not establish atomic snapshots or unchanged inputs throughout execution; changes restored between observations may be missed. Historical coverage remains independent of current code correspondence.".into(),
             "The manifest identifies selected files at export time; it is not a repository tree, execution snapshot, signature, or reproducibility guarantee.".into(),
             "Before/after comparison is optimistic and does not provide an atomic filesystem snapshot.".into(),
