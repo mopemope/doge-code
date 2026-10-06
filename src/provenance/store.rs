@@ -8,12 +8,13 @@ use uuid::Uuid;
 use super::types::{
     LEGACY_PROVENANCE_SCHEMA_VERSION, PROVENANCE_SCHEMA_VERSION, PlanChangedEvent, ProvenanceEvent,
     ProvenanceEventEnvelope, V2_PROVENANCE_SCHEMA_VERSION, V3_PROVENANCE_SCHEMA_VERSION,
-    V4_PROVENANCE_SCHEMA_VERSION, V5_PROVENANCE_SCHEMA_VERSION, from_v1_wire, from_v2_wire,
-    from_v3_wire, from_v4_wire, from_v5_wire, from_v6_wire, to_v6_wire,
+    V4_PROVENANCE_SCHEMA_VERSION, V5_PROVENANCE_SCHEMA_VERSION, V6_PROVENANCE_SCHEMA_VERSION,
+    from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire, from_v5_wire, from_v6_wire,
+    from_v7_wire, to_v7_wire,
 };
 use super::wire::{
     EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 as wire_v4, v5 as wire_v5,
-    v6 as wire_v6,
+    v6 as wire_v6, v7 as wire_v7,
 };
 
 /// Durable provenance store for one session.
@@ -24,11 +25,12 @@ use super::wire::{
 /// - legacy v3 (read-only): `<session_dir>/provenance/v3/events/<event-id>.json`
 /// - legacy v4 (read-only): `<session_dir>/provenance/v4/events/<event-id>.json`
 /// - legacy v5 (read-only): `<session_dir>/provenance/v5/events/<event-id>.json`
-/// - current v6 (read + write): `<session_dir>/provenance/v6/events/<event-id>.json`
+/// - legacy v6 (read-only): `<session_dir>/provenance/v6/events/<event-id>.json`
+/// - current v7 (read + write): `<session_dir>/provenance/v7/events/<event-id>.json`
 ///
-/// v1/v2/v3/v4 files are never copied, rewritten, or migrated on disk; they are
+/// v1/v2/v3/v4/v5/v6 files are never copied, rewritten, or migrated on disk; they are
 /// converted into the canonical representation on read. New events are
-/// always written as v6.
+/// always written as v7.
 #[derive(Debug, Clone)]
 pub struct ProvenanceStore {
     provenance_root: PathBuf,
@@ -38,7 +40,7 @@ pub struct ProvenanceStore {
 impl ProvenanceStore {
     pub fn new(session_dir: PathBuf) -> Self {
         let provenance_root = session_dir.join("provenance");
-        let current_dir = provenance_root.join("v6").join("events");
+        let current_dir = provenance_root.join("v7").join("events");
         Self {
             provenance_root,
             current_dir,
@@ -86,15 +88,15 @@ impl ProvenanceStore {
         self.current_dir.clone()
     }
 
-    /// Current v6 write directory.
+    /// Current v7 write directory.
     ///
     /// This is the only directory new events are written to. Reads cover
-    /// v1/v2/v3/v4/v5 (legacy) and v6; see [`ProvenanceStore::load_all`].
+    /// v1/v2/v3/v4/v5/v6 (legacy) and v7; see [`ProvenanceStore::load_all`].
     pub fn events_dir(&self) -> &Path {
         &self.current_dir
     }
 
-    /// Owned path of the current v6 events directory.
+    /// Owned path of the current v7 events directory.
     pub fn current_events_path(&self) -> PathBuf {
         self.current_events_dir()
     }
@@ -116,7 +118,7 @@ impl ProvenanceStore {
 
     /// Atomically persist one event and return its envelope.
     ///
-    /// The payload is written to a sibling temp file in the v6 events
+    /// The payload is written to a sibling temp file in the v7 events
     /// directory and persisted with `persist_noclobber` (fail if the
     /// destination already exists). Never check-then-write.
     pub fn append(
@@ -150,7 +152,7 @@ impl ProvenanceStore {
             timestamp: Utc::now().to_rfc3339(),
             event,
         };
-        let wire = to_v6_wire(&canonical);
+        let wire = to_v7_wire(&canonical);
         let payload =
             serde_json::to_string_pretty(&wire).context("failed to serialize provenance event")?;
         let dest = current_dir.join(format!("{event_id}.json"));
@@ -182,13 +184,13 @@ impl ProvenanceStore {
         Ok(canonical)
     }
 
-    /// Load all events from v1 + v2 + v3 + v4 + v5 (legacy) and v6 (current), merged and
+    /// Load all events from v1 + v2 + v3 + v4 + v5 + v6 (legacy) and v7 (current), merged and
     /// sorted by `(timestamp, event_id)`.
     ///
     /// One corrupt or future-schema file never fails the whole query; it is
     /// skipped with a warning entry. When the same event id exists in
     /// multiple versions (manual copy/migration mistake, not expected UUID
-    /// collision), the highest version wins deterministically (v6 > v5 > v4 > v3 > v2 > v1)
+    /// collision), the highest version wins deterministically (v7 > v6 > v5 > v4 > v3 > v2 > v1)
     /// and a warning explains why.
     pub fn load_all(&self) -> Result<ProvenanceLoadResult> {
         let mut warnings = Vec::new();
@@ -203,7 +205,8 @@ impl ProvenanceStore {
             (self.v3_events_dir(), 3u32, "v3"),
             (self.v4_events_dir(), 4u32, "v4"),
             (self.provenance_root.join("v5/events"), 5u32, "v5"),
-            (self.current_events_dir(), 6u32, "v6"),
+            (self.provenance_root.join("v6/events"), 6u32, "v6"),
+            (self.current_events_dir(), 7u32, "v7"),
         ] {
             let loaded = load_events_dir(&dir, &mut warnings);
             for env in loaded {
@@ -376,9 +379,17 @@ fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEven
                     path.display()
                 )),
             }
-        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+        } else if header.schema_version == V6_PROVENANCE_SCHEMA_VERSION {
             match serde_json::from_str::<wire_v6::V6Envelope>(&raw) {
                 Ok(env) => events.push(from_v6_wire(env)),
+                Err(e) => warnings.push(format!(
+                    "Skipping malformed provenance event {}: {e}",
+                    path.display()
+                )),
+            }
+        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+            match serde_json::from_str::<wire_v7::V7Envelope>(&raw) {
+                Ok(env) => events.push(from_v7_wire(env)),
                 Err(e) => warnings.push(format!(
                     "Skipping malformed provenance event {}: {e}",
                     path.display()
@@ -492,7 +503,7 @@ mod tests {
             store
                 .events_dir()
                 .to_string_lossy()
-                .ends_with("provenance/v6/events")
+                .ends_with("provenance/v7/events")
         );
     }
 
@@ -1030,9 +1041,9 @@ mod tests {
         }
         // Raw file is under v4.
         let v4_dir = store.current_events_path();
-        assert!(v4_dir.to_string_lossy().ends_with("provenance/v6/events"));
+        assert!(v4_dir.to_string_lossy().ends_with("provenance/v7/events"));
         let raw = std::fs::read_to_string(v4_dir.join(format!("{}.json", env.event_id))).unwrap();
-        assert!(raw.contains("\"schema_version\": 6") || raw.contains("\"schema_version\":6"));
+        assert!(raw.contains("\"schema_version\": 7") || raw.contains("\"schema_version\":7"));
     }
 
     #[test]
@@ -1042,6 +1053,7 @@ mod tests {
         let store = ProvenanceStore::new(dir.path().join("s"));
         let event = ProvenanceEvent::VerificationObserved(
             crate::provenance::types::VerificationObservedEvent {
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 directive_id: None,
@@ -1155,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_writes_only_under_v6() {
+    fn test_store_writes_only_under_v7() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s");
         let store = ProvenanceStore::new(session_dir.clone());
@@ -1166,7 +1178,7 @@ mod tests {
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(true)
         );
-        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v6/events"))
+        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v7/events"))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -1380,6 +1392,7 @@ mod execution_snapshot_tests {
         .await;
         let store = ProvenanceStore::new(root.path().join("session"));
         let event = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
             kind: VerificationKind::Test,
             source: VerificationSource::ExecuteProcess,
             program: "cargo",
@@ -1441,7 +1454,7 @@ mod execution_snapshot_tests {
         std::fs::write(&legacy_file, &v4_bytes).expect("v4 fixture");
         let both = store.load_all().expect("mixed versions");
         assert_eq!(both.events.len(), 1);
-        assert!(both.warnings.iter().any(|w| w.contains("v6 wins")));
+        assert!(both.warnings.iter().any(|w| w.contains("v7 wins")));
         assert_eq!(std::fs::read(&v6_file).expect("unchanged v6"), v6_before);
         std::fs::remove_file(v6_file).expect("remove test v6");
         let previous = store.load_all().expect("v5 only");
@@ -1473,5 +1486,79 @@ mod execution_snapshot_tests {
                 .count(),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod structured_result_tests {
+    use super::*;
+    use crate::provenance::*;
+    #[test]
+    fn v7_result_roundtrip_and_v6_unknown_do_not_reparse_legacy_stdout() {
+        let root = tempfile::tempdir().expect("root");
+        let store = ProvenanceStore::new(root.path().join("s"));
+        let stdout =
+            "{\"Action\":\"start\",\"Package\":\"p\"}\n{\"Action\":\"skip\",\"Package\":\"p\"}\n";
+        let event = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
+            kind: VerificationKind::Test,
+            source: VerificationSource::ExecuteProcess,
+            program: "go",
+            args: &["test".into(), "-json".into()],
+            cwd_relative: None,
+            success: true,
+            status: "completed",
+            exit_code: Some(0),
+            timed_out: false,
+            stdout,
+            stderr: "",
+            capture_truncated: false,
+            context: VerificationContext {
+                observed_change_ids: vec!["change-frozen".into()],
+                ..Default::default()
+            },
+            extra_warnings: vec![],
+        });
+        let env = store
+            .append("s", ProvenanceEvent::VerificationObserved(event))
+            .expect("v7 append");
+        let v7_file = store.events_dir().join(format!("{}.json", env.event_id));
+        let bytes = std::fs::read(&v7_file).expect("v7 bytes");
+        let frozen = crate::provenance::types::to_v6_wire(&env);
+        assert_eq!(frozen.schema_version, 6);
+        let previous = serde_json::to_vec(&frozen).expect("v6 bytes");
+        assert!(!String::from_utf8_lossy(&previous).contains("structured_test_result"));
+        let dir = store.provenance_root.join("v6/events");
+        std::fs::create_dir_all(&dir).expect("old directory");
+        let old_file = dir.join(format!("{}.json", env.event_id));
+        std::fs::write(&old_file, &previous).expect("legacy fixture");
+        let loaded = store.load_all().expect("load");
+        assert_eq!(loaded.events.len(), 1);
+        assert!(loaded.warnings.iter().any(|w| w.contains("v7 wins")));
+        match &loaded.events[0].event {
+            ProvenanceEvent::VerificationObserved(v) => {
+                assert_eq!(
+                    v.structured_test_result
+                        .as_ref()
+                        .and_then(|r| r.test_count()),
+                    Some(0)
+                );
+                assert_eq!(v.observed_change_ids, vec!["change-frozen"]);
+            }
+            _ => panic!("verification"),
+        }
+        assert_eq!(std::fs::read(&v7_file).expect("unchanged"), bytes);
+        std::fs::remove_file(v7_file).expect("remove v7 fixture");
+        let old = store.load_all().expect("legacy load");
+        match &old.events[0].event {
+            ProvenanceEvent::VerificationObserved(v) => {
+                assert!(v.structured_test_result.is_none());
+                assert!(v.stdout_excerpt.contains("start"));
+                assert!(v.outcome.success);
+                assert_eq!(v.observed_change_ids, vec!["change-frozen"]);
+            }
+            _ => panic!("verification"),
+        }
+        assert_eq!(std::fs::read(old_file).expect("legacy unchanged"), previous);
     }
 }

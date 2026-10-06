@@ -1055,6 +1055,7 @@ mod finalize_integration_tests {
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: crate::provenance::VerificationKind::Test,
                 source: crate::provenance::VerificationSource::ExecuteProcess,
                 program: "cargo",

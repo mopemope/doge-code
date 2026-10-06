@@ -1,4 +1,4 @@
-//! Plan-to-Evidence Provenance Graph v6.
+//! Plan-to-Evidence Provenance Graph v7.
 //!
 //! Doge-observed development provenance: which user directive motivated which
 //! agent-structured requirement, which plan step was active when a workspace
@@ -6,9 +6,9 @@
 //! afterwards.
 //!
 //! Durable state lives under the session directory
-//! (`.doge/sessions/<id>/provenance/v6/events/<uuid>.json` for new writes;
+//! (`.doge/sessions/<id>/provenance/v7/events/<uuid>.json` for new writes;
 //! legacy v1/v2/v3 under `provenance/v1/events/`, `provenance/v2/events/` and
-//! `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` remain readable but are never written or physically
+//! `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` remain readable but are never written or physically
 //! migrated), never in `repomap.sqlite` (rebuildable analysis cache) nor the
 //! legacy `action_log`.
 //! One event is one JSON file; writes use sibling-temp + no-clobber

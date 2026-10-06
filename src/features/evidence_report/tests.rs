@@ -233,6 +233,7 @@ fn verification(f: &Fixture, success: bool, timeout: bool) {
         .append(
             &f.session.meta.id,
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 directive_id: Some(f.directive.clone()),
@@ -1155,16 +1156,17 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
     )
     .await;
     let event = build_verification_event(VerificationRecordInput {
+        structured_test_result: None,
         kind: VerificationKind::Test,
         source: VerificationSource::ExecuteProcess,
-        program: "cargo",
-        args: &["test".into()],
+        program: "go",
+        args: &["test".into(), "-json".into()],
         cwd_relative: None,
         success: true,
         status: "completed",
         exit_code: Some(0),
         timed_out: false,
-        stdout: "",
+        stdout: "{\"Action\":\"start\",\"Package\":\"private/pkg\"}\n{\"Action\":\"run\",\"Package\":\"private/pkg\",\"Test\":\"TestPrivate\"}\n{\"Action\":\"pass\",\"Package\":\"private/pkg\",\"Test\":\"TestPrivate\"}\n{\"Action\":\"pass\",\"Package\":\"private/pkg\"}\n",
         stderr: "",
         capture_truncated: false,
         context: VerificationContext {
@@ -1187,6 +1189,15 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
         )
         .expect("verification");
     let before = report(&f, false).await;
+    assert_eq!(before.verifications[1].test_count, Some(1));
+    assert_eq!(
+        before.verifications[1].observed_change_ids,
+        vec![f.change.clone()]
+    );
+    assert_eq!(
+        before.verifications[1].matched_obligations[0].binding_hash,
+        f.binding
+    );
     assert_eq!(
         before.verifications[1].current_code_state.state,
         crate::features::verification_snapshot::CurrentState::MatchesStart
@@ -1214,6 +1225,11 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
         0
     );
     assert!(after.verifications[1].outcome.success);
+    assert_eq!(after.verifications[1].test_count, Some(1));
+    assert_eq!(
+        after.verifications[1].test_count_unit,
+        Some("go_test_terminal_events_including_subtests")
+    );
     assert!(
         after.review_handoff[0]
             .matching_successful_observation_ids
@@ -1241,6 +1257,9 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
     let json = render::render(&after, ReportFormat::Json).expect("json");
     assert!(json.contains("differs_from_start"));
     assert!(!json.contains("test changed after success"));
+    assert!(!json.contains("TestPrivate"));
+    assert!(!json.contains("private/pkg"));
+    assert!(markdown.contains("Historical structured test results"));
 }
 
 #[tokio::test]
