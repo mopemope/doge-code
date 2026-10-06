@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -161,114 +162,110 @@ def child_env(variant):
 
 def stream_child(argv, cwd, env, timeout_seconds, grace_seconds,
                  stdout_path, stderr_path):
-    """Run a child, streaming output to files.
+    """Run a child with bounded, concurrently drained output files.
 
-    Returns (exit_code, timed_out, elapsed_seconds, spawn_error, truncated).
-    On timeout the child first receives SIGTERM so Doge Code can flush
-    session state, then the process group is force-killed after the grace
-    period. Output beyond MAX_STREAM_BYTES is truncated with a diagnostic.
+    Give the leader time to flush on cancellation, then kill its original
+    process group even if the leader already exited. A completed trial must
+    not leave same-group descendants writing into its workspace. Detached
+    sessions are outside this group boundary; stop readers before returning
+    so they cannot change captured artifacts after collection finishes.
     """
     start = time.monotonic()
     timed_out = False
-    truncated = False
-    stdout_handle = None
-    stderr_handle = None
+    truncated = [False, False]
+    readers = []
+    reader_errors = []
+    stop_readers = threading.Event()
+
+    def drain(pipe, path, index):
+        try:
+            with pipe, open(path, "wb") as handle:
+                os.set_blocking(pipe.fileno(), False)
+                remaining = MAX_STREAM_BYTES
+                while not stop_readers.is_set():
+                    try:
+                        chunk = os.read(pipe.fileno(), 64 * 1024)
+                    except BlockingIOError:
+                        stop_readers.wait(0.01)
+                        continue
+                    if not chunk:
+                        break
+                    kept = chunk[:remaining]
+                    handle.write(kept)
+                    remaining -= len(kept)
+                    if len(kept) != len(chunk):
+                        truncated[index] = True
+        except OSError as error:
+            reader_errors.append(f"output_capture_failed: {error}")
+
+    def kill_group():
+        try:
+            if os.name == "posix":
+                # start_new_session makes pid the group id. Do not query
+                # getpgid after wait(): the leader may already be reaped.
+                os.killpg(child.pid, signal.SIGKILL)
+            elif child.poll() is None:
+                child.kill()
+        except ProcessLookupError:
+            pass
+
+    def stop_child():
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            kill_group()
+        return child.wait()
+
+    # Check the sinks before starting a process that might mutate a workspace.
     try:
-        stdout_handle = open(stdout_path, "wb")
-        stderr_handle = open(stderr_path, "wb")
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"")
         child = subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            env=env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            start_new_session=True,
+            argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, start_new_session=True,
         )
     except OSError as error:
-        for handle in (stdout_handle, stderr_handle):
-            try:
-                if handle is not None:
-                    handle.close()
-            except OSError:
-                pass
         try:
-            stdout_path.write_bytes(b"")
+            stderr_path.write_bytes(
+                f"harness: failed to spawn child: {error}\n".encode("utf-8")
+            )
         except OSError:
             pass
-        stderr_path.write_bytes(
-            f"harness: failed to spawn child: {error}\n".encode("utf-8")
-        )
         return 127, False, 0.0, f"spawn_failed: {error}", False
-    spawn_error = None
+
     try:
+        for index, (pipe, path) in enumerate((
+            (child.stdout, stdout_path), (child.stderr, stderr_path),
+        )):
+            reader = threading.Thread(target=drain, args=(pipe, path, index))
+            readers.append(reader)
+            reader.start()
         try:
             exit_code = child.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            exit_code = None
-            try:
-                if os.name == "posix":
-                    os.kill(child.pid, signal.SIGTERM)
-                else:
-                    child.terminate()
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                exit_code = child.wait(timeout=grace_seconds)
-            except subprocess.TimeoutExpired:
-                exit_code = None
-            if exit_code is None:
-                try:
-                    if os.name == "posix":
-                        try:
-                            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
-                        except (OSError, ProcessLookupError):
-                            child.kill()
-                    else:
-                        child.kill()
-                except (OSError, ProcessLookupError):
-                    pass
-                exit_code = child.wait()
-    except KeyboardInterrupt:
-        # Runner interrupted: give the child a graceful chance, then kill.
-        try:
-            if os.name == "posix":
-                os.kill(child.pid, signal.SIGTERM)
-            else:
-                child.terminate()
-        except (OSError, ProcessLookupError):
-            pass
-        try:
-            exit_code = child.wait(timeout=grace_seconds)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            try:
-                if os.name == "posix":
-                    try:
-                        os.killpg(os.getpgid(child.pid), signal.SIGKILL)
-                    except (OSError, ProcessLookupError):
-                        child.kill()
-                else:
-                    child.kill()
-            except (OSError, ProcessLookupError):
-                pass
-            exit_code = child.wait()
-            timed_out = False
-        raise
-    elapsed = time.monotonic() - start
-    for handle in (stdout_handle, stderr_handle):
-        try:
-            if handle is not None:
-                handle.close()
-        except OSError:
-            pass
-    for path in (stdout_path, stderr_path):
-        try:
-            if path.stat().st_size > MAX_STREAM_BYTES:
-                truncated = True
-        except OSError:
-            pass
-    return exit_code, timed_out, elapsed, spawn_error, truncated
+            exit_code = stop_child()
+        except KeyboardInterrupt:
+            stop_child()
+            raise
+    finally:
+        kill_group()
+        child.wait()
+        for reader in readers:
+            reader.join(timeout=grace_seconds)
+        if any(reader.is_alive() for reader in readers):
+            reader_errors.append("output_capture_incomplete: descendant retained output pipe")
+            stop_readers.set()
+            for reader in readers:
+                reader.join()
+    error = "; ".join(reader_errors) if reader_errors else None
+    return exit_code, timed_out, time.monotonic() - start, error, any(truncated)
 
 
 def parse_exec_json(stdout_path):
@@ -367,7 +364,7 @@ def collect_evidence(variant, workspace, run_dir, env):
     return "collected"
 
 
-def collect_workspace_diff(workspace, run_dir):
+def collect_workspace_diff(workspace, run_dir, base_commit):
     """Save status, diff stat, and a patch including untracked source files."""
     status = run_git(
         ["status", "--porcelain=v1", "--untracked-files=all"], workspace
@@ -376,7 +373,7 @@ def collect_workspace_diff(workspace, run_dir):
         status.stdout if status.returncode == 0 else f"git status failed: {status.stderr}",
         encoding="utf-8",
     )
-    # Intent-to-add lets untracked source files appear in `git diff HEAD`
+    # Intent-to-add lets untracked source files appear in `git diff <base_commit>`
     # without committing anything. Session evidence was already collected,
     # so touching the index here is safe; the worktree is disposable.
     # NUL-separated listing keeps newline-containing filenames exact.
@@ -391,12 +388,12 @@ def collect_workspace_diff(workspace, run_dir):
             add = run_git(["add", "-N", "--", name], workspace)
             if add.returncode == 0:
                 added.append(name)
-    diff = run_git(["diff", "HEAD", "--binary", "--no-ext-diff"], workspace)
+    diff = run_git(["diff", base_commit, "--binary", "--no-ext-diff"], workspace)
     (run_dir / "agent.patch").write_text(
         diff.stdout if diff.returncode == 0 else f"git diff failed: {diff.stderr}",
         encoding="utf-8",
     )
-    stat = run_git(["diff", "HEAD", "--stat", "--no-ext-diff"], workspace)
+    stat = run_git(["diff", base_commit, "--stat", "--no-ext-diff"], workspace)
     (run_dir / "diff-stat.txt").write_text(
         stat.stdout if stat.returncode == 0 else f"git diff --stat failed: {stat.stderr}",
         encoding="utf-8",
@@ -579,7 +576,7 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
         measurement["evidence_status"] = evidence_status
 
         if harness_error is None:
-            diff_info = collect_workspace_diff(workspace, run_dir)
+            diff_info = collect_workspace_diff(workspace, run_dir, base_commit)
         else:
             diff_info = {"status_output": "", "patch_bytes": 0, "intent_to_add": []}
             for name in ("git-status.txt", "diff-stat.txt", "agent.patch"):
