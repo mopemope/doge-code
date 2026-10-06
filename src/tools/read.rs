@@ -17,9 +17,9 @@ pub fn tool_def() -> ToolDef {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute path of the file to read."},
-                    "start_line": {"type": "integer", "minimum": 1, "description": "1-based line number to start reading from. Legacy: prefer `cursor` for pagination."},
+                    "start_line": {"type": "integer", "minimum": 1, "description": "1-based line number to start reading from. Prefer `cursor` for pagination. If both are supplied, they must be equal; otherwise omit one."},
                     "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."},
-                    "cursor": {"type": "integer", "minimum": 1, "description": "1-based alias for start_line when paginating from previous response"},
+                    "cursor": {"type": "integer", "minimum": 1, "description": "1-based alias for start_line when paginating from previous response. Supply cursor alone, or the same value as start_line; conflicting values are rejected."},
                     "page_size": {"type": "integer", "minimum": 1, "description": "Number of lines to return (overrides limit)"},
                     "response_budget_chars": {"type": "integer", "minimum": 1, "description": "Positive Unicode scalar character budget including line separators (default 6000, capped at 40000; JSON overhead may reduce a page)"},
                     "mode": {"type": "string", "enum": ["summary", "full"], "description": "Summary limits line count; full considers all lines but remains budgeted"}
@@ -139,6 +139,13 @@ fn fs_read_cancellable(
         ("response_budget_chars", opts.response_budget_chars),
     ] {
         super::budget::positive_read_option(name, value)?;
+    }
+    if let (Some(start_line), Some(cursor)) = (opts.start_line, opts.cursor)
+        && start_line != cursor
+    {
+        anyhow::bail!(
+            "conflicting fs_read positions: start_line={start_line} and cursor={cursor}; they are aliases. Set them to the same value or omit one; use the returned next_cursor for pagination"
+        );
     }
     let requested = opts.cursor.or(opts.start_line).unwrap_or(1);
     let requested_start = requested.saturating_sub(1);
@@ -260,6 +267,55 @@ mod tests {
             .unwrap();
         #[allow(deprecated)]
         dir.into_path()
+    }
+
+    #[test]
+    fn conflicting_read_positions_fail_instead_of_silently_rereading() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("numbered.txt");
+        std::fs::write(
+            &path,
+            (1..=1200)
+                .map(|n| format!("line {n}\n"))
+                .collect::<String>(),
+        )
+        .expect("write fixture");
+        let config = AppConfig {
+            project_root: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        // The observed agent trace supplied cursor=1 with these start lines.
+        for start_line in [600, 1100] {
+            let error = fs_read(
+                path.to_str().expect("path"),
+                FsReadOptions {
+                    start_line: Some(start_line),
+                    cursor: Some(1),
+                    limit: Some(40),
+                    ..Default::default()
+                },
+                &config,
+            )
+            .expect_err("conflicting aliases must not return the first page as success");
+            assert!(error.to_string().contains("start_line"));
+            assert!(error.to_string().contains("cursor"));
+        }
+        for (start_line, cursor) in [(Some(600), None), (None, Some(600)), (Some(600), Some(600))] {
+            let result = fs_read(
+                path.to_str().expect("path"),
+                FsReadOptions {
+                    start_line,
+                    cursor,
+                    limit: Some(2),
+                    ..Default::default()
+                },
+                &config,
+            )
+            .expect("unambiguous position");
+            assert_eq!(result.start_line, 600);
+            assert_eq!(result.content, "line 600\nline 601");
+            assert_eq!(result.next_cursor, Some(602));
+        }
     }
 
     #[test]
