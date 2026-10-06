@@ -1083,6 +1083,10 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
   - Python: the interpreter in `.venv` (preferred) or `venv`, identified by
     `pyvenv.cfg`, runs `-m pytest -v` without requiring activation. Without a
     project environment, use PATH `python3` (`python` on Windows).
+- `/test` excludes `.doge` internal files from language detection, deduplicates
+  detected languages and runs them in stable alphabetical order. Existing source
+  scanning depth and exclusions remain in effect; this does not change `/lint`
+  or apply other features' ignore settings to test detection.
 - A selected Python environment that cannot start or lacks pytest reports that
   failure; `/test` does not install packages or retry in another environment.
   [Python venv](https://docs.python.org/3/library/venv.html) supports invoking the
