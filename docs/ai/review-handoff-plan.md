@@ -172,3 +172,19 @@ Acceptance: readable pass/fail/build failure, parallel/subtest attribution,
 known zero versus package failure, cache, pre-display count retention, capture
 warnings/timeout unknown, cancelled runs unrecorded, writer failure visibility.
 Focused/full Rust/guidance, independent review and TUI terminal recording.
+
+## Follow-up: Use the project Python environment for regular tests
+
+Python `/test` previously inferred PATH `pytest` availability from a configuration
+file and otherwise used PATH `python`. Prefer `.venv/pyvenv.cfg`, then
+`venv/pyvenv.cfg`, and invoke the native environment interpreter with
+`-m pytest -v`. Keep the venv interpreter symlink path; activation is unnecessary.
+Without a project venv use PATH `python3` on Unix, `python` on Windows. Missing
+interpreter/module errors stay failures; never install or silently change the
+selected environment. Parse pytest diagnostics independently of the interpreter's
+display path, including spaces. No structured counts, wire changes or judgments.
+Acceptance: environment selection/precedence, unrelated directories ignored,
+missing interpreter and module, argv separation and paths with spaces, pass/fail
+diagnostics, timeout/cancel lifecycle, shared observation/handoff unchanged.
+Focused/full Rust/guidance, independent review and real TUI recording precede a
+dedicated Draft PR and exact-head CI completion.
