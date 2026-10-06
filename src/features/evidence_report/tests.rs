@@ -1200,6 +1200,18 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
     );
     fs::write(root.join("test.rs"), "test changed after success").expect("change only test");
     let after = report(&f, false).await;
+    assert_eq!(
+        workflow::ReviewSummary::from_report(root, &before)
+            .expect("before summary")
+            .matching_successes,
+        1
+    );
+    assert_eq!(
+        workflow::ReviewSummary::from_report(root, &after)
+            .expect("after summary")
+            .matching_successes,
+        0
+    );
     assert!(after.verifications[1].outcome.success);
     assert!(
         after.review_handoff[0]
@@ -1368,4 +1380,84 @@ async fn review_handoff_escapes_recorded_links_and_empty_evidence() {
     r.review_handoff.clear();
     let markdown = render::render(&r, ReportFormat::Markdown).expect("empty Markdown");
     assert!(markdown.contains("No recorded changes. Empty evidence does not establish success."));
+}
+
+#[tokio::test]
+async fn review_summary_selects_requested_saved_session_and_does_not_write() {
+    let f = fixture(true);
+    let old_id = f.session.meta.id.clone();
+    let newer = f.store.create().expect("newer session");
+    f.store.save(&newer).expect("save newer");
+    let saved = f.store.session_dir(&old_id).join("session.json");
+    let before = fs::read(&saved).expect("saved bytes");
+    let summary = review_summary(f.dir.path(), &old_id)
+        .await
+        .expect("summary");
+    assert_eq!(summary.link.session_id, old_id);
+    assert_ne!(summary.link.session_id, newer.meta.id);
+    assert_eq!(summary.matching_successes, 0);
+    assert_eq!(summary.other_successes, 1);
+    assert_eq!(summary.unknown_correspondence, 1);
+    assert_eq!(fs::read(saved).expect("unchanged bytes"), before);
+    assert!(
+        summary
+            .lines()
+            .join("\n")
+            .contains("Unknown execution/current correspondence: 1")
+    );
+    assert!(
+        review_summary(f.dir.path(), &uuid::Uuid::now_v7().to_string())
+            .await
+            .is_err()
+    );
+    assert!(!f.dir.path().join("evidence.md").exists());
+}
+
+#[tokio::test]
+async fn review_summary_deduplicates_links_and_marks_incomplete_unknowns() {
+    let f = fixture(true);
+    let mut r = report(&f, false).await;
+    r.review_handoff.push(super::model::ReviewChange {
+        change_id: "second-change".into(),
+        matching_successful_observation_ids: vec![],
+        failed_observation_ids: vec![],
+        other_successful_observation_ids: vec![r.verifications[0].id.clone()],
+    });
+    r.session.provenance_incomplete = true;
+    let summary = workflow::ReviewSummary::from_report(f.dir.path(), &r).expect("summary");
+    assert_eq!(summary.other_successes, 1);
+    assert!(summary.incomplete);
+    assert!(
+        summary
+            .lines()
+            .join("\n")
+            .contains("incomplete/unavailable")
+    );
+    r.review_handoff.clear();
+    let summary = workflow::ReviewSummary::from_report(f.dir.path(), &r).expect("summary");
+    assert_eq!(summary.unlinked_observations, 1);
+    assert_eq!(summary.matching_successes, 0);
+    assert!(
+        summary
+            .lines()
+            .join("\n")
+            .contains("Empty evidence is not success")
+    );
+}
+
+#[test]
+fn review_link_uses_exact_id_arguments_and_escapes_project_control_characters() {
+    let id = uuid::Uuid::now_v7().to_string();
+    let root = Path::new("project\x1b[31m\nsecret");
+    let link = ReviewLink::new(root, &id).expect("full ID");
+    assert_eq!(
+        link.evidence_command,
+        vec!["dgc", "session", "evidence", &id]
+    );
+    let text = link.lines().join("\n");
+    assert!(!text.contains('\x1b'));
+    assert!(text.contains("U+001B"));
+    assert!(ReviewLink::new(root, "latest").is_none());
+    assert!(ReviewLink::new(root, "../../other").is_none());
+    assert!(ReviewLink::new(root, "/evidence injected").is_none());
 }

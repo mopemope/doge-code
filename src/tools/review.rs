@@ -174,6 +174,7 @@ impl ReviewCapture {
             files.push(rel);
         }
         DiffReviewPayload {
+            session_id: self.session.clone(),
             diff,
             files,
             review_id: Some(self.id.clone()),
@@ -447,6 +448,50 @@ mod tests {
         let fs = FsTools::new(Arc::new(tokio::sync::RwLock::new(None)), Arc::new(config))
             .with_review_capture(crate::jobs::JobId(1));
         (dir, fs)
+    }
+    #[test]
+    fn review_session_navigation_is_fixed_at_capture_across_session_changes() {
+        let dir = tempfile::tempdir().expect("root");
+        let store =
+            crate::session::SessionStore::new(dir.path().join(".doge/sessions")).expect("store");
+        let manager = Arc::new(Mutex::new(crate::session::SessionManager::with_store(
+            store,
+        )));
+        manager
+            .lock()
+            .expect("manager")
+            .create_session(None)
+            .expect("first");
+        let first = manager
+            .lock()
+            .expect("manager")
+            .current_session_id()
+            .expect("ID");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().into(),
+            ..Default::default()
+        };
+        let fs = FsTools::new(Arc::new(tokio::sync::RwLock::new(None)), Arc::new(cfg))
+            .with_session_manager(manager.clone())
+            .with_review_capture(crate::jobs::JobId(1));
+        fs.review_capture
+            .as_ref()
+            .expect("capture")
+            .lock()
+            .expect("capture lock")
+            .reason = Some("view only test".into());
+        manager
+            .lock()
+            .expect("manager")
+            .create_session(None)
+            .expect("second");
+        let payload = fs.seal_review().expect("payload");
+        assert_eq!(payload.session_id.as_deref(), Some(first.as_str()));
+        let id = payload.review_id.expect("review ID");
+        assert_eq!(
+            fs.review_payload(&id).expect("registry").session_id,
+            Some(first)
+        );
     }
     async fn change(fs: &FsTools, path: &Path, text: &str) {
         let before = mutation::read_text_snapshot(path).unwrap();

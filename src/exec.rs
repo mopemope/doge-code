@@ -317,6 +317,13 @@ impl Executor {
 
         match res {
             Ok(run) => {
+                // Freeze navigation immediately after the canonical save, before hooks.
+                let review_link = self.tools.get_current_session().and_then(|s| {
+                    crate::features::evidence_report::ReviewLink::new(
+                        &self.cfg.project_root,
+                        &s.meta.id,
+                    )
+                });
                 let updated_messages = run.messages;
                 let final_msg = run.final_message;
                 let status_str = match run.status {
@@ -372,7 +379,8 @@ impl Executor {
                         "tokens_used": tokens_used,
                         "usage": usage,
                         "tools_called": tools_called,
-                        "conversation_length": updated_messages.len()
+                        "conversation_length": updated_messages.len(),
+                        "review_handoff": review_link
                     });
                     println!(
                         "{}",
@@ -392,6 +400,11 @@ impl Executor {
                     }
                 }
 
+                if !json && let Some(link) = review_link {
+                    for line in link.lines() {
+                        eprintln!("{line}");
+                    }
+                }
                 if !json && notifications_enabled() {
                     // Send desktop notification on success
                     let summary = format!(

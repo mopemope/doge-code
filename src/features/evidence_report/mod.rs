@@ -3,7 +3,9 @@ mod collect;
 mod handoff;
 mod model;
 mod render;
+mod workflow;
 mod workspace;
+pub use workflow::{ReviewLink, ReviewSummary, review_summary};
 
 use crate::session::SessionStore;
 pub use model::{EvidenceReport, ReportFormat};
@@ -72,7 +74,7 @@ async fn build_with(
     include_content: bool,
     generated_at: String,
     git: &GitReader,
-    between_reads: &mut dyn FnMut(usize),
+    between_reads: &mut (dyn FnMut(usize) + Send),
 ) -> Result<EvidenceReport> {
     let root = root.canonicalize()?;
     let store_root = root.join(".doge/sessions");
