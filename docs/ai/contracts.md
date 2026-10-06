@@ -44,6 +44,11 @@ history; reject ambiguous blocks before inference or new directive persistence.
 ## Context Budget / Observation Safety
 
 Preflight context reductions must preserve unseen tool results.
+Local text compaction retains every observed user message unchanged and in order,
+independently of summary quality or the recent-tail budget. Generated summaries
+are assistant observations, not observed directives. The auxiliary summarizer
+receives historical roles and tool calls as JSON-quoted data, not live messages.
+Native Responses compaction follows its separate provider contract.
 Seen historical results should be offloaded through the Observation Store
 before conversation compaction. Never replace an unseen tool result with a
 non-recoverable clearing stub merely to satisfy a local token estimate.
