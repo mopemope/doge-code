@@ -326,6 +326,7 @@ impl TuiApp {
             "/cancel".to_string(),
             "/jobs".to_string(),
             "/compact".to_string(),
+            "/evidence".to_string(),
             "/lint".to_string(),
             "/git-worktree".to_string(),
             "/plan".to_string(),

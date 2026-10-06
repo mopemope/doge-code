@@ -48,6 +48,21 @@ implementation dependency.
 
 ## P1 / PR 2: Bring the handoff into the review workflow
 
+Implementation slice: CLI exec completion adds only an exact-session navigation
+link; text stdout remains the final answer. TUI `/evidence [id]` explicitly starts
+a cancellable foreground read job using the P0 report collector/classifier.
+Diff Review captures the session ID with its existing turn-owned capture; `e`
+requests that ID and leaves the diff available. The log remains visible beside
+the panel. Missing legacy IDs never fall back to the current session. Summary
+counts deduplicate IDs per category, preserve failures/unknowns and expose
+incomplete comparison. Full report export remains the existing CLI operation
+with explicit user destination selection. No automatic report or session writes.
+New runtime payload field defaults to absent for old payloads; no durable wire
+migration. Sync bounded reads may finish before cancellation is observed; late
+successful output is suppressed after cancellation. Saved data is inspected,
+so unsaved session changes are not represented. Recheck current files on demand.
+
+
 Gap: reviewers must invoke the export themselves and find the relevant session.
 Investigate CLI completion and Diff Review entry points; propose a session-specific
 summary and discoverable export action using the P0 derived view. Preserve
