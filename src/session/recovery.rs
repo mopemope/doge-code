@@ -300,7 +300,7 @@ mod tests {
         data.requests = 2;
         data.tool_calls = 1;
         data.conversation = vec![
-            serde_json::from_value(json!({"role":"assistant","content":null,"tool_calls":[{"id":"pending","type":"function","function":{"name":"fs_read","arguments":"{}"}}],"provider_state":{"provider":"openai-chatgpt","account_id":"test-account","model":"test-model","output":[{"type":"reasoning","encrypted_content":"opaque-state"}]}})).unwrap(),
+            serde_json::from_value(json!({"role":"assistant","content":null,"tool_calls":[{"id":"pending","type":"function","function":{"name":"fs_read","arguments":"{}"}}],"provider_state":{"provider":"openai","account_id":"test-account","model":"test-model","output":[{"type":"reasoning","encrypted_content":"opaque-state"}]}})).unwrap(),
             serde_json::from_value(json!({"role":"tool","tool_call_id":"pending","content":"complete result"})).unwrap(),
         ];
 

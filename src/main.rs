@@ -93,7 +93,7 @@ pub enum Commands {
     },
     /// List account-specific ChatGPT models
     Models {
-        #[arg(long, value_enum, default_value = "openai-chatgpt")]
+        #[arg(long, value_enum, default_value = "openai")]
         provider: features::openai_subscription::ProviderKind,
     },
     /// Run in TUI mode (default if no subcommand is provided)
@@ -183,8 +183,8 @@ async fn main() -> Result<()> {
     }
     if let Some(Commands::Models { provider }) = &cli.command {
         anyhow::ensure!(
-            *provider == features::openai_subscription::ProviderKind::OpenaiChatgpt,
-            "models currently supports openai-chatgpt only"
+            *provider == features::openai_subscription::ProviderKind::Openai,
+            "models currently supports openai only"
         );
         let cancel = tokio_util::sync::CancellationToken::new();
         let operation = features::openai_subscription::cli::models(
@@ -417,9 +417,9 @@ async fn run_tui(
         .as_ref()
         .and_then(|client| client.account_label())
     {
-        app.inference_label = Some(format!("openai-chatgpt | {account} | {}", cfg.model));
+        app.inference_label = Some(format!("openai | {account} | {}", cfg.model));
         app.push_log(format!(
-            "Provider: openai-chatgpt | Account: {account} | Model: {}",
+            "Provider: openai | Account: {account} | Model: {}",
             cfg.model
         ));
         app.push_log("ChatGPT plan usage: review limits in ChatGPT Settings > Usage. Token counts do not indicate remaining allowance.");

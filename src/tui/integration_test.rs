@@ -59,7 +59,7 @@ mod tests {
     fn subscription_selection_remains_visible_in_status_line() -> Result<()> {
         use ratatui::{Terminal, backend::TestBackend};
         let mut app = TuiApp::new_for_test("doge-code", Some("test-model".into()), "default");
-        app.inference_label = Some("openai-chatgpt | test-account | test-model".into());
+        app.inference_label = Some("openai | test-account | test-model".into());
         for _ in 0..50 {
             app.push_log("conversation continues");
         }
@@ -71,7 +71,7 @@ mod tests {
                 .lines()
                 .next()
                 .expect("status line")
-                .contains("openai-chatgpt | test-account | test-model")
+                .contains("openai | test-account | test-model")
         );
         println!("{rendered}");
         Ok(())
