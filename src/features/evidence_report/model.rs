@@ -17,6 +17,9 @@ pub enum ReportFormat {
 
 #[derive(Debug, Serialize)]
 pub struct EvidenceReport {
+    pub review_target: Option<crate::features::human_review::ReviewTarget>,
+    pub review_decision_state: crate::features::human_review::HistoryState,
+    pub review_decisions: Vec<crate::features::human_review::DecisionView>,
     pub schema_version: u32,
     pub generator: String,
     pub generated_at: String,

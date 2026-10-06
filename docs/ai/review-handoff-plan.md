@@ -118,10 +118,41 @@ privacy and unchanged frozen linkage/stale report. Independent review and focuse
 full Rust/guidance checks precede dedicated draft PR and final-head CI completion.
 No TUI command or layout change in this slice.
 
-## P3 / later separate PRs: Other formats and human reviewer decisions
+## P3 / PR 5: Explicit local reviewer decisions
+
+Implementation slice: evidence exports issue a versioned snapshot token for all
+saved session changes/observations and selected current working-tree comparison.
+`session review <full-id> <accept|request-changes> --snapshot <token>` requires a
+TTY and exact kind confirmation. No agent tool or noninteractive bypass; existing
+Diff Review close/rollback never creates a judgment. Store append-only v1 decisions
+separately from frozen provenance v1–7. Preserve command outcomes/unknowns. The
+judgment is explicit operator input, not identity authentication, correctness,
+GitHub approval or merge authority.
+
+Target identity includes bounded saved input byte hashes, canonical change/command/
+plan/requirement/obligation state, selected file hashes, Git comparison and current
+execution-file hashes. Export time, content opt-in and review history are excluded.
+No complete workspace/comparison or no recorded changes means no recording token;
+--base exports are read-only. Different input is stale; unavailable target or
+invalid/unsupported judgment data is unknown. Index contents are outside the
+working-tree judgment scope.
+
+Latest identical kind/target is idempotent; different kind appends with an explicit
+supersedes ID. Derive history from the chain, not clock order. Session lease guards
+publication; close the owning CLI/TUI before recording. Held Unix directories,
+no-clobber publication and file/directory sync protect writes. Failures after
+publication report durability uncertainty. Every export rechecks target identity;
+this is not an atomic workspace approval. No identities/comments/external sends.
+
+Acceptance: cancellation/EOF/noninteractive rejection, repeated operation and
+accept→request-changes→accept, alternate session, saved-payload/plan/staging/file
+changes, stale/unknown/old forms, clock reversal, unsafe storage, publication and
+post-publication sync failures. Independent review, full Rust/guidance checks,
+manual recorded CLI operation, dedicated draft PR and exact-head CI completion.
+
+## P3 / later separate PRs: Other formats
 
 Exit status and reported test events are not coverage measurements or review
 acceptance. Further adapters require format-specific trust/bounds/compatibility
-design. A human decision needs a separate explicit record and stale-decision
-handling. Never parse arbitrary output into correctness or treat command success
+design. Human reviewer decisions are covered by the explicit local judgment slice above. Never parse arbitrary output into correctness or treat command success
 as human approval. These follow-ups are not included in the first adapter PR.

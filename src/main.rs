@@ -153,7 +153,9 @@ async fn main() -> Result<()> {
     // Evidence export uses current-directory storage without loading user
     // credentials, creating default config/project logs, or starting services.
     if let Some(Commands::Session {
-        command: command @ session::cli::SessionCommands::Evidence { .. },
+        command:
+            command @ (session::cli::SessionCommands::Evidence { .. }
+            | session::cli::SessionCommands::Review { .. }),
     }) = &cli.command
     {
         tracing_subscriber::fmt()

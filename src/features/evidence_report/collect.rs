@@ -512,6 +512,7 @@ pub(super) fn build(
     summary.record_collection_complete = inputs.warnings.is_empty() && snapshot.complete;
     let review_handoff = super::handoff::build(&changes, &verifications);
     EvidenceReport {
+        review_target: None, review_decision_state: crate::features::human_review::HistoryState::NotRecorded, review_decisions: vec![],
         schema_version: 2, generator: format!("dgc/{}", env!("CARGO_PKG_VERSION")), generated_at,
         session: ReportSession { id: inputs.session.meta.id, updated_at: inputs.session.timestamp,
             provenance_incomplete: inputs.session.provenance_incomplete,

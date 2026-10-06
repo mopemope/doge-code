@@ -27,6 +27,8 @@ pub enum ReportError {
     Session(#[from] crate::session::error::SessionError),
     #[error("evidence serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("review decision input could not be loaded: {0}")]
+    Review(String),
     #[error("evidence input could not be loaded")]
     Input(#[source] anyhow::Error),
     #[error("evidence report limit exceeded: {0}")]
@@ -65,6 +67,19 @@ pub async fn export(
     )
     .await?;
     render::render(&report, format)
+}
+
+pub async fn inspect(root: &Path, id: &str) -> Result<EvidenceReport> {
+    build_with(
+        root,
+        id,
+        None,
+        false,
+        chrono::Utc::now().to_rfc3339(),
+        &GitReader::default(),
+        &mut |_| {},
+    )
+    .await
 }
 
 async fn build_with(
@@ -130,7 +145,7 @@ async fn build_with(
                 .await,
             )
         };
-        let report = collect::build(
+        let mut report = collect::build(
             collect::ReportRoots {
                 project: &root,
                 query: query_files.path(),
@@ -142,6 +157,13 @@ async fn build_with(
             include_content,
             generated_at.clone(),
         );
+        crate::features::human_review::attach(
+            &mut report,
+            &before,
+            &frozen_store.session_dir(&id),
+            current_execution.as_ref(),
+        )
+        .map_err(|e| ReportError::Review(e.to_string()))?;
         between_reads(attempt);
         let after = collect::input_identity(&root, &store, &id)?;
         let git_after = git.capture(&root, base).await?;
