@@ -190,6 +190,7 @@ impl TuiApp {
                     // codebase emits this message anymore; view-only.
                     if let Some(output) = msg.strip_prefix("::diff_output:") {
                         let payload = DiffReviewPayload {
+                            session_id: None,
                             review_id: None,
                             reject_reason: None,
                             diff: output.to_string(),
@@ -652,6 +653,25 @@ impl TuiApp {
                 self.dismiss_diff_review();
                 Ok(true)
             }
+            KeyCode::Char('e') => {
+                let Some(review) = self.diff_review.as_ref() else {
+                    return Ok(false);
+                };
+                if review.rejecting {
+                    self.push_log(
+                        "[evidence] Rollback is running; wait before inspecting evidence.",
+                    );
+                } else if let Some(id) = review
+                    .session_id
+                    .clone()
+                    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                {
+                    self.dispatch(&format!("/evidence {id}"));
+                } else {
+                    self.push_log("[evidence] This review has no captured session ID. Select a saved session explicitly with /evidence <id>.");
+                }
+                Ok(true)
+            }
             KeyCode::Char('a') => {
                 self.accept_diff_review();
                 Ok(true)
@@ -1083,6 +1103,52 @@ mod tests {
         assert_eq!(ui.processing_start_time, Some(start));
     }
     #[test]
+    fn diff_evidence_key_uses_captured_id_without_legacy_or_rollback_fallback() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mut ui = TuiApp::new_for_test("evidence", None, "default");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        let id = uuid::Uuid::now_v7().to_string();
+        let payload: DiffReviewPayload = serde_json::from_value(serde_json::json!({
+            "session_id": id, "diff": "+change", "files": ["a"]
+        }))
+        .expect("payload");
+        ui.diff_review = Some(DiffReviewState::from_payload(payload));
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        );
+        assert!(ui.process_diff_review_key(key).expect("key"));
+        assert_eq!(*calls.lock().expect("calls"), [format!("/evidence {id}")]);
+        assert!(ui.diff_review.is_some());
+        calls.lock().expect("calls").clear();
+        ui.diff_review.as_mut().expect("review").rejecting = true;
+        ui.process_diff_review_key(key).expect("rollback key");
+        assert!(calls.lock().expect("calls").is_empty());
+        let review = ui.diff_review.as_mut().expect("review");
+        review.rejecting = false;
+        review.session_id = None;
+        ui.process_diff_review_key(key).expect("legacy key");
+        assert!(calls.lock().expect("calls").is_empty());
+        for code in [
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyCode::Char('q'),
+        ] {
+            let payload: DiffReviewPayload = serde_json::from_value(
+                serde_json::json!({"session_id": id, "diff": "+change", "files": ["a"]}),
+            )
+            .expect("payload");
+            ui.diff_review = Some(DiffReviewState::from_payload(payload));
+            ui.process_diff_review_key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+                .expect("action");
+            assert!(calls.lock().expect("calls").is_empty());
+        }
+    }
+
+    #[test]
     fn running_reject_keeps_panel_and_esc_requests_cancel() {
         let calls = Arc::new(Mutex::new(vec![]));
         let mut ui = TuiApp::new_for_test("reject", None, "default");
@@ -1092,6 +1158,7 @@ mod tests {
             reject_once: false,
         }));
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: Some("review".into()),
             reject_reason: None,
             diff: "diff --git a/a b/a\n+agent\n".into(),
@@ -1114,6 +1181,7 @@ mod tests {
     #[test]
     fn legacy_diff_without_capture_is_view_only() {
         let payload = DiffReviewPayload {
+            session_id: None,
             review_id: None,
             reject_reason: None,
             diff: "diff --git a/user b/user\n-user\n+agent\n".into(),

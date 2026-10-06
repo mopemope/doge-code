@@ -95,6 +95,14 @@ impl CommandHandler for TuiExecutor {
             return;
         }
 
+        if line.split_whitespace().next() == Some("/evidence") {
+            crate::tui::commands::handlers::slash_commands::evidence::handle_evidence(
+                self,
+                ui,
+                line.strip_prefix("/evidence").unwrap_or("").trim(),
+            );
+            return;
+        }
         match line {
             "/help" => handle_help(self, ui),
             "/tools" => handle_tools(self, ui),
@@ -198,7 +206,9 @@ impl CommandHandler for TuiExecutor {
     }
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
-        if !self.handle_compact_completed(producer, ui) {
+        if !self.handle_evidence_completed(producer, ui)
+            && !self.handle_compact_completed(producer, ui)
+        {
             if let Some(id) = crate::jobs::JobId::parse_arg(producer)
                 && let Some(job) = self.jobs.get_snapshot(id)
                 && job.kind == crate::jobs::JobKind::DiffReject

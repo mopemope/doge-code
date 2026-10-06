@@ -217,6 +217,28 @@ and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-
 
 ## Export evidence for review
 
+After a successful or partial CLI `exec` run, stderr shows the saved session ID
+and its evidence command. JSON output adds `review_handoff` containing the exact
+session ID, project root and command arguments. No report is generated automatically.
+In the TUI, `/evidence [session-id]` compares saved evidence with current selected
+files and shows a bounded summary plus the export command in the log. Without an
+ID it selects the current session at command invocation; explicit prefixes use
+the existing unambiguous resolver and the summary displays the full resolved ID.
+Diff Review's `e` key inspects its captured session, even if another session is
+now current. Legacy reviews without an ID require explicit selection. The key
+works with empty input and does not accept, reject or dismiss the diff.
+
+Evidence inspection is a foreground read job: `/cancel` cancels it; session
+transitions and conflicting operations wait for completion. Cancelling, accepting,
+rejecting or dismissing a diff never triggers an export. The summary marks
+incomplete/unavailable collection, unknown correspondence and unattributed files;
+counts are unique observation IDs per category and may overlap across changes.
+Use the full per-change report for diagnostics and exact links. A summary is an
+export-time observation and can become stale after later edits. Inspect again
+before review. Run the shown export command from the displayed project root;
+choose an output file explicitly using shell redirection when needed.
+
+
 The report starts with a per-change review handoff: explicit requirement/plan
 links and linked command observation IDs. Matching successful observations require
 an active change matching its recorded file, stable execution endpoints and
@@ -812,6 +834,7 @@ The TUI provides various slash commands for quick operations:
 | `/clear` | Clear the screen |
 | `/cancel [job-id]` | Cancel the current foreground job or a specific job (`/cancel job-12`) |
 | `/jobs` | List running and recent jobs |
+| `/evidence [id]` | Inspect saved evidence and show the session-specific export command |
 | `/compact` | Compact conversation history (OpenAI-compatible: LLM summarization; openai-chatgpt: automatic Responses native compaction, no local summarizer) |
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
