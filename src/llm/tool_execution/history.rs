@@ -1373,12 +1373,13 @@ impl HistoryManager {
     /// Keeps:
     /// - pruned system messages (deduped, bounded) so the system prompt and
     ///   recent interventions survive,
-    /// - the compacted summary,
+    /// - the compacted summary as an assistant observation,
+    /// - every observed user directive byte-for-byte, including later steering,
     /// - the most recent non-system messages (within a character budget) so
     ///   the model can continue mid-task without re-discovering state.
-    fn merge_compacted_history(
+    pub(super) fn merge_compacted_history(
         original: &[ChatMessage],
-        compacted: ChatMessage,
+        mut compacted: ChatMessage,
     ) -> Vec<ChatMessage> {
         const TAIL_BUDGET_CHARS: usize = 8_000;
         const MAX_SYSTEM_MESSAGES: usize = 8;
@@ -1398,8 +1399,10 @@ impl HistoryManager {
             MAX_SYSTEM_MESSAGES.saturating_sub(new_history.len()),
             MAX_SYSTEM_MESSAGE_CHARS,
         ));
+        // A generated summary is evidence, never a new user directive.
+        compacted.role = "assistant".into();
         new_history.push(compacted);
-        new_history.extend(Self::tail_messages(original, TAIL_BUDGET_CHARS));
+        new_history.extend(Self::retained_messages(original, TAIL_BUDGET_CHARS));
         new_history
     }
 
@@ -1450,11 +1453,12 @@ impl HistoryManager {
         kept
     }
 
-    /// Take the most recent non-system messages whose combined size fits the
+    /// Preserve all user directives and take the most recent non-system messages
+    /// whose combined size fits the
     /// budget, capped to the last few conversation units. Tool-call pairing is
     /// preserved: an assistant message with tool calls and its tool responses
     /// are kept or dropped as a unit.
-    fn tail_messages(original: &[ChatMessage], budget: usize) -> Vec<ChatMessage> {
+    fn retained_messages(original: &[ChatMessage], budget: usize) -> Vec<ChatMessage> {
         const MAX_TAIL_GROUPS: usize = 3;
 
         let msg_len = |m: &ChatMessage| -> usize {
@@ -1467,22 +1471,26 @@ impl HistoryManager {
 
         // Group each assistant tool-call message with the tool responses that
         // immediately follow it so we never cut a pair in half.
-        let mut groups: Vec<Vec<&ChatMessage>> = Vec::new();
-        for msg in original.iter().filter(|m| m.role != "system") {
+        let mut groups: Vec<Vec<(usize, &ChatMessage)>> = Vec::new();
+        for (index, msg) in original
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != "system")
+        {
             match msg.role.as_str() {
-                "assistant" if !msg.tool_calls.is_empty() => groups.push(vec![msg]),
+                "assistant" if !msg.tool_calls.is_empty() => groups.push(vec![(index, msg)]),
                 "tool" => {
                     if let Some(group) = groups.last_mut()
-                        && group.first().is_some_and(|head| {
+                        && group.first().is_some_and(|(_, head)| {
                             head.role == "assistant" && !head.tool_calls.is_empty()
                         })
                     {
-                        group.push(msg);
+                        group.push((index, msg));
                     } else {
-                        groups.push(vec![msg]);
+                        groups.push(vec![(index, msg)]);
                     }
                 }
-                _ => groups.push(vec![msg]),
+                _ => groups.push(vec![(index, msg)]),
             }
         }
 
@@ -1492,7 +1500,7 @@ impl HistoryManager {
         let mut total = 0usize;
         let mut take_from = groups.len();
         for (idx, group) in groups.iter().enumerate().rev() {
-            let group_len: usize = group.iter().map(|m| msg_len(m)).sum();
+            let group_len: usize = group.iter().map(|(_, m)| msg_len(m)).sum();
             if idx < window_start {
                 break;
             }
@@ -1503,12 +1511,20 @@ impl HistoryManager {
             take_from = idx;
         }
 
-        if take_from >= groups.len() {
-            return Vec::new();
-        }
-        groups[take_from..]
+        let tail_indices: BTreeSet<usize> = groups[take_from..]
             .iter()
-            .flat_map(|group| group.iter().map(|m| (*m).clone()))
+            .flat_map(|group| group.iter().map(|(index, _)| *index))
+            .collect();
+        // Keep chronological order and select by identity rather than content:
+        // two equal directives are still two distinct observed user turns.
+        // User instructions are deliberately exempt from the tail budget. If
+        // they alone exceed context capacity, fail rather than silently forget
+        // the user's goal, cancellation, or constraints.
+        original
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| message.role == "user" || tail_indices.contains(index))
+            .map(|(_, message)| message.clone())
             .collect()
     }
 }
@@ -1617,6 +1633,67 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_exact_directives_across_repeated_merges() {
+        let directive = make_msg(
+            "user",
+            &format!(
+                "Fix the parser and add a failing regression. {}",
+                "条件を保持\n".repeat(1500)
+            ),
+        );
+        let steering = make_msg("user", "Keep the public interface; do not publish.");
+        let mut original = vec![make_msg("system", "authority"), directive.clone()];
+        for index in 0..5 {
+            original.push(make_msg("assistant", &format!("progress {index}")));
+        }
+        original.push(steering.clone());
+        for round in 0..3 {
+            original.push(make_assistant_with_tool_calls("read", "reading"));
+            original.push(make_tool_msg("read", "file content"));
+            original = HistoryManager::merge_compacted_history(
+                &original,
+                make_msg("assistant", &format!("I have read a file, round {round}")),
+            );
+            let directives: Vec<_> = original.iter().filter(|m| m.role == "user").collect();
+            assert_eq!(
+                directives.len(),
+                2,
+                "summaries must not become directives or duplicate them"
+            );
+            assert_eq!(
+                serde_json::to_value(directives[0]).expect("message"),
+                serde_json::to_value(&directive).expect("message")
+            );
+            assert_eq!(
+                serde_json::to_value(directives[1]).expect("message"),
+                serde_json::to_value(&steering).expect("message")
+            );
+            let call_index = original
+                .iter()
+                .position(|m| !m.tool_calls.is_empty())
+                .expect("tail call");
+            assert_eq!(
+                original[call_index + 1].tool_call_id.as_deref(),
+                Some("read")
+            );
+        }
+        let suffix = vec![
+            make_assistant_with_tool_calls("unseen", "pending"),
+            make_tool_msg("unseen", "exact unseen bytes"),
+        ];
+        let merged = HistoryManager::merge_compacted_with_protected_suffix(
+            &original,
+            &suffix,
+            make_msg("assistant", "read-only progress"),
+        );
+        assert_eq!(
+            serde_json::to_value(&merged[merged.len() - 2..]).expect("suffix"),
+            serde_json::to_value(&suffix).expect("suffix")
+        );
+        assert_eq!(merged.iter().filter(|m| m.role == "user").count(), 2);
+    }
+
+    #[test]
     fn test_merge_compacted_history_keeps_system_summary_and_tail() {
         let original = vec![
             make_msg("system", "System Prompt"),
@@ -1635,7 +1712,7 @@ mod tests {
         assert_eq!(result[0].content.as_deref(), Some("System Prompt"));
         assert_eq!(result[1].role, "system");
         assert_eq!(result[1].content.as_deref(), Some("Loop Warning"));
-        assert_eq!(result[2].role, "user");
+        assert_eq!(result[2].role, "assistant");
         assert_eq!(result[2].content.as_deref(), Some("Summary"));
         // Recent tail preserved after the summary.
         assert_eq!(result[3].content.as_deref(), Some("User 1"));
@@ -1728,7 +1805,10 @@ mod tests {
         assert!(contents.contains(&"recent question".to_string()));
         assert!(contents.contains(&"middle".to_string()));
         assert!(!contents.contains(&big));
-        assert!(!contents.contains(&"old task".to_string()));
+        assert!(
+            contents.contains(&"old task".to_string()),
+            "original directive is exempt from the tail budget"
+        );
     }
 
     #[test]

@@ -34,13 +34,10 @@ pub async fn handle_compaction(
             if compact_result.metadata.success {
                 info!("History compaction successful");
 
-                // Preserve System Prompt if present
-                let system_prompt = messages.iter().find(|m| m.role == "system").cloned();
-                messages.clear();
-                if let Some(sys) = system_prompt {
-                    messages.push(sys);
-                }
-                messages.push(compact_result.compacted_message);
+                *messages = super::history::HistoryManager::merge_compacted_history(
+                    messages,
+                    compact_result.compacted_message,
+                );
 
                 // Inform UI
                 if let Some(tx) = ui_tx {
