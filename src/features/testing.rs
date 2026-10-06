@@ -710,23 +710,52 @@ fn parse_pytest_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
     let mut failed_tests = Vec::new();
     let combined = format!("{}\n{}", stdout, stderr);
 
-    // Pattern: FAILED test_file.py::test_name - AssertionError
-    let re_fail = Regex::new(r"(?m)^FAILED\s+(\S+)::(\S+)\s*(?:-\s*(.+))?$").unwrap();
-
     for line in combined.lines() {
-        if let Some(captures) = re_fail.captures(line) {
-            let file_path = captures.get(1).map(|m| m.as_str().to_string());
-            let name = captures.get(2).map(|m| m.as_str().to_string());
-            let message = captures
-                .get(3)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-
+        let Some(summary) = line
+            .strip_prefix("FAILED")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        else {
+            continue;
+        };
+        // pytest node IDs separate the file from the complete test path at the
+        // first ::. Further :: belong to classes/nested collectors or parameters.
+        let Some((file, description)) = summary.trim_start().split_once("::") else {
+            continue;
+        };
+        let mut parameter_depth = 0usize;
+        let mut malformed_node = false;
+        let mut separator = None;
+        for (index, character) in description.char_indices() {
+            match character {
+                '[' => parameter_depth += 1,
+                ']' if parameter_depth == 0 => malformed_node = true,
+                ']' => parameter_depth -= 1,
+                ' ' if parameter_depth == 0 && description[index..].starts_with(" - ") => {
+                    separator = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (name, message) = separator.map_or((description, ""), |index| {
+            (&description[..index], &description[index + 3..])
+        });
+        // pytest renders arbitrary IDs without escaping brackets. A further
+        // closing-bracket/message boundary could belong to the ID instead.
+        // Omit ambiguous metadata rather than invent a test/message split;
+        // the raw capture and command failure remain available to the follow-up.
+        if malformed_node
+            || parameter_depth != 0
+            || (name.contains('[') && message.contains("] - "))
+        {
+            continue;
+        }
+        if !file.is_empty() && !name.trim().is_empty() {
             failed_tests.push(FailedTest {
-                name: name.unwrap_or_else(|| "Unknown Test".to_string()),
-                file_path,
+                name: name.trim_end().to_string(),
+                file_path: Some(file.to_string()),
                 line_number: None,
-                message,
+                message: message.to_string(),
                 expected: None,
                 actual: None,
                 stack_trace: None,
@@ -736,6 +765,76 @@ fn parse_pytest_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
     }
 
     failed_tests
+}
+
+#[cfg(test)]
+mod pytest_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn actual_pytest_multiple_failures_keep_files_and_complete_test_names() {
+        // Summary emitted by Python 3.13.3 / pytest 9.1.1, -vv. The fixture
+        // includes a class, ordinary function, file spaces and real parameter IDs.
+        let raw = include_str!("testing/fixtures/pytest-current-summary.txt");
+        let failures = parse_pytest_output(raw, "");
+        assert_eq!(failures.len(), 7);
+        for failure in &failures {
+            assert_eq!(
+                failure.file_path.as_deref(),
+                Some("test_nodes with spaces.py")
+            );
+            assert!(!failure.file_path.as_ref().unwrap().contains("::"));
+            assert!(failure.message.starts_with("assert "));
+        }
+        assert_eq!(
+            failures.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            [
+                "TestGroup::test_parameter[space id]",
+                "TestGroup::test_parameter[space - id]",
+                "TestGroup::test_parameter[nested [id]]",
+                "TestGroup::test_parameter[namespace::id]",
+                "TestGroup::test_parameter[日本 語]",
+                "TestGroup::test_plain",
+                "test_plain",
+            ]
+        );
+    }
+
+    #[test]
+    fn pytest_message_boundaries_and_missing_messages_keep_node_identity() {
+        let stdout = "FAILED tests/test_plain.py::test_plain - AssertionError: left - right\nFAILED tests/test_class.py::Outer::Inner::test_value[space - id] - assert [1] == [2]\n";
+        let stderr = "FAILED tests/test_none.py::TestClass::test_none[space id]\nFAILED tests/test_none.py::test_plain\n";
+        let failures = parse_pytest_output(stdout, stderr);
+        assert_eq!(failures.len(), 4);
+        assert_eq!(failures[0].message, "AssertionError: left - right");
+        assert_eq!(failures[1].name, "Outer::Inner::test_value[space - id]");
+        assert_eq!(failures[1].message, "assert [1] == [2]");
+        assert_eq!(failures[2].name, "TestClass::test_none[space id]");
+        assert_eq!(failures[2].message, "");
+        assert_eq!(failures[3].name, "test_plain");
+    }
+
+    #[test]
+    fn ambiguous_pytest_metadata_does_not_rewrite_raw_failure_or_outcome() {
+        let raw = concat!(
+            "FAILED tests/test_ids.py::test_id[right] - literal] - assert 1 == 2\n",
+            "FAILED tests/test_ids.py::test_id[unclosed[ - assert 1 == 2\n",
+            "FAILED tests/test_ids.py::test_id[stray]] - assert 1 == 2\n",
+            "FAILED ::test_empty_file\nFAILED tests/test_ids.py::\n",
+            "FAILEDnot_a_summary tests/test_ids.py::test_plain\n",
+        );
+        let result: TestResult = serde_json::from_value(serde_json::json!({
+            "command":"/tmp/project with spaces/.venv/bin/python -m pytest -v",
+            "stdout":raw,"stderr":"raw stderr","success":false,"exit_code":1,"failed_tests":[]
+        }))
+        .unwrap();
+        assert!(parse_test_output(&result, "python").is_empty());
+        assert_eq!(result.stdout, raw);
+        assert_eq!(result.stderr, "raw stderr");
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(1));
+        assert!(result.structured_test_result.is_none());
+    }
 }
 
 /// Parse Rust stack trace from panic output
