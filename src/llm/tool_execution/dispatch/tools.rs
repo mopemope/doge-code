@@ -230,6 +230,9 @@ fn record_execute_process_verification(
     }
     let event =
         crate::provenance::build_verification_event(crate::provenance::VerificationRecordInput {
+            structured_test_result: value
+                .get("structured_test_result")
+                .and_then(|r| serde_json::from_value(r.clone()).ok()),
             kind,
             source: crate::provenance::VerificationSource::ExecuteProcess,
             program,

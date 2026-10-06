@@ -338,6 +338,36 @@ change the verification outcome. Old v1–5 events stay unchanged with context
 unknown; export reads saved context without probing the current machine.
 Matching context never establishes correctness or reproducibility.
 
+Explicit `execute_process` requests for `go test -json` now record bounded
+structured results in provenance v7. The [Go event format](https://pkg.go.dev/cmd/test2json)
+is parsed from existing stdout capture before the LLM presentation budget. This
+adds no commands, result-file reads or automatic `-json` flags. Ordinary `/test`
+Go commands still use their existing arguments and have no structured result.
+The same verification writer can interpret eligible complete trusted output.
+Other output formats and v1–6 history remain unknown, without reparsing excerpts
+on export. Original process success/exit status and change/obligation links remain
+separate from reported test results and human approval.
+
+Complete results count passed/failed/skipped terminal test events (parent tests,
+subtests and examples separately) and package outcomes. JSON `test_count` is this
+terminal-event total, accompanied by `test_count_unit`; it is not a unique-test,
+assertion or coverage count. Known zero requires a complete package event stream.
+Markdown shows historical results beside execution/current-code comparisons;
+later edits preserve old counts while making their workspace correspondence stale.
+New summaries contain numeric counts and fixed status/reason only, without
+package/test names, output, paths or parser error text. Existing content opt-in
+and provenance command excerpts retain their established behavior.
+
+Input is limited to 64 KiB, 16 KiB per line, 4,096 events, 128 packages, 512 test
+keys and 256 bytes per key. Malformed, duplicate/unclosed, unsupported, truncated,
+excessive or timed-out output yields unknown counts rather than zero. Package
+terminal outcomes inconsistent with process success also yield unknown. Benchmark,
+fuzz, list, wrapper, repeated-test/CPU modes and unknown flags/events are not
+supported by this first adapter. The invocation must explicitly enable `-json`
+before `-args`/`--`; an effective `-json=false` disables collection. Reports are
+observations of the emitted format and do not authenticate that tests ran, prove
+correctness or record a human review decision.
+
 Each endpoint is limited to 10,000 paths, 16 MiB per file, 128 MiB of reads and
 
 4 MiB serialized data, with a cooperative 10-second collection budget. Acquisition
@@ -600,7 +630,7 @@ Verification:
 - `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
 - `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification. It also freezes `matched_obligations` (id + binding hash) for structured runs.
 - Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
-- Storage: `.doge/sessions/<id>/provenance/v6/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
+- Storage: `.doge/sessions/<id>/provenance/v7/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 
@@ -622,11 +652,11 @@ step-2
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
 - A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
-- Tracked mutations (v6 writes, legacy v1–v5 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
+- Tracked mutations (v7 writes, legacy v1–v6 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
-- Storage: `.doge/sessions/<id>/provenance/v6/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Storage: `.doge/sessions/<id>/provenance/v7/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
 - Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
 
 ## Verification Obligations

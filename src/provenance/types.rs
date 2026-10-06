@@ -6,7 +6,8 @@ use super::wire::v3 as wire_v3;
 use super::wire::v4 as wire_v4;
 
 /// Current on-disk schema version for newly written provenance events.
-pub const PROVENANCE_SCHEMA_VERSION: u32 = 6;
+pub const PROVENANCE_SCHEMA_VERSION: u32 = 7;
+pub const V6_PROVENANCE_SCHEMA_VERSION: u32 = 6;
 pub const V5_PROVENANCE_SCHEMA_VERSION: u32 = 5;
 pub const V4_PROVENANCE_SCHEMA_VERSION: u32 = 4;
 /// Legacy read-only schema version. v1 files are converted on read and are
@@ -433,6 +434,9 @@ pub fn file_content_hash(content: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationObservedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_test_result:
+        Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_context: Option<Box<crate::features::verification_context::ExecutionContext>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_workspace:
@@ -585,6 +589,7 @@ pub fn from_v1_wire(env: wire_v1::V1Envelope) -> ProvenanceEventEnvelope {
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 verification_kind: match v.verification_kind {
@@ -705,6 +710,7 @@ pub fn from_v2_wire(env: wire_v2::V2Envelope) -> ProvenanceEventEnvelope {
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 verification_kind: match v.verification_kind {
@@ -872,6 +878,7 @@ pub fn from_v3_wire(env: wire_v3::V3Envelope) -> ProvenanceEventEnvelope {
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 verification_kind: match v.verification_kind {
@@ -1232,6 +1239,7 @@ pub fn from_v4_wire(env: wire_v4::V4Envelope) -> ProvenanceEventEnvelope {
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
+                structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
                 verification_kind: kind_from_v4(v.verification_kind),
@@ -1574,6 +1582,58 @@ pub fn to_v6_wire(env: &ProvenanceEventEnvelope) -> super::wire::v6::V6Envelope 
         }
     };
     v6::V6Envelope {
+        schema_version: V6_PROVENANCE_SCHEMA_VERSION,
+        event_id: previous.event_id,
+        session_id: previous.session_id,
+        timestamp: previous.timestamp,
+        event,
+    }
+}
+
+/// v7 composes the frozen v6 adapter; old formats never acquire host metadata.
+pub fn from_v7_wire(env: super::wire::v7::V7Envelope) -> ProvenanceEventEnvelope {
+    use super::wire::{v6, v7};
+    let (event, context) = match env.event {
+        v7::V7Event::DirectiveObserved(v) => (v6::V6Event::DirectiveObserved(v), None),
+        v7::V7Event::RequirementChanged(v) => (v6::V6Event::RequirementChanged(v), None),
+        v7::V7Event::PlanChanged(v) => (v6::V6Event::PlanChanged(v), None),
+        v7::V7Event::ChangeCommitted(v) => (v6::V6Event::ChangeCommitted(v), None),
+        v7::V7Event::VerificationObserved(v) => (
+            v6::V6Event::VerificationObserved(v.observation),
+            v.structured_test_result,
+        ),
+    };
+    let mut canonical = from_v6_wire(v6::V6Envelope {
+        schema_version: V6_PROVENANCE_SCHEMA_VERSION,
+        event_id: env.event_id,
+        session_id: env.session_id,
+        timestamp: env.timestamp,
+        event,
+    });
+    if let ProvenanceEvent::VerificationObserved(v) = &mut canonical.event {
+        v.structured_test_result = context;
+    }
+    canonical
+}
+pub fn to_v7_wire(env: &ProvenanceEventEnvelope) -> super::wire::v7::V7Envelope {
+    use super::wire::{v6, v7};
+    let previous = to_v6_wire(env);
+    let event = match previous.event {
+        v6::V6Event::DirectiveObserved(v) => v7::V7Event::DirectiveObserved(v),
+        v6::V6Event::RequirementChanged(v) => v7::V7Event::RequirementChanged(v),
+        v6::V6Event::PlanChanged(v) => v7::V7Event::PlanChanged(v),
+        v6::V6Event::ChangeCommitted(v) => v7::V7Event::ChangeCommitted(v),
+        v6::V6Event::VerificationObserved(v) => {
+            v7::V7Event::VerificationObserved(v7::V7VerificationObserved {
+                observation: v,
+                structured_test_result: match &env.event {
+                    ProvenanceEvent::VerificationObserved(c) => c.structured_test_result.clone(),
+                    _ => None,
+                },
+            })
+        }
+    };
+    v7::V7Envelope {
         schema_version: PROVENANCE_SCHEMA_VERSION,
         event_id: previous.event_id,
         session_id: previous.session_id,

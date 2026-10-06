@@ -1104,6 +1104,7 @@ mod tests {
         let change = commit_for(&store, "s", "src/lib.rs", &sym_id, &fp);
         // Successful verification observes the change.
         let event = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
             kind: VerificationKind::Test,
             source: VerificationSource::ExecuteProcess,
             program: "cargo",
@@ -1159,6 +1160,7 @@ mod tests {
         let store = ProvenanceStore::new(sess_dir.path().join("s"));
         let change = commit_for(&store, "s", "src/lib.rs", &sym_id, &fp);
         let event = VerificationObservedEvent {
+            structured_test_result: None,
             execution_context: None,
             execution_workspace: None,
             plan_item_id: None,

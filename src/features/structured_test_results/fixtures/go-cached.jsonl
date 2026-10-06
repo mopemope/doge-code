@@ -1,0 +1,21 @@
+{"Action":"start","Package":"example.invalid/fixture"}
+{"Action":"run","Package":"example.invalid/fixture","Test":"TestPass"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass","Output":"=== RUN   TestPass\n","OutputType":"frame"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass","Output":"=== PAUSE TestPass\n","OutputType":"frame"}
+{"Action":"pause","Package":"example.invalid/fixture","Test":"TestPass"}
+{"Action":"run","Package":"example.invalid/fixture","Test":"TestSkip"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestSkip","Output":"=== RUN   TestSkip\n","OutputType":"frame"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestSkip","Output":"    fixture_test.go:10: fixture\n"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n","OutputType":"frame"}
+{"Action":"skip","Package":"example.invalid/fixture","Test":"TestSkip"}
+{"Action":"cont","Package":"example.invalid/fixture","Test":"TestPass"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass","Output":"=== CONT  TestPass\n","OutputType":"frame"}
+{"Action":"run","Package":"example.invalid/fixture","Test":"TestPass/child"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass/child","Output":"=== RUN   TestPass/child\n","OutputType":"frame"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass/child","Output":"--- PASS: TestPass/child (0.00s)\n","OutputType":"frame"}
+{"Action":"pass","Package":"example.invalid/fixture","Test":"TestPass/child"}
+{"Action":"output","Package":"example.invalid/fixture","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n","OutputType":"frame"}
+{"Action":"pass","Package":"example.invalid/fixture","Test":"TestPass"}
+{"Action":"output","Package":"example.invalid/fixture","Output":"PASS\n","OutputType":"frame"}
+{"Action":"output","Package":"example.invalid/fixture","Output":"ok  \texample.invalid/fixture\t(cached)\n"}
+{"Action":"pass","Package":"example.invalid/fixture"}
