@@ -210,6 +210,9 @@ pub struct Change {
 
 #[derive(Debug, Serialize)]
 pub struct Verification {
+    pub structured_test_result:
+        Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
+    pub test_count_unit: Option<&'static str>,
     pub execution_context: Option<Box<crate::features::verification_context::ExecutionContext>>,
     pub execution_workspace:
         Option<Box<crate::features::verification_snapshot::ExecutionWorkspace>>,

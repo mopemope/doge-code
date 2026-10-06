@@ -218,6 +218,26 @@ fn markdown(r: &EvidenceReport, json: &str) -> String {
             v.current_code_state.state
         );
     }
+    out.push_str("\n## Historical structured test results\n\n| Observation | Reported result | Execution endpoints | Current code |\n|---|---|---|---|\n");
+    for v in &r.verifications {
+        let result = v
+            .structured_test_result
+            .as_ref()
+            .map(|r| format!("{:?} / {:?}", r.format, r.observation))
+            .unwrap_or_else(|| "unknown (not recorded or unsupported format)".into());
+        let _ = writeln!(
+            out,
+            "| {} | {} | {:?} | {:?} |",
+            cell(&v.id),
+            cell(&result),
+            v.execution_workspace
+                .as_ref()
+                .map(|w| w.run_state)
+                .unwrap_or(crate::features::verification_snapshot::RunState::NotRecorded),
+            v.current_code_state.state
+        );
+    }
+    out.push_str("\nCounts describe reported terminal test/subtest events, including parent and child separately, and package outcomes. They are historical observations, separate from process exit, current-code comparison and human approval.\n");
     out.push_str("\n## Recorded execution context\n\n| Observation | OS family | Architecture | Primary tool | Version observation |\n|---|---|---|---|---|\n");
     for v in &r.verifications {
         if let Some(c) = &v.execution_context {

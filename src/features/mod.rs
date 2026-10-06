@@ -1,5 +1,6 @@
 pub mod doc_skill;
 pub mod evidence_report;
+pub mod structured_test_results;
 pub mod verification_context;
 pub mod verification_snapshot;
 

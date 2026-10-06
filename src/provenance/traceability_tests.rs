@@ -567,6 +567,7 @@ mod traceability_tests {
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: VerificationKind::Test,
                 source: VerificationSource::ExecuteProcess,
                 program: "cargo",
@@ -627,6 +628,7 @@ mod traceability_tests {
             )
             .unwrap();
         let failed = VerificationObservedEvent {
+            structured_test_result: None,
             execution_context: None,
             execution_workspace: None,
             directive_id: Some("d1".to_string()),
@@ -759,6 +761,7 @@ mod traceability_tests {
         };
         let v = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: VerificationKind::Test,
                 source: VerificationSource::ExecuteProcess,
                 program: "cargo",
@@ -938,6 +941,7 @@ mod traceability_tests {
         };
         let v = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: VerificationKind::Test,
                 source: VerificationSource::ExecuteProcess,
                 program: "cargo",

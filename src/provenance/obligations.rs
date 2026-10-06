@@ -857,6 +857,7 @@ mod tests {
         matched: Vec<VerificationObligationRef>,
     ) {
         let event = build_verification_event(VerificationRecordInput {
+            structured_test_result: None,
             kind,
             source: VerificationSource::ExecuteProcess,
             program,

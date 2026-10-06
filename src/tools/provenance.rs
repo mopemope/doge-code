@@ -446,6 +446,7 @@ pub fn record_tui_test_verification(
 ) -> bool {
     let event =
         crate::provenance::build_verification_event(crate::provenance::VerificationRecordInput {
+            structured_test_result: None,
             kind: crate::provenance::VerificationKind::Test,
             source: crate::provenance::VerificationSource::TuiTest,
             program,
@@ -485,6 +486,7 @@ pub fn record_tui_lint_verification(
 ) -> bool {
     let event =
         crate::provenance::build_verification_event(crate::provenance::VerificationRecordInput {
+            structured_test_result: None,
             kind,
             source: crate::provenance::VerificationSource::TuiLint,
             program,
@@ -1648,6 +1650,7 @@ mod tests {
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: crate::provenance::VerificationKind::Test,
                 source: crate::provenance::VerificationSource::ExecuteProcess,
                 program: "cargo",
@@ -2202,6 +2205,7 @@ mod provenance_extra_tests {
         let store = ProvenanceStore::new(ctx.session_dir);
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: crate::provenance::VerificationKind::Test,
                 source: crate::provenance::VerificationSource::ExecuteProcess,
                 program: "cargo",
@@ -2362,6 +2366,7 @@ mod provenance_extra_tests {
         let store = ProvenanceStore::new(ctx.session_dir);
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: crate::provenance::VerificationKind::Test,
                 source: crate::provenance::VerificationSource::ExecuteProcess,
                 program: "cargo",
@@ -2639,6 +2644,7 @@ mod review_fix_tests {
         };
         let event = crate::provenance::build_verification_event(
             crate::provenance::VerificationRecordInput {
+                structured_test_result: None,
                 kind: crate::provenance::VerificationKind::Test,
                 source: crate::provenance::VerificationSource::ExecuteProcess,
                 program: "cargo",

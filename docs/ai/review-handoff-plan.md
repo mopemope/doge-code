@@ -96,14 +96,32 @@ format-specific result adapters are not recorded by P2. Metadata absence never
 fabricates evidence, and future context changes require a new explicit format.
 Structured test results and human decisions remain separate P3 work.
 
-## P3 / separate future PRs: Structured results and reviewer decisions
+## P3 / PR 4: Bounded structured results, first format
 
-Gap: exit status is not an authoritative test count, coverage measurement or
-review acceptance. Investigate format-specific result adapters and a separate
-explicit human review decision record. Never parse arbitrary stdout into a
-correctness claim or treat a command success as human approval. Plan wire
-migration, bounded artifact paths and trust boundaries before implementation.
-Acceptance includes malformed/truncated results, legacy unknowns, stale decisions
-and distinct observed outcome versus human verdict. Dependencies: P0; P2 only
-where environment identity is necessary. Split adapters and review decisions;
-this plan does not authorize a broad verifier or autonomous approval system.
+Implementation slice: explicit `go test -json` stdout, parsed from the existing
+managed capture before presentation truncation. Persist counts/status/reason only
+in v7, composing frozen v6. No additional execution or artifact-file reads. Unknown
+old v1–6 records stay unknown on export. Test/subtest terminal-event counts and
+package outcomes are separate from process outcome; no result claims requirement
+satisfaction or human approval. Keep frozen change/obligation IDs and selected-file
+endpoint/current-code comparisons. Historical counts survive later edits while
+comparison becomes stale. Complete zero requires terminal package events.
+
+Bounds: 64 KiB input, 16 KiB lines, 4,096 events, 128 packages, 512 test keys,
+256-byte names (transient only). Track interleaved start/run/pause/cont/terminal
+lifecycles; unclosed/duplicate/malformed/oversized/truncated/timed-out streams and
+outcome contradictions yield unknown, never zero. Go cached output is supported;
+benchmark/fuzz/list/wrapper/repetition and other formats remain unsupported.
+Acceptance: realistic current/cached Go fixtures, nonzero/failing/skip/zero,
+pre-budget capture regression, bounds/malformed cases, explicit v7/old-wire reads,
+privacy and unchanged frozen linkage/stale report. Independent review and focused/
+full Rust/guidance checks precede dedicated draft PR and final-head CI completion.
+No TUI command or layout change in this slice.
+
+## P3 / later separate PRs: Other formats and human reviewer decisions
+
+Exit status and reported test events are not coverage measurements or review
+acceptance. Further adapters require format-specific trust/bounds/compatibility
+design. A human decision needs a separate explicit record and stale-decision
+handling. Never parse arbitrary output into correctness or treat command success
+as human approval. These follow-ups are not included in the first adapter PR.

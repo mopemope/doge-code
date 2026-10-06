@@ -33,6 +33,9 @@ pub enum ProcessStatus {
 /// Structured result returned to the LLM (JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_test_result:
+        Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
     pub success: bool,
     pub status: ProcessStatus,
     pub exit_code: Option<i32>,
@@ -51,6 +54,7 @@ pub struct ProcessResult {
 impl ProcessResult {
     pub fn policy_denied(denial: &PolicyDenial) -> Self {
         Self {
+            structured_test_result: None,
             success: false,
             status: ProcessStatus::PolicyDenied,
             exit_code: None,
@@ -64,6 +68,7 @@ impl ProcessResult {
 
     pub fn spawn_failed(msg: impl Into<String>) -> Self {
         Self {
+            structured_test_result: None,
             success: false,
             status: ProcessStatus::SpawnFailed,
             exit_code: None,
@@ -138,6 +143,7 @@ pub async fn run_process(
     let cwd = policy.resolve_cwd(&req.cwd);
     let timeout = policy.effective_timeout(req.timeout_ms);
     let program = req.program.clone();
+    let process_args = req.args.clone();
     let spec = ManagedProcessSpec {
         program: req.program,
         args: req.args,
@@ -168,6 +174,19 @@ pub async fn run_process(
         }
     };
 
+    let structured_test_result = crate::features::structured_test_results::observe(
+        &program,
+        &process_args,
+        &managed.stdout,
+        if managed.termination == ManagedProcessTermination::TimedOut {
+            crate::features::structured_test_results::CaptureState::TimedOut
+        } else if managed.capture_truncated || !managed.warnings.is_empty() {
+            crate::features::structured_test_results::CaptureState::Incomplete
+        } else {
+            crate::features::structured_test_results::CaptureState::Complete
+        },
+        managed.success(),
+    );
     match managed.termination {
         ManagedProcessTermination::Cancelled => {
             return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
@@ -188,6 +207,7 @@ pub async fn run_process(
                 "process timed out"
             );
             return Ok(ProcessResult {
+                structured_test_result,
                 success: false,
                 status: ProcessStatus::TimedOut,
                 // A timeout has no meaningful child exit status. Do not invent
@@ -219,6 +239,7 @@ pub async fn run_process(
     // Environment values are never logged.
 
     Ok(ProcessResult {
+        structured_test_result,
         success,
         status: ProcessStatus::Completed,
         exit_code,
@@ -438,5 +459,76 @@ mod tests {
         let result = run_process(req, &cfg, None).await.unwrap();
         assert!(result.success);
         assert_eq!(result.status, ProcessStatus::Completed);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod structured_result_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn go_result_uses_complete_capture_before_presentation_truncation() {
+        let root = tempfile::tempdir().expect("root");
+        let program = root.path().join("go");
+        let start = "{\"Action\":\"start\",\"Package\":\"p\"}\n";
+        let noise = serde_json::json!({"Action":"output","Package":"p","Output":"X".repeat(9000)})
+            .to_string();
+        let stdout = format!("{start}{noise}\n{{\"Action\":\"skip\",\"Package\":\"p\"}}\n");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ncat <<'FIXTURE_JSON'\n{stdout}FIXTURE_JSON\n"),
+        )
+        .expect("script");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let config = AppConfig {
+            project_root: root.path().into(),
+            execution_configured: true,
+            ..Default::default()
+        };
+        let request = ProcessRequest {
+            program: program.to_string_lossy().into_owned(),
+            args: vec!["test".into(), "-json".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+        };
+        let result = run_process(request, &config, None).await.expect("process");
+        assert!(result.success);
+        assert!(result.output_truncated);
+        assert!(result.stdout.len() < stdout.len());
+        assert_eq!(
+            result
+                .structured_test_result
+                .as_ref()
+                .and_then(|r| r.test_count()),
+            Some(0)
+        );
+        let event = crate::provenance::build_verification_event(
+            crate::provenance::VerificationRecordInput {
+                structured_test_result: result.structured_test_result,
+                kind: crate::provenance::VerificationKind::Test,
+                source: crate::provenance::VerificationSource::ExecuteProcess,
+                program: "go",
+                args: &["test".into(), "-json".into()],
+                cwd_relative: None,
+                success: result.success,
+                status: "completed",
+                exit_code: result.exit_code,
+                timed_out: false,
+                stdout: &result.stdout,
+                stderr: &result.stderr,
+                capture_truncated: result.output_truncated,
+                context: crate::provenance::VerificationContext::default(),
+                extra_warnings: vec![],
+            },
+        );
+        assert_eq!(
+            event
+                .structured_test_result
+                .as_ref()
+                .and_then(|r| r.test_count()),
+            Some(0)
+        );
+        assert!(event.outcome.success);
     }
 }
