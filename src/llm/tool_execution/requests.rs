@@ -31,6 +31,37 @@ struct ChatRequestWithToolsRef<'a> {
     reasoning_effort: Option<&'static str>,
 }
 
+// GPT-6 Luna permits Chat Completions function calling only when reasoning
+// is explicitly disabled. Omitting the field leaves the provider's medium
+// default enabled, so `[reasoning] mode = "off"` alone is insufficient.
+fn chat_tools_request<'a>(
+    base_url: &str,
+    model: &'a str,
+    messages: &'a [ChatMessage],
+    tools: &'a [ToolDef],
+    effort: Option<ReasoningEffort>,
+    mode: ReasoningMode,
+) -> ChatRequestWithToolsRef<'a> {
+    let luna_tools = !tools.is_empty()
+        && model == "gpt-6-luna"
+        && reqwest::Url::parse(base_url)
+            .ok()
+            .is_some_and(|url| url.host_str() == Some("api.openai.com"));
+    let reasoning_effort = if luna_tools {
+        Some("none")
+    } else {
+        resolve_reasoning_hint(base_url, model, &mode, effort).map(|e| e.as_api_str())
+    };
+    ChatRequestWithToolsRef {
+        model,
+        messages,
+        temperature: None,
+        tools: (!tools.is_empty()).then_some(tools),
+        tool_choice: None,
+        reasoning_effort,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_tools_once(
     client: &OpenAIClient,
@@ -215,18 +246,16 @@ async fn chat_tools_once_attempt(
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
     let url = client.endpoint();
-    let resolved =
-        resolve_reasoning_hint(&client.base_url, model, &reasoning_mode, reasoning_effort);
-    let reasoning_effort_str = resolved.map(|e| e.as_api_str());
-    let hint_sent = reasoning_effort_str.is_some();
-    let req = ChatRequestWithToolsRef {
+    let req = chat_tools_request(
+        &client.base_url,
         model,
         messages,
-        temperature: None,
-        tools: (!tools.is_empty()).then_some(tools),
-        tool_choice: None,
-        reasoning_effort: reasoning_effort_str,
-    };
+        tools,
+        reasoning_effort,
+        reasoning_mode,
+    );
+    let reasoning_effort_str = req.reasoning_effort;
+    let hint_sent = reasoning_effort_str.is_some();
     if tracing::enabled!(tracing::Level::DEBUG) {
         let summary = telemetry::summarize_chat_request(
             messages,
@@ -884,6 +913,112 @@ mod tests {
             five, fifty,
             "initial active schema must not grow with remote tool count"
         );
+    }
+
+    #[test]
+    fn luna_chat_tools_require_explicit_none_for_every_reasoning_mode() {
+        let tools = default_tools_def();
+        assert!(!tools.is_empty());
+        for mode in [
+            ReasoningMode::Auto,
+            ReasoningMode::Fixed,
+            ReasoningMode::Off,
+        ] {
+            let req = chat_tools_request(
+                "https://api.openai.com/v1",
+                "gpt-6-luna",
+                &[],
+                &tools,
+                Some(ReasoningEffort::Medium),
+                mode,
+            );
+            let body = serde_json::to_value(req).unwrap();
+            assert_eq!(body["reasoning_effort"], "none");
+            assert!(!body["tools"].as_array().unwrap().is_empty());
+            assert!(body.get("temperature").is_none());
+        }
+    }
+
+    #[test]
+    fn luna_chat_tools_preserve_other_endpoints_models_and_toolless_requests() {
+        let tools = default_tools_def();
+        for (base, model, defs) in [
+            ("https://api.openai.com/v1", "gpt-6-luna", &[][..]),
+            ("https://api.openai.com/v1", "gpt-5-mini", tools.as_slice()),
+            (
+                "https://openrouter.ai/api/v1",
+                "gpt-6-luna",
+                tools.as_slice(),
+            ),
+            (
+                "https://api.openai.com.example/v1",
+                "gpt-6-luna",
+                tools.as_slice(),
+            ),
+        ] {
+            let req = chat_tools_request(
+                base,
+                model,
+                &[],
+                defs,
+                Some(ReasoningEffort::High),
+                ReasoningMode::Fixed,
+            );
+            assert_eq!(req.reasoning_effort, Some("high"));
+        }
+    }
+
+    #[tokio::test]
+    async fn luna_chat_tools_http_wire_uses_none_without_retry() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("\"reasoning_effort\":\"none\"")),
+                request::body(matches("\"tools\":")),
+            ])
+            .times(1)
+            .respond_with(json_encoded(assistant_done_response())),
+        );
+        let client = OpenAIClient::new(server.url_str(""), "test-key").unwrap();
+        let messages = user_message();
+        let tools = default_tools_def();
+        let req = chat_tools_request(
+            "https://api.openai.com/v1",
+            "gpt-6-luna",
+            &messages,
+            &tools,
+            Some(ReasoningEffort::Medium),
+            ReasoningMode::Auto,
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(matches("\"reasoning_effort\":\"medium\"")),
+            ])
+            .times(1)
+            .respond_with(
+                httptest::responders::status_code(400).body(
+                    r#"{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"reasoning_effort","message":"synthetic incompatible reasoning fixture"}}"#,
+                ),
+            ),
+        );
+        let mut incompatible = chat_tools_request(
+            "https://api.openai.com/v1",
+            "gpt-6-luna",
+            &messages,
+            &tools,
+            Some(ReasoningEffort::Medium),
+            ReasoningMode::Auto,
+        );
+        incompatible.reasoning_effort = Some("medium");
+        let error = client
+            .chat_once_request(&incompatible, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("HTTP 400"));
+        let result = client.chat_once_request(&req, None).await.unwrap();
+        assert_eq!(result.content, "done");
     }
 
     // --- Reasoning payload tests (v1) ---
