@@ -60,6 +60,71 @@ Running an external agent may consume paid API usage. Live evaluation is a
 manual local command; CI runs only unit tests, guidance checks, and Rust
 checks, never real model evals.
 
+## Optional API request budget
+
+For controlled, text-only OpenAI Chat Completions evaluations, add `api_budget`
+to the manifest. Ordinary manifests keep their existing behavior. The guard
+supports only `openai-compatible` with pinned `gpt-4o-mini-2024-07-18` or
+`gpt-4.1-mini-2025-04-14`; subscription Responses, streaming, images, custom
+endpoints, multiple choices and unrecognized request fields are refused.
+
+```json
+"api_budget": {
+  "max_cost_micro_usd": 5000000,
+  "max_requests": 128,
+  "max_requests_per_run": 32,
+  "max_output_tokens": 4096,
+  "input_nano_usd_per_token": 150,
+  "output_nano_usd_per_token": 600,
+  "pricing_reviewed_on": "2026-10-07"
+}
+```
+
+This example uses the pinned 4o-mini model. Review current provider prices before
+running and set `pricing_reviewed_on` to today's UTC date. Rates are explicit
+billing ceilings in nano-USD per token, including any applicable uplift; values
+below the known Standard floors are rejected. The date is an operator assertion,
+not an automatic pricing lookup. The known floors and model limits come from
+[4o-mini](https://developers.openai.com/api/docs/models/gpt-4o-mini) and
+[4.1-mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini).
+
+The guard forces `service_tier: "default"` upstream and refuses any response
+with a missing or different tier, following the [Chat API contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+Before every upstream call, the guard permanently reserves the model's full
+published context times the input rate, plus the output cap times the output
+rate. It never discounts cached input or refunds retries, failed requests,
+timeouts or small reported usage. For the example, each reservation is
+$0.0216576; 128 calls reserve at most $2.7721728. With 4.1-mini's 1,047,576-token
+context and 400/1600 nano-USD rates, the same output cap reserves $0.425584 per
+call: a $5 ceiling permits at most 11 calls, without promising task completion.
+The entire planned request count must fit the ceiling before startup.
+
+Every variant needs an explicit credential-free config with
+`llm.max_retries = 0`, no MCP servers and the official OpenAI base URL. Fresh
+worktrees containing `.doge/config.toml` are refused. The original
+`OPENAI_API_KEY` stays in the parent guard; git hooks and version probes receive
+no key, and agents, evidence collection and independent checks receive a random
+local token. The harness forces a loopback base URL, so main, worker and
+compaction calls share the same global reservation counter. It inserts Chat
+Completions `max_completion_tokens` when absent and preserves a valid smaller
+explicit output cap. Checks and evidence collection cannot forward API calls.
+
+Any provider error, timeout, malformed or missing usage, unknown response model,
+concurrent call or output-limit finish stops subsequent forwarding across the
+entire matrix. Already reserved calls retain their upper bound; unreached trials
+have explicit `not_run` checks. Existing independent post-checks still run for
+available worktrees. `api-budget.json`, resolved manifest and each measurement
+record the policy, permanent reservation and stop reason. `actual_cost` stays
+null; observed tokens and reserved upper bounds are separate. Budget findings do
+not determine human `accepted`, even if the agent reports completion.
+
+This bounds only requests forwarded by this guard at the reviewed billing rates
+and provider context/output contract. Use controlled fixtures and configs: it is
+not an account-wide cap or a sandbox for arbitrary programs, other credentials,
+or other API clients. Dry-run starts no guard and makes no provider request.
+CI uses injected fake upstreams and loopback HTTP only.
+
 ## Independent post-check evidence
 
 The agent's `run_status`, post-check `verification_status`, and human `accepted`
