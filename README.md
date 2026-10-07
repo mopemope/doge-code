@@ -666,7 +666,12 @@ Partial rewrite output is reported as evidence rather than a completed code
 replacement. Partial desktop
 notifications say that execution stopped, not that it succeeded. Resume a saved
 session to continue work. Completion describes the agent loop outcome, not an
-independent guarantee that the requested change is correct or accepted.
+independent guarantee that the requested change is correct or accepted. Agent
+requests reject a final assistant turn with no tool calls and missing, empty or
+whitespace-only text as an incomplete response. This fails without retrying or
+reporting completion; reported usage and earlier checkpoints remain available.
+Tool-only turns may still omit text. Responses reasoning/compaction state alone
+is not a final answer.
 
 `budget.progress` adds content-free, run-local observations: read/search dispatch
 counts, successful read count, repeated read ranges, the first actual mutation

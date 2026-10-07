@@ -574,6 +574,15 @@ fn validate_tool_message_with_activation(
     if message.refusal.is_some() {
         return Err(anyhow!(LlmErrorKind::Incomplete).context("provider refused the response"));
     }
+    if message.tool_calls.is_empty()
+        && message
+            .content
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err(anyhow!(LlmErrorKind::Incomplete)
+            .context("provider returned no final answer or tool calls"));
+    }
     let validation = (|| -> Result<()> {
         anyhow::ensure!(
             message.role == "assistant",
@@ -653,6 +662,59 @@ mod tests {
     use crate::llm::tool_def::default_tools_def;
     use crate::llm::types::{ToolDef, ToolFunctionDef};
     use httptest::{Expectation, matchers::*, responders::*};
+
+    #[test]
+    fn blank_final_gate_preserves_tool_only_turns_and_rejects_state_only_turns() {
+        let tools = default_tools_def();
+        for content in [None, Some(""), Some(" \n\t")] {
+            let mut message = ChoiceMessageWithTools {
+                refusal: None,
+                provider_state: None,
+                role: "assistant".into(),
+                content: content.map(str::to_owned),
+                tool_calls: vec![],
+            };
+            for state_output in [
+                vec![],
+                vec![serde_json::json!({"type":"reasoning","encrypted_content":"fixture"})],
+                vec![serde_json::json!({"type":"compaction","encrypted_content":"fixture"})],
+            ] {
+                message.provider_state =
+                    Some(crate::features::openai_subscription::ProviderState {
+                        version: 1,
+                        account: "fixture".into(),
+                        model: "fixture".into(),
+                        output: state_output,
+                        additional_tool_names: vec![],
+                    });
+                let error = validate_tool_message_with_activation(&message, &tools, &tools)
+                    .expect_err("state alone is not a final answer");
+                assert!(matches!(
+                    error.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::Incomplete)
+                ));
+            }
+            message.provider_state = None;
+            message.tool_calls.push(crate::llm::types::ToolCall {
+                id: Some("read".into()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "fs_read".into(),
+                    arguments: r#"{"path":"fixture.txt"}"#.into(),
+                },
+            });
+            validate_tool_message(&message, &tools).expect("tool-only assistant turn is valid");
+        }
+        let message = ChoiceMessageWithTools {
+            refusal: None,
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some("  done  ".into()),
+            tool_calls: vec![],
+        };
+        validate_tool_message(&message, &tools).expect("nonblank answer");
+        assert_eq!(message.content.as_deref(), Some("  done  "));
+    }
 
     fn remote_fixture_entry(
         alias: &str,
