@@ -1091,6 +1091,15 @@ silently moving user instructions or removing messages.
 
 ## 📋 Diff Review Panel
 
+Use `Alt+Enter` to insert a draft newline and `Enter` to submit. Multiline
+drafts use Up/Down to move through their rows (single-line input retains
+history navigation); active completion lists still use Up/Down for selection.
+Tab/Enter completion edits the current row's command or `@path` token,
+preserving other rows and text after the token. File candidates come from the
+configured project root. The input area grows with draft rows up to eight
+terminal rows, leaves space for logs, and scrolls longer drafts without
+discarding their text.
+
 Logs wrap to the visible log column, including the narrower split beside a
 diff review. Resizing rebuilds wrapped-row heights before rendering. Log
 scrolling and Ctrl+Home use displayed rows and stop at the oldest visible
