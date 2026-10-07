@@ -471,6 +471,7 @@ async fn mutation_preserved_on_budget_stop() {
     .expect("partial");
     assert_eq!(run.status, AgentRunStatus::Partial);
     assert_eq!(run.stop_reason, Some(AgentStopReason::IterationBudget));
+    assert_eq!(run.budget.progress.first_mutation_tool_call, Some(1));
     // File mutation survived the budget stop (no rollback).
     assert_eq!(
         std::fs::read_to_string(&target).expect("read"),
@@ -1105,4 +1106,73 @@ async fn normal_non_llm_tool_charges_nothing() {
     assert_eq!(run.budget.request_attempts, 2);
     assert_eq!(run.budget.usage_records, 2);
     server.abort();
+}
+
+#[tokio::test]
+async fn progress_read_only_completed_and_partial_are_observations_not_stalls() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    for limit in [1, 2] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("read.txt");
+        std::fs::write(&target, "first\nsecond\n").expect("fixture");
+        let calls = vec![
+            tool_call(
+                "fs_read",
+                "r1",
+                serde_json::json!({"path":target,"start_line":1,"limit":1}),
+            ),
+            tool_call(
+                "fs_read",
+                "r2",
+                serde_json::json!({"path":target,"cursor":1,"page_size":1}),
+            ),
+        ];
+        let (client, _requests, server) = fixture(vec![
+            (200, assistant_with_calls(calls)),
+            (200, assistant_done("read-only investigation complete")),
+        ])
+        .await;
+        let cfg = test_cfg_with_root(
+            AgentBudgetConfig {
+                max_iterations: limit,
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        );
+        let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()));
+        let run = run_agent_loop(
+            &client,
+            "test-model",
+            &fs,
+            user_msg("investigate only"),
+            None,
+            None,
+            &cfg,
+            None,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        .expect("run");
+        assert_eq!(
+            run.status,
+            if limit == 1 {
+                AgentRunStatus::Partial
+            } else {
+                AgentRunStatus::Completed
+            }
+        );
+        assert_eq!(run.budget.tool_calls, 2);
+        let progress = run.budget.progress;
+        assert_eq!(progress.read_tool_calls, 2);
+        assert_eq!(progress.successful_read_tool_calls, 2);
+        assert_eq!(progress.repeated_read_ranges, 1);
+        assert_eq!(progress.first_mutation_tool_call, None);
+        assert_eq!(progress.first_verification_tool_call, None);
+        assert_eq!(
+            std::fs::read_to_string(target).expect("content"),
+            "first\nsecond\n"
+        );
+        server.abort();
+    }
 }

@@ -99,6 +99,8 @@ USAGE_OK = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
 BUDGET = {"iterations": 2, "tool_calls": 3, "charged_tokens": 120,
           "elapsed_ms": 1000, "provider_reported_tokens": 120,
           "estimated_tokens": 0, "request_attempts": 1, "usage_records": 1}
+if os.environ.get("FAKE_PROGRESS"):
+    BUDGET["progress"] = json.loads(os.environ["FAKE_PROGRESS"])
 payload = os.environ.get("FAKE_PAYLOAD", "ok")
 if payload == "no_usage":
     doc = {"success": True, "status": "completed", "stop_reason": None,
@@ -654,6 +656,26 @@ if "exec" in args:
         self.assertEqual(measurement["run_status"], "harness_error")
         self.assertIsNone(measurement["accepted"])
 
+    def test_progress_observation_survives_run_artifact(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        manifest, cases = self.load_harness(
+            self.write_manifest(fake, self.write_cases([self.base_case()])))
+        progress = {"read_tool_calls": 4, "successful_read_tool_calls": 4,
+                    "search_tool_calls": 1, "repeated_read_ranges": 2,
+                    "first_mutation_tool_call": None,
+                    "first_verification_tool_call": None,
+                    "verification_tool_calls": 0,
+                    "successful_verification_tool_calls": 0}
+        with fake_env(FAKE_PROGRESS=json.dumps(progress)):
+            measurement, out_root = self.run_trial(repo, manifest, cases[0])
+        run_dir = out_root / "baseline" / "runs" / "fake-case" / "trial-001"
+        saved = json.loads((run_dir / "run.json").read_text())
+        self.assertEqual(measurement["progress"], progress)
+        self.assertEqual(saved["progress"], progress)
+        self.assertEqual(saved["run_status"], "completed")
+        self.assertIsNone(saved["accepted"])
+
     def test_patch_includes_tracked_and_untracked(self):
         repo = self.make_repo()
         fake = self.make_fake()
@@ -1042,6 +1064,21 @@ class TelemetryTests(unittest.TestCase):
                "usage": usage, "tools_called": [], "conversation_length": 4}
         doc.update(overrides)
         return doc
+
+    def test_progress_observation_is_preserved_without_acceptance_inference(self):
+        doc = self.payload()
+        progress = {"read_tool_calls": 4, "successful_read_tool_calls": 3,
+                    "search_tool_calls": 2, "repeated_read_ranges": 1,
+                    "first_mutation_tool_call": None,
+                    "first_verification_tool_call": 7,
+                    "verification_tool_calls": 1,
+                    "successful_verification_tool_calls": 0}
+        doc["budget"]["progress"] = progress
+        self.assertEqual(common.extract_exec_telemetry(doc)["progress"], progress)
+        for value in (None, {}, {"read_tool_calls": True}, {"read_tool_calls": -1}):
+            doc["budget"]["progress"] = value
+            self.assertIsNone(common.extract_exec_telemetry(doc)["progress"])
+        self.assertIsNone(common.extract_exec_telemetry(self.payload())["progress"])
 
     def test_complete_usage_maps_to_eval_tokens(self):
         telemetry = common.extract_exec_telemetry(self.payload())

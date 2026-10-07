@@ -245,3 +245,11 @@ trials, report measured sample aggregates without generalizing to claims
 such as "30% faster". Expand cases from actual failures and keep human
 review aligned with acceptance criteria. See official [evaluation best
 practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices).
+
+The optional `progress` observation object is preserved from `budget.progress`
+in each measurement and `run.json`. It separates read/search dispatches from
+actual mutations and recognized executed checks; see the README for field and
+repeat-window semantics. Missing telemetry stays null. Use it with the case's
+intent, patch, stop reason and check evidence to investigate repeated reading;
+null mutation positions are expected for legitimate read-only cases and are not
+an automatic failure criterion. This object does not change human `accepted`.
