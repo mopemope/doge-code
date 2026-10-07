@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_eval_common as common
+from agent_eval_api_budget import ApiBudgetGuard
 
 MAX_PARSE_BYTES = 5 * 1024 * 1024
 MAX_STREAM_BYTES = 200 * 1024 * 1024
@@ -35,9 +36,13 @@ def log(message):
 
 
 def run_git(args, cwd, timeout=60):
+    # Git and its hooks never need the model provider's credential.
+    env = dict(os.environ)
+    env.pop("OPENAI_API_KEY", None)
     return subprocess.run(
         ["git"] + args,
         cwd=str(cwd),
+        env=env,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -103,7 +108,7 @@ def validate_agent_binary(variant):
                 )
 
 
-def variant_metadata(variant):
+def variant_metadata(variant, probe_env=None):
     """Collect non-secret variant identity (hashes only, never file content)."""
     command = variant["agent_command"]
     fingerprint = common.fingerprint_command(command)
@@ -130,6 +135,7 @@ def variant_metadata(variant):
             probe = subprocess.run(
                 [binary, "--version"],
                 cwd=probe_dir,
+                env=probe_env,
                 capture_output=True,
                 text=True,
                 timeout=VERSION_PROBE_TIMEOUT_SECONDS,
@@ -511,7 +517,7 @@ def remove_worktree(toplevel, workspace):
 
 
 def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
-               item, base_commit, settings, out_root, keep_workspaces):
+               item, base_commit, settings, out_root, keep_workspaces, api_guard=None):
     variant_name = item["variant"]
     case = case_by_id[item["case_id"]]
     trial = item["trial"]
@@ -537,11 +543,23 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
     )
     measurement["case_sha256"] = common.sha256_file(case_path)
     measurement["artifacts"] = {"directory": str(run_dir.relative_to(out_root / variant_name)), "case": "case.json"}
+    if api_guard is not None and api_guard.stopped:
+        reason = "api_budget_stopped:" + api_guard.stopped
+        measurement["run_status"] = "harness_error"
+        measurement["harness_error"] = reason
+        measurement["api_budget"] = api_guard.snapshot()
+        measurement["post_checks"] = run_post_checks(case, None, run_dir, {}, skip_reason=reason)
+        measurement["verification_status"], measurement["required_checks_passed"] = verification_summary(measurement["post_checks"])
+        (run_dir / "run.json").write_text(json.dumps(measurement, indent=2) + "\n", encoding="utf-8")
+        return measurement
+
     measurement["post_checks"] = run_post_checks(
         case, None, run_dir, {}, skip_reason="verification_not_reached",
     )
     measurement["verification_status"], measurement["required_checks_passed"] = verification_summary(measurement["post_checks"])
     env = child_env(variant)
+    if api_guard is not None:
+        env = api_guard.environment(env)
     harness_error = None
     timed_out = False
     exit_code = None
@@ -572,16 +590,24 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
                     "worktree_not_clean: "
                     + pre.stdout.strip()[:2000]
                 )
+        if api_guard is not None and workspace is not None:
+            project_config = workspace / ".doge" / "config.toml"
+            if project_config.exists() or project_config.is_symlink():
+                harness_error = "api_budget_project_config_not_allowed"
+                api_guard.stop("project_config_not_allowed")
         protected_baseline = snapshot_protected_checks(case, workspace) if harness_error is None else None
         parsed = None
         parse_diagnostic = None
         telemetry = common.extract_exec_telemetry(None)
         if harness_error is None:
             argv = common.build_agent_argv(
-                variant, manifest["model"], manifest["provider"], case["prompt"]
+                api_guard.variant(variant) if api_guard is not None else variant,
+                manifest["model"], manifest["provider"], case["prompt"]
             )
             stdout_path = run_dir / "stdout.txt"
             stderr_path = run_dir / "stderr.txt"
+            if api_guard is not None:
+                api_guard.begin_run()
             try:
                 exit_code, timed_out, elapsed, spawn_error, truncated = stream_child(
                     argv,
@@ -595,6 +621,11 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
             except KeyboardInterrupt:
                 cancelled = True
                 raise
+            finally:
+                if api_guard is not None:
+                    if cancelled:
+                        api_guard.stop("agent_interrupted")
+                    measurement["api_budget"] = api_guard.end_run()
             measurement["elapsed_seconds"] = elapsed
             if spawn_error is not None:
                 harness_error = spawn_error
@@ -612,6 +643,11 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
                         encoding="utf-8",
                     )
                 telemetry = common.extract_exec_telemetry(parsed)
+                if api_guard is not None and measurement["api_budget"]["run_requests"]:
+                    if timed_out:
+                        api_guard.stop("agent_timeout")
+                    elif parsed is None:
+                        api_guard.stop("agent_output_unknown")
         else:
             measurement["elapsed_seconds"] = 0.0
 
@@ -642,7 +678,7 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
 
         # Verification is independent of the agent's completion/status/config.
         check_results = run_post_checks(
-            case, workspace, run_dir, dict(os.environ), protected_baseline,
+            case, workspace, run_dir, api_guard.environment(os.environ) if api_guard is not None else dict(os.environ), protected_baseline,
             skip_reason=f"harness_error: {harness_error}" if harness_error else None,
             grace_seconds=manifest["termination_grace_seconds"], on_result=record_check,
         )
@@ -662,6 +698,10 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
             findings.append("agent_timeout")
         if parse_diagnostic is not None and harness_error is None:
             findings.append(f"exec_output_unparseable:{parse_diagnostic.split(':')[0]}")
+        if api_guard is not None:
+            measurement["api_budget"] = api_guard.snapshot()
+            if api_guard.stopped:
+                findings.append("api_budget_stopped:" + api_guard.stopped)
         measurement["machine_findings"] = findings
 
         if cancelled:
@@ -826,8 +866,16 @@ def main(argv=None):
 
     cases_digest = common.sha256_file(manifest["cases_path"])
     settings = common.build_settings(manifest, cases_digest)
+    def probe_environment(variant):
+        if manifest.get("api_budget") is None:
+            return None
+        env = child_env(variant)
+        env.pop("OPENAI_API_KEY", None)
+        env["OPENAI_BASE_URL"] = "http://127.0.0.1:9/v1"
+        return env
+
     variant_metas = {
-        variant["name"]: variant_metadata(variant)
+        variant["name"]: variant_metadata(variant, probe_environment(variant))
         for variant in manifest["variants"]
     }
     resolved = {
@@ -843,6 +891,7 @@ def main(argv=None):
         "timeout_seconds": manifest["timeout_seconds"],
         "termination_grace_seconds": manifest["termination_grace_seconds"],
         "seed": manifest["seed"],
+        "api_budget": manifest.get("api_budget"),
         "variants": [
             {
                 "name": variant["name"],
@@ -883,6 +932,14 @@ def main(argv=None):
                     return 2
     out_root.mkdir(parents=True, exist_ok=True)
 
+    api_guard = None
+    if manifest.get("api_budget") is not None:
+        try:
+            api_guard = ApiBudgetGuard(manifest["api_budget"], os.environ.get("OPENAI_API_KEY")).start()
+        except (ValueError, OSError) as error:
+            print(f"API budget setup error: {error}", file=sys.stderr)
+            return 2
+
     records = {variant["name"]: [] for variant in manifest["variants"]}
     interrupted = False
     try:
@@ -903,6 +960,7 @@ def main(argv=None):
                     settings,
                     out_root,
                     args.keep_workspaces,
+                    api_guard=api_guard,
                 )
             except KeyboardInterrupt:
                 # The interrupted run already flushed its own run.json as
@@ -935,7 +993,16 @@ def main(argv=None):
         log("interrupted: current run marked cancelled; flushing completed trials")
         interrupted = True
     finally:
+        if api_guard is not None:
+            api_guard.close()
+            resolved["api_budget_usage"] = api_guard.snapshot()
         try:
+            if api_guard is not None:
+                (out_root / "api-budget.json").write_text(
+                    json.dumps({"limits": manifest["api_budget"],
+                                "usage": resolved["api_budget_usage"]}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             write_outputs(
                 out_root, manifest,
                 [v["name"] for v in manifest["variants"]], records, resolved,
@@ -943,7 +1010,7 @@ def main(argv=None):
         except OSError as error:
             print(f"Failed to flush artifacts: {error}", file=sys.stderr)
             return 1
-    return 130 if interrupted else 0
+    return 130 if interrupted else 1 if api_guard is not None and api_guard.stopped else 0
 
 
 if __name__ == "__main__":
