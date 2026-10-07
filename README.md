@@ -668,6 +668,22 @@ notifications say that execution stopped, not that it succeeded. Resume a saved
 session to continue work. Completion describes the agent loop outcome, not an
 independent guarantee that the requested change is correct or accepted.
 
+`budget.progress` adds content-free, run-local observations: read/search dispatch
+counts, successful read count, repeated read ranges, the first actual mutation
+and first recognized verification dispatch (1-based), and executed/successful
+verification counts. A mutation requires a successful `changed=true` result.
+Verification uses the existing structured `execute_process` classifier; failed
+or timed-out checks count as executed, while denied/spawn-failed commands do not.
+Shell strings and unrecognized custom scripts are not inferred as checks.
+Repeated ranges count nonempty `fs_read` results with identical supplied path,
+returned start/end lines and content among the 128 most recently observed unique
+fingerprints. Path aliases, overlapping ranges and batch-read snippets are not
+normalized into repeats. No paths, content or commands appear in these fields.
+These observations do not force edits or change loop/budget behavior. Read-only
+investigations can finish with null mutation/verification positions. The eval
+runner preserves this object in measurements and run artifacts; missing or
+malformed telemetry remains null. Counts alone do not establish task acceptance.
+
 ## Directive-to-Evidence Traceability
 
 Doge-Code connects observed work as:

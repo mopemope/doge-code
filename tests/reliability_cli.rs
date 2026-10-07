@@ -269,6 +269,18 @@ fn partial_exec_is_nonzero_and_resumable() {
     let report = output_json(&output);
     assert_eq!(report["status"], "partial");
     assert_eq!(report["stop_reason"], "iteration_budget");
+    assert_eq!(
+        report["budget"]["progress"]["successful_read_tool_calls"],
+        1
+    );
+    assert_eq!(
+        report["budget"]["progress"]["first_mutation_tool_call"],
+        Value::Null
+    );
+    assert_eq!(
+        report["budget"]["progress"]["first_verification_tool_call"],
+        Value::Null
+    );
     assert_eq!(report["success"], false, "partial is not task completion");
     assert_eq!(output.status.code(), Some(2));
     let session = report["review_handoff"]["session_id"]
@@ -1830,4 +1842,54 @@ fn search_process_real_cli_distinguishes_regex_failure_and_no_match() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn progress_cli_preserves_repeated_read_and_failed_verification_evidence() {
+    let project = Project::new(true);
+    let target = project.root.join("broken.py");
+    std::fs::write(&target, "def broken(:\n").unwrap();
+    let server = Server::new(move |n, _| {
+        if n == 1 {
+            response(
+                "investigate",
+                vec![
+                    call(
+                        "r1",
+                        "fs_read",
+                        json!({"path":target,"start_line":1,"limit":1}),
+                    ),
+                    call(
+                        "r2",
+                        "fs_read",
+                        json!({"path":target,"cursor":1,"page_size":1}),
+                    ),
+                    call(
+                        "check",
+                        "execute_process",
+                        json!({"program":"python3","args":["-m","py_compile",target]}),
+                    ),
+                ],
+                "tool_calls",
+            )
+        } else {
+            response("observed syntax failure", vec![], "stop")
+        }
+    });
+    let output = project.command(&server).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = output_json(&output);
+    let progress = &report["budget"]["progress"];
+    assert_eq!(progress["read_tool_calls"], 2);
+    assert_eq!(progress["successful_read_tool_calls"], 2);
+    assert_eq!(progress["repeated_read_ranges"], 1);
+    assert_eq!(progress["first_mutation_tool_call"], Value::Null);
+    assert_eq!(progress["first_verification_tool_call"], 3);
+    assert_eq!(progress["verification_tool_calls"], 1);
+    assert_eq!(progress["successful_verification_tool_calls"], 0);
+    assert_eq!(report["status"], "completed");
 }
