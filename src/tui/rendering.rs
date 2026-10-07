@@ -51,7 +51,10 @@ impl TuiApp {
         self.render_main_content(f, chunks[1], &plan, &self.theme);
         self.render_input_area(f, chunks[2]);
 
-        if self.completion_active && !self.completion_candidates.is_empty() {
+        if self.completion_active
+            && !self.completion_candidates.is_empty()
+            && self.diff_review_focus != crate::tui::state::DiffReviewFocus::Review
+        {
             self.render_completion_popup(f, chunks[2]);
         }
     }
@@ -130,7 +133,7 @@ impl TuiApp {
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
         f.render_widget(Clear, area);
 
-        if self.diff_review.is_some() {
+        if self.diff_review.is_some() && self.input_mode == crate::tui::state::InputMode::Normal {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
@@ -422,7 +425,9 @@ impl TuiApp {
         }
 
         // instructions footer for diff
-        let help = if review.rejecting {
+        let help = if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
+            "Input focused: type normally. F6 focuses review controls.".to_string()
+        } else if review.rejecting {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
@@ -437,9 +442,15 @@ impl TuiApp {
                     .unwrap_or("No turn-owned rollback capture.")
             )
         };
-        let instructions = Paragraph::new(help)
-            .style(theme.footer_style)
-            .block(Block::default().borders(Borders::ALL));
+        let instructions = Paragraph::new(help).style(theme.footer_style).block(
+            Block::default().borders(Borders::ALL).title(
+                if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Review {
+                    "Review focused (F6: input)"
+                } else {
+                    "Review (F6: focus)"
+                },
+            ),
+        );
         f.render_widget(instructions, layout[footer_idx]);
     }
 
@@ -539,6 +550,13 @@ impl TuiApp {
         let block_title = match self.input_mode {
             crate::tui::state::InputMode::HistorySearch => "History Search",
             crate::tui::state::InputMode::FileSearch => "File Search",
+            _ if self.diff_review.is_some() => {
+                if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
+                    "Input focused (F6: review)"
+                } else {
+                    "Input (F6: focus)"
+                }
+            }
             _ => "Input",
         };
 
