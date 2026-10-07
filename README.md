@@ -1339,6 +1339,12 @@ errors, as are invalid enum/policy values (for example `[tool_routing]`,
 loader is read-only: invalid files are never auto-repaired or rewritten,
 and typos never silently fall back to defaults.
 
+When using `gpt-6-luna` with the OpenAI Chat Completions endpoint,
+function calling requires `reasoning_effort = "none"`. dgc explicitly sends
+that value whenever tools are included, including in `[reasoning] mode = "off"`.
+Other models, providers, and the Responses backend retain their reasoning policy.
+See the [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
 ### MCP Servers (Local vs Remote)
 
 See [`docs/mcp-3x-migration.md`](docs/mcp-3x-migration.md) for the rmcp 3.x
