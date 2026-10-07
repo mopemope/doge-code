@@ -148,7 +148,24 @@ pub enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run_cli().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            if error
+                .downcast_ref::<crate::exec::IncompleteExecution>()
+                .is_some()
+            {
+                std::process::ExitCode::from(2)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     // Evidence export uses current-directory storage without loading user
     // credentials, creating default config/project logs, or starting services.
@@ -541,7 +558,7 @@ async fn run_exec(
     executor
         .flush_session()
         .context("final exec checkpoint failed")?;
-    result
+    result?.require_completed()
 }
 
 impl std::fmt::Debug for Cli {

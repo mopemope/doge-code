@@ -25,6 +25,68 @@ pub enum ExecError {
     Timeout,
 }
 
+/// Agent completion is separate from transport success and answer quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecOutcome {
+    pub status: crate::llm::tool_execution::AgentRunStatus,
+    pub stop_reason: Option<crate::llm::tool_execution::AgentStopReason>,
+}
+
+impl From<&crate::llm::tool_execution::AgentRunResult> for ExecOutcome {
+    fn from(run: &crate::llm::tool_execution::AgentRunResult) -> Self {
+        Self {
+            status: run.status,
+            stop_reason: run.stop_reason,
+        }
+    }
+}
+
+impl ExecOutcome {
+    pub fn is_completed(self) -> bool {
+        self.status == crate::llm::tool_execution::AgentRunStatus::Completed
+    }
+
+    pub fn require_completed(self) -> Result<()> {
+        if self.is_completed() {
+            Ok(())
+        } else {
+            Err(IncompleteExecution(self).into())
+        }
+    }
+
+    fn notification(self, tokens: u64, steps: usize) -> (&'static str, String) {
+        if self.is_completed() {
+            (
+                "Doge-Code Agent Finished",
+                format!("Execution Completed Successfully\nTokens: {tokens}\nSteps: {steps}"),
+            )
+        } else {
+            (
+                "Doge-Code Agent Stopped",
+                format!(
+                    "Execution Partial\nReason: {}\nTokens: {tokens}\nSteps: {steps}",
+                    self.stop_reason.map(|r| r.as_str()).unwrap_or("unknown")
+                ),
+            )
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct IncompleteExecution(pub ExecOutcome);
+
+impl std::fmt::Display for IncompleteExecution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Agent execution is partial: {}",
+            self.0.stop_reason.map(|r| r.as_str()).unwrap_or("unknown")
+        )
+    }
+}
+
+impl std::error::Error for IncompleteExecution {}
+
 /// Whether desktop notifications are enabled for agent runs.
 ///
 /// Bulk evaluation runs set `DGC_DISABLE_NOTIFICATIONS=1` to avoid
@@ -242,7 +304,7 @@ impl Executor {
 
     /// Runs the executor with the given instruction.
     /// Sends the instruction to the LLM, handles tool calls, and prints the final response to stdout.
-    pub async fn run(&mut self, instruction: &str, json: bool) -> Result<()> {
+    pub async fn run(&mut self, instruction: &str, json: bool) -> Result<ExecOutcome> {
         self.run_with_cancel(instruction, json, None).await
     }
 
@@ -251,7 +313,7 @@ impl Executor {
         instruction: &str,
         json: bool,
         cancel: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<()> {
+    ) -> Result<ExecOutcome> {
         // Build this turn's request from the durable snapshot. The outer
         // history stays untouched until the canonical result commits.
         let msgs = self.build_request_messages(instruction).await;
@@ -317,6 +379,7 @@ impl Executor {
 
         match res {
             Ok(run) => {
+                let outcome = ExecOutcome::from(&run);
                 // Freeze navigation immediately after the canonical save, before hooks.
                 let review_link = self.tools.get_current_session().and_then(|s| {
                     crate::features::evidence_report::ReviewLink::new(
@@ -371,7 +434,7 @@ impl Executor {
                     let tools_called = collect_tools_called(&updated_messages);
                     let response = &final_msg.content;
                     let output = serde_json::json!({
-                        "success": true,
+                        "success": outcome.is_completed(),
                         "status": status_str,
                         "stop_reason": stop_reason,
                         "budget": budget,
@@ -406,20 +469,13 @@ impl Executor {
                     }
                 }
                 if !json && notifications_enabled() {
-                    // Send desktop notification on success
-                    let summary = format!(
-                        "Execution Completed Successfully\nTokens: {}\nSteps: {}",
-                        tokens_used,
-                        updated_messages.len()
-                    );
-                    if let Err(e) = Notification::new()
-                        .summary("Doge-Code Agent Finished")
-                        .body(&summary)
-                        .show()
-                    {
+                    let (title, summary) =
+                        outcome.notification(tokens_used, updated_messages.len());
+                    if let Err(e) = Notification::new().summary(title).body(&summary).show() {
                         tracing::warn!("Failed to send desktop notification: {}", e);
                     }
                 }
+                Ok(outcome)
             }
             Err(e) => {
                 if let Err(recovery_error) = self.restore_history_after_failure().await {
@@ -456,11 +512,9 @@ impl Executor {
                         }
                     }
                 }
-                return Err(e);
+                Err(e)
             }
         }
-
-        Ok(())
     }
 
     /// Runs the executor in rewrite mode, returning the rewritten snippet.
@@ -557,6 +611,7 @@ impl Executor {
 
         match res {
             Ok(Ok(run)) => {
+                let outcome = ExecOutcome::from(&run);
                 let updated_messages = run.messages;
                 let final_msg = run.final_message;
                 let tools_called = collect_tools_called(&updated_messages);
@@ -583,6 +638,22 @@ impl Executor {
                     tracing::error!("Error executing hooks: {}", e);
                 }
 
+                if !outcome.is_completed() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "success": false, "status": "partial", "stop_reason": outcome.stop_reason,
+                                "mode": "rewrite", "response": final_msg.content,
+                                "tokens_used": tokens_used, "file_path": original_file_path,
+                                "display_path": display_path,
+                            }))?
+                        );
+                    } else {
+                        eprintln!("{}", IncompleteExecution(outcome));
+                    }
+                    return outcome.require_completed();
+                }
                 let raw_response = final_msg.content.clone();
                 if let Some(rewritten) = extract_rewritten_code(&raw_response, snippet) {
                     // Security check: Ensure the rewritten code does not contain malicious patterns
@@ -761,6 +832,7 @@ impl Executor {
         match res {
             Ok(run) => {
                 self.commit_canonical_history(&run.messages).await?;
+                ExecOutcome::from(&run).require_completed()?;
                 Ok(run.final_message.content)
             }
             Err(e) => {
@@ -1345,6 +1417,81 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
         }
+    }
+
+    #[test]
+    fn incomplete_outcomes_preserve_budget_reasons_and_do_not_notify_success() {
+        use crate::llm::tool_execution::{AgentRunStatus, AgentStopReason};
+        for reason in [
+            AgentStopReason::IterationBudget,
+            AgentStopReason::ToolCallBudget,
+            AgentStopReason::TokenBudget,
+            AgentStopReason::ElapsedBudget,
+        ] {
+            let outcome = ExecOutcome {
+                status: AgentRunStatus::Partial,
+                stop_reason: Some(reason),
+            };
+            let error = outcome.require_completed().expect_err("partial");
+            assert_eq!(
+                error
+                    .downcast_ref::<IncompleteExecution>()
+                    .expect("typed outcome")
+                    .0
+                    .stop_reason,
+                Some(reason)
+            );
+            let (title, body) = outcome.notification(100, 4);
+            assert_eq!(title, "Doge-Code Agent Stopped");
+            assert!(body.contains(reason.as_str()));
+            assert!(!body.contains("Successfully"));
+        }
+        let complete = ExecOutcome {
+            status: AgentRunStatus::Completed,
+            stop_reason: None,
+        };
+        complete.require_completed().expect("completed");
+        assert!(
+            complete
+                .notification(100, 4)
+                .1
+                .contains("Completed Successfully")
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_rewrite_does_not_publish_code_as_completed() {
+        use httptest::{Expectation, matchers::*, responders::*};
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("input.rs");
+        std::fs::write(&path, "fn old() {}\n").expect("fixture");
+        let read = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"reading","tool_calls":[{"id":"read","type":"function","function":{"name":"fs_read","arguments":serde_json::json!({"path":path}).to_string()}}]}}]});
+        let partial = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"```rust\nfn candidate() {}\n```"}}]});
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(2)
+                .respond_with(cycle![json_encoded(read), json_encoded(partial)]),
+        );
+        let mut cfg = exec_cfg_with_server(root.path(), &server);
+        cfg.agent_budget.max_iterations = 1;
+        let mut executor = Executor::new(cfg).await.expect("executor");
+        let error = executor
+            .run_rewrite("fix", "fn old() {}", None, true)
+            .await
+            .expect_err("partial rewrite");
+        assert_eq!(
+            error
+                .downcast_ref::<IncompleteExecution>()
+                .expect("typed")
+                .0
+                .stop_reason,
+            Some(crate::llm::tool_execution::AgentStopReason::IterationBudget)
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("fixture"),
+            "fn old() {}\n"
+        );
     }
 
     fn tool_invocation_msg(id: &str) -> ChatMessage {

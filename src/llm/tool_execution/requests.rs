@@ -775,7 +775,8 @@ mod tests {
         let catalog = deferred_fixture_catalog();
         // Sanity: remotes and non-core builtins really are deferred here.
         assert!(!catalog.is_active("mcp_github_get_pull_request").await);
-        assert!(!catalog.is_active("edit").await);
+        assert!(catalog.is_active("edit").await);
+        assert!(!catalog.is_active("task").await);
         assert!(catalog.is_active("tool_search").await);
 
         // The final HTTP payload carries core + tool_search schemas only.
@@ -800,12 +801,12 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "edit",
                 "execute_process",
                 "fs_read",
                 "observation_read",
                 "search_repomap",
                 "search_text",
-                "task",
                 "tool_search",
             ]
         );
