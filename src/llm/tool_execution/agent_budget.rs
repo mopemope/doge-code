@@ -43,6 +43,7 @@ pub enum AgentRunStatus {
 /// The provider [`UsageLedger`] itself never receives estimates.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentBudgetUsage {
+    pub progress: super::agent_progress::AgentProgressUsage,
     pub iterations: usize,
     pub tool_calls: usize,
     pub charged_tokens: u64,
@@ -66,6 +67,7 @@ pub struct AgentRunResult {
 }
 
 pub struct AgentBudgetTracker {
+    progress: super::agent_progress::ProgressObserver,
     limits: AgentBudgetConfig,
     started_at: Instant,
     usage_before_run: UsageLedger,
@@ -83,6 +85,7 @@ pub struct AgentBudgetTracker {
 impl AgentBudgetTracker {
     pub fn new(limits: AgentBudgetConfig, usage_before_run: UsageLedger) -> Self {
         Self {
+            progress: Default::default(),
             limits,
             started_at: Instant::now(),
             usage_before_run,
@@ -268,8 +271,21 @@ impl AgentBudgetTracker {
         now.difference(&self.usage_before_run)
     }
 
+    pub fn observe_tool_result(
+        &mut self,
+        name: &str,
+        arguments: &str,
+        success: bool,
+        output: Option<&serde_json::Value>,
+        mutated: bool,
+    ) {
+        self.progress
+            .observe(self.tool_calls, name, arguments, success, output, mutated);
+    }
+
     pub fn usage(&self) -> AgentBudgetUsage {
         AgentBudgetUsage {
+            progress: self.progress.usage.clone(),
             iterations: self.iterations,
             tool_calls: self.tool_calls,
             charged_tokens: self.charged_tokens,

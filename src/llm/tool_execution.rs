@@ -2,6 +2,7 @@ pub mod agent_budget;
 #[cfg(test)]
 mod agent_budget_tests;
 mod agent_loop;
+mod agent_progress;
 mod arguments;
 pub mod compaction;
 mod diff_collection;
