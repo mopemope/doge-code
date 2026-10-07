@@ -1021,6 +1021,8 @@ foreground job is rejected explicitly (use `/jobs` to inspect it or
 
 `/jobs` and `/cancel [job-id]` submitted with Enter are handled immediately,
 even while a job is running; Esc also cancels the current foreground job.
+The cancellation log confirms a request, not completion: cleanup and session
+saves may still be running. `/jobs` shows `cancelling` until the job finishes.
 Other prompts keep FIFO queue order and are consumed only after the foreground owner releases its slot, including cancellation cleanup, diff collection and session saves. Cosmetic done/error messages cannot release the queue. Busy reservation races retain accepted prompts for retry. `/compact` is a foreground
 `compact` job visible in `/jobs`, cancellable with `/cancel` or Esc, and drained
 on shutdown. While it owns the session, another foreground job, session switch,
