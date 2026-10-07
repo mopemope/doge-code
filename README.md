@@ -1560,6 +1560,12 @@ Older schema-v2 cache values without item counters contribute to the known
 subtotal, while their complete cache total stays unknown. Ordinary input/output
 totals and legacy-v1 measured comparisons retain their existing behavior.
 
+The eval runner records independent post-check outcomes separately from agent
+completion and human acceptance. Optional `protected_paths` detect changes to
+specified verifier files; `case.json`, file hashes, the candidate patch and check
+outputs preserve the evidence. See the evaluation protocol for status meanings
+and the limits of this local integrity guard.
+
 ### Adding New Languages
 1. Add tree-sitter parser dependency to `Cargo.toml`
 2. Implement `LanguageSpecificExtractor` trait
