@@ -1075,8 +1075,8 @@ fn context_catalog_does_not_expand_unknown_model_names_or_native_provider() {
         let (_root, cfg) = model_context_fixture(model);
         assert_eq!(
             cfg.get_context_window_size(),
-            Some(8_192),
-            "preserve conservative legacy behavior for {model}"
+            None,
+            "unknown model metadata must remain unknown for {model}"
         );
     }
     let (_root, unknown) = model_context_fixture("unknown-private-model");
@@ -1086,7 +1086,69 @@ fn context_catalog_does_not_expand_unknown_model_names_or_native_provider() {
     native.provider = crate::features::openai_subscription::ProviderKind::Openai;
     assert_eq!(
         native.get_context_window_size(),
-        Some(8_192),
+        None,
         "API metadata must not infer a subscription model's capacity"
+    );
+}
+
+#[test]
+fn capability_custom_endpoints_do_not_inherit_capacity() {
+    for endpoint in [
+        "https://custom.invalid/v1",
+        "https://api.openai.com.example/v1",
+    ] {
+        let (_root, mut cfg) = model_context_fixture("gpt-4.1-mini");
+        cfg.base_url = endpoint.into();
+        assert_eq!(cfg.get_context_window_size(), None, "{endpoint}");
+        cfg.llm.context_window_size = Some(20_000);
+        assert_eq!(cfg.get_context_window_size(), Some(20_000));
+    }
+}
+
+#[test]
+fn capability_unknown_model_names_do_not_inherit_legacy_capacity() {
+    for model in ["acme/gpt-4o", "prefix-gpt-4", "gpt-4.1-mini-future"] {
+        let (_root, cfg) = model_context_fixture(model);
+        assert_eq!(cfg.get_context_window_size(), None, "{model}");
+    }
+}
+
+#[test]
+fn capability_model_selection_preserves_overrides_and_compaction_limits() {
+    let (_root, mut main) = model_context_fixture("gpt-4.1-mini");
+    main.base_url = "https://custom.invalid/v1".into();
+    main.llm.context_window_size = Some(20_000);
+    main.auto_compact_prompt_token_threshold_overrides
+        .insert("worker-private".into(), 900);
+    let mut worker = main.clone();
+    worker.model = "worker-private".into();
+    assert_eq!(main.get_context_window_size(), Some(20_000));
+    assert_eq!(worker.get_context_window_size(), Some(20_000));
+    assert_eq!(main.get_effective_compaction_limit(), 16_000);
+    assert_eq!(worker.get_effective_compaction_limit(), 900);
+    assert_eq!(worker.base_url, main.base_url);
+    assert_eq!(worker.provider, main.provider);
+    assert_eq!(worker.reasoning.mode, main.reasoning.mode);
+}
+
+#[test]
+fn capability_native_unknown_capacity_preserves_threshold_validation() {
+    let (_root, mut cfg) = model_context_fixture("gpt-4.1-mini");
+    cfg.provider = crate::features::openai_subscription::ProviderKind::Openai;
+    assert_eq!(cfg.get_context_window_size(), None);
+    assert_eq!(cfg.get_effective_compaction_limit(), 102_400);
+    let client = crate::llm::OpenAIClient::new("http://127.0.0.1:1", "fixture").expect("client");
+    let client = client
+        .with_responses_compact_threshold(Some(cfg.get_effective_compaction_limit()))
+        .expect("valid native fallback");
+    assert_eq!(client.responses_compact_threshold(), Some(102_400));
+    cfg.llm.context_window_size = Some(20_000);
+    assert_eq!(cfg.get_effective_compaction_limit(), 16_000);
+    cfg.auto_compact_prompt_token_threshold_overrides
+        .insert(cfg.model.clone(), 999);
+    assert!(
+        client
+            .with_responses_compact_threshold(Some(cfg.get_effective_compaction_limit()))
+            .is_err()
     );
 }
