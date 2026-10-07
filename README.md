@@ -1096,7 +1096,12 @@ After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatica
 - **Scoped to agent changes**: the TUI diff covers captured text mutations from this turn, from the first pre-edit contents to the last committed contents; existing staged, unstaged and untracked user content is the baseline
 - **Split view**: log on the left, diff preview on the right with per-file tabs showing addition/deletion counts
 - **Syntax highlighting**: additions in green, removals in red, hunk headers in yellow, etc.
-- **Keyboard controls** (active while the input box is empty):
+- **Focus**: opening a review keeps focus in the input box, so ordinary typing
+  (including initial `r`, `a`, `q`, or `e`) remains input. `F6` switches between
+  input and review; each pane shows its focus. Draft input is preserved. Tab
+  remains available for input completion. Modified input shortcuts return focus
+  to input; history/file search keys are handled by their search mode.
+- **Keyboard controls** (active only with review focus):
   - `a` — accept changes (keep them applied)
   - `r` — restore this review’s captured pre-edit contents, preserving Git’s index. Only files captured as missing before creation are removed. The agent is notified of restored changes on your next instruction
   - `q` / `Esc` — dismiss the panel (changes remain applied). During rollback, Esc requests cancellation and the panel stays open until the result; accept/dismiss are disabled

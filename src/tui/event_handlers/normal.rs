@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
+#[cfg(test)]
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{CursorMove, Input, TextArea};
@@ -8,6 +9,7 @@ use tracing::debug;
 
 use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 
+#[cfg(test)]
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// Only control commands bypass the ordinary instruction queue.
@@ -20,7 +22,7 @@ fn is_immediate_control_command(line: &str) -> bool {
 pub fn handle_normal_mode_key(
     app: &mut TuiApp,
     k: KeyEvent,
-    _terminal: &mut TerminalType,
+    _terminal: &mut Terminal<impl ratatui::backend::Backend>,
 ) -> Result<bool> {
     match k {
         KeyEvent {
