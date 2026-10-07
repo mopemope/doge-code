@@ -700,6 +700,7 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
             "budget_provider_reported_tokens",
             "budget_estimated_tokens",
             "conversation_length",
+            "progress",
         ):
             measurement[key] = telemetry[key]
         measurement["harness_error"] = harness_error
