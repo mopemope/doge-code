@@ -7,9 +7,18 @@ use anyhow::Result;
 mod tests {
     use super::*;
 
+    fn populated_app() -> TuiApp {
+        let mut app = TuiApp::new_for_test("test", None, "default");
+        app.main_content_height = 3;
+        for line in 0..10 {
+            app.push_log(format!("line {line}"));
+        }
+        app
+    }
+
     #[test]
     fn test_scroll_up_basic() -> Result<()> {
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = populated_app();
         app.input_mode = InputMode::Normal;
 
         // Initial state
@@ -28,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_scroll_down_basic() -> Result<()> {
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = populated_app();
         app.input_mode = InputMode::Normal;
 
         // Set up initial scrolled state
@@ -48,7 +57,7 @@ mod tests {
 
     #[test]
     fn test_scroll_down_to_bottom() -> Result<()> {
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = populated_app();
         app.input_mode = InputMode::Normal;
 
         // Set up scrolled state close to bottom
@@ -69,7 +78,8 @@ mod tests {
 
     #[test]
     fn test_scroll_to_top_bottom() -> Result<()> {
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = TuiApp::new_for_test("test", None, "default");
+        app.main_content_height = 3;
 
         // Add some log entries to scroll
         for i in 0..10 {
@@ -78,7 +88,7 @@ mod tests {
 
         // Test scroll to top
         app.scroll_to_top();
-        assert_eq!(app.scroll_state.offset, 10);
+        assert_eq!(app.scroll_state.offset, 7);
         assert!(!app.scroll_state.auto_scroll);
 
         // Test scroll to bottom
@@ -92,10 +102,11 @@ mod tests {
 
     #[test]
     fn test_page_up_down() -> Result<()> {
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = TuiApp::new_for_test("test", None, "default");
+        app.main_content_height = 20;
 
         // Add some log entries
-        for i in 0..20 {
+        for i in 0..40 {
             app.push_log(format!("Log line {}", i));
         }
 

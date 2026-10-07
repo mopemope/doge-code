@@ -7,6 +7,14 @@ use ratatui::{
 };
 
 impl TuiApp {
+    fn diff_review_columns(area: Rect) -> [Rect; 2] {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+        [columns[0], columns[1]]
+    }
+
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
         let input_height = self
@@ -34,16 +42,24 @@ impl TuiApp {
         let main_content_height = chunks[1].height;
         self.main_content_height = main_content_height as usize;
 
-        if self.window_width != size.width as usize {
-            self.window_width = size.width as usize;
+        let log_width = if self.diff_review.is_some()
+            && self.input_mode == crate::tui::state::InputMode::Normal
+        {
+            Self::diff_review_columns(chunks[1])[0].width
+        } else {
+            chunks[1].width
+        };
+        if self.log_width != log_width as usize || self.log_heights.len() != self.log.len() {
+            self.log_width = log_width as usize;
             self.recalculate_all_heights();
         }
+        self.clamp_log_scroll();
 
         let params = crate::tui::state::BuildRenderPlanParams {
             title: &self.title,
             status: self.status,
             log: &self.log,
-            width: size.width,
+            width: log_width,
             main_content_height,
             model,
             spinner_state: self.spinner_state,
@@ -58,7 +74,10 @@ impl TuiApp {
         self.render_main_content(f, chunks[1], &plan, &self.theme);
         self.render_input_area(f, chunks[2]);
 
-        if self.completion_active && !self.completion_candidates.is_empty() {
+        if self.completion_active
+            && !self.completion_candidates.is_empty()
+            && self.diff_review_focus != crate::tui::state::DiffReviewFocus::Review
+        {
             self.render_completion_popup(f, chunks[2]);
         }
     }
@@ -137,11 +156,8 @@ impl TuiApp {
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
         f.render_widget(Clear, area);
 
-        if self.diff_review.is_some() {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(area);
+        if self.diff_review.is_some() && self.input_mode == crate::tui::state::InputMode::Normal {
+            let columns = Self::diff_review_columns(area);
 
             self.render_log_panel(f, columns[0], plan, theme);
             self.render_diff_review(f, columns[1], theme);
@@ -429,7 +445,9 @@ impl TuiApp {
         }
 
         // instructions footer for diff
-        let help = if review.rejecting {
+        let help = if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
+            "Input focused: type normally. F6 focuses review controls.".to_string()
+        } else if review.rejecting {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
@@ -444,9 +462,15 @@ impl TuiApp {
                     .unwrap_or("No turn-owned rollback capture.")
             )
         };
-        let instructions = Paragraph::new(help)
-            .style(theme.footer_style)
-            .block(Block::default().borders(Borders::ALL));
+        let instructions = Paragraph::new(help).style(theme.footer_style).block(
+            Block::default().borders(Borders::ALL).title(
+                if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Review {
+                    "Review focused (F6: input)"
+                } else {
+                    "Review (F6: focus)"
+                },
+            ),
+        );
         f.render_widget(instructions, layout[footer_idx]);
     }
 
@@ -546,6 +570,13 @@ impl TuiApp {
         let block_title = match self.input_mode {
             crate::tui::state::InputMode::HistorySearch => "History Search",
             crate::tui::state::InputMode::FileSearch => "File Search",
+            _ if self.diff_review.is_some() => {
+                if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
+                    "Input focused (F6: review)"
+                } else {
+                    "Input (F6: focus)"
+                }
+            }
             _ => "Input",
         };
 

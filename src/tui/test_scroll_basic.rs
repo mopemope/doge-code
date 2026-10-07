@@ -3,7 +3,12 @@ mod tests {
     use crate::tui::state::{ScrollState, TuiApp};
 
     fn create_test_app() -> TuiApp {
-        TuiApp::new("test", None, "dark").unwrap()
+        let mut app = TuiApp::new_for_test("test", None, "dark");
+        app.main_content_height = 20;
+        for line in 0..40 {
+            app.push_log(format!("line {line}"));
+        }
+        app
     }
 
     #[test]
@@ -47,7 +52,7 @@ mod tests {
         app.push_log("line3");
 
         app.scroll_to_top();
-        assert_eq!(app.scroll_state.offset, app.log.len());
+        assert_eq!(app.scroll_state.offset, 23);
         assert!(!app.scroll_state.auto_scroll);
         assert!(app.dirty);
     }

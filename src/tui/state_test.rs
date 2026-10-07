@@ -3,6 +3,130 @@ use crate::TuiApp;
 use crate::tui::commands::core::CommandHandler;
 use std::any::Any;
 
+fn viewport_test_terminal(
+    width: u16,
+    height: u16,
+) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap()
+}
+
+fn viewport_screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn viewport_resize_rebuilds_wrapped_log_heights() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    app.push_log(format!("{}TAIL", "x".repeat(90)));
+    let mut terminal = viewport_test_terminal(80, 20);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    terminal.backend_mut().resize(32, 20);
+    app.handle_resize(32, 20);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert_eq!(app.log_heights.len(), app.log.len());
+    assert_eq!(
+        app.log_heights[0],
+        app.calculate_entry_height(&app.log[0], 32)
+    );
+    assert!(viewport_screen(&terminal).contains("TAIL"));
+}
+
+#[test]
+fn viewport_diff_split_wraps_logs_to_the_log_column() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    app.push_log(format!("{}TAIL", "x".repeat(70)));
+    app.diff_review = Some(crate::tui::diff_review::DiffReviewState::from_payload(
+        serde_json::from_value(serde_json::json!({"diff": "+change", "files": ["a"]})).unwrap(),
+    ));
+    let mut terminal = viewport_test_terminal(80, 20);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert!(viewport_screen(&terminal).contains("TAIL"));
+    app.push_log(format!("{}NEXT", "y".repeat(70)));
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert!(viewport_screen(&terminal).contains("NEXT"));
+    app.diff_review = None;
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert_eq!(app.log_width, 80);
+    assert!(viewport_screen(&terminal).contains("TAIL"));
+}
+
+#[test]
+fn viewport_top_and_repeated_scroll_keep_oldest_wrapped_content_visible() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    app.push_log(format!("OLDEST{}", "x".repeat(500)));
+    app.push_log("NEWEST");
+    let mut terminal = viewport_test_terminal(32, 10);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    app.scroll_to_top();
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert!(viewport_screen(&terminal).contains("OLDEST"));
+    app.scroll_up(usize::MAX);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert!(viewport_screen(&terminal).contains("OLDEST"));
+}
+
+#[test]
+fn viewport_height_changes_and_tiny_terminal_clamp_scroll() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    for line in 0..30 {
+        app.push_log(format!("line {line}"));
+    }
+    let mut terminal = viewport_test_terminal(32, 10);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    app.scroll_up(usize::MAX);
+    terminal.backend_mut().resize(32, 40);
+    app.handle_resize(32, 40);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    assert_eq!(app.scroll_state.offset, 0);
+    assert!(app.scroll_state.auto_scroll);
+    assert!(viewport_screen(&terminal).contains("line 0"));
+    terminal.backend_mut().resize(1, 1);
+    app.handle_resize(1, 1);
+    terminal.draw(|f| app.view(f, None)).unwrap();
+    app.scroll_up(usize::MAX);
+    assert!(app.scroll_state.offset <= app.log_heights.iter().sum::<usize>());
+}
+
+#[test]
+fn viewport_empty_log_cannot_scroll_into_blank_space() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    app.main_content_height = 10;
+    app.scroll_up(usize::MAX);
+    assert_eq!(app.scroll_state.offset, 0);
+    assert!(app.scroll_state.auto_scroll);
+}
+
+#[test]
+fn viewport_render_plan_indicator_matches_clamped_content() {
+    let mut app = TuiApp::new_for_test("viewport", None, "default");
+    for line in 0..20 {
+        app.push_log(format!("line {line}"));
+    }
+    app.scroll_state.auto_scroll = false;
+    app.scroll_state.offset = usize::MAX;
+    let plan = crate::tui::state::build_render_plan(crate::tui::state::BuildRenderPlanParams {
+        title: "viewport",
+        status: app.status,
+        log: &app.log,
+        width: 32,
+        main_content_height: 5,
+        model: None,
+        spinner_state: 0,
+        scroll_state: &app.scroll_state,
+        plan_list: &app.plan_list,
+        theme: &app.theme,
+        log_heights: &app.log_heights,
+    });
+    assert_eq!(plan.log_lines.len(), 5);
+    assert_eq!(plan.scroll_info.unwrap().current_line, 5);
+}
+
 struct MockCommandHandler {
     custom_commands: Vec<String>,
     pub internal_calls: Vec<String>,

@@ -9,7 +9,7 @@ use crate::tui::diff_review::DiffReviewState;
 use crate::tui::event_handlers::{
     handle_file_search_key, handle_history_search_key, handle_normal_mode_key,
 };
-use crate::tui::state::{InputMode, Status, TuiApp};
+use crate::tui::state::{DiffReviewFocus, InputMode, Status, TuiApp};
 
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
@@ -166,6 +166,7 @@ impl TuiApp {
                                 )
                             };
                             self.diff_review = Some(review_state);
+                            self.diff_review_focus = DiffReviewFocus::Input;
                             self.diff_rejected_pending = false;
                             self.dirty = true;
                             self.push_log(notice);
@@ -174,6 +175,7 @@ impl TuiApp {
                         {
                             self.push_log(format!("[diff][error] {}", err_payload.error));
                             self.diff_review = None;
+                            self.diff_review_focus = DiffReviewFocus::Input;
                             self.dirty = true;
                         } else {
                             self.push_log(format!(
@@ -200,6 +202,7 @@ impl TuiApp {
                         };
                         let review_state = DiffReviewState::from_payload(payload);
                         self.diff_review = Some(review_state);
+                        self.diff_review_focus = DiffReviewFocus::Input;
                         self.diff_rejected_pending = false;
                         self.dirty = true;
                         self.push_log(
@@ -557,10 +560,7 @@ impl TuiApp {
 
                 match event {
                     Event::Resize(w, h) => {
-                        self.window_width = w as usize;
-                        self.main_content_height = h.saturating_sub(4) as usize; // Status(1) + Input(3) = 4
-                        self.log_heights.clear();
-                        self.dirty = true;
+                        self.handle_resize(w, h);
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {
@@ -571,48 +571,10 @@ impl TuiApp {
                         }
                         _ => {}
                     },
-                    Event::Key(k) => {
-                        if k.code == KeyCode::Char('c')
-                            && k.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            let now = Instant::now();
-                            if let Some(prev) = last_ctrl_c_at
-                                && now.duration_since(prev) <= Duration::from_secs(3)
-                            {
-                                self.request_exit();
-                                continue;
-                            }
-                            last_ctrl_c_at = Some(now);
-                            self.dispatch("/cancel");
-                            self.push_log("[Press Ctrl+C again within 3s to exit]");
-                            self.dirty = true;
-                            continue;
-                        }
-
-                        // Diff review keys take precedence while the panel is open,
-                        // but only when the input box is empty; otherwise the keys
-                        // must keep flowing into the textarea (typing "run the
-                        // tests" must not trigger a revert).
-                        if self.diff_review.is_some()
-                            && self.input_is_empty()
-                            && self.process_diff_review_key(k)?
-                        {
-                            continue;
-                        }
-
-                        match self.input_mode {
-                            InputMode::Normal => {
-                                if handle_normal_mode_key(self, k, terminal)? {
-                                    self.request_exit();
-                                }
-                            }
-                            InputMode::HistorySearch => {
-                                handle_history_search_key(self, k)?;
-                            }
-                            InputMode::FileSearch => {
-                                handle_file_search_key(self, k)?;
-                            }
-                        }
+                    Event::Key(k)
+                        if self.handle_terminal_key(k, terminal, &mut last_ctrl_c_at)? =>
+                    {
+                        self.request_exit();
                     }
                     _ => {}
                 }
@@ -628,9 +590,82 @@ impl TuiApp {
 }
 
 impl TuiApp {
-    /// True when the input textarea has no user-typed content.
-    fn input_is_empty(&self) -> bool {
-        self.textarea.lines().iter().all(|line| line.is_empty())
+    fn handle_terminal_key(
+        &mut self,
+        key: event::KeyEvent,
+        terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
+        last_ctrl_c_at: &mut Option<Instant>,
+    ) -> Result<bool> {
+        if key.kind == event::KeyEventKind::Release {
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.kind != event::KeyEventKind::Press {
+                return Ok(false);
+            }
+            self.diff_review_focus = DiffReviewFocus::Input;
+            let now = Instant::now();
+            if last_ctrl_c_at.is_some_and(|prev| now.duration_since(prev) <= Duration::from_secs(3))
+            {
+                return Ok(true);
+            }
+            *last_ctrl_c_at = Some(now);
+            self.dispatch("/cancel");
+            self.push_log("[Press Ctrl+C again within 3s to exit]");
+            self.dirty = true;
+            return Ok(false);
+        }
+        self.handle_ui_key(key, terminal)
+    }
+
+    fn handle_ui_key(
+        &mut self,
+        key: event::KeyEvent,
+        terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
+    ) -> Result<bool> {
+        if key.kind == event::KeyEventKind::Release {
+            return Ok(false);
+        }
+        if self.input_mode == InputMode::Normal && self.diff_review.is_some() {
+            if key.code == KeyCode::F(6) && key.modifiers.is_empty() {
+                if key.kind == event::KeyEventKind::Press {
+                    self.diff_review_focus = match self.diff_review_focus {
+                        DiffReviewFocus::Input => DiffReviewFocus::Review,
+                        DiffReviewFocus::Review => DiffReviewFocus::Input,
+                    };
+                    self.dirty = true;
+                }
+                return Ok(false);
+            }
+            if self.diff_review_focus == DiffReviewFocus::Review {
+                // Only explicit review focus owns bare review keys. Unknown
+                // keys must not silently type into the unfocused input box.
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    if key.modifiers.is_empty() {
+                        self.process_diff_review_key(key)?;
+                    }
+                    return Ok(false);
+                }
+                // Modified shortcuts (history/file search, cancellation, etc.)
+                // belong to normal input handling, never rollback actions.
+                self.diff_review_focus = DiffReviewFocus::Input;
+                self.dirty = true;
+            }
+        }
+        match self.input_mode {
+            InputMode::Normal => handle_normal_mode_key(self, key, terminal),
+            InputMode::HistorySearch => {
+                handle_history_search_key(self, key)?;
+                Ok(false)
+            }
+            InputMode::FileSearch => {
+                handle_file_search_key(self, key)?;
+                Ok(false)
+            }
+        }
     }
 
     fn process_diff_review_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -808,6 +843,7 @@ impl TuiApp {
                 handler.dismiss_review(&report.id);
             }
             self.diff_review = None;
+            self.diff_review_focus = DiffReviewFocus::Input;
         } else if let Some(payload) = payload {
             self.diff_review = Some(DiffReviewState::from_payload(payload));
         }
@@ -819,6 +855,7 @@ impl TuiApp {
             return;
         }
         if let Some(review) = self.diff_review.take() {
+            self.diff_review_focus = DiffReviewFocus::Input;
             if let Some(id) = &review.review_id
                 && let Some(handler) = &self.handler
             {
@@ -835,6 +872,7 @@ impl TuiApp {
             return;
         }
         if let Some(review) = self.diff_review.take() {
+            self.diff_review_focus = DiffReviewFocus::Input;
             if let Some(id) = &review.review_id
                 && let Some(handler) = &self.handler
             {
@@ -956,6 +994,225 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diff_panel_does_not_intercept_initial_typing() {
+        for text in [
+            "run tests",
+            "add coverage",
+            "query status",
+            "explain changes",
+        ] {
+            let mut ui = TuiApp::new_for_test("focus", None, "default");
+            let payload = serde_json::from_value(serde_json::json!({
+                "diff": "+change", "files": ["a"]
+            }))
+            .unwrap();
+            ui.diff_review = Some(DiffReviewState::from_payload(payload));
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            for ch in text.chars() {
+                ui.handle_ui_key(
+                    event::KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &mut terminal,
+                )
+                .unwrap();
+            }
+            assert_eq!(ui.textarea.lines(), [text]);
+            assert!(ui.diff_review.is_some());
+            assert!(!ui.diff_rejected_pending);
+        }
+    }
+
+    fn focus_test_ui() -> (TuiApp, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        let mut ui = TuiApp::new_for_test("focus", None, "default");
+        ui.diff_review = Some(DiffReviewState::from_payload(
+            serde_json::from_value(serde_json::json!({"diff": "+change", "files": ["a"]})).unwrap(),
+        ));
+        (
+            ui,
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 32)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn review_focus_preserves_draft_and_view_only_safety() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        ui.textarea.insert_str("draft input");
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Review);
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.diff_review.is_some());
+        assert!(!ui.diff_rejected_pending);
+        assert_eq!(ui.textarea.lines(), ["draft input"]);
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.diff_review.is_none());
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Input);
+        assert_eq!(ui.textarea.lines(), ["draft input"]);
+    }
+
+    #[test]
+    fn review_focus_returns_to_input_without_stealing_search_keys() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(ui.input_mode, InputMode::HistorySearch);
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Input);
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(ui.history_search_state.as_ref().unwrap().query, "q");
+        assert!(ui.diff_review.is_some());
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("History Search (Ctrl+R)"));
+    }
+
+    #[test]
+    fn review_focus_render_and_key_release_are_consistent() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Input focused (F6: review)"));
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new_with_kind(
+                KeyCode::F(6),
+                KeyModifiers::NONE,
+                event::KeyEventKind::Release,
+            ),
+            &mut terminal,
+        )
+        .unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new_with_kind(
+                KeyCode::F(6),
+                KeyModifiers::NONE,
+                event::KeyEventKind::Repeat,
+            ),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Review);
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Review focused (F6: input)"));
+    }
+
+    #[test]
+    fn review_focus_keeps_rollback_panel_until_result() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        let calls = Arc::new(Mutex::new(vec![]));
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        ui.diff_review.as_mut().unwrap().rejecting = true;
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        for code in [KeyCode::Char('a'), KeyCode::Char('q'), KeyCode::Esc] {
+            ui.handle_ui_key(
+                event::KeyEvent::new(code, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+            assert!(ui.diff_review.as_ref().unwrap().rejecting);
+        }
+        assert_eq!(*calls.lock().unwrap(), ["/cancel"]);
+    }
+
+    #[test]
+    fn terminal_key_release_does_not_count_as_second_ctrl_c() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        ui.diff_review_focus = DiffReviewFocus::Review;
+        let calls = Arc::new(Mutex::new(vec![]));
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        let mut last_ctrl_c_at = None;
+        let press = event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let release = event::KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            event::KeyEventKind::Release,
+        );
+        let repeat = event::KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            event::KeyEventKind::Repeat,
+        );
+        assert!(
+            !ui.handle_terminal_key(press, &mut terminal, &mut last_ctrl_c_at)
+                .unwrap()
+        );
+        let recorded = last_ctrl_c_at;
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Input);
+        assert!(
+            !ui.handle_terminal_key(repeat, &mut terminal, &mut last_ctrl_c_at)
+                .unwrap()
+        );
+        assert_eq!(last_ctrl_c_at, recorded);
+        assert!(
+            !ui.handle_terminal_key(release, &mut terminal, &mut last_ctrl_c_at)
+                .unwrap()
+        );
+        assert_eq!(last_ctrl_c_at, recorded);
+        assert_eq!(*calls.lock().unwrap(), ["/cancel"]);
+        assert!(
+            ui.handle_terminal_key(press, &mut terminal, &mut last_ctrl_c_at)
+                .unwrap()
+        );
+    }
+
     use crate::{
         jobs::{JobKind, JobManager, JobRunOutcome, JobScope, JobSpec, WorkspaceAccess},
         tui::commands::core::CommandHandler,
