@@ -6,6 +6,7 @@ pub mod followup;
 
 pub mod event_handlers;
 pub mod event_loop;
+mod key_help;
 pub mod llm_response_handler;
 pub mod rendering;
 pub mod shell;

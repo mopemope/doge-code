@@ -51,6 +51,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("");
 
     ui.push_log("Other controls:");
+    ui.push_log("  F1 - Contextual keyboard help (F1/Esc closes it)");
     ui.push_log("  @ - File completion");
     ui.push_log("  ! - Shell mode (at start of empty line)");
     ui.push_log("  Esc - Cancel operation or exit shell mode");

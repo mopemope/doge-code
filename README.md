@@ -1099,6 +1099,16 @@ silently moving user instructions or removing messages.
 
 ## 📋 Diff Review Panel
 
+The input separator shows contextual key hints. Press `F1` for keyboard help
+for the current input, completion, search, or review mode. Help preserves the
+draft, cursor, search query, and review focus; `F1` or `Esc` returns to them.
+Use Up/Down, Page Up/Down, or the mouse wheel to scroll wrapped help on narrow
+terminals, and Home/End to jump to its first/last page. Other keys do not act on
+the underlying input or review while help is open. `Ctrl+C` closes help and
+requests cancellation; a second press within three seconds exits as usual.
+While a foreground job owns execution, the input hint says `Enter queue`;
+completion and search modes show their own available actions instead.
+
 Use `Alt+Enter` to insert a draft newline and `Enter` to submit. Multiline
 drafts use Up/Down to move through their rows (single-line input retains
 history navigation); active completion lists still use Up/Down for selection.
