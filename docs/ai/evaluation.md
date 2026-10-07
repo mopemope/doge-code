@@ -37,7 +37,7 @@ execution:
 4. Inspect artifacts under `<output>/<variant>/runs/<case>/trial-NNN/`:
    `run.json`, `exec.json`, `stdout.txt`, `stderr.txt`, redacted
    `evidence.json`, `git-status.txt`, `diff-stat.txt`, `agent.patch`
-   (tracked plus non-ignored untracked files), and `checks/` outputs.
+   (tracked plus non-ignored untracked files), `case.json`, and `checks/` outputs.
    `resolved-manifest.json` records the pinned base commit and variant
    hashes (never secrets or config bodies).
 5. Review each case's acceptance criteria against the resulting diff, tests,
@@ -59,6 +59,57 @@ execution:
 Running an external agent may consume paid API usage. Live evaluation is a
 manual local command; CI runs only unit tests, guidance checks, and Rust
 checks, never real model evals.
+
+## Independent post-check evidence
+
+The agent's `run_status`, post-check `verification_status`, and human `accepted`
+are separate. A completed agent can fail verification; a Partial or timed-out
+agent can leave a change that passes a check. Neither result automatically fills
+`accepted`. Required checks still run after agent Partial, failure or timeout
+when the worktree is available. Spawn/setup failures leave explicit `not_run`
+records with reasons; no declared checks means `not_configured`, not a pass.
+On interruption, completed results stay recorded, the interrupted check is
+`not_run` with `check_interrupted`, and only later checks remain unreached.
+
+Each `post_checks` entry contains a unique name, an argv array (never a shell
+string), and a finite positive timeout. It can also declare `protected_paths`,
+a list of project-relative verifier files that must remain unchanged:
+
+```json
+{"name":"oracle","argv":["python3","accept.py"],"timeout_seconds":30,"protected_paths":["accept.py","oracle_helpers.py"]}
+```
+
+The runner records file hashes and modes before the agent runs and checks them
+before and after verification. Changed verifiers invalidate the result even if
+the command would exit zero. Missing, unreadable or symlink baselines are
+`not_run`, never trusted as a pass. Declare all verifier dependencies that must
+stay fixed; leave the implementation under evaluation editable. This is a
+local file-integrity guard, not an immutable or hidden test environment. It does
+not protect undeclared imports, the interpreter/toolchain, or transient changes
+and races between signature checks. Use separately controlled verification for
+stronger isolation. Existing checks without `protected_paths` remain supported
+and do not gain this integrity guarantee.
+
+Per-check statuses are `passed`, `failed`, `timed_out`, `error`, `not_run`, and
+`invalidated`. Exit codes, reasons, timeouts, output truncation and bounded output
+artifacts remain available individually when results are mixed. Verification
+uses the existing process-group runner and the parent environment, not the
+variant's `DOGE_CODE_CONFIG`. `required_checks_passed` is true only when all
+checks pass, false for observed failures/timeouts/errors/invalidation, and null
+when checks are absent or incomplete without an observed failure. The aggregate
+`verification_status` prioritizes invalidated/error/failed/timed_out/not_run;
+inspect per-check records for all outcomes.
+
+Each run retains `case.json` (normalized original prompt, acceptance criteria,
+commands and protected paths), its `case_sha256`, the pinned base commit,
+`agent.patch`, and check outputs. These link the original task to the candidate
+change and independent command evidence without asking the agent to grade itself.
+The existing seven repository cases are retained; no model benchmarks are added.
+Unit regressions use a disposable external Git repository with a small calculation
+bug: the reference implementation fails then passes the same oracle, while
+weakening that oracle invalidates the result. These fake-agent runs spend no model
+usage. Other agents still require the existing dgc-style CLI/telemetry contract;
+real Unity projects and external toolchains are not validated by these fixtures.
 
 ## Run record
 
