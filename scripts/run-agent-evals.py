@@ -411,51 +411,92 @@ def workspace_changed(diff_info):
     return bool(diff_info["status_output"].strip())
 
 
-def run_post_checks(case, workspace, run_dir, env):
+def protected_signature(workspace, name):
+    """Do not follow verifier symlinks or infer a missing baseline as trusted."""
+    path = Path(workspace)
+    try:
+        for part in Path(name).parts:
+            path = path / part
+            if path.is_symlink():
+                return {"error": "symlink"}
+        if not path.is_file():
+            return {"error": "missing_or_not_file"}
+        return {"sha256": common.sha256_file(path), "mode": path.stat().st_mode & 0o777}
+    except OSError:
+        return {"error": "unreadable"}
+
+
+def snapshot_protected_checks(case, workspace):
+    return {
+        check["name"]: {name: protected_signature(workspace, name)
+                        for name in check.get("protected_paths", [])}
+        for check in case.get("post_checks", [])
+    }
+
+
+def verification_summary(results):
+    if not results:
+        return "not_configured", None
+    statuses = {result["status"] for result in results}
+    for status in ("invalidated", "error", "failed", "timed_out", "not_run"):
+        if status in statuses:
+            return status, None if statuses <= {"passed", "not_run"} else False
+    return "passed", True
+
+
+def run_post_checks(case, workspace, run_dir, env, baseline=None,
+                    skip_reason=None, grace_seconds=10, on_result=None):
     checks_dir = run_dir / "checks"
     checks_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for check in case.get("post_checks", []):
         name = check["name"]
-        argv = check["argv"]
-        timeout = check.get("timeout_seconds", 120)
         stdout_path = checks_dir / f"{name}.stdout.txt"
         stderr_path = checks_dir / f"{name}.stderr.txt"
-        start = time.monotonic()
-        timed_out = False
-        try:
-            completed = subprocess.run(
-                argv,
-                cwd=str(workspace),
-                env=env,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
-            exit_code = completed.returncode
-            stdout_path.write_bytes(completed.stdout or b"")
-            stderr_path.write_bytes(completed.stderr or b"")
-        except subprocess.TimeoutExpired as error:
-            timed_out = True
-            exit_code = None
-            stdout_path.write_bytes(error.stdout or b"")
-            stderr_path.write_bytes(error.stderr or b"")
-        except OSError as error:
-            exit_code = 127
+        expected = (baseline or {}).get(name, {})
+        reason = skip_reason
+        status = "not_run" if reason else None
+        if status is None and check.get("protected_paths"):
+            if not expected or any("error" in value for value in expected.values()):
+                status, reason = "not_run", "protected_baseline_unavailable"
+            elif any(protected_signature(workspace, path) != signature
+                     for path, signature in expected.items()):
+                status, reason = "invalidated", "protected_verifier_changed"
+        exit_code, timed_out, elapsed, truncated = None, False, 0.0, False
+        interrupted = False
+        if status is None:
+            start = time.monotonic()
+            try:
+                exit_code, timed_out, elapsed, error, truncated = stream_child(
+                    check["argv"], workspace, env, check.get("timeout_seconds", 120),
+                    grace_seconds, stdout_path, stderr_path,
+                )
+                status = "error" if error else "timed_out" if timed_out else "passed" if exit_code == 0 else "failed"
+                reason = error or ("check_timeout" if timed_out else f"exit_nonzero:{exit_code}" if exit_code != 0 else None)
+            except KeyboardInterrupt:
+                interrupted = True
+                status, reason = "not_run", "check_interrupted"
+                elapsed = time.monotonic() - start
+                with stderr_path.open("ab") as handle:
+                    handle.write(b"\nharness: check_interrupted\n")
+            if not interrupted and any(protected_signature(workspace, path) != signature
+                                       for path, signature in expected.items()):
+                status, reason = "invalidated", "protected_verifier_changed_during_check"
+        else:
             stdout_path.write_bytes(b"")
-            stderr_path.write_bytes(f"harness: check spawn failed: {error}\n".encode())
-        elapsed = time.monotonic() - start
-        results.append(
-            {
-                "name": name,
-                "argv": list(argv),
-                "exit_code": exit_code,
-                "timed_out": timed_out,
-                "elapsed_seconds": elapsed,
-                "stdout_artifact": f"checks/{name}.stdout.txt",
-                "stderr_artifact": f"checks/{name}.stderr.txt",
-            }
-        )
+            stderr_path.write_text(f"harness: {reason}\n", encoding="utf-8")
+        results.append({
+            "name": name, "argv": list(check["argv"]), "status": status,
+            "reason": reason, "exit_code": exit_code, "timed_out": timed_out,
+            "elapsed_seconds": elapsed, "output_truncated": truncated,
+            "protected_files": expected,
+            "stdout_artifact": f"checks/{name}.stdout.txt",
+            "stderr_artifact": f"checks/{name}.stderr.txt",
+        })
+        if on_result is not None:
+            on_result(results[-1])
+        if interrupted:
+            raise KeyboardInterrupt
     return results
 
 
@@ -483,6 +524,8 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
         / f"trial-{trial:03d}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
+    case_path = run_dir / "case.json"
+    case_path.write_text(json.dumps(case, sort_keys=True, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     measurement = common.base_measurement(
         case["case_id"],
         trial,
@@ -492,7 +535,12 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
         variant_name,
         variant_metas[variant_name],
     )
-    measurement["artifacts"] = {"directory": str(run_dir.relative_to(out_root / variant_name))}
+    measurement["case_sha256"] = common.sha256_file(case_path)
+    measurement["artifacts"] = {"directory": str(run_dir.relative_to(out_root / variant_name)), "case": "case.json"}
+    measurement["post_checks"] = run_post_checks(
+        case, None, run_dir, {}, skip_reason="verification_not_reached",
+    )
+    measurement["verification_status"], measurement["required_checks_passed"] = verification_summary(measurement["post_checks"])
     env = child_env(variant)
     harness_error = None
     timed_out = False
@@ -524,6 +572,7 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
                     "worktree_not_clean: "
                     + pre.stdout.strip()[:2000]
                 )
+        protected_baseline = snapshot_protected_checks(case, workspace) if harness_error is None else None
         parsed = None
         parse_diagnostic = None
         telemetry = common.extract_exec_telemetry(None)
@@ -583,17 +632,24 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
                 if not (run_dir / name).exists():
                     (run_dir / name).write_text("", encoding="utf-8")
 
-        if harness_error is None:
-            check_results = run_post_checks(case, workspace, run_dir, env)
-        else:
-            check_results = []
+        # Persist each observed result even if a later check is interrupted.
+        def record_check(result):
+            for index, pending in enumerate(measurement["post_checks"]):
+                if pending["name"] == result["name"]:
+                    measurement["post_checks"][index] = result
+                    break
+            measurement["verification_status"], measurement["required_checks_passed"] = verification_summary(measurement["post_checks"])
+
+        # Verification is independent of the agent's completion/status/config.
+        check_results = run_post_checks(
+            case, workspace, run_dir, dict(os.environ), protected_baseline,
+            skip_reason=f"harness_error: {harness_error}" if harness_error else None,
+            grace_seconds=manifest["termination_grace_seconds"], on_result=record_check,
+        )
         measurement["post_checks"] = check_results
-        if check_results:
-            measurement["required_checks_passed"] = all(
-                r["exit_code"] == 0 and not r["timed_out"] for r in check_results
-            )
-        else:
-            measurement["required_checks_passed"] = None
+        verification_status, passed = verification_summary(check_results)
+        measurement["verification_status"] = verification_status
+        measurement["required_checks_passed"] = passed
 
         findings = []
         if (
@@ -653,6 +709,7 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
         measurement["artifacts"] = {
             "directory": str(run_dir.relative_to(out_root / variant_name)),
             "evidence": "evidence.json",
+            "case": "case.json",
             "patch": "agent.patch",
             "stdout": "stdout.txt",
             "stderr": "stderr.txt",

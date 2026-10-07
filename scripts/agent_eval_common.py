@@ -9,8 +9,9 @@ or human-reviewed; estimates are never mixed into provider usage.
 
 import hashlib
 import json
+import math
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MANIFEST_SCHEMA_VERSION = 1
 MEASUREMENT_SCHEMA_VERSION = 2
@@ -175,6 +176,7 @@ def load_cases(cases_path):
             _fail(errors, f"{where}: post_checks must be an array")
             checks = []
         else:
+            check_names = set()
             for check_index, check in enumerate(checks):
                 cwhere = f"{where} post_checks[{check_index}]"
                 if not isinstance(check, dict):
@@ -184,6 +186,22 @@ def load_cases(cases_path):
                     _fail(errors, f"{cwhere}: name must be a nonempty string")
                 elif check_safe_name(check["name"], "post check name"):
                     _fail(errors, f"{cwhere}: {check_safe_name(check['name'], 'x')}")
+                unknown_check_keys = set(check) - {"name", "argv", "timeout_seconds", "protected_paths"}
+                if unknown_check_keys:
+                    _fail(errors, f"{cwhere}: unknown keys: {sorted(unknown_check_keys)}")
+                if isinstance(check.get("name"), str):
+                    if check["name"] in check_names:
+                        _fail(errors, f"{cwhere}: duplicate post check name {check['name']!r}")
+                    check_names.add(check["name"])
+                protected = check.get("protected_paths", [])
+                if not isinstance(protected, list) or not all(
+                    isinstance(name, str) and name and "\\" not in name
+                    and not PurePosixPath(name).is_absolute()
+                    and ".." not in PurePosixPath(name).parts
+                    and PurePosixPath(name).parts
+                    for name in protected
+                ):
+                    _fail(errors, f"{cwhere}: protected_paths must contain relative file paths without traversal")
                 argv = check.get("argv")
                 if (
                     not isinstance(argv, list)
@@ -199,9 +217,9 @@ def load_cases(cases_path):
                 if (
                     type(timeout) not in (int, float)
                     or not (timeout > 0)
-                    or timeout != timeout
+                    or not math.isfinite(timeout)
                 ):
-                    _fail(errors, f"{cwhere}: timeout_seconds must be > 0")
+                    _fail(errors, f"{cwhere}: timeout_seconds must be finite and > 0")
         normalized = {
             "case_id": case_id,
             "prompt": case.get("prompt"),
@@ -212,6 +230,7 @@ def load_cases(cases_path):
                     "name": check.get("name"),
                     "argv": list(check.get("argv", [])),
                     "timeout_seconds": check.get("timeout_seconds", 120),
+                    "protected_paths": list(check.get("protected_paths", [])) if isinstance(check.get("protected_paths", []), list) else [],
                 }
                 for check in checks
                 if isinstance(check, dict) and isinstance(check.get("argv"), list)

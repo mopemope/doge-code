@@ -403,6 +403,20 @@ class ManifestTests(HarnessCase):
                          {"baseline", "candidate"})
 
 
+    def test_acceptance_check_schema_rejects_ambiguous_or_unsafe_contracts(self):
+        check = {"name": "oracle", "argv": [sys.executable, "-c", "pass"]}
+        for checks in [
+            [check, check],
+            [dict(check, protected_paths=["../outside.py"])],
+            [dict(check, protected_paths=["/absolute.py"])],
+            [dict(check, protected_paths=None)],
+            [dict(check, protected_path=["typo.py"])],
+            [dict(check, timeout_seconds=float("inf"))],
+        ]:
+            with self.subTest(checks=checks), self.assertRaises(ValueError):
+                common.load_cases(self.write_cases([self.base_case(post_checks=checks)]))
+
+
 @unittest.skipIf(NEEDS_GIT, "git is required for worktree tests")
 class RunnerTests(HarnessCase):
     @unittest.skipUnless(os.name == "posix", "detached sessions require POSIX")
@@ -700,6 +714,155 @@ if "exec" in args:
             measurement["machine_findings"],
         )
         self.assertIsNone(measurement["accepted"])
+
+    def acceptance_fixture(self):
+        repo = self.make_repo()
+        (repo / "calc.py").write_text("def total(values): return sum(values) + 1\n")
+        (repo / "accept.py").write_text(
+            "from calc import total\nassert total([2, 3]) == 5\nassert total([]) == 0\n"
+        )
+        git("add", "calc.py", "accept.py", cwd=repo)
+        git("commit", "-m", "acceptance fixture", cwd=repo)
+        check = {"name": "oracle", "argv": [sys.executable, "accept.py"],
+                 "protected_paths": ["accept.py"], "timeout_seconds": 10}
+        return repo, self.make_fake(), check
+
+    def test_acceptance_weakened_oracle_cannot_pass(self):
+        repo, fake, check = self.acceptance_fixture()
+        manifest, cases = self.load_harness(self.write_manifest(
+            fake, self.write_cases([self.base_case(post_checks=[check])]))
+        )
+        with fake_env(FAKE_CREATE_FILE="accept.py", FAKE_CREATE_CONTENT="pass\n"):
+            measurement, output = self.run_trial(repo, manifest, cases[0])
+        self.assertFalse(measurement["required_checks_passed"])
+        self.assertEqual(measurement["post_checks"][0]["status"], "invalidated")
+        self.assertEqual(measurement["run_status"], "completed")
+        self.assertIsNone(measurement["accepted"])
+        artifact = output / "baseline/runs/fake-case/trial-001"
+        self.assertIn("accept.py", (artifact / "agent.patch").read_text())
+        self.assertEqual(json.loads((artifact / "case.json").read_text())["post_checks"][0]["protected_paths"], ["accept.py"])
+
+    def test_acceptance_reference_fix_and_partial_are_independent(self):
+        repo, fake, check = self.acceptance_fixture()
+        manifest, cases = self.load_harness(self.write_manifest(
+            fake, self.write_cases([self.base_case(post_checks=[check])]))
+        )
+        before, _ = self.run_trial(repo, manifest, cases[0], out_name="before")
+        self.assertEqual(before["run_status"], "completed")
+        self.assertFalse(before["required_checks_passed"])
+        for payload, exit_code, expected in [("ok", "0", "completed"), ("partial_incomplete", "2", "partial")]:
+            with fake_env(FAKE_CREATE_FILE="calc.py", FAKE_CREATE_CONTENT="def total(values): return sum(values)\n", FAKE_PAYLOAD=payload, FAKE_EXIT=exit_code):
+                after, output = self.run_trial(repo, manifest, cases[0], out_name=expected)
+            self.assertTrue(after["required_checks_passed"])
+            self.assertEqual(after["run_status"], expected)
+            self.assertIsNone(after["accepted"])
+            self.assertEqual(after["verification_status"], "passed")
+            self.assertEqual(after["post_checks"][0]["status"], "passed")
+            artifact = output / "baseline/runs/fake-case/trial-001"
+            self.assertIn("calc.py", (artifact / "agent.patch").read_text())
+            self.assertEqual(after["case_sha256"], common.sha256_file(artifact / "case.json"))
+
+    def test_acceptance_failure_timeout_and_spawn_error_are_distinct(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        checks = [
+            {"name": "fail", "argv": [sys.executable, "-c", "raise SystemExit(3)"]},
+            {"name": "timeout", "argv": [sys.executable, "-c", "import time; time.sleep(10)"], "timeout_seconds": 0.1},
+            {"name": "missing", "argv": [str(self.root / "missing-command")]},
+        ]
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=checks)])))
+        measurement, _ = self.run_trial(repo, manifest, cases[0])
+        results = {r["name"]: r for r in measurement["post_checks"]}
+        self.assertEqual(results["fail"]["status"], "failed")
+        self.assertEqual(results["fail"]["exit_code"], 3)
+        self.assertEqual(results["timeout"]["status"], "timed_out")
+        self.assertTrue(results["timeout"]["timed_out"])
+        self.assertEqual(results["missing"]["status"], "error")
+        self.assertIn("spawn_failed", results["missing"]["reason"])
+        self.assertEqual(measurement["run_status"], "completed")
+        self.assertFalse(measurement["required_checks_passed"])
+
+    def test_acceptance_not_run_is_recorded_after_agent_spawn_failure(self):
+        repo, fake, check = self.acceptance_fixture()
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=[check])])))
+        fake.unlink()
+        measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "harness_error")
+        self.assertEqual(measurement["verification_status"], "not_run")
+        self.assertIsNone(measurement["required_checks_passed"])
+        self.assertEqual(len(measurement["post_checks"]), 1)
+        self.assertIn("harness_error", measurement["post_checks"][0]["reason"])
+        self.assertIsNone(measurement["post_checks"][0]["exit_code"])
+
+    def test_acceptance_checks_still_run_after_agent_timeout(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        check = {"name": "oracle", "argv": [sys.executable, "-c", "print('independent check')"]}
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=[check])]), timeout_seconds=0.1, termination_grace_seconds=0.1))
+        with fake_env(FAKE_SLEEP_SECONDS="10"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "timed_out")
+        self.assertEqual(measurement["verification_status"], "passed")
+        self.assertIsNone(measurement["accepted"])
+
+    def test_acceptance_missing_baseline_is_not_a_pass(self):
+        repo, fake, check = self.acceptance_fixture()
+        check["protected_paths"] = ["missing.py"]
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=[check])])))
+        measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["verification_status"], "not_run")
+        self.assertIsNone(measurement["required_checks_passed"])
+        self.assertEqual(measurement["post_checks"][0]["reason"], "protected_baseline_unavailable")
+
+    def test_acceptance_verifier_mutation_during_check_invalidates_zero_exit(self):
+        repo, fake, check = self.acceptance_fixture()
+        check["argv"] = [sys.executable, "-c", "from pathlib import Path; Path('accept.py').write_text('pass')"]
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=[check])])))
+        measurement, _ = self.run_trial(repo, manifest, cases[0])
+        result = measurement["post_checks"][0]
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["status"], "invalidated")
+        self.assertIn("during_check", result["reason"])
+        self.assertFalse(measurement["required_checks_passed"])
+
+    def test_acceptance_interruption_preserves_completed_and_pending_checks(self):
+        from unittest.mock import patch
+        repo = self.make_repo()
+        fake = self.make_fake()
+        checks = [
+            {"name": "done", "argv": [sys.executable, "-c", "print('checked')"]},
+            {"name": "interrupt", "argv": [sys.executable, "-c", "print('interrupt fixture')"]},
+            {"name": "pending", "argv": [sys.executable, "-c", "print('must not run')"]},
+        ]
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=checks)])))
+        original = runner.stream_child
+        def interrupt(argv, *args, **kwargs):
+            if argv == checks[1]["argv"]:
+                raise KeyboardInterrupt
+            return original(argv, *args, **kwargs)
+        with patch.object(runner, "stream_child", side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_trial(repo, manifest, cases[0])
+        artifact = self.root / "out/baseline/runs/fake-case/trial-001"
+        saved = json.loads((artifact / "run.json").read_text())
+        self.assertEqual(saved["run_status"], "cancelled")
+        results = {r["name"]: r for r in saved["post_checks"]}
+        self.assertEqual(results["done"]["status"], "passed")
+        self.assertEqual(results["interrupt"]["reason"], "check_interrupted")
+        self.assertEqual(results["pending"]["reason"], "verification_not_reached")
+        self.assertEqual(saved["verification_status"], "not_run")
+        self.assertIsNone(saved["required_checks_passed"])
+        self.assertIn("checked", (artifact / "checks/done.stdout.txt").read_text())
+
+    def test_acceptance_environment_does_not_inherit_variant_config(self):
+        repo = self.make_repo()
+        fake = self.make_fake()
+        config = self.root / "variant.toml"
+        config.write_text("# fixture\n")
+        check = {"name": "environment", "argv": [sys.executable, "-c", "import os; assert os.environ.get('DOGE_CODE_CONFIG') == 'parent-fixture'"]}
+        manifest, cases = self.load_harness(self.write_manifest(fake, self.write_cases([self.base_case(post_checks=[check])]), variants=[{"name": "baseline", "agent_command": [str(fake)], "config": str(config)}]))
+        with fake_env(DOGE_CODE_CONFIG="parent-fixture"):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["verification_status"], "passed")
 
     def test_post_checks_record_evidence(self):
         repo = self.make_repo()

@@ -8,6 +8,7 @@
       {
         "name": "guidance",
         "argv": ["python3", "scripts/check-agent-guidance.py"],
+        "protected_paths": ["scripts/check-agent-guidance.py"],
         "timeout_seconds": 120
       }
     ]
