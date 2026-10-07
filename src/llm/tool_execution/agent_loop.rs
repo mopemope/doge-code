@@ -2155,6 +2155,13 @@ pub async fn run_agent_loop(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let actually_changed = success && output_changed;
+            run_budget.observe_tool_result(
+                tool_name,
+                &tc.function.arguments,
+                success,
+                output_value,
+                modifies_files && actually_changed,
+            );
 
             let ui_args = if success
                 && ui_tx.is_some()

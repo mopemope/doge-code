@@ -481,6 +481,7 @@ def extract_exec_telemetry(parsed):
         "budget_provider_reported_tokens": None,
         "budget_estimated_tokens": None,
         "conversation_length": None,
+        "progress": None,
     }
     if not isinstance(parsed, dict):
         return telemetry
@@ -540,6 +541,18 @@ def extract_exec_telemetry(parsed):
         telemetry["budget_estimated_tokens"] = _as_optional_u64(
             budget.get("estimated_tokens")
         )
+        progress = budget.get("progress")
+        counters = ("read_tool_calls", "successful_read_tool_calls", "search_tool_calls",
+                    "repeated_read_ranges", "verification_tool_calls",
+                    "successful_verification_tool_calls")
+        firsts = ("first_mutation_tool_call", "first_verification_tool_call")
+        if (isinstance(progress, dict)
+                and all(_as_optional_u64(progress.get(key)) is not None for key in counters)
+                and all(key in progress and (progress[key] is None
+                        or (_as_optional_u64(progress[key]) is not None and progress[key] > 0))
+                        for key in firsts)):
+            # Preserve only content-free contract fields, never arbitrary provider data.
+            telemetry["progress"] = {key: progress[key] for key in counters + firsts}
         elapsed_ms = budget.get("elapsed_ms")
         if type(elapsed_ms) in (int, float) and elapsed_ms >= 0 and elapsed_ms == elapsed_ms:
             telemetry["agent_elapsed_seconds"] = float(elapsed_ms) / 1000.0
@@ -620,6 +633,7 @@ def base_measurement(case_id, trial, base_commit, model, settings, variant,
         "budget_provider_reported_tokens": None,
         "budget_estimated_tokens": None,
         "conversation_length": None,
+        "progress": None,
         # Human review is never fabricated by the runner: null means unknown,
         # not rejected.
         "accepted": None,
