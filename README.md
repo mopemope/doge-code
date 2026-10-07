@@ -1501,6 +1501,12 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
 - `execute_process` takes `program` + `args` separately and spawns the
   program directly (never `bash -c`). `args: ["hello; touch /tmp/x"]` is one
   literal argument — `touch` never runs.
+  `program` supplies the executable; `args` contains only the arguments after
+  it. For `python3 -m unittest`, use
+  `{"program":"python3","args":["-m","unittest"]}` (with `python3` allowed
+  by the execution policy). An argument equal to the program name is preserved
+  when intentionally passed as data, for example
+  `{"program":"echo","args":["echo","literal"]}` prints `echo literal`.
 - `mode = "allowlist"` matches executables exactly: `allowed_programs =
   ["cargo"]` allows `program = "cargo"` only — not `./cargo`, `/tmp/cargo`,
   or `cargo;rm`. Absolute paths must be listed explicitly to be allowed.
