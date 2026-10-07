@@ -44,7 +44,9 @@ fn cancel_specific(executor: &mut TuiExecutor, ui: &mut TuiApp, id: JobId) {
         CancelJobResult::Cancelled { id } => {
             // Cancellation is only a request. Foreground ownership remains
             // held through cleanup and checkpoint persistence.
-            ui.push_log(format!("[Cancelled {id}]"));
+            ui.push_log(format!(
+                "[Cancellation requested for {id}; waiting for cleanup]"
+            ));
         }
         CancelJobResult::AlreadyFinished { id } => {
             ui.push_log(format!("[{id} already finished]"));
@@ -104,6 +106,66 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn cancel_feedback_does_not_claim_completion_before_cleanup() {
+        let (mut executor, _dir) = test_executor();
+        let mut app = TuiApp::new_for_test("test", None, "dark");
+        let (release, cleanup) = tokio::sync::oneshot::channel();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let id = executor
+            .jobs
+            .spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::Write,
+                    "held cleanup",
+                ),
+                move |ctx| async move {
+                    started.send(()).unwrap();
+                    ctx.cancellation.cancelled().await;
+                    let _ = cleanup.await;
+                    JobRunOutcome::Cancelled
+                },
+            )
+            .unwrap();
+        running.await.unwrap();
+        handle_cancel(&mut executor, &mut app);
+        assert_eq!(
+            executor.jobs.get_snapshot(id).unwrap().status,
+            crate::jobs::JobStatus::Cancelling
+        );
+        assert_eq!(executor.jobs.foreground_id(), Some(id));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            screen.contains(&format!("Cancellation requested for {id}")),
+            "{screen}"
+        );
+        assert!(screen.contains("waiting for cleanup"), "{screen}");
+        assert!(!screen.contains(&format!("Cancelled {id}")), "{screen}");
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while executor.jobs.foreground_id().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            executor.jobs.get_snapshot(id).unwrap().status,
+            crate::jobs::JobStatus::Cancelled
+        );
+    }
+
     #[test]
     fn test_cancel_foreground_cancels_current_job() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -144,7 +206,7 @@ mod tests {
             executor.set_ui_tx(app.sender());
             let id = spawn_blocking(&executor);
             handle_cancel_with_args(&mut executor, &mut app, Some(&id.to_string()));
-            assert!(log_contains(&app, "Cancelled"));
+            assert!(log_contains(&app, "Cancellation requested"));
             // Second cancel reports already-finished once the job drains.
             for _ in 0..200 {
                 if let Some(snapshot) = executor.jobs.get_snapshot(id)
@@ -171,7 +233,7 @@ mod tests {
             executor.set_ui_tx(app.sender());
             let id = spawn_blocking(&executor);
             handle_cancel_with_args(&mut executor, &mut app, Some(&id.0.to_string()));
-            assert!(log_contains(&app, "Cancelled"));
+            assert!(log_contains(&app, "Cancellation requested"));
         });
     }
 
