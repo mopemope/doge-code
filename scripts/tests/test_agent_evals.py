@@ -268,6 +268,48 @@ class HarnessCase(unittest.TestCase):
 
 
 class ManifestTests(HarnessCase):
+    def test_manifest_rejects_nonfinite_execution_deadlines(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        for field in ("timeout_seconds", "termination_grace_seconds"):
+            for value in (float("inf"), float("-inf"), float("nan"), 10**400,
+                          0, -1, True, "10", None):
+                with self.subTest(field=field, value=value):
+                    path = self.write_manifest(fake, cases, **{field: value})
+                    with self.assertRaisesRegex(ValueError, field):
+                        common.load_manifest(path)
+
+    def test_manifest_preserves_positive_fractional_execution_deadlines(self):
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        path = self.write_manifest(
+            fake, cases, timeout_seconds=0.25, termination_grace_seconds=0.5,
+        )
+        manifest = common.load_manifest(path)
+        self.assertEqual(manifest["timeout_seconds"], 0.25)
+        self.assertEqual(manifest["termination_grace_seconds"], 0.5)
+
+    def test_overflowing_json_deadlines_fail_before_agent_probe(self):
+        from unittest.mock import patch
+
+        fake = self.make_fake()
+        cases = self.write_cases([self.base_case()])
+        output = self.root / "output"
+        for field in ("timeout_seconds", "termination_grace_seconds"):
+            with self.subTest(field=field):
+                path = self.write_manifest(fake, cases, **{field: 1.0})
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace(
+                        f'"{field}": 1.0', f'"{field}": 1e309',
+                    ), encoding="utf-8",
+                )
+                with patch.object(runner, "variant_metadata") as probe:
+                    self.assertEqual(runner.main([
+                        "--manifest", str(path), "--output", str(output),
+                    ]), 2)
+                    probe.assert_not_called()
+                self.assertFalse(output.exists())
+
     def test_manifest_rejects_duplicate_variants(self):
         fake = self.make_fake()
         cases = self.write_cases([self.base_case()])
@@ -414,6 +456,7 @@ class ManifestTests(HarnessCase):
             [dict(check, protected_paths=None)],
             [dict(check, protected_path=["typo.py"])],
             [dict(check, timeout_seconds=float("inf"))],
+            [dict(check, timeout_seconds=10**400)],
         ]:
             with self.subTest(checks=checks), self.assertRaises(ValueError):
                 common.load_cases(self.write_cases([self.base_case(post_checks=checks)]))

@@ -1623,7 +1623,7 @@ template = "Execute the following task: {args}"
 - **Agent Development Workflow**: [docs/ai/workflow.md](docs/ai/workflow.md) - Shared Skills and verification matrix
 - **Architecture Routing**: [docs/ai/architecture.md](docs/ai/architecture.md) - Module responsibilities and change entry points
 - **Development Contracts**: [docs/ai/contracts.md](docs/ai/contracts.md) - Mutation, execution, context, and provenance boundaries
-- **Agent Evaluation**: [docs/ai/evaluation.md](docs/ai/evaluation.md) - Representative tasks and measured comparisons; optional `api_budget` reserves a conservative cost ceiling before each supported pinned OpenAI Chat request and stops the matrix on uncertain usage or output limits.
+- **Agent Evaluation**: [docs/ai/evaluation.md](docs/ai/evaluation.md) - Representative tasks and measured comparisons; trial timeouts and termination grace must be finite positive seconds and are validated before launching agents. Optional `api_budget` reserves a conservative cost ceiling before each supported pinned OpenAI Chat request and stops the matrix on uncertain usage or output limits.
 - **Tool Output Contract**: `docs/tool-output-contract.md` - Tool response/truncation spec
 - **Emacs Integration**: `elisp/emacs-integration.md`
 - **API Documentation**: Generate with `cargo doc`
