@@ -6,6 +6,7 @@ pub fn handle_reset(ui: &mut TuiApp) {
     ui.status = Status::Ready;
     ui.pending_instructions.clear();
     ui.diff_review = None;
+    ui.diff_review_focus = crate::tui::state::DiffReviewFocus::Input;
     ui.diff_rejected_pending = false;
 
     // Reset other processing flags
