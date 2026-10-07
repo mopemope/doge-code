@@ -540,7 +540,9 @@ def map_run_status(telemetry, exit_code, timed_out, harness_error=None):
     status = telemetry.get("exec_status")
     if success is True and status == "completed":
         return "completed", telemetry.get("stop_reason")
-    if success is True and status == "partial":
+    # Both historical success:true/exit0 and corrected success:false/exit2
+    # describe a resumable partial run, rather than an API/runtime failure.
+    if status == "partial" and (success is True or success is False):
         return "partial", telemetry.get("stop_reason")
     if success is False:
         return "failed", telemetry.get("stop_reason")

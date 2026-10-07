@@ -784,6 +784,7 @@ async fn test_task_output_completed_and_partial_shape() {
         let runtime = ToolRuntime::build(&fs, Some(client), "test-model", None)
             .await
             .expect("runtime");
+        runtime.tool_catalog.activate(&["task".to_string()]).await;
         let mut call = make_call("task", "task");
         call.function.arguments =
             serde_json::json!({"description":"fixture", "prompt":"investigate"}).to_string();
@@ -1032,6 +1033,7 @@ async fn test_review_task_output_bounded_after_json_escaping() {
     let runtime = ToolRuntime::build(&fs, Some(client), "test-model", None)
         .await
         .expect("runtime");
+    runtime.tool_catalog.activate(&["task".to_string()]).await;
     let mut call = make_call("task", "task");
     call.function.arguments =
         serde_json::json!({"description":"fixture","prompt":"investigate"}).to_string();

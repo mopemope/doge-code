@@ -657,6 +657,17 @@ reasoning subtotals, and includes `task` subagent usage via the shared client.
 One in-flight request may finish before the next-operation stop applies, so
 this is not a hard billing limit. Cached tokens are never subtracted.
 
+`dgc exec --json` reports `success: true` only for `status: "completed"`.
+Budget-limited results retain `status: "partial"`, `stop_reason`, response,
+usage and the saved session, but report `success: false`. `exec` exit codes are
+0 for completion, 2 for partial execution, and 1 for errors or cancellation.
+A workflow stops at an incomplete step instead of executing subsequent steps.
+Partial rewrite output is reported as evidence rather than a completed code
+replacement. Partial desktop
+notifications say that execution stopped, not that it succeeded. Resume a saved
+session to continue work. Completion describes the agent loop outcome, not an
+independent guarantee that the requested change is correct or accepted.
+
 ## Directive-to-Evidence Traceability
 
 Doge-Code connects observed work as:
@@ -1163,9 +1174,16 @@ Verification failures are returned to LLM for automatic correction.
 
 ### Tool Search / Deferred Tools
 - Doge-Code can keep large tool catalogs out of the initial LLM context.
-  Core tools (`search_repomap`, `fs_read`, `search_text`, `task`,
+  Core tools (`search_repomap`, `fs_read`, `search_text`, `edit`,
   `execute_process`, `observation_read`) are loaded eagerly; other built-in
   and MCP tools are found and activated on demand via `tool_search`.
+  This exposes a read/edit/verify path without discovery for ordinary small
+  fixes. Delegated research (`task`) is discovered only when needed in deferred
+  mode; explicit `eager` mode still exposes all tools. The system prompt allows
+  localized fixes without a plan or requirements ledger, while preserving
+  complex-work planning and explicit user instructions. RepoMap and delegation
+  are optional task aids. This changes availability and guidance; improved
+  model completion rates or token savings have not been measured.
 - Activated tools appear in the next LLM request and stay active for the run.
 - Already-active matches never consume activation capacity: the search limit
   bounds inactive activation, and active matches are reported separately.

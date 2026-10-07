@@ -729,6 +729,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["task"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_task".to_string()),
@@ -762,6 +763,7 @@ mod tests {
         });
         let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
         let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["task"]).await;
 
         let tool_call = ToolCall {
             id: Some("call_task_bad".to_string()),
@@ -1212,14 +1214,14 @@ mod tests {
     async fn test_tool_search_activates_then_dispatch_succeeds() -> Result<()> {
         let (_dir, fs_tools) = deferred_test_fs();
         let runtime = deferred_test_runtime(&fs_tools);
-        assert!(!runtime.is_tool_active("edit").await);
+        assert!(!runtime.is_tool_active("fs_write").await);
 
         let search_call = ToolCall {
             id: Some("call_search".to_string()),
             r#type: "function".to_string(),
             function: ToolCallFunction {
                 name: "tool_search".to_string(),
-                arguments: json!({"query": "surgical text edit file block"}).to_string(),
+                arguments: json!({"query": "fs_write"}).to_string(),
             },
         };
         let search_out = dispatch_tool_call(&runtime, &search_call).await?;
@@ -1228,7 +1230,7 @@ mod tests {
         // Full schemas are never echoed in search results.
         let rendered = search_out.value.to_string();
         assert!(!rendered.contains("\"parameters\""));
-        assert!(runtime.is_tool_active("edit").await);
+        assert!(runtime.is_tool_active("fs_write").await);
 
         // Activation is sticky and dispatch now executes the tool.
         let target = fs_tools.config.project_root.join("activated.txt");
@@ -1237,11 +1239,10 @@ mod tests {
             id: Some("call_edit_after_search".to_string()),
             r#type: "function".to_string(),
             function: ToolCallFunction {
-                name: "edit".to_string(),
+                name: "fs_write".to_string(),
                 arguments: json!({
-                    "file_path": target.to_str().unwrap(),
-                    "target_block": "hello",
-                    "new_block": "goodbye",
+                    "path": target.to_str().unwrap(),
+                    "content": "goodbye\n",
                 })
                 .to_string(),
             },

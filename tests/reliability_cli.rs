@@ -244,6 +244,211 @@ impl Drop for CleanupChild {
 }
 
 #[test]
+fn partial_exec_is_nonzero_and_resumable() {
+    let project = Project::new(false);
+    std::fs::write(project.root.join("input.txt"), "fixture content").unwrap();
+    let config = std::fs::read_to_string(&project.config).unwrap();
+    std::fs::write(
+        &project.config,
+        format!("{config}\n[agent_budget]\nmax_iterations=1\n"),
+    )
+    .unwrap();
+    let read_path = project.root.join("input.txt");
+    let server = Server::new(move |n, _| {
+        if n == 1 {
+            response(
+                "reading",
+                vec![call("read-1", "fs_read", json!({"path":read_path}))],
+                "tool_calls",
+            )
+        } else {
+            response("saved partial evidence", vec![], "stop")
+        }
+    });
+    let output = project.command(&server).output().unwrap();
+    let report = output_json(&output);
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["stop_reason"], "iteration_budget");
+    assert_eq!(report["success"], false, "partial is not task completion");
+    assert_eq!(output.status.code(), Some(2));
+    let session = report["review_handoff"]["session_id"]
+        .as_str()
+        .expect("saved session");
+    std::fs::write(
+        &project.config,
+        format!("{config}\n[agent_budget]\nmax_iterations=3\n"),
+    )
+    .unwrap();
+    let mut resumed = project.command(&server);
+    resumed.arg(format!("--resume={session}"));
+    let resumed = resumed.output().unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(output_json(&resumed)["status"], "completed");
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("fixture content")
+    );
+}
+
+#[test]
+fn partial_workflow_does_not_execute_the_next_step() {
+    let project = Project::new(false);
+    let config = std::fs::read_to_string(&project.config).unwrap();
+    std::fs::write(
+        &project.config,
+        format!("{config}\n[agent_budget]\nmax_iterations=1\n"),
+    )
+    .unwrap();
+    let workflows = project.root.join(".doge/workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    std::fs::write(
+        workflows.join("fixture.md"),
+        "- first bounded step\n- forbidden second step\n",
+    )
+    .unwrap();
+    let server = Server::new(|n, _| {
+        if n == 1 {
+            response(
+                "research",
+                vec![call("read-loop", "fs_read", json!({"path":"missing.txt"}))],
+                "tool_calls",
+            )
+        } else {
+            response("partial evidence", vec![], "stop")
+        }
+    });
+    let run_workflow = |server: &Server| {
+        Command::new(env!("CARGO_BIN_EXE_dgc"))
+            .current_dir(&project.root)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("NO_PROXY", "*")
+            .env("DGC_DISABLE_NOTIFICATIONS", "1")
+            .env("DOGE_CODE_CONFIG", &project.config)
+            .args([
+                "--no-repomap",
+                "--provider",
+                "openai-compatible",
+                "--model",
+                "fixture",
+                "--api-key",
+                "fixture-only",
+                "--base-url",
+                &server.url,
+                "run",
+                "fixture",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = run_workflow(&server);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Step 1 completed"));
+    assert!(
+        !server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.to_string().contains("forbidden second step"))
+    );
+    let completed_server = Server::new(|_, _| response("done", vec![], "stop"));
+    let completed = run_workflow(&completed_server);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&completed.stdout);
+    assert!(stdout.contains("Step 1 completed") && stdout.contains("Step 2 completed"));
+    assert_eq!(completed_server.requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn auto_small_fix_reads_edits_and_verifies_without_discovery() {
+    let project = Project::new(true);
+    let config = std::fs::read_to_string(&project.config)
+        .unwrap()
+        .replace("mode='eager'", "mode='auto'");
+    std::fs::write(&project.config, config).unwrap();
+    let path = project.root.join("small.txt");
+    std::fs::write(&path, "old\n").unwrap();
+    let file = path.clone();
+    let server = Server::new(move |n, _| match n {
+        1 => response(
+            "read",
+            vec![call("read", "fs_read", json!({"path":file}))],
+            "tool_calls",
+        ),
+        2 => response(
+            "edit",
+            vec![call(
+                "edit",
+                "edit",
+                json!({"file_path":file,"target_block":"old","new_block":"new"}),
+            )],
+            "tool_calls",
+        ),
+        3 => response(
+            "verify",
+            vec![call(
+                "verify",
+                "execute_process",
+                json!({"program":"python3","args":["-c",format!("from pathlib import Path; assert Path({:?}).read_text() == 'new\\n'", file.to_str().unwrap())]}),
+            )],
+            "tool_calls",
+        ),
+        _ => response("done", vec![], "stop"),
+    });
+    let output = project.command(&server).output().unwrap();
+    let requests = server.requests.lock().unwrap();
+    let initial = requests[0]["tools"].as_array().expect("initial tools");
+    assert!(
+        initial
+            .iter()
+            .any(|tool| tool["function"]["name"] == "edit")
+    );
+    assert!(
+        !initial
+            .iter()
+            .any(|tool| tool["function"]["name"] == "task")
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = output_json(&output);
+    assert_eq!(report["status"], "completed");
+    assert_eq!(
+        report["tools_called"],
+        json!(["fs_read", "edit", "execute_process"])
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "new\n");
+    let verification = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["tool_call_id"] == "verify")
+        .expect("verification result");
+    let result: Value = serde_json::from_str(verification["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        result["exit_code"], 0,
+        "verification command must actually pass: {result}"
+    );
+}
+
+#[test]
 fn fixture_accepts_a_body_arriving_after_headers() {
     let server = Server::new(|_, _| response("done", vec![], "stop"));
     let address = server
