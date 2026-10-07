@@ -64,6 +64,25 @@ fn wire_exposed_additional(messages: &[ChatMessage]) -> std::collections::BTreeS
     exposed
 }
 
+/// Snapshot the initial wire namespace before the run starts.
+fn initial_wire_base(
+    initial: Vec<crate::llm::ToolDef>,
+    messages: &[ChatMessage],
+    native_responses: bool,
+) -> Vec<crate::llm::ToolDef> {
+    if !native_responses {
+        return initial;
+    }
+    // A resumed tool may have become eager since the session was saved.
+    // Its historical activation still owns the additional namespace; replay
+    // resolves the schema from the trusted active catalog, as before.
+    let additional = wire_exposed_additional(messages);
+    initial
+        .into_iter()
+        .filter(|tool| !additional.contains(&tool.function.name))
+        .collect()
+}
+
 /// Fail-closed sidecar validation against the trusted catalog.
 ///
 /// Unknown names (e.g. removed MCP tools or hand-edited session files) and,
@@ -525,7 +544,11 @@ pub async fn run_agent_loop(
         history.record_activated_tools(reactivated);
     }
     // Stable Responses wire base: initial active set, never changes mid-run.
-    let base_tools_stable: Vec<crate::llm::ToolDef> = runtime.initial_active_tool_defs();
+    let base_tools_stable: Vec<crate::llm::ToolDef> = initial_wire_base(
+        runtime.initial_active_tool_defs(),
+        history.as_slice(),
+        client.is_subscription(),
+    );
     let mut file_was_written = false;
     let mut loop_detector = crate::analysis::LoopDetector::new();
     let mut task_sentinel = crate::analysis::TaskSentinel::new();
@@ -3045,6 +3068,35 @@ mod append_only_agent_tests {
             crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
         // Leak dir to keep FsTools project_root alive? FsTools holds Arc<config> with owned PathBuf, no borrow, so dir can drop after? Config holds PathBuf owned, so safe.
         crate::llm::tool_execution::history::HistoryManager::new(client, vec![], None, fs, config)
+    }
+
+    #[test]
+    fn native_resume_preserves_promoted_edit_additional_namespace() {
+        let messages = vec![user_msg("resume"), activation_marker(vec!["edit"])];
+        let initial = vec![crate::tools::edit::tool_def()];
+        let native_base = initial_wire_base(initial.clone(), &messages, true);
+        let request = crate::features::openai_subscription::responses::build_with_activation(
+            "m",
+            "acc",
+            &messages,
+            &native_base,
+            &initial,
+            None,
+            None,
+        )
+        .expect("old deferred edit activation must remain resumable after eager promotion");
+        let json = serde_json::to_value(request).expect("request JSON");
+        assert!(
+            json["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .any(|item| item["type"] == "additional_tools")
+        );
+        assert!(native_base.is_empty());
+        let generic_base = initial_wire_base(initial, &messages, false);
+        assert_eq!(generic_base.len(), 1);
+        assert_eq!(generic_base[0].function.name, "edit");
     }
 
     #[test]

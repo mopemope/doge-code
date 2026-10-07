@@ -127,7 +127,7 @@ elif payload == "reasoning":
            "budget": dict(BUDGET), "response": "fake",
            "tokens_used": 120, "usage": usage,
            "tools_called": [], "conversation_length": 2}
-elif payload == "partial":
+elif payload in ("partial", "partial_incomplete"):
     doc = {"success": True, "status": "partial", "stop_reason": "token_budget",
            "budget": dict(BUDGET), "response": "fake partial",
            "tokens_used": 120, "usage": dict(USAGE_OK),
@@ -140,6 +140,8 @@ else:
            "budget": dict(BUDGET), "response": "fake",
            "tokens_used": 120, "usage": dict(USAGE_OK),
            "tools_called": ["fs_read"], "conversation_length": 4}
+if payload == "partial_incomplete":
+    doc["success"] = False
 json.dump(doc, sys.stdout)
 sys.stdout.write("\n")
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
@@ -545,13 +547,21 @@ if "exec" in args:
         self.assertIn("exact-model-id", agent_call[:exec_index])
         self.assertIn("--provider", agent_call[:exec_index])
 
+    def test_partial_status_supports_legacy_and_corrected_completion_flags(self):
+        for success, exit_code in [(True, 0), (False, 2)]:
+            with self.subTest(success=success):
+                self.assertEqual(common.map_run_status(
+                    {"exec_success": success, "exec_status": "partial", "stop_reason": "tool_call_budget"},
+                    exit_code, False), ("partial", "tool_call_budget"))
+
     def test_partial_run_is_preserved(self):
         repo = self.make_repo()
         fake = self.make_fake()
         manifest, cases = self.load_harness(
             self.write_manifest(fake, self.write_cases([self.base_case()])))
-        with fake_env(FAKE_PAYLOAD="partial"):
+        with fake_env(FAKE_PAYLOAD="partial_incomplete", FAKE_EXIT="2"):
             measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["exit_code"], 2)
         self.assertEqual(measurement["run_status"], "partial")
         self.assertEqual(measurement["stop_reason"], "token_budget")
         # The runner never invents review outcomes, even for partial runs.

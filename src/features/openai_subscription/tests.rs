@@ -2612,11 +2612,11 @@ fn append_only_native_tool_search_never_emitted() {
 
 #[test]
 fn append_only_resume_activation_only_session() {
-    // Session: tool_search activated edit, but edit not yet called.
+    // Session: tool_search activated apply_patch, but apply_patch not yet called.
     // Resume must: catalog active, input has additional, top-level stable.
     use crate::config::{ToolRoutingConfig, ToolRoutingMode};
     use crate::llm::{ToolCatalog, ToolCatalogEntry, ToolSource};
-    let defs = vec![fixture_tool_def("fs_read"), fixture_tool_def("edit")];
+    let defs = vec![fixture_tool_def("fs_read"), fixture_tool_def("apply_patch")];
     let entries: Vec<ToolCatalogEntry> = defs
         .into_iter()
         .map(|def| {
@@ -2640,22 +2640,22 @@ fn append_only_resume_activation_only_session() {
                 search_result_limit: 5,
             },
         );
-        // Simulate persisted sidecar with edit (activation-only).
+        // Simulate persisted sidecar with apply_patch (activation-only).
         let persisted: std::collections::BTreeSet<String> =
-            ["edit".into()].into_iter().collect();
+            ["apply_patch".into()].into_iter().collect();
         catalog.activate(&persisted.iter().cloned().collect::<Vec<_>>()).await;
-        assert!(catalog.is_active("edit").await);
+        assert!(catalog.is_active("apply_patch").await);
         let base = catalog.initial_active_tool_defs();
         let active = catalog.active_tool_defs().await;
-        // Top-level stable: base does not contain edit.
-        assert!(!base.iter().any(|d| d.function.name == "edit"));
-        assert!(active.iter().any(|d| d.function.name == "edit"));
+        // Top-level stable: base does not contain apply_patch.
+        assert!(!base.iter().any(|d| d.function.name == "apply_patch"));
+        assert!(active.iter().any(|d| d.function.name == "apply_patch"));
         // Build resume request with marker.
         let history = vec![
-            user("do edit"),
+            user("do apply_patch"),
             tool_search_call("c1"),
             tool_result("c1", "{}"),
-            activation_marker(vec!["edit"]),
+            activation_marker(vec!["apply_patch"]),
         ];
         let req = serde_json::to_value(
             responses::build_with_activation("m", "a", &history, &base, &active, None, None)
@@ -2668,7 +2668,7 @@ fn append_only_resume_activation_only_session() {
             .iter()
             .any(|i| i["type"] == "additional_tools"));
         // Edit callable as unnamespaced additional.
-        let call = response(vec![json!({"type":"function_call","id":"fc","call_id":"c2","name":"edit","arguments":"{}","status":"completed"})]);
+        let call = response(vec![json!({"type":"function_call","id":"fc","call_id":"c2","name":"apply_patch","arguments":"{}","status":"completed"})]);
         assert!(responses::completed_with_activation(&call, "a", "m", &base, &active).is_ok());
     });
 }
