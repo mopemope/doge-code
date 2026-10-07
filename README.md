@@ -1091,6 +1091,11 @@ silently moving user instructions or removing messages.
 
 ## 📋 Diff Review Panel
 
+Logs wrap to the visible log column, including the narrower split beside a
+diff review. Resizing rebuilds wrapped-row heights before rendering. Log
+scrolling and Ctrl+Home use displayed rows and stop at the oldest visible
+content; repeated scrolling cannot move the viewport into an empty region.
+
 After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):
 
 - **Scoped to agent changes**: the TUI diff covers captured text mutations from this turn, from the first pre-edit contents to the last committed contents; existing staged, unstaged and untracked user content is the baseline

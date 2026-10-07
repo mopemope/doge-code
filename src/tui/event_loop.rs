@@ -560,10 +560,7 @@ impl TuiApp {
 
                 match event {
                     Event::Resize(w, h) => {
-                        self.window_width = w as usize;
-                        self.main_content_height = h.saturating_sub(4) as usize; // Status(1) + Input(3) = 4
-                        self.log_heights.clear();
-                        self.dirty = true;
+                        self.handle_resize(w, h);
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {

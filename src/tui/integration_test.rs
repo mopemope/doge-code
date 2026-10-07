@@ -12,7 +12,11 @@ mod tests {
         // This test verifies that mouse events can be captured in the event loop
         // We'll create a minimal test that simulates the event loop behavior
 
-        let mut app = TuiApp::new("test".to_string(), None, "default")?;
+        let mut app = TuiApp::new_for_test("test", None, "default");
+        app.main_content_height = 3;
+        for line in 0..10 {
+            app.push_log(format!("line {line}"));
+        }
         app.input_mode = InputMode::Normal;
 
         // Test that the app can be created and basic functionality works

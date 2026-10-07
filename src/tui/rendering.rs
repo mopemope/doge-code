@@ -7,6 +7,14 @@ use ratatui::{
 };
 
 impl TuiApp {
+    fn diff_review_columns(area: Rect) -> [Rect; 2] {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+        [columns[0], columns[1]]
+    }
+
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
 
@@ -27,16 +35,24 @@ impl TuiApp {
         let main_content_height = chunks[1].height;
         self.main_content_height = main_content_height as usize;
 
-        if self.window_width != size.width as usize {
-            self.window_width = size.width as usize;
+        let log_width = if self.diff_review.is_some()
+            && self.input_mode == crate::tui::state::InputMode::Normal
+        {
+            Self::diff_review_columns(chunks[1])[0].width
+        } else {
+            chunks[1].width
+        };
+        if self.log_width != log_width as usize || self.log_heights.len() != self.log.len() {
+            self.log_width = log_width as usize;
             self.recalculate_all_heights();
         }
+        self.clamp_log_scroll();
 
         let params = crate::tui::state::BuildRenderPlanParams {
             title: &self.title,
             status: self.status,
             log: &self.log,
-            width: size.width,
+            width: log_width,
             main_content_height,
             model,
             spinner_state: self.spinner_state,
@@ -134,10 +150,7 @@ impl TuiApp {
         f.render_widget(Clear, area);
 
         if self.diff_review.is_some() && self.input_mode == crate::tui::state::InputMode::Normal {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(area);
+            let columns = Self::diff_review_columns(area);
 
             self.render_log_panel(f, columns[0], plan, theme);
             self.render_diff_review(f, columns[1], theme);
