@@ -355,10 +355,19 @@ def load_manifest(manifest_path):
                 {"name": name, "agent_command": list(command), "config": config_path}
             )
 
+    api_budget = None
+    if data.get("api_budget") is not None and not errors:
+        from agent_eval_api_budget import validate_budget
+        try:
+            api_budget = validate_budget(data["api_budget"], model, provider, variants)
+        except (ValueError, OSError) as error:
+            _fail(errors, str(error))
+
     if errors:
         raise ValueError("invalid manifest:\n- " + "\n- ".join(errors))
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "api_budget": api_budget,
         "manifest_path": str(path.resolve()),
         "manifest_dir": str(base_dir),
         "base_ref": base_ref.strip(),
@@ -575,13 +584,16 @@ def map_run_status(telemetry, exit_code, timed_out, harness_error=None):
 
 
 def build_settings(manifest, cases_digest):
-    return {
+    settings = {
         "provider": manifest["provider"],
         "environment_id": manifest["environment_id"],
         "timeout_seconds": manifest["timeout_seconds"],
         "cases_digest": cases_digest,
         "seed": manifest["seed"],
     }
+    if manifest.get("api_budget") is not None:
+        settings["api_budget"] = dict(manifest["api_budget"])
+    return settings
 
 
 def base_measurement(case_id, trial, base_commit, model, settings, variant,
