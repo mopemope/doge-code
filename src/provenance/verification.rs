@@ -104,17 +104,35 @@ fn classify_go(args: &[&str]) -> Option<VerificationKind> {
     }
 }
 
-fn classify_python(args: &[&str]) -> Option<VerificationKind> {
-    // `python -m pytest ...` -> Test; `python -m py_compile ...` -> SyntaxCheck.
-    // A script literally named `pytest.py` must not match.
-    if args.len() >= 2 && args[0] == "-m" {
-        match args[1] {
-            "pytest" => Some(VerificationKind::Test),
-            "py_compile" => Some(VerificationKind::SyntaxCheck),
-            _ => None,
+fn classify_python(mut args: &[&str]) -> Option<VerificationKind> {
+    // Consume only known interpreter options; never search past a script,
+    // -c, --, help/version or an unknown option for a misleading `-m` token.
+    loop {
+        match args.first().copied()? {
+            "-B" | "-E" | "-I" | "-O" | "-OO" | "-P" | "-q" | "-s" | "-S" | "-u" => {
+                args = &args[1..];
+            }
+            "-W" | "-X" => {
+                // The next token is a value, even when it looks like -m.
+                args.get(1)?;
+                args = &args[2..];
+            }
+            value if (value.starts_with("-W") || value.starts_with("-X")) && value.len() > 2 => {
+                args = &args[1..];
+            }
+            "-m" => break,
+            _ => return None,
         }
-    } else {
-        None
+    }
+    let module = *args.get(1)?;
+    // Help is an executed command, but it does not run a verification.
+    if args[2..].iter().any(|arg| matches!(*arg, "-h" | "--help")) {
+        return None;
+    }
+    match module {
+        "pytest" | "unittest" => Some(VerificationKind::Test),
+        "py_compile" => Some(VerificationKind::SyntaxCheck),
+        _ => None,
     }
 }
 
@@ -420,6 +438,65 @@ mod tests {
         assert_eq!(
             classify_verification("python", &args(&["-m", "py_compile", "a.py"])),
             Some(VerificationKind::SyntaxCheck)
+        );
+    }
+
+    #[test]
+    fn python_unittest_invocations_are_classified_without_guessing_scripts() {
+        for invocation in [
+            vec!["-m", "unittest"],
+            vec!["-m", "unittest", "checks.test_csv_numbers"],
+            vec![
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "checks",
+                "-p",
+                "test_*.py",
+            ],
+            vec!["-I", "-B", "-m", "unittest", "-v", "test_numbers"],
+            vec!["-u", "-W", "ignore", "-X", "dev", "-m", "unittest"],
+            vec!["-Wignore", "-Xdev", "-m", "unittest"],
+        ] {
+            assert_eq!(
+                classify_verification("/usr/bin/python3", &args(&invocation)),
+                Some(VerificationKind::Test),
+                "{invocation:?}"
+            );
+        }
+        for invocation in [
+            vec!["-m", "unittest", "--help"],
+            vec!["-m", "unittest", "discover", "-h"],
+            vec!["--version", "-m", "unittest"],
+            vec!["-c", "print('unittest')", "-m", "unittest"],
+            vec!["accept.py"],
+            vec!["test_numbers.py"],
+            vec!["-m", "unittest_wrapper"],
+            vec!["-W", "-m", "unittest"],
+            vec!["--", "-m", "unittest"],
+            vec!["-h"],
+            vec!["-V", "-m", "unittest"],
+            vec!["-W"],
+            vec!["-X"],
+            vec!["-m"],
+            vec!["--unknown", "-m", "unittest"],
+            vec!["-m", "pytest", "--help"],
+            vec!["-m", "py_compile", "-h"],
+        ] {
+            assert_eq!(
+                classify_verification("python3", &args(&invocation)),
+                None,
+                "{invocation:?}"
+            );
+        }
+        assert_eq!(
+            classify_verification("bash", &args(&["-c", "python3 -m unittest"])),
+            None
+        );
+        assert_eq!(
+            classify_verification("echo", &args(&["python3", "-m", "unittest"])),
+            None
         );
     }
 

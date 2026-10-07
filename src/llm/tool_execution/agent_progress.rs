@@ -183,6 +183,64 @@ mod tests {
     }
 
     #[test]
+    fn unittest_progress_counts_execution_and_exit_success_separately() {
+        let mut observer = ProgressObserver::default();
+        for (index, args, status, success) in [
+            (
+                1,
+                vec!["-m", "unittest", "test_numbers"],
+                "policy_denied",
+                false,
+            ),
+            (
+                2,
+                vec!["-m", "unittest", "test_numbers"],
+                "spawn_failed",
+                false,
+            ),
+            (
+                3,
+                vec!["-m", "unittest", "test_numbers"],
+                "completed",
+                false,
+            ),
+            (
+                4,
+                vec!["-I", "-m", "unittest", "discover"],
+                "completed",
+                true,
+            ),
+            (
+                5,
+                vec!["-m", "unittest", "test_numbers"],
+                "timed_out",
+                false,
+            ),
+            (6, vec!["-m", "unittest", "--help"], "completed", true),
+            (7, vec!["accept.py"], "completed", true),
+            (
+                8,
+                vec!["-c", "print('python3 -m unittest')"],
+                "completed",
+                true,
+            ),
+        ] {
+            observer.observe(
+                index,
+                "execute_process",
+                &json!({"program":"python3", "args":args}).to_string(),
+                success,
+                Some(&json!({"status":status})),
+                false,
+            );
+        }
+        assert_eq!(observer.usage.first_verification_tool_call, Some(3));
+        assert_eq!(observer.usage.verification_tool_calls, 3);
+        assert_eq!(observer.usage.successful_verification_tool_calls, 1);
+        assert_eq!(observer.usage.first_mutation_tool_call, None);
+    }
+
+    #[test]
     fn read_fingerprints_are_bounded_and_empty_eof_is_not_repeated() {
         let mut observer = ProgressObserver::default();
         for i in 0..=RECENT_READS {
