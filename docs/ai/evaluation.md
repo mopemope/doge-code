@@ -64,6 +64,37 @@ Running an external agent may consume paid API usage. Live evaluation is a
 manual local command; CI runs only unit tests, guidance checks, and Rust
 checks, never real model evals.
 
+## Retaining diagnostic state
+
+For a diagnostic run, use the existing workspace retention flag from the start:
+
+```bash
+python3 scripts/run-agent-evals.py --manifest /path/to/eval-run.json --output /tmp/dgc-eval-diagnostic --keep-workspaces
+```
+
+Completed, failed, timed-out, and interrupted trials record the retained
+workspace path in their `run.json` when the workspace exists. Without this
+flag the harness removes trial workspaces. Retention does not retry a trial
+or change its status or human acceptance score.
+
+Use `run.json.workspace` to locate source state and
+`.doge/sessions/<session-id>/session.json`. Persisted session conversation
+contains original tool arguments and tool results; compare it with
+`stdout.txt`, `stderr.txt`, `agent.patch`, and independent `checks/` outputs.
+Inspect the saved state before making any edits or rerunning commands, and
+keep diagnostic results separate from the original evaluation scores.
+
+The retained session is local content, not the redacted `evidence.json`
+export. Tool arguments/results may contain sensitive content; do not publish
+the workspace or raw session as PR/CI artifacts. This option adds no raw
+request logging and cannot recover messages that were never persisted.
+Interruption during agent execution may leave no `exec.json`, patch, or
+redacted evidence export; the retained workspace remains available for local
+inspection. Abrupt termination that prevents the harness from handling
+`KeyboardInterrupt` is outside this guarantee. After diagnosis, remove a
+retained workspace explicitly with `git worktree remove <workspace>`; retain
+needed evidence before removing modified files.
+
 ## Optional API request budget
 
 For controlled, text-only OpenAI Chat Completions evaluations, add `api_budget`
