@@ -26,6 +26,10 @@ execution:
    `python3 scripts/run-agent-evals.py --manifest <manifest> --output /tmp/dgc-eval --dry-run`.
    This resolves the base commit once, validates the manifest, cases, and
    variant commands, and prints the deterministic execution matrix.
+   Manifest `timeout_seconds` and `termination_grace_seconds` must be finite
+   positive numbers (fractional seconds are allowed). Invalid values,
+   including numeric overflow such as `1e309`, are rejected before agent
+   version probes or trials start.
 3. Run live trials explicitly (never from CI):
    `python3 scripts/run-agent-evals.py --manifest <manifest> --output /tmp/dgc-eval`.
    Every variant x case x trial runs serially in a fresh disposable git

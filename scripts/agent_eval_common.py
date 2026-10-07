@@ -59,6 +59,16 @@ RUN_STATUSES = (
 )
 
 
+def valid_execution_seconds(value):
+    """Accept positive numeric deadlines representable as finite floats."""
+    if type(value) not in (int, float) or not (value > 0):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def check_safe_name(value, kind):
     """Return an error string when *value* is not a path-safe artifact name."""
     if not isinstance(value, str) or not SAFE_NAME_RE.match(value):
@@ -214,11 +224,7 @@ def load_cases(cases_path):
                         "nonempty strings (no shell strings)",
                     )
                 timeout = check.get("timeout_seconds", 120)
-                if (
-                    type(timeout) not in (int, float)
-                    or not (timeout > 0)
-                    or not math.isfinite(timeout)
-                ):
+                if not valid_execution_seconds(timeout):
                     _fail(errors, f"{cwhere}: timeout_seconds must be finite and > 0")
         normalized = {
             "case_id": case_id,
@@ -285,11 +291,11 @@ def load_manifest(manifest_path):
     if not isinstance(environment_id, str) or not environment_id.strip():
         _fail(errors, "environment_id must be a nonempty string")
     timeout = data.get("timeout_seconds")
-    if type(timeout) not in (int, float) or not (timeout > 0) or timeout != timeout:
-        _fail(errors, f"timeout_seconds must be > 0, got {timeout!r}")
+    if not valid_execution_seconds(timeout):
+        _fail(errors, f"timeout_seconds must be finite and > 0, got {timeout!r}")
     grace = data.get("termination_grace_seconds", 10)
-    if type(grace) not in (int, float) or not (grace > 0) or grace != grace:
-        _fail(errors, f"termination_grace_seconds must be > 0, got {grace!r}")
+    if not valid_execution_seconds(grace):
+        _fail(errors, f"termination_grace_seconds must be finite and > 0, got {grace!r}")
     seed = data.get("seed", 0)
     if type(seed) is not int:
         _fail(errors, f"seed must be an integer, got {seed!r}")
