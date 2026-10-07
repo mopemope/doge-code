@@ -6,6 +6,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{CursorMove, Input, TextArea};
 use tracing::debug;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 
@@ -16,6 +17,33 @@ type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 fn is_immediate_control_command(line: &str) -> bool {
     let line = line.trim();
     line == "/jobs" || line.split_whitespace().next() == Some("/cancel")
+}
+
+fn queued_input_preview(input: &str) -> String {
+    let first = input
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let clean: String = first
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect();
+    let mut preview = String::new();
+    for (index, grapheme) in clean.graphemes(true).enumerate() {
+        if index >= 60 || preview.len().saturating_add(grapheme.len()) > 240 {
+            preview.push('…');
+            break;
+        }
+        preview.push_str(grapheme);
+    }
+    let extra_lines = input.split('\n').count().saturating_sub(1);
+    if extra_lines > 0 {
+        preview.push_str(&format!(" (+{extra_lines} lines)"));
+    }
+    preview
 }
 
 fn apply_selected_completion(app: &mut TuiApp) {
@@ -116,14 +144,15 @@ pub fn handle_normal_mode_key(
             if submit {
                 debug!("Submitting line: '{}'", app.textarea.lines().join("\n"));
                 let line = app.textarea.lines().join("\n");
-                if !line.trim().is_empty() {
-                    if app.input_history.last().map(|s| s.as_str()) != Some(line.as_str()) {
-                        app.input_history.push(line.clone());
-                        save_input_history(&app.input_history);
-                    }
-                    app.history_index = app.input_history.len();
-                    app.draft.clear();
+                if line.trim().is_empty() {
+                    return Ok(false);
                 }
+                if app.input_history.last().map(|s| s.as_str()) != Some(line.as_str()) {
+                    app.input_history.push(line.clone());
+                    save_input_history(&app.input_history);
+                }
+                app.history_index = app.input_history.len();
+                app.draft.clear();
 
                 let immediate_control = is_immediate_control_command(&line);
 
@@ -132,6 +161,21 @@ pub fn handle_normal_mode_key(
                     if immediate_control {
                         app.dispatch(&line);
                     } else {
+                        let waiting = app.foreground_busy()
+                            || !app.pending_instructions.is_empty()
+                            || (app.handler.is_none()
+                                && !matches!(
+                                    app.status,
+                                    crate::tui::state::Status::Ready
+                                        | crate::tui::state::Status::Error
+                                ));
+                        if waiting {
+                            app.push_log(format!(
+                                "[Queued: {} waiting] {}",
+                                app.pending_instructions.len().saturating_add(1),
+                                queued_input_preview(&line)
+                            ));
+                        }
                         app.pending_instructions.push_back(line);
                     }
                 }

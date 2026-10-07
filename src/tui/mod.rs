@@ -6,6 +6,7 @@ pub mod followup;
 
 pub mod event_handlers;
 pub mod event_loop;
+mod key_help;
 pub mod llm_response_handler;
 pub mod rendering;
 pub mod shell;
@@ -32,6 +33,9 @@ mod mouse_test;
 
 #[cfg(test)]
 mod integration_test;
+
+#[cfg(test)]
+mod test_queue_visibility;
 
 #[cfg(test)]
 mod test_completion;
