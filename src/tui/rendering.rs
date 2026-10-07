@@ -9,6 +9,13 @@ use ratatui::{
 impl TuiApp {
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
+        let input_height = self
+            .textarea
+            .lines()
+            .len()
+            .saturating_add(1)
+            .clamp(3, 8)
+            .min(size.height.saturating_sub(2) as usize) as u16;
 
         // Apply theme background to entire screen
         let background_block = Block::default().style(self.theme.background_style);
@@ -18,9 +25,9 @@ impl TuiApp {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Status Line
-                Constraint::Min(1),    // Main content
-                Constraint::Length(3), // Input area
+                Constraint::Length(1),            // Status Line
+                Constraint::Min(1),               // Main content
+                Constraint::Length(input_height), // Bounded multiline input area
             ])
             .split(size);
 

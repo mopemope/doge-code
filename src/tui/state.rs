@@ -378,7 +378,13 @@ impl TuiApp {
         if let Some(at_pos) = input.rfind('@') {
             let path_part = &input[at_pos + 1..];
             // debug!("Path part: {}", path_part);
-            let project_root = match std::env::current_dir() {
+            let project_root = match self
+                .cfg
+                .as_ref()
+                .map(|cfg| cfg.project_root.clone())
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)
+            {
                 Ok(path) => path,
                 Err(_e) => {
                     // debug!("Error getting current dir: {}", e);
