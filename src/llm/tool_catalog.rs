@@ -21,12 +21,12 @@ use crate::tools::remote_tools::RemoteToolInfo;
 use crate::tools::tool_search::{TOOL_SEARCH_DESC_CHARS, TOOL_SEARCH_TOOL_NAME};
 
 /// Tools always visible in deferred mode: navigation, reading, literal
-/// search, isolated research, and structured verification.
+/// search, surgical editing, and structured verification.
 pub const CORE_EAGER_TOOLS: &[&str] = &[
     "search_repomap",
     "fs_read",
     "search_text",
-    "task",
+    "edit",
     "execute_process",
     "observation_read",
 ];
@@ -761,6 +761,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auto_small_fix_has_read_edit_verify_without_delegation() {
+        let catalog = ToolCatalog::from_entries(core_entries(), &ToolRoutingConfig::default());
+        assert!(catalog.is_deferred());
+        let initial = catalog.initial_active_tool_defs();
+        for name in ["fs_read", "edit", "execute_process"] {
+            assert!(
+                initial.iter().any(|tool| tool.function.name == name),
+                "missing {name}"
+            );
+        }
+        assert!(
+            !catalog.is_active("task").await,
+            "research delegation is optional"
+        );
+        assert!(catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
+        assert_eq!(catalog.activate(&["task".to_string()]).await, ["task"]);
+        assert!(catalog.is_active("task").await);
+    }
+
+    #[tokio::test]
     async fn test_deferred_initial_active_set() {
         let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
         assert!(catalog.is_deferred());
@@ -770,7 +790,8 @@ mod tests {
                 "{core} should be eagerly active"
             );
         }
-        assert!(!catalog.is_active("edit").await);
+        assert!(catalog.is_active("edit").await);
+        assert!(!catalog.is_active("task").await);
         assert!(!catalog.is_active("apply_patch").await);
         assert!(!catalog.is_active("fs_write").await);
         assert!(catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
@@ -989,9 +1010,9 @@ mod tests {
     async fn test_duplicate_activation_is_noop() {
         let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
         let before = catalog.active_count().await;
-        let first = catalog.activate(&["edit".to_string()]).await;
-        assert_eq!(first, vec!["edit".to_string()]);
-        let second = catalog.activate(&["edit".to_string()]).await;
+        let first = catalog.activate(&["task".to_string()]).await;
+        assert_eq!(first, vec!["task".to_string()]);
+        let second = catalog.activate(&["task".to_string()]).await;
         assert!(second.is_empty());
         assert_eq!(catalog.active_count().await, before + 1);
         // Unknown tools are ignored.
@@ -1011,7 +1032,7 @@ mod tests {
     #[tokio::test]
     async fn test_history_activation() {
         let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
-        assert!(!catalog.is_active("edit").await);
+        assert!(!catalog.is_active("task").await);
         let messages = vec![ChatMessage {
             provider_state: None,
             role: "assistant".into(),
@@ -1020,15 +1041,15 @@ mod tests {
                 id: Some("1".into()),
                 r#type: "function".into(),
                 function: crate::llm::types::ToolCallFunction {
-                    name: "edit".into(),
+                    name: "task".into(),
                     arguments: "{}".into(),
                 },
             }],
             tool_call_id: None,
         }];
         let activated = catalog.activate_known_from_history(&messages).await;
-        assert_eq!(activated, vec!["edit".to_string()]);
-        assert!(catalog.is_active("edit").await);
+        assert_eq!(activated, vec!["task".to_string()]);
+        assert!(catalog.is_active("task").await);
     }
 
     #[tokio::test]
@@ -1137,7 +1158,7 @@ mod tests {
         assert!(catalog.is_active(TOOL_SEARCH_TOOL_NAME).await);
         catalog
             .activate(&[
-                "edit".to_string(),
+                "task".to_string(),
                 "apply_patch".to_string(),
                 "fs_write".to_string(),
             ])
@@ -1325,10 +1346,10 @@ mod tests {
         let initial = catalog.initial_active_tool_defs();
         let active_before = catalog.active_tool_defs().await;
         assert_eq!(initial.len(), active_before.len());
-        catalog.activate(&["edit".to_string()]).await;
+        catalog.activate(&["task".to_string()]).await;
         let active_after = catalog.active_tool_defs().await;
         assert!(active_after.len() > initial.len());
-        assert!(active_after.iter().any(|d| d.function.name == "edit"));
-        assert!(!initial.iter().any(|d| d.function.name == "edit"));
+        assert!(active_after.iter().any(|d| d.function.name == "task"));
+        assert!(!initial.iter().any(|d| d.function.name == "task"));
     }
 }

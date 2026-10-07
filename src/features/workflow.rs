@@ -141,7 +141,13 @@ impl WorkflowExecutor {
             // If the user wants specific "fix" behavior, they might need to specify it,
             // BUT our recent change to agent_loop.rs makes it self-healing by default on verification failure!
             // So standard `executor.run` is already robust!
-            executor.run(&instruction, false).await?;
+            executor
+                .run(&instruction, false)
+                .await?
+                .require_completed()
+                .with_context(|| {
+                    format!("Workflow '{}' stopped at step {}", workflow.name, step_num)
+                })?;
 
             println!("✅ Step {} completed.", step_num);
         }
