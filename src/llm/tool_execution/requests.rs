@@ -3,7 +3,7 @@ use crate::llm::LlmErrorKind;
 use crate::llm::chat_with_tools::{ChatResponseWithTools, ChoiceMessageWithTools};
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::message_utils::clean_json_text;
-use crate::llm::reasoning::resolve_reasoning_hint;
+use crate::llm::reasoning::resolve_hint_for_support;
 use crate::llm::retry::{
     self, RequestAttemptFailure, RetryDelayDecision, classify_transport, compute_retry_delay,
     extract_provider_code, is_context_length_exceeded_code, kind_for_status, max_attempts,
@@ -42,15 +42,17 @@ fn chat_tools_request<'a>(
     effort: Option<ReasoningEffort>,
     mode: ReasoningMode,
 ) -> ChatRequestWithToolsRef<'a> {
-    let luna_tools = !tools.is_empty()
-        && model == "gpt-6-luna"
-        && reqwest::Url::parse(base_url)
-            .ok()
-            .is_some_and(|url| url.host_str() == Some("api.openai.com"));
-    let reasoning_effort = if luna_tools {
+    let capabilities = crate::llm::capabilities::resolve(
+        crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+        base_url,
+        crate::llm::capabilities::ApiKind::ChatCompletions,
+        model,
+        !tools.is_empty(),
+    );
+    let reasoning_effort = if capabilities.chat_tools_require_reasoning_none {
         Some("none")
     } else {
-        resolve_reasoning_hint(base_url, model, &mode, effort).map(|e| e.as_api_str())
+        resolve_hint_for_support(capabilities.reasoning, &mode, effort).map(|e| e.as_api_str())
     };
     ChatRequestWithToolsRef {
         model,
@@ -105,12 +107,15 @@ pub async fn chat_tools_once_with_activation(
 ) -> Result<ChoiceMessageWithTools> {
     crate::llm::history::validate_tool_blocks(messages, false)?;
     if let Some(auth) = &client.subscription {
-        let effort = crate::llm::reasoning::resolve_reasoning_hint(
+        let capabilities = crate::llm::capabilities::resolve(
+            crate::features::openai_subscription::ProviderKind::Openai,
             &client.base_url,
+            crate::llm::capabilities::ApiKind::Responses,
             model,
-            &reasoning_mode,
-            reasoning_effort,
+            !active_tools.is_empty(),
         );
+        let effort =
+            resolve_hint_for_support(capabilities.reasoning, &reasoning_mode, reasoning_effort);
         let message = crate::features::openai_subscription::responses::infer_with_activation(
             client,
             auth,
@@ -914,6 +919,32 @@ mod tests {
             five, fifty,
             "initial active schema must not grow with remote tool count"
         );
+    }
+
+    #[test]
+    fn capability_chat_serialization_preserves_explicit_overrides() {
+        let tools = default_tools_def();
+        for (url, model) in [
+            ("https://api.openai.com.example/v1", "gpt-5-mini"),
+            ("https://api.openai.com/v1", "acme/gpt-5-mini"),
+            ("https://api.openai.com/v1", "gpt-5-future-private"),
+        ] {
+            for (mode, expected) in [
+                (ReasoningMode::Auto, None),
+                (ReasoningMode::Off, None),
+                (ReasoningMode::Fixed, Some("high")),
+            ] {
+                let req =
+                    chat_tools_request(url, model, &[], &tools, Some(ReasoningEffort::High), mode);
+                let body = serde_json::to_value(req).expect("request");
+                assert_eq!(
+                    body.get("reasoning_effort").and_then(|v| v.as_str()),
+                    expected,
+                    "{url} {model} {mode:?}"
+                );
+                assert!(!body["tools"].as_array().expect("tools").is_empty());
+            }
+        }
     }
 
     #[test]
