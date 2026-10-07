@@ -1231,15 +1231,15 @@ mode = "auto"  # auto / observe / off
 - `auto` reduces automatically, `observe` logs the estimate but keeps legacy
   behavior, `off` disables the governor.
 
-API-compatible context sizing uses the documented capacity for the exact
-`gpt-4.1-mini` alias and `gpt-4.1-mini-2025-04-14` snapshot, including their
-`openai/` IDs. Their verified context window is 1,047,576 tokens
+Context sizing on the official OpenAI endpoint uses the documented capacity for
+exact `gpt-4.1-mini` and `gpt-4.1-mini-2025-04-14` IDs, including their existing
+`openai/` aliases. On OpenRouter, only the canonical `openai/` IDs inherit it. Their verified context window is 1,047,576 tokens
 ([OpenAI model specification](https://developers.openai.com/api/docs/models/gpt-4.1-mini));
 the configured compaction threshold still caps automatic compaction. This is a
 local documented default, not a live provider capability check. Unknown names,
 future snapshots, and subscription model catalogs do not inherit this capacity.
-Set `[llm] context_window_size` for a custom endpoint with different limits; an
-explicit value takes precedence over model defaults.
+Custom endpoints require `[llm] context_window_size` for a confirmed capacity;
+an explicit value takes precedence over model defaults.
 
 ### Conversation History Compaction
 - Automatic compaction when token threshold is exceeded
@@ -1362,6 +1362,28 @@ function calling requires `reasoning_effort = "none"`. dgc explicitly sends
 that value whenever tools are included, including in `[reasoning] mode = "off"`.
 Other models, providers, and the Responses backend retain their reasoning policy.
 See the [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+Capability hints use the selected provider/API route, the parsed endpoint host,
+and exact model IDs. A model name on a custom endpoint or an unknown vendor
+prefix does not inherit official capacity or automatic reasoning support.
+`[llm] context_window_size` remains authoritative, and `[reasoning] mode = "fixed"`
+remains an explicit override for custom or unlisted models; `off` still omits the
+hint except for the Luna Chat Completions tool requirement above. OpenRouter
+retains its existing reasoning-parameter forwarding policy. Unlisted model
+capacities stay unknown, including ChatGPT subscription slugs; the existing
+128,000-token fallback is a local compaction setting, not confirmed model metadata.
+Main and delegated tool requests use the same request resolver; workers retain
+the selected model and its threshold override. Plain requests and local
+compaction retain their existing policy of using the same client/model without
+a reasoning hint or tools. No new provider catalog is fetched or inferred.
+
+Previously, family substrings and arbitrary vendor prefixes could imply capacity
+or automatic reasoning support. Unlisted IDs now stay unknown: Auto omits an
+unconfirmed reasoning hint, while Fixed remains available. OpenRouter's bare
+`gpt-4.1-mini` alias also no longer implies a capacity. The existing fallback can
+raise the effective compaction threshold from an old substring-based value;
+configure `context_window_size` or a model-specific threshold when the endpoint's
+actual limit is smaller.
 
 ### MCP Servers (Local vs Remote)
 

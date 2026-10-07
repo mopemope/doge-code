@@ -126,50 +126,14 @@ impl AppConfig {
             return Some(size);
         }
 
-        // Documented API capacity, verified 2026-10-06 against:
-        // https://developers.openai.com/api/docs/models/gpt-4.1-mini
-        // https://openrouter.ai/api/v1/models (id/canonical_slug/context_length).
-        // Match only these complete, verified IDs; a family substring, arbitrary
-        // vendor prefix, or future snapshot must not inherit a 1M-token window.
-        // Subscription catalogs have no capacity metadata and are not API IDs.
-        // Custom endpoints with smaller limits must use the explicit override.
-        if self.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
-            && matches!(
-                self.model.as_str(),
-                "gpt-4.1-mini"
-                    | "gpt-4.1-mini-2025-04-14"
-                    | "openai/gpt-4.1-mini"
-                    | "openai/gpt-4.1-mini-2025-04-14"
-            )
-        {
-            return Some(1_047_576);
-        }
-
-        let model_lower = self.model.to_lowercase();
-        if model_lower.contains("gpt-4o") {
-            Some(128_000)
-        } else if model_lower.contains("gpt-4") {
-            Some(8_192)
-        } else if model_lower.contains("gpt-3.5") {
-            Some(16_385)
-        } else if model_lower.contains("claude-3-5-sonnet")
-            || model_lower.contains("claude-3-opus")
-            || model_lower.contains("claude-3-haiku")
-        {
-            Some(200_000)
-        } else if model_lower.contains("claude-2") {
-            Some(100_000)
-        } else if model_lower.contains("kwaipilot/kat-coder-pro") {
-            Some(128_000)
-        } else if model_lower.contains("qwen/qwen3-coder") {
-            Some(32_768)
-        } else if model_lower.contains("deepseek/deepseek-chat-v3.1") {
-            Some(64_000)
-        } else if model_lower.contains("llama-3") || model_lower.contains("gemma") {
-            Some(8_192)
-        } else {
-            None
-        }
+        use crate::llm::capabilities::{ApiKind, resolve};
+        let api = match self.provider {
+            crate::features::openai_subscription::ProviderKind::OpenaiCompatible => {
+                ApiKind::ChatCompletions
+            }
+            crate::features::openai_subscription::ProviderKind::Openai => ApiKind::Responses,
+        };
+        resolve(self.provider, &self.base_url, api, &self.model, false).context_window
     }
 
     pub fn auto_compact_prompt_token_threshold_for_current_model(&self) -> u32 {

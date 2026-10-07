@@ -1,3 +1,4 @@
+pub(crate) mod capabilities;
 mod chat_with_tools;
 pub mod client_core;
 mod compact_history;
