@@ -765,6 +765,8 @@ def run_single(toplevel, manifest, variant_by_name, variant_metas, case_by_id,
         measurement["harness_error"] = harness_error
         measurement["exit_code"] = exit_code
         measurement["timed_out"] = timed_out
+        if keep_workspaces and workspace is not None and workspace.is_dir():
+            measurement["workspace"] = str(workspace)
         try:
             (run_dir / "run.json").write_text(
                 json.dumps(measurement, indent=2, allow_nan=False), encoding="utf-8"
