@@ -34,6 +34,9 @@ mod mouse_test;
 mod integration_test;
 
 #[cfg(test)]
+mod test_queue_visibility;
+
+#[cfg(test)]
 mod test_completion;
 
 mod job_messages;
