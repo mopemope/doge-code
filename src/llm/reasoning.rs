@@ -205,28 +205,18 @@ fn is_routine_tool(name: &str) -> bool {
     )
 }
 
-/// Provider capability for `reasoning_effort`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReasoningProviderSupport {
-    Supported,
-    Unsupported,
-    Unknown,
-}
+pub use crate::llm::capabilities::ReasoningSupport as ReasoningProviderSupport;
 
-/// Pure helper: does this endpoint + model support `reasoning_effort`?
+/// Compatibility helper for the Chat Completions route.
 pub fn provider_support(base_url: &str, model: &str) -> ReasoningProviderSupport {
-    let url = base_url.to_ascii_lowercase();
-    if url.contains("openrouter.ai") {
-        return ReasoningProviderSupport::Supported;
-    }
-    if url.contains("api.openai.com") {
-        return if is_openai_reasoning_model(model) {
-            ReasoningProviderSupport::Supported
-        } else {
-            ReasoningProviderSupport::Unsupported
-        };
-    }
-    ReasoningProviderSupport::Unknown
+    crate::llm::capabilities::resolve(
+        crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+        base_url,
+        crate::llm::capabilities::ApiKind::ChatCompletions,
+        model,
+        false,
+    )
+    .reasoning
 }
 
 /// Resolve the final hint to serialize.
@@ -241,33 +231,25 @@ pub fn resolve_reasoning_hint(
     mode: &ReasoningMode,
     effort: Option<ReasoningEffort>,
 ) -> Option<ReasoningEffort> {
+    resolve_hint_for_support(provider_support(base_url, model), mode, effort)
+}
+
+pub(crate) fn resolve_hint_for_support(
+    support: ReasoningProviderSupport,
+    mode: &ReasoningMode,
+    effort: Option<ReasoningEffort>,
+) -> Option<ReasoningEffort> {
     match mode {
         ReasoningMode::Off => None,
         ReasoningMode::Fixed => effort,
         ReasoningMode::Auto => {
             let effort = effort?;
-            match provider_support(base_url, model) {
+            match support {
                 ReasoningProviderSupport::Supported => Some(effort),
                 ReasoningProviderSupport::Unsupported | ReasoningProviderSupport::Unknown => None,
             }
         }
     }
-}
-
-/// OpenAI reasoning families (prefix match, provider-prefix tolerant):
-/// `gpt-5*`, `gpt-6*`, `o1*`, `o3*`, `o4*`.
-/// `gpt-4o` / `gpt-4o-mini` and other non-reasoning models return false.
-fn is_openai_reasoning_model(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    // Tolerate provider prefixes like `openai/gpt-5-mini`.
-    let id = lower.rsplit('/').next().unwrap_or(lower.as_str());
-    // Strip common version suffixes is unnecessary: prefix match suffices,
-    // but guard `gpt-4o` explicitly by requiring the prefix before any `-`.
-    id.starts_with("gpt-5")
-        || id.starts_with("gpt-6")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
 }
 
 #[cfg(test)]
@@ -446,6 +428,37 @@ mod tests {
         };
         let c = ReasoningController::new(off_cfg);
         assert_eq!(c.current_effort(), None);
+    }
+
+    #[test]
+    fn capability_endpoint_identity_is_not_url_substring() {
+        for url in [
+            "https://api.openai.com.example/v1",
+            "https://example.invalid/api.openai.com/v1",
+            "https://example.invalid/?next=https://openrouter.ai",
+            "not-a-url-api.openai.com",
+        ] {
+            assert_eq!(
+                provider_support(url, "gpt-5-mini"),
+                ReasoningProviderSupport::Unknown,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_unknown_models_do_not_inherit_reasoning() {
+        for model in [
+            "acme/gpt-5-mini",
+            "gpt-5-future-private",
+            "o3-custom-private",
+        ] {
+            assert_eq!(
+                provider_support("https://api.openai.com/v1", model),
+                ReasoningProviderSupport::Unknown,
+                "{model}"
+            );
+        }
     }
 
     #[test]
