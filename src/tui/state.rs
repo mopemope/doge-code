@@ -66,6 +66,13 @@ pub enum InputMode {
 }
 
 #[derive(PartialEq, Default, Clone, Copy, Debug)]
+pub enum DiffReviewFocus {
+    #[default]
+    Input,
+    Review,
+}
+
+#[derive(PartialEq, Default, Clone, Copy, Debug)]
 pub enum ViewMode {
     #[default]
     Log,
@@ -288,6 +295,7 @@ pub struct TuiApp {
     pub last_heartbeat: Option<std::time::Instant>,
     // Diff review panel state (populated from `::diff_review:` agent messages)
     pub diff_review: Option<DiffReviewState>,
+    pub diff_review_focus: DiffReviewFocus,
     /// Height of the diff preview viewport, updated during rendering.
     /// Cell because rendering only has `&self`.
     pub diff_viewport_height: std::cell::Cell<usize>,
@@ -522,6 +530,7 @@ impl TuiApp {
             task_queue: VecDeque::new(),
             last_heartbeat: None,
             diff_review: None,
+            diff_review_focus: DiffReviewFocus::Input,
             diff_viewport_height: std::cell::Cell::new(0),
             diff_rejected_pending: false,
         }
