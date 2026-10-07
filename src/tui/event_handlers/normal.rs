@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
+#[cfg(test)]
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{CursorMove, Input, TextArea};
@@ -8,6 +9,7 @@ use tracing::debug;
 
 use crate::tui::state::{CompletionType, TuiApp, save_input_history};
 
+#[cfg(test)]
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// Only control commands bypass the ordinary instruction queue.
@@ -16,11 +18,64 @@ fn is_immediate_control_command(line: &str) -> bool {
     line == "/jobs" || line.split_whitespace().next() == Some("/cancel")
 }
 
+fn apply_selected_completion(app: &mut TuiApp) {
+    let Some(completed) = app.completion_candidates.get(app.completion_index).cloned() else {
+        return;
+    };
+    let cursor = app.textarea.cursor();
+    let (row, col) = (cursor.0, cursor.1);
+    let current = app.textarea.lines()[row].clone();
+    let cursor_byte = current
+        .char_indices()
+        .nth(col)
+        .map_or(current.len(), |(byte, _)| byte);
+    let range = match app.completion_type {
+        CompletionType::FilePath => {
+            let Some(at) = current[..cursor_byte].rfind('@') else {
+                return;
+            };
+            if current[at + 1..cursor_byte].contains(char::is_whitespace) {
+                return;
+            }
+            let end = current[cursor_byte..]
+                .find(char::is_whitespace)
+                .map_or(current.len(), |offset| cursor_byte + offset);
+            at + 1..end
+        }
+        CompletionType::Command => {
+            if !current.starts_with('/') {
+                return;
+            }
+            0..current.find(char::is_whitespace).unwrap_or(current.len())
+        }
+        CompletionType::None => return,
+    };
+    let mut replacement = current.clone();
+    replacement.replace_range(range.clone(), &completed);
+    let cursor_chars = replacement[..range.start + completed.len()].chars().count();
+    // Delete only this line's contents. Deleting again at its empty end would
+    // remove the following newline and join a different draft line.
+    app.textarea.cancel_selection();
+    app.textarea.move_cursor(CursorMove::End);
+    if !current.is_empty() {
+        app.textarea.delete_line_by_head();
+    }
+    app.textarea.insert_str(&replacement);
+    // Jump uses u16 coordinates; unusually large drafts still retain their
+    // contents and keep the cursor at the edited line's end.
+    if let (Ok(row), Ok(col)) = (u16::try_from(row), u16::try_from(cursor_chars)) {
+        app.textarea.move_cursor(CursorMove::Jump(row, col));
+    }
+    if app.completion_type == CompletionType::Command && range.end == current.len() {
+        app.textarea.insert_str(" ");
+    }
+}
+
 /// Handle keys when in Normal input mode. Returns Ok(true) if the caller should exit the event loop.
 pub fn handle_normal_mode_key(
     app: &mut TuiApp,
     k: KeyEvent,
-    _terminal: &mut TerminalType,
+    _terminal: &mut Terminal<impl ratatui::backend::Backend>,
 ) -> Result<bool> {
     match k {
         KeyEvent {
@@ -29,6 +84,7 @@ pub fn handle_normal_mode_key(
             ..
         } if m.contains(KeyModifiers::ALT) => {
             app.textarea.insert_newline();
+            app.completion_active = false;
             app.dirty = true;
         }
 
@@ -42,38 +98,14 @@ pub fn handle_normal_mode_key(
             );
             let mut submit = false;
             if app.completion_active && !app.completion_candidates.is_empty() {
-                let current_input = app.textarea.lines()[0].trim();
+                let current_input = app.textarea.lines()[app.textarea.cursor().0].trim();
                 // If the user has typed a command that is in the completion list, submit it directly.
                 if app.completion_type == CompletionType::Command
                     && app.completion_candidates.iter().any(|c| c == current_input)
                 {
                     submit = true;
                 } else {
-                    // Otherwise, apply the currently selected completion.
-                    let completed_item = app.completion_candidates[app.completion_index].clone();
-                    let current_line = app.textarea.lines()[0].clone();
-
-                    let new_input = if app.completion_type == CompletionType::Command {
-                        let mut parts: Vec<&str> = current_line.split_whitespace().collect();
-                        if !parts.is_empty() {
-                            parts[0] = &completed_item;
-                        }
-                        parts.join(" ") + " "
-                    } else if app.completion_type == CompletionType::FilePath {
-                        if let Some(at_pos) = current_line.rfind('@') {
-                            let before_at = &current_line[..=at_pos];
-                            format!("{}{}", before_at, completed_item)
-                        } else {
-                            current_line
-                        }
-                    } else {
-                        current_line
-                    };
-
-                    app.textarea.delete_line_by_head();
-                    app.textarea.delete_line_by_end();
-                    app.textarea.insert_str(&new_input);
-                    app.textarea.move_cursor(CursorMove::End);
+                    apply_selected_completion(app);
                 }
                 app.completion_active = false;
                 app.dirty = true;
@@ -134,6 +166,7 @@ pub fn handle_normal_mode_key(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             app.enter_history_search();
+            app.completion_active = false;
             app.dirty = true;
         }
 
@@ -143,6 +176,7 @@ pub fn handle_normal_mode_key(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             app.enter_file_search();
+            app.completion_active = false;
             app.dirty = true;
         }
 
@@ -189,6 +223,8 @@ pub fn handle_normal_mode_key(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             // Handle Ctrl+V to paste clipboard content
+            app.completion_active = false;
+            app.dirty = true;
             match arboard::Clipboard::new() {
                 Ok(mut clipboard) => match clipboard.get_text() {
                     Ok(contents) => {
@@ -259,6 +295,9 @@ pub fn handle_normal_mode_key(
                 }
 
                 app.dirty = true;
+            } else if app.textarea.lines().len() > 1 {
+                app.textarea.move_cursor(CursorMove::Up);
+                app.dirty = true;
             } else if !app.input_history.is_empty() && app.history_index > 0 {
                 if app.history_index == app.input_history.len() {
                     app.draft = app.textarea.lines().join("\n");
@@ -288,6 +327,9 @@ pub fn handle_normal_mode_key(
                 }
 
                 app.dirty = true;
+            } else if app.textarea.lines().len() > 1 {
+                app.textarea.move_cursor(CursorMove::Down);
+                app.dirty = true;
             } else if !app.input_history.is_empty() && app.history_index < app.input_history.len() {
                 app.history_index += 1;
                 if app.history_index == app.input_history.len() {
@@ -306,32 +348,7 @@ pub fn handle_normal_mode_key(
             code: KeyCode::Tab, ..
         } => {
             if app.completion_active && !app.completion_candidates.is_empty() {
-                let completed_item = app.completion_candidates[app.completion_index].clone();
-                let current_input = app.textarea.lines()[0].clone();
-
-                let new_input = if app.completion_type == CompletionType::Command {
-                    // Command completion
-                    let mut parts: Vec<&str> = current_input.split_whitespace().collect();
-                    if !parts.is_empty() {
-                        parts[0] = &completed_item;
-                    }
-                    parts.join(" ") + " "
-                } else if app.completion_type == CompletionType::FilePath {
-                    // File path completion
-                    if let Some(at_pos) = current_input.rfind('@') {
-                        let before_at = &current_input[..=at_pos];
-                        format!("{}{}", before_at, completed_item)
-                    } else {
-                        current_input // Should not happen
-                    }
-                } else {
-                    current_input
-                };
-
-                app.textarea.delete_line_by_head();
-                app.textarea.delete_line_by_end();
-                app.textarea.insert_str(&new_input);
-                app.textarea.move_cursor(CursorMove::End);
+                apply_selected_completion(app);
                 app.completion_active = false;
                 app.dirty = true;
             }
@@ -348,6 +365,7 @@ pub fn handle_normal_mode_key(
             ..
         } => {
             app.textarea.move_cursor(CursorMove::Back);
+            app.completion_active = false;
             app.dirty = true;
         }
 
@@ -356,6 +374,7 @@ pub fn handle_normal_mode_key(
             ..
         } => {
             app.textarea.move_cursor(CursorMove::Forward);
+            app.completion_active = false;
             app.dirty = true;
         }
 
@@ -377,7 +396,13 @@ pub fn handle_normal_mode_key(
                     let handled_by_textarea = app.textarea.input(Input::from(other));
                     if handled_by_textarea {
                         app.dirty = true;
-                        let input_str = app.textarea.lines()[0].clone();
+                        let row = app.textarea.cursor().0;
+                        let current_line = &app.textarea.lines()[row];
+                        let cursor_byte = current_line
+                            .char_indices()
+                            .nth(app.textarea.cursor().1)
+                            .map_or(current_line.len(), |(byte, _)| byte);
+                        let input_str = current_line[..cursor_byte].to_string();
                         if input_str.starts_with('/') {
                             app.update_completion_candidates(&input_str);
                         } else if input_str.contains('@') {
@@ -400,6 +425,174 @@ pub fn handle_normal_mode_key(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn multiline_cursor_move_does_not_apply_stale_completion_to_other_row() {
+        let mut app = TuiApp::new_for_test("multiline", None, "default");
+        app.textarea = TextArea::from(vec!["@alpha".to_string(), "@beta".to_string()]);
+        app.textarea.move_cursor(CursorMove::End);
+        app.completion_active = true;
+        app.completion_type = crate::tui::state::CompletionType::FilePath;
+        app.completion_candidates = vec!["alpha".to_string()];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        for _ in 0..3 {
+            handle_normal_mode_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+        }
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines(), ["@alpha", "@beta"]);
+    }
+
+    #[test]
+    fn multiline_vertical_navigation_keeps_draft() {
+        let mut app = TuiApp::new_for_test("multiline", None, "default");
+        app.textarea = TextArea::from(vec!["first".to_string(), "second".to_string()]);
+        app.textarea.move_cursor(CursorMove::Bottom);
+        app.input_history = vec!["old history".to_string()];
+        app.history_index = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.lines(), ["first", "second"]);
+        assert_eq!(app.textarea.cursor().0, 0);
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.textarea.cursor().0, 1);
+        assert_eq!(app.history_index, 1);
+    }
+
+    #[test]
+    fn multiline_command_completion_preserves_spacing_and_other_rows() {
+        let mut app = TuiApp::new_for_test("multiline", None, "default");
+        app.textarea = TextArea::from(vec![
+            "keep first".to_string(),
+            "/he  arguments".to_string(),
+            "keep last".to_string(),
+        ]);
+        app.textarea.move_cursor(CursorMove::Jump(1, 3));
+        app.completion_active = true;
+        app.completion_type = crate::tui::state::CompletionType::Command;
+        app.completion_candidates = vec!["/help".to_string()];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(
+            app.textarea.lines(),
+            ["keep first", "/help  arguments", "keep last"]
+        );
+    }
+
+    #[test]
+    fn multiline_completion_preserves_other_lines_and_suffix() {
+        for code in [KeyCode::Tab, KeyCode::Enter] {
+            let mut app = TuiApp::new_for_test("multiline", None, "default");
+            app.textarea = TextArea::from(vec![
+                "keep first".to_string(),
+                "日本語 @pa keep suffix".to_string(),
+                "keep last".to_string(),
+            ]);
+            app.textarea.move_cursor(CursorMove::Jump(1, 7));
+            app.completion_active = true;
+            app.completion_type = crate::tui::state::CompletionType::FilePath;
+            app.completion_candidates = vec!["path.rs".to_string()];
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            handle_normal_mode_key(
+                &mut app,
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+            assert_eq!(
+                app.textarea.lines(),
+                ["keep first", "日本語 @path.rs keep suffix", "keep last"]
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_typing_updates_completion_from_current_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "").unwrap();
+        let mut app = TuiApp::new_for_test("multiline", None, "default");
+        app.cfg = Some(crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        app.textarea = TextArea::from(vec!["keep first".to_string(), "review @".to_string()]);
+        app.textarea.move_cursor(CursorMove::Bottom);
+        app.textarea.move_cursor(CursorMove::End);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        handle_normal_mode_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(app.completion_active);
+        assert!(app.completion_candidates.contains(&"alpha.rs".to_string()));
+    }
+
+    #[test]
+    fn multiline_input_view_grows_to_show_draft_rows() {
+        let mut app = TuiApp::new_for_test("multiline", None, "default");
+        app.textarea = TextArea::from((0..6).map(|n| format!("INPUT{n}")).collect::<Vec<_>>());
+        app.textarea.move_cursor(CursorMove::Bottom);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        for n in 0..6 {
+            assert!(screen.contains(&format!("INPUT{n}")));
+        }
+        app.textarea = TextArea::from((0..30).map(|n| format!("INPUT{n}")).collect::<Vec<_>>());
+        app.textarea.move_cursor(CursorMove::Bottom);
+        terminal.draw(|f| app.view(f, None)).unwrap();
+        assert_eq!(app.main_content_height, 21);
+        assert_eq!(app.textarea.lines().len(), 30);
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("INPUT29"));
+        terminal.backend_mut().resize(1, 1);
+        terminal.draw(|f| app.view(f, None)).unwrap();
+        assert_eq!(app.textarea.lines().len(), 30);
+    }
+
     use super::*;
     use crate::tui::state::CompletionType;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
