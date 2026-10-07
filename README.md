@@ -1023,6 +1023,12 @@ foreground job is rejected explicitly (use `/jobs` to inspect it or
 even while a job is running; Esc also cancels the current foreground job.
 The cancellation log confirms a request, not completion: cleanup and session
 saves may still be running. `/jobs` shows `cancelling` until the job finishes.
+Inputs accepted behind foreground work receive a `[Queued: N waiting]`
+confirmation with a bounded preview; their complete text is retained. The
+status line shows the live `[N queued]` count, including during cleanup, and
+removes it when the queue is empty. Cancelling the current job retains queued
+inputs; `/jobs` and `/cancel` act immediately without joining the queue.
+Empty or whitespace-only Enter presses leave the draft and queue unchanged.
 Other prompts keep FIFO queue order and are consumed only after the foreground owner releases its slot, including cancellation cleanup, diff collection and session saves. Cosmetic done/error messages cannot release the queue. Busy reservation races retain accepted prompts for retry. `/compact` is a foreground
 `compact` job visible in `/jobs`, cancellable with `/cancel` or Esc, and drained
 on shutdown. While it owns the session, another foreground job, session switch,

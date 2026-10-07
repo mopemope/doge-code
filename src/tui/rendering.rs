@@ -131,7 +131,16 @@ impl TuiApp {
             status_str
         };
 
-        let spans = vec![
+        let mut spans = Vec::new();
+        if !self.pending_instructions.is_empty() {
+            spans.push(Span::styled(
+                format!("[{} queued] ", self.pending_instructions.len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.extend([
             Span::styled(
                 format!(" [{}] ", display_status_str),
                 Style::default()
@@ -145,7 +154,7 @@ impl TuiApp {
             Span::raw(format!("{} tokens", self.tokens_prompt_used)),
             Span::raw(" "),
             Span::styled(spinner, Style::default().fg(status_color)),
-        ];
+        ]);
 
         let line = Line::from(spans);
         let para = Paragraph::new(line).style(theme.footer_style);
