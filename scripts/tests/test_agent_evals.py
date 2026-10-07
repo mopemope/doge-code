@@ -464,6 +464,58 @@ class ManifestTests(HarnessCase):
 
 @unittest.skipIf(NEEDS_GIT, "git is required for worktree tests")
 class RunnerTests(HarnessCase):
+    def test_kept_workspace_is_locatable_after_failure_timeout_and_interruption(self):
+        from unittest.mock import patch
+
+        repo = self.make_repo()
+        fake = self.make_fake()
+        fake.write_text(FAKE_AGENT.replace(
+            'json.dump({"id": f"fake-session-{index}"}, handle)',
+            'json.dump({"conversation": [{"tool_calls": [{"function": '
+            '{"name": "fs_read", "arguments": "{\\\"path\\\":\\\"tracked.txt\\\"}"}}]}, '
+            '{"role": "tool", "content": "base content"}]}, handle)',
+        ).replace(
+            'json.dump(doc, sys.stdout)',
+            'if os.environ.get("FAKE_SLEEP_AFTER_WRITE") == "1": time.sleep(10)\n'
+            'json.dump(doc, sys.stdout)',
+        ))
+        manifest, cases = self.load_harness(self.write_manifest(
+            fake, self.write_cases([self.base_case()]),
+            timeout_seconds=1, termination_grace_seconds=0.1,
+        ))
+        original = runner.stream_child
+        for mode in ("failed", "timeout", "cancelled"):
+            with self.subTest(mode=mode):
+                workspaces = []
+
+                def observe(argv, cwd, *args, **kwargs):
+                    workspaces.append(Path(cwd))
+                    self.addCleanup(runner.remove_worktree, repo, Path(cwd))
+                    result = original(argv, cwd, *args, **kwargs)
+                    if mode == "cancelled":
+                        raise KeyboardInterrupt
+                    return result
+
+                with fake_env(
+                    FAKE_PAYLOAD="fail" if mode == "failed" else "ok",
+                    FAKE_EXIT="1" if mode == "failed" else "0",
+                    FAKE_SLEEP_AFTER_WRITE="1" if mode == "timeout" else "0",
+                    FAKE_MODIFY_TRACKED="1",
+                ), patch.object(runner, "stream_child", side_effect=observe):
+                    if mode == "cancelled":
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.run_trial(repo, manifest, cases[0], keep=True, out_name=mode)
+                    else:
+                        self.run_trial(repo, manifest, cases[0], keep=True, out_name=mode)
+                artifact = self.root / mode / "baseline/runs/fake-case/trial-001"
+                saved = json.loads((artifact / "run.json").read_text())
+                self.assertEqual(saved["run_status"], "timed_out" if mode == "timeout" else mode)
+                self.assertEqual(saved.get("workspace"), str(workspaces[0]))
+                session = json.loads((workspaces[0] / ".doge/sessions/fake-session-0/session.json").read_text())
+                self.assertEqual(json.loads(session["conversation"][0]["tool_calls"][0]["function"]["arguments"]), {"path": "tracked.txt"})
+                self.assertEqual(session["conversation"][1]["content"], "base content")
+                self.assertIn("fake agent edit", (workspaces[0] / "tracked.txt").read_text())
+
     @unittest.skipUnless(os.name == "posix", "detached sessions require POSIX")
     def test_detached_output_reader_stops_before_artifacts_are_returned(self):
         import signal
@@ -910,6 +962,8 @@ if "exec" in args:
         artifact = self.root / "out/baseline/runs/fake-case/trial-001"
         saved = json.loads((artifact / "run.json").read_text())
         self.assertEqual(saved["run_status"], "cancelled")
+        self.assertNotIn("workspace", saved)
+        self.assertEqual(git("worktree", "list", "--porcelain", cwd=repo).count("worktree "), 1)
         results = {r["name"]: r for r in saved["post_checks"]}
         self.assertEqual(results["done"]["status"], "passed")
         self.assertEqual(results["interrupt"]["reason"], "check_interrupted")
