@@ -80,7 +80,11 @@ pub fn build_render_plan(
     let view_end_row = if scroll_state.auto_scroll || scroll_state.offset == 0 {
         total_rows
     } else {
-        total_rows.saturating_sub(scroll_state.offset)
+        total_rows.saturating_sub(
+            scroll_state
+                .offset
+                .min(total_rows.saturating_sub(max_log_rows)),
+        )
     };
     let view_start_row = view_end_row.saturating_sub(max_log_rows);
 
@@ -209,11 +213,7 @@ pub fn build_render_plan(
 
     // Create scroll info
     let scroll_info = if total_rows > max_log_rows {
-        let current_line = if scroll_state.auto_scroll || scroll_state.offset == 0 {
-            total_rows
-        } else {
-            total_rows.saturating_sub(scroll_state.offset)
-        };
+        let current_line = view_end_row;
         Some(crate::tui::state::ScrollInfo {
             current_line,
             total_lines: total_rows,

@@ -177,7 +177,7 @@ pub struct TuiApp {
     pub textarea: TextArea<'static>,
     pub log: Vec<LogEntry>,
     pub log_heights: Vec<usize>, // Cache for wrapped line counts of log entries
-    pub window_width: usize,     // Current window width for cache invalidation
+    pub log_width: usize,        // Rendered log column width for cache invalidation
     pub main_content_height: usize, // Height of the main content area (log panel)
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
@@ -297,6 +297,12 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
+    pub(crate) fn handle_resize(&mut self, _width: u16, _height: u16) {
+        // The next frame supplies the actual layout dimensions. Keep the old
+        // cache until then so a resize cannot masquerade as an already rebuilt cache.
+        self.dirty = true;
+    }
+
     pub(crate) fn apply_plan_list_update(&mut self, plan_list: Vec<PlanItem>) {
         if plan_list.is_empty() {
             self.plan_list.clear();
@@ -456,7 +462,7 @@ impl TuiApp {
             textarea,
             log: Vec::new(),
             log_heights: Vec::new(),
-            window_width: 0,
+            log_width: 0,
             main_content_height: 0,
             handler: None,
             inbox_rx: Some(rx),
@@ -623,7 +629,7 @@ impl TuiApp {
     }
 
     pub fn recalculate_all_heights(&mut self) {
-        if self.window_width == 0 {
+        if self.log_width == 0 {
             self.log_heights.clear();
             self.log_heights.resize(self.log.len(), 1);
             return;
@@ -631,7 +637,7 @@ impl TuiApp {
         self.log_heights.clear();
         for entry in &self.log {
             self.log_heights
-                .push(self.calculate_entry_height(entry, self.window_width));
+                .push(self.calculate_entry_height(entry, self.log_width));
         }
     }
 
@@ -641,8 +647,8 @@ impl TuiApp {
         let content = s.into();
         for line in content.split('\n') {
             let entry = LogEntry::Plain(line.to_string());
-            let height = if self.window_width > 0 {
-                self.calculate_entry_height(&entry, self.window_width)
+            let height = if self.log_width > 0 {
+                self.calculate_entry_height(&entry, self.log_width)
             } else {
                 1
             };
@@ -690,8 +696,8 @@ impl TuiApp {
 
         let lines_before = self.log.len();
         let entry = LogEntry::Markdown(content.to_string());
-        let height = if self.window_width > 0 {
-            self.calculate_entry_height(&entry, self.window_width)
+        let height = if self.log_width > 0 {
+            self.calculate_entry_height(&entry, self.log_width)
         } else {
             1
         };
@@ -730,6 +736,7 @@ impl TuiApp {
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll_state.auto_scroll = false;
         self.scroll_state.offset = self.scroll_state.offset.saturating_add(lines);
+        self.clamp_log_scroll();
         self.dirty = true;
     }
 
@@ -749,8 +756,30 @@ impl TuiApp {
     pub fn scroll_to_top(&mut self) {
         self.scroll_state.auto_scroll = false;
         // Set offset to maximum to show the oldest content
-        self.scroll_state.offset = self.log.len();
+        self.scroll_state.offset = self.max_log_scroll_offset();
+        self.clamp_log_scroll();
         self.dirty = true;
+    }
+
+    fn max_log_scroll_offset(&self) -> usize {
+        let plan_rows = if self.plan_list.is_empty() {
+            0
+        } else {
+            self.plan_list.len() + 2
+        };
+        self.log_heights
+            .iter()
+            .sum::<usize>()
+            .saturating_add(plan_rows)
+            .saturating_sub(self.main_content_height)
+    }
+
+    pub(crate) fn clamp_log_scroll(&mut self) {
+        self.scroll_state.offset = self.scroll_state.offset.min(self.max_log_scroll_offset());
+        if self.scroll_state.offset == 0 {
+            self.scroll_state.auto_scroll = true;
+            self.scroll_state.new_messages = 0;
+        }
     }
 
     /// Scroll to the bottom of the log (enable auto-scroll)
