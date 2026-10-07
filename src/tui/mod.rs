@@ -40,4 +40,7 @@ mod test_queue_visibility;
 #[cfg(test)]
 mod test_completion;
 
+#[cfg(test)]
+mod test_search_navigation;
+
 mod job_messages;
