@@ -296,6 +296,28 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn test_argument_matching_program_name_is_preserved() {
+        let dir = TempDir::new().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let req = ProcessRequest {
+            program: "echo".to_string(),
+            args: vec!["echo".to_string(), "literal".to_string()],
+            cwd: Some(dir.path().to_path_buf()),
+            env: BTreeMap::new(),
+            timeout_ms: Some(10_000),
+        };
+        let result = run_process(req, &cfg, None).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.status, ProcessStatus::Completed);
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "echo literal\n");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn test_shell_injection_not_executed() {
         // args must pass through as a single argv element, never via a shell.
         let dir = TempDir::new().unwrap();

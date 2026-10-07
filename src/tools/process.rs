@@ -27,7 +27,7 @@ pub fn tool_def() -> ToolDef {
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Arguments passed directly to the program (no shell expansion)."
+                        "description": "Arguments after the executable, each passed literally (no shell expansion). `program` supplies argv[0]; do not repeat it in `args` to name the executable. For `python3 -m unittest`, use program=\"python3\" and args=[\"-m\", \"unittest\"]. An argument may equal the program name when it is intentionally passed as data."
                     },
                     "cwd": {
                         "type": "string",
