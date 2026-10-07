@@ -214,6 +214,8 @@ pub struct TuiApp {
     pub current_stream_start: Option<usize>,
     // Input mode
     pub input_mode: InputMode,
+    pub(crate) key_help_open: bool,
+    pub(crate) key_help_scroll: usize,
     // View mode
     pub view_mode: ViewMode,
     // session management
@@ -497,6 +499,8 @@ impl TuiApp {
             last_llm_response_content: None,
             current_stream_start: None,
             input_mode: InputMode::default(),
+            key_help_open: false,
+            key_help_scroll: 0,
             view_mode: ViewMode::default(),
             tokens_used: 0,
             tokens_prompt_used: 0,
