@@ -1176,3 +1176,120 @@ async fn progress_read_only_completed_and_partial_are_observations_not_stalls() 
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn blank_final_response_is_not_completed() {
+    for content in [
+        serde_json::Value::Null,
+        serde_json::json!(""),
+        serde_json::json!(" \n\t"),
+    ] {
+        let mut reply = assistant_done("");
+        reply["choices"][0]["message"]["content"] = content;
+        reply["usage"] =
+            serde_json::json!({"prompt_tokens":10,"completion_tokens":2,"total_tokens":12});
+        let (client, requests, server) = fixture(vec![(200, reply)]).await;
+        let client = client.with_llm_config(crate::config::LlmConfig {
+            max_retries: 3,
+            ..Default::default()
+        });
+        let result = run_with_cfg(
+            &client,
+            test_cfg(AgentBudgetConfig::default()),
+            user_msg("Fix the issue and report the result"),
+            None,
+        )
+        .await;
+        server.abort();
+        let error = result.expect_err("blank output must not report Completed");
+        assert!(
+            matches!(
+                error.downcast_ref::<crate::llm::LlmErrorKind>(),
+                Some(crate::llm::LlmErrorKind::Incomplete)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+        assert_eq!(client.usage_snapshot().usage_records, 1);
+    }
+}
+
+#[tokio::test]
+async fn blank_final_preserves_prior_mutation_and_checkpoint() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("out.txt");
+    let write_call = tool_call(
+        "fs_write",
+        "write-before-blank",
+        serde_json::json!({"path":target.to_string_lossy(),"content":"kept change"}),
+    );
+    let (client, requests, server) = fixture(vec![
+        (200, assistant_calls_with_usage(vec![write_call], 100, 80)),
+        (200, assistant_done_with_usage("", 12, 10)),
+    ])
+    .await;
+    let cfg = test_cfg_with_root(AgentBudgetConfig::default(), dir.path().to_path_buf());
+    let sessions_root = dir.path().join(".doge/sessions");
+    let store = crate::session::SessionStore::new(sessions_root.clone()).expect("store");
+    let manager = Arc::new(std::sync::Mutex::new(
+        crate::session::SessionManager::with_store(store),
+    ));
+    manager
+        .lock()
+        .expect("manager")
+        .create_session(None)
+        .expect("session");
+    let session_id = manager
+        .lock()
+        .expect("manager")
+        .current_session_id()
+        .expect("id");
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()))
+        .with_session_manager(manager);
+    let error = run_agent_loop(
+        &client,
+        "test-model",
+        &fs,
+        user_msg("write then report"),
+        None,
+        None,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+    .expect_err("blank answer");
+    server.abort();
+    assert!(matches!(
+        error.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(crate::llm::LlmErrorKind::Incomplete)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(target).expect("changed file"),
+        "kept change"
+    );
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    let usage = client.usage_snapshot();
+    assert_eq!(usage.usage_records, 2);
+    assert_eq!(usage.total_tokens, 112);
+    let saved = crate::session::SessionStore::new(sessions_root)
+        .expect("store")
+        .load(&session_id)
+        .expect("durable checkpoint");
+    assert!(saved.conversation.iter().any(|message| {
+        message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+            && message
+                .get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                == Some("write-before-blank")
+    }));
+    assert!(!saved.conversation.iter().any(|message| {
+        message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            && message.get("content").and_then(serde_json::Value::as_str) == Some("")
+            && message
+                .get("tool_calls")
+                .is_none_or(|calls| calls.as_array().is_none_or(Vec::is_empty))
+    }));
+}
