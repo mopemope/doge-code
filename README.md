@@ -1123,6 +1123,15 @@ diff review. Resizing rebuilds wrapped-row heights before rendering. Log
 scrolling and Ctrl+Home use displayed rows and stop at the oldest visible
 content; repeated scrolling cannot move the viewport into an empty region.
 
+`Ctrl+R` searches input history; `Ctrl+P` searches project files. Type to
+filter, use Up/Down to select, and press Enter to load the complete history
+entry into the draft or open the selected file. Esc/Ctrl+G cancels and keeps
+the draft. The selected result stays visible when navigating or resizing;
+search panels show the result position and one-line previews (`↵` marks
+multiline entries). File previews use project-relative paths. Empty results
+and file scanning are shown explicitly. Search temporarily reduces the draft
+pane to leave room for results without changing its text.
+
 After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):
 
 - **Scoped to agent changes**: the TUI diff covers captured text mutations from this turn, from the first pre-edit contents to the last committed contents; existing staged, unstaged and untracked user content is the baseline

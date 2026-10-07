@@ -3,7 +3,7 @@ use crate::tui::state::{RenderPlan, TuiApp, build_render_plan};
 use crate::tui::theme::Theme;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 impl TuiApp {
@@ -17,10 +17,13 @@ impl TuiApp {
 
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
-        let input_height = self
-            .textarea
-            .lines()
-            .len()
+        // Search needs room for results even when the preserved draft is long.
+        let draft_rows = if self.input_mode == crate::tui::state::InputMode::Normal {
+            self.textarea.lines().len()
+        } else {
+            1
+        };
+        let input_height = draft_rows
             .saturating_add(1)
             .clamp(3, 8)
             .min(size.height.saturating_sub(2) as usize) as u16;
@@ -624,41 +627,16 @@ impl TuiApp {
         state: &crate::tui::state::HistorySearchState,
         theme: &Theme,
     ) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.border_style)
-            .title("History Search (Ctrl+R)");
-
-        let area = centered_rect(60, 40, area);
-        f.render_widget(Clear, area);
-        f.render_widget(block.clone(), area);
-
-        let inner = block.inner(area);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(inner);
-
-        let search_text = format!("Search: {}_", state.query);
-        let search_para = Paragraph::new(search_text).style(theme.input_style);
-        f.render_widget(search_para, chunks[0]);
-
-        let items: Vec<ListItem> = state
-            .results
-            .iter()
-            .enumerate()
-            .map(|(i, res)| {
-                let style = if i == state.selected_index {
-                    theme.completion_selected_style
-                } else {
-                    theme.completion_style
-                };
-                ListItem::new(res.clone()).style(style)
-            })
-            .collect();
-
-        let list = List::new(items).highlight_style(theme.completion_selected_style);
-        f.render_widget(list, chunks[1]);
+        render_search(
+            f,
+            area,
+            "History Search (Ctrl+R)",
+            &state.query,
+            state.results.iter().map(String::as_str),
+            state.selected_index,
+            false,
+            theme,
+        );
     }
 
     fn render_file_search(
@@ -668,41 +646,26 @@ impl TuiApp {
         state: &crate::tui::state::FileSearchState,
         theme: &Theme,
     ) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.border_style)
-            .title("File Search (Ctrl+P)");
-
-        let area = centered_rect(60, 40, area);
-        f.render_widget(Clear, area);
-        f.render_widget(block.clone(), area);
-
-        let inner = block.inner(area);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(inner);
-
-        let search_text = format!("Search: {}_", state.query);
-        let search_para = Paragraph::new(search_text).style(theme.input_style);
-        f.render_widget(search_para, chunks[0]);
-
-        let items: Vec<ListItem> = state
-            .results
-            .iter()
-            .enumerate()
-            .map(|(i, res)| {
-                let style = if i == state.selected_index {
-                    theme.completion_selected_style
-                } else {
-                    theme.completion_style
-                };
-                ListItem::new(res.clone()).style(style)
-            })
-            .collect();
-
-        let list = List::new(items).highlight_style(theme.completion_selected_style);
-        f.render_widget(list, chunks[1]);
+        let root = self
+            .cfg
+            .as_ref()
+            .map(|cfg| cfg.project_root.clone())
+            .or_else(|| std::env::current_dir().ok());
+        render_search(
+            f,
+            area,
+            "File Search (Ctrl+P)",
+            &state.query,
+            state.results.iter().map(|path| {
+                root.as_ref()
+                    .and_then(|root| std::path::Path::new(path).strip_prefix(root).ok())
+                    .and_then(|relative| relative.to_str())
+                    .unwrap_or(path)
+            }),
+            state.selected_index,
+            state.loading,
+            theme,
+        );
     }
 
     fn render_completion_popup(&self, f: &mut Frame, input_area: Rect) {
@@ -755,22 +718,118 @@ impl TuiApp {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
+/// A one-row preview; original result strings remain available to Enter.
+fn search_preview(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let first = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("(blank input)");
+    // Bound allocation even for very long rows and strip terminal control characters.
+    let mut chars = first.trim().chars();
+    let preview: String = chars
+        .by_ref()
+        .take(width.saturating_mul(4).saturating_add(1))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let suffix = if text.contains('\n') { " ↵" } else { "" };
+    let available = width.saturating_sub(UnicodeWidthStr::width(suffix));
+    let clipped = chars.next().is_some() || UnicodeWidthStr::width(preview.as_str()) > available;
+    let limit = available.saturating_sub(usize::from(clipped));
+    let mut row = crate::tui::state_render::truncate_display(&preview, limit);
+    if clipped && available > 0 {
+        row.push('…');
+    }
+    row.push_str(suffix);
+    row
+}
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+#[allow(clippy::too_many_arguments)]
+fn render_search<'a>(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    query: &str,
+    results: impl Iterator<Item = &'a str>,
+    selected_index: usize,
+    loading: bool,
+    theme: &Theme,
+) {
+    let width = area.width.saturating_sub(2).min(100);
+    let height = area.height.min(18);
+    let area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_style)
+        .title(title);
+    let inner = block.inner(area);
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(u16::from(inner.height >= 4)),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(format!("Search: {query}_")).style(theme.input_style),
+        chunks[0],
+    );
+    let items: Vec<ListItem> = results
+        .map(|res| {
+            ListItem::new(search_preview(res, inner.width.saturating_sub(2) as usize))
+                .style(theme.completion_style)
+        })
+        .collect();
+    let count = items.len();
+    if count == 0 {
+        let message = if loading {
+            "Scanning files…"
+        } else {
+            "No matches"
+        };
+        f.render_widget(
+            Paragraph::new(message).style(theme.completion_style),
+            chunks[1],
+        );
+    } else {
+        // Stateful rendering scrolls to the selected row, including after a resize.
+        let mut state = ListState::default().with_selected(Some(selected_index.min(count - 1)));
+        let list = List::new(items)
+            .highlight_style(theme.completion_selected_style)
+            .highlight_symbol("> ");
+        f.render_stateful_widget(list, chunks[1], &mut state);
+    }
+    let position = if count == 0 {
+        0
+    } else {
+        selected_index.min(count - 1) + 1
+    };
+    f.render_widget(
+        Paragraph::new(format!("{position}/{count} · ↑↓ · Enter · Esc"))
+            .style(theme.completion_style),
+        chunks[2],
+    );
+}
+
+#[cfg(test)]
+mod search_preview_tests {
+    use super::search_preview;
+
+    #[test]
+    fn previews_bound_large_rows_and_mark_clipped_combining_text() {
+        let combined = format!("e{}tail", "\u{301}".repeat(1000));
+        let preview = search_preview(&combined, 20);
+        assert!(preview.ends_with('…'));
+        assert!(preview.len() < 200);
+        let preview = search_preview(&format!("\u{1b}\t{}\nsecond", "界".repeat(1000)), 20);
+        assert!(!preview.chars().any(char::is_control));
+        assert!(preview.ends_with("… ↵"));
+        assert!(unicode_width::UnicodeWidthStr::width(preview.as_str()) <= 20);
+    }
 }
