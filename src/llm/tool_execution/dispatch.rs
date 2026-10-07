@@ -1105,6 +1105,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unittest_dispatch_records_failed_and_successful_runs_but_not_help_or_scripts()
+    -> Result<()> {
+        let dir = tempdir()?;
+        let project_root = dir.path().to_path_buf();
+        std::fs::write(
+            project_root.join("test_numbers.py"),
+            "import unittest\nclass Numbers(unittest.TestCase):\n def test_number(self): self.assertEqual(1, 2)\n",
+        )?;
+        std::fs::write(project_root.join("accept.py"), "print('ordinary script')\n")?;
+        let store = crate::session::SessionStore::new(project_root.join(".doge/sessions"))?;
+        let manager = Arc::new(std::sync::Mutex::new(crate::session::SessionManager {
+            save_state: Default::default(),
+            current_lease: None,
+            store,
+            current_session: None,
+        }));
+        manager.lock().unwrap().create_session(None)?;
+        let session_id = manager.lock().unwrap().current_session_id().unwrap();
+        let session_dir = project_root.join(".doge/sessions").join(&session_id);
+        let config = Arc::new(AppConfig {
+            project_root: project_root.clone(),
+            ..AppConfig::default()
+        });
+        let fs_tools =
+            FsTools::new(Arc::new(RwLock::new(None)), config).with_session_manager(manager);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        for (args, expected_success) in [
+            (vec!["-B", "-m", "unittest", "test_numbers"], false),
+            (vec!["-m", "unittest", "--help"], true),
+            (vec!["accept.py"], true),
+        ] {
+            let call = ToolCall {
+                id: Some("unittest-check".into()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "execute_process".into(),
+                    arguments: json!({"program":"python3", "args":args}).to_string(),
+                },
+            };
+            let output = dispatch_tool_call(&runtime, &call).await?;
+            assert_eq!(output.value["status"], "completed");
+            assert_eq!(output.is_success, expected_success, "{}", output.value);
+        }
+        std::fs::write(
+            project_root.join("test_numbers.py"),
+            "import unittest\nclass Numbers(unittest.TestCase):\n def test_number(self): self.assertEqual(1, 1)\n",
+        )?;
+        let call = ToolCall {
+            id: Some("unittest-success".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "execute_process".into(),
+                arguments:
+                    json!({"program":"python3", "args":["-B", "-m", "unittest", "test_numbers"]})
+                        .to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(output.is_success, "{}", output.value);
+        let loaded = crate::provenance::ProvenanceStore::new(session_dir).load_all()?;
+        let observed: Vec<_> = loaded
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                crate::provenance::ProvenanceEvent::VerificationObserved(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(observed.len(), 2);
+        assert!(!observed[0].outcome.success);
+        assert!(observed[1].outcome.success);
+        for event in observed {
+            assert_eq!(
+                event.verification_kind,
+                crate::provenance::VerificationKind::Test
+            );
+            assert!(event.stderr_excerpt.contains("Ran 1 test"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_execute_process_policy_denied_records_nothing() -> Result<()> {
         use crate::config::{ExecutionConfig, ExecutionMode};
         let dir = tempdir()?;
