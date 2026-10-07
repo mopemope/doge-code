@@ -395,6 +395,7 @@ impl Executor {
                 };
                 let stop_reason = run.stop_reason.map(|r| r.as_str().to_string());
                 let budget = serde_json::json!({
+                    "progress": run.budget.progress,
                     "iterations": run.budget.iterations,
                     "tool_calls": run.budget.tool_calls,
                     "charged_tokens": run.budget.charged_tokens,
