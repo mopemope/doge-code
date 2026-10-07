@@ -674,7 +674,15 @@ and first recognized verification dispatch (1-based), and executed/successful
 verification counts. A mutation requires a successful `changed=true` result.
 Verification uses the existing structured `execute_process` classifier; failed
 or timed-out checks count as executed, while denied/spawn-failed commands do not.
-Shell strings and unrecognized custom scripts are not inferred as checks.
+Explicit `python`/`python3 -m unittest` invocations (including discovery and
+named tests) are recognized, alongside `pytest` and `py_compile`. Known
+interpreter options such as `-I`, `-B`, `-W` and `-X` are supported. Interpreter
+help/version, module `-h`/`--help`, `-c`, unknown interpreter options, shell strings
+and ordinary/custom Python scripts are not inferred as checks. A successful verification count means the
+recognized command exited successfully; zero discovered tests or a shadowed
+module can also exit successfully. It does not prove test coverage or task
+acceptance. Declare custom acceptance scripts as eval `post_checks` to preserve
+their separate execution evidence.
 Repeated ranges count nonempty `fs_read` results with identical supplied path,
 returned start/end lines and content among the 128 most recently observed unique
 fingerprints. Path aliases, overlapping ranges and batch-read snippets are not
