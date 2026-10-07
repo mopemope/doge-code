@@ -78,10 +78,14 @@ impl TuiApp {
         self.render_input_area(f, chunks[2]);
 
         if self.completion_active
+            && !self.key_help_open
             && !self.completion_candidates.is_empty()
             && self.diff_review_focus != crate::tui::state::DiffReviewFocus::Review
         {
             self.render_completion_popup(f, chunks[2]);
+        }
+        if self.key_help_open {
+            self.render_key_help(f, chunks[1]);
         }
     }
 
@@ -134,7 +138,16 @@ impl TuiApp {
             status_str
         };
 
-        let spans = vec![
+        let mut spans = Vec::new();
+        if !self.pending_instructions.is_empty() {
+            spans.push(Span::styled(
+                format!("[{} queued] ", self.pending_instructions.len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.extend([
             Span::styled(
                 format!(" [{}] ", display_status_str),
                 Style::default()
@@ -148,7 +161,7 @@ impl TuiApp {
             Span::raw(format!("{} tokens", self.tokens_prompt_used)),
             Span::raw(" "),
             Span::styled(spinner, Style::default().fg(status_color)),
-        ];
+        ]);
 
         let line = Line::from(spans);
         let para = Paragraph::new(line).style(theme.footer_style);
@@ -570,17 +583,25 @@ impl TuiApp {
         // We will stick to a minimal Block for bounds, maybe just top border or no border.
         // User asked for "OpenAI Codex CLI" like. minimalistic.
 
-        let block_title = match self.input_mode {
-            crate::tui::state::InputMode::HistorySearch => "History Search",
-            crate::tui::state::InputMode::FileSearch => "File Search",
-            _ if self.diff_review.is_some() => {
-                if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
-                    "Input focused (F6: review)"
-                } else {
-                    "Input (F6: focus)"
-                }
-            }
-            _ => "Input",
+        let block_title = if self.key_help_open {
+            "Help focused (F1/Esc: close)".to_string()
+        } else {
+            format!(
+                "{} · {}",
+                match self.input_mode {
+                    crate::tui::state::InputMode::HistorySearch => "History Search",
+                    crate::tui::state::InputMode::FileSearch => "File Search",
+                    _ if self.diff_review.is_some() => {
+                        if self.diff_review_focus == crate::tui::state::DiffReviewFocus::Input {
+                            "Input focused (F6: review)"
+                        } else {
+                            "Input (F6: focus)"
+                        }
+                    }
+                    _ => "Input",
+                },
+                self.input_key_hint(area.width)
+            )
         };
 
         // Use standard border type if we want a visible separator

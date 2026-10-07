@@ -564,10 +564,18 @@ impl TuiApp {
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {
-                            self.scroll_up(3);
+                            if self.key_help_open {
+                                self.scroll_key_help(-3);
+                            } else {
+                                self.scroll_up(3);
+                            }
                         }
                         event::MouseEventKind::ScrollDown => {
-                            self.scroll_down(3);
+                            if self.key_help_open {
+                                self.scroll_key_help(3);
+                            } else {
+                                self.scroll_down(3);
+                            }
                         }
                         _ => {}
                     },
@@ -604,6 +612,7 @@ impl TuiApp {
                 return Ok(false);
             }
             self.diff_review_focus = DiffReviewFocus::Input;
+            self.key_help_open = false;
             let now = Instant::now();
             if last_ctrl_c_at.is_some_and(|prev| now.duration_since(prev) <= Duration::from_secs(3))
             {
@@ -623,7 +632,12 @@ impl TuiApp {
         key: event::KeyEvent,
         terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
     ) -> Result<bool> {
-        if key.kind == event::KeyEventKind::Release {
+        if key.kind == event::KeyEventKind::Release
+            || (key.code == KeyCode::Esc && key.kind != event::KeyEventKind::Press)
+        {
+            return Ok(false);
+        }
+        if self.handle_key_help_key(key) {
             return Ok(false);
         }
         if self.input_mode == InputMode::Normal && self.diff_review.is_some() {
@@ -1032,6 +1046,361 @@ mod tests {
             ui,
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 32)).unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn keyboard_help_preserves_draft_completion_search_and_review_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "fixture").unwrap();
+        for mode in [
+            InputMode::Normal,
+            InputMode::HistorySearch,
+            InputMode::FileSearch,
+        ] {
+            let (mut ui, mut terminal) = focus_test_ui();
+            ui.cfg = Some(crate::config::AppConfig {
+                project_root: dir.path().to_path_buf(),
+                ..Default::default()
+            });
+            ui.textarea
+                .insert_str("keep first\nreview @alpha\nkeep last");
+            ui.diff_review_focus = DiffReviewFocus::Review;
+            ui.completion_active = true;
+            ui.completion_candidates = vec!["alpha.rs".into()];
+            ui.input_history = vec!["alpha first".into(), "alpha second".into()];
+            match mode {
+                InputMode::HistorySearch => ui.enter_history_search(),
+                InputMode::FileSearch => ui.enter_file_search(),
+                InputMode::Normal => {}
+            }
+            if mode != InputMode::Normal {
+                for ch in "alpha".chars() {
+                    ui.handle_ui_key(
+                        event::KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                        &mut terminal,
+                    )
+                    .unwrap();
+                }
+                if let Some(search) = &mut ui.file_search_state {
+                    search.all_files = vec!["alpha.rs".into(), "alpha.txt".into()];
+                    ui.update_file_search();
+                }
+                ui.handle_ui_key(
+                    event::KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    &mut terminal,
+                )
+                .unwrap();
+            }
+            let history = ui
+                .history_search_state
+                .as_ref()
+                .map(|s| (s.query.clone(), s.selected_index, s.results.clone()));
+            let files = ui
+                .file_search_state
+                .as_ref()
+                .map(|s| (s.query.clone(), s.selected_index, s.results.clone()));
+            let cursor = ui.textarea.cursor();
+            let review = ui.diff_review.clone();
+            ui.handle_ui_key(
+                event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+            terminal.draw(|f| ui.view(f, None)).unwrap();
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            let context = match mode {
+                InputMode::HistorySearch => "History search",
+                InputMode::FileSearch => "File search",
+                InputMode::Normal => "Review",
+            };
+            assert!(
+                screen.contains(&format!("Keyboard help: {context}")),
+                "{screen}"
+            );
+            for code in [
+                KeyCode::Char('r'),
+                KeyCode::Char('a'),
+                KeyCode::Char('q'),
+                KeyCode::Tab,
+                KeyCode::Enter,
+                KeyCode::F(6),
+            ] {
+                ui.handle_ui_key(
+                    event::KeyEvent::new(code, KeyModifiers::NONE),
+                    &mut terminal,
+                )
+                .unwrap();
+            }
+            for kind in [event::KeyEventKind::Repeat, event::KeyEventKind::Release] {
+                ui.handle_ui_key(
+                    event::KeyEvent::new_with_kind(KeyCode::F(1), KeyModifiers::NONE, kind),
+                    &mut terminal,
+                )
+                .unwrap();
+                assert!(ui.key_help_open);
+            }
+            ui.handle_ui_key(
+                event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+            ui.handle_ui_key(
+                event::KeyEvent::new_with_kind(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                    event::KeyEventKind::Repeat,
+                ),
+                &mut terminal,
+            )
+            .unwrap();
+            assert!(!ui.key_help_open);
+            assert_eq!(ui.input_mode, mode);
+            assert_eq!(
+                ui.textarea.lines(),
+                ["keep first", "review @alpha", "keep last"]
+            );
+            assert_eq!(ui.textarea.cursor(), cursor);
+            assert_eq!(ui.diff_review, review);
+            assert_eq!(ui.diff_review_focus, DiffReviewFocus::Review);
+            assert!(ui.completion_active);
+            assert_eq!(ui.completion_candidates, ["alpha.rs"]);
+            assert!(ui.pending_instructions.is_empty());
+            assert!(
+                ui.history_search_state
+                    .as_ref()
+                    .is_none_or(|s| s.query == "alpha")
+            );
+            assert!(
+                ui.file_search_state
+                    .as_ref()
+                    .is_none_or(|s| s.query == "alpha")
+            );
+            assert_eq!(
+                ui.history_search_state.as_ref().map(|s| (
+                    s.query.clone(),
+                    s.selected_index,
+                    s.results.clone()
+                )),
+                history
+            );
+            assert_eq!(
+                ui.file_search_state.as_ref().map(|s| (
+                    s.query.clone(),
+                    s.selected_index,
+                    s.results.clone()
+                )),
+                files
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_help_scrolls_wrapped_rows_and_clamps_after_resize() {
+        let mut ui = TuiApp::new_for_test("help", None, "dark");
+        ui.textarea.insert_str("keep first\nkeep last");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("F1 keys"));
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        for _ in 0..100 {
+            ui.handle_ui_key(
+                event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .unwrap();
+            terminal.draw(|f| ui.view(f, None)).unwrap();
+        }
+        assert!(ui.key_help_scroll > 0);
+        let last = ui.key_help_scroll;
+        ui.scroll_key_help(3);
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        assert_eq!(ui.key_help_scroll, last);
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("released."), "{screen}");
+        terminal.backend_mut().resize(140, 50);
+        terminal.autoresize().unwrap();
+        ui.handle_resize(140, 50);
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        assert_eq!(ui.key_help_scroll, 0);
+        terminal.backend_mut().resize(1, 1);
+        terminal.autoresize().unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        assert_eq!(ui.textarea.lines(), ["keep first", "keep last"]);
+    }
+
+    #[test]
+    fn keyboard_help_ctrl_c_closes_help_and_retains_cancel_exit_semantics() {
+        let (mut ui, mut terminal) = focus_test_ui();
+        let calls = Arc::new(Mutex::new(vec![]));
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: JobManager::new(),
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        let mut last = None;
+        let cancel = event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(
+            !ui.handle_terminal_key(cancel, &mut terminal, &mut last)
+                .unwrap()
+        );
+        assert!(!ui.key_help_open);
+        assert_eq!(*calls.lock().unwrap(), ["/cancel"]);
+        assert!(
+            ui.handle_terminal_key(cancel, &mut terminal, &mut last)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn keyboard_help_input_hints_follow_foreground_ownership() {
+        let jobs = JobManager::new();
+        let (release, held) = tokio::sync::oneshot::channel();
+        jobs.spawn(
+            JobSpec::new(
+                JobKind::AgentTurn,
+                JobScope::Foreground,
+                WorkspaceAccess::None,
+                "held",
+            ),
+            move |_| async move {
+                let _ = held.await;
+                JobRunOutcome::Completed
+            },
+        )
+        .unwrap();
+        let mut ui = TuiApp::new_for_test("help", None, "dark");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs: jobs.clone(),
+            calls: Arc::new(Mutex::new(vec![])),
+            reject_once: false,
+        }));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Enter queue"), "{screen}");
+        assert!(!screen.contains("Enter send"));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while jobs.foreground_id().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Enter send"), "{screen}");
+    }
+
+    #[test]
+    fn keyboard_help_completion_and_rollback_guidance_match_available_actions() {
+        let mut ui = TuiApp::new_for_test("help", None, "dark");
+        ui.textarea.insert_str("@al");
+        ui.completion_active = true;
+        ui.completion_type = crate::tui::state::CompletionType::FilePath;
+        ui.completion_candidates = vec!["alpha.rs".into()];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Keyboard help: Completion"));
+        assert!(screen.contains("Tab: complete the token"));
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(ui.textarea.lines(), ["@alpha.rs"]);
+
+        ui.diff_review = Some(DiffReviewState::from_payload(
+            serde_json::from_value(serde_json::json!({"diff":"+change","files":["a"]})).unwrap(),
+        ));
+        ui.diff_review_focus = DiffReviewFocus::Review;
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("View only: rollback is unavailable"));
+        assert!(!screen.contains("r: restore"));
+        ui.diff_review.as_mut().unwrap().rejecting = true;
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Rollback running"));
+        assert!(!screen.contains("a: accept"));
     }
 
     #[test]
