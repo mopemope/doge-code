@@ -1558,6 +1558,8 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   by the execution policy). An argument equal to the program name is preserved
   when intentionally passed as data, for example
   `{"program":"echo","args":["echo","literal"]}` prints `echo literal`.
+  Unknown parameter names are rejected before execution; use `args`, `cwd`,
+  `env`, and `timeout_ms` rather than aliases such as `arguments` or `timeout`.
 - `mode = "allowlist"` matches executables exactly: `allowed_programs =
   ["cargo"]` allows `program = "cargo"` only — not `./cargo`, `/tmp/cargo`,
   or `cargo;rm`. Absolute paths must be listed explicitly to be allowed.

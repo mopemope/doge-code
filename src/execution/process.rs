@@ -93,6 +93,7 @@ impl ProcessResult {
 
 /// Parameters for one structured run (tool schema shape).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteProcessParams {
     pub program: String,
     #[serde(default)]
