@@ -607,25 +607,39 @@ fn validate_tool_message_with_activation(
                         .any(|tool| tool.function.name == call.function.name),
                 "tool-call batch requested a tool outside the active catalog"
             );
-            let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-            super::arguments::validate_builtin_arguments(&call.function.name, &arguments)?;
         }
         Ok(())
     })();
-    validation.map_err(|error| {
-        if let Some(parse_error) = error.downcast_ref::<serde_json::Error>() {
-            let summary = telemetry::JsonErrorSummary::from_error(parse_error);
-            error!(
-                category = summary.category,
-                line = summary.line,
-                column = summary.column,
-                "llm tool-call arguments deserialize error"
-            );
-            anyhow!(LlmErrorKind::Client).context(format!("invalid tool-call arguments: {summary}"))
-        } else {
-            error.context(LlmErrorKind::Client)
-        }
-    })
+    validation.map_err(|error| error.context(LlmErrorKind::Client))?;
+
+    // Validate identities/catalog for the whole batch before classifying an
+    // argument failure as correctable. No sibling may dispatch on either path.
+    for call in &message.tool_calls {
+        let validation = (|| -> Result<()> {
+            let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+            super::arguments::validate_builtin_arguments(&call.function.name, &arguments)
+        })();
+        validation.map_err(|error| {
+            // Never propagate serde's raw values or semantic validator text.
+            let detail = if let Some(parse_error) = error.downcast_ref::<serde_json::Error>() {
+                let summary = telemetry::JsonErrorSummary::from_error(parse_error);
+                error!(
+                    category = summary.category,
+                    line = summary.line,
+                    column = summary.column,
+                    "llm tool-call arguments deserialize error"
+                );
+                summary.to_string()
+            } else {
+                "arguments do not satisfy the tool schema".to_string()
+            };
+            anyhow!(LlmErrorKind::InvalidToolArguments).context(format!(
+                "invalid {} arguments: {detail}",
+                call.function.name
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -662,6 +676,47 @@ mod tests {
     use crate::llm::tool_def::default_tools_def;
     use crate::llm::types::{ToolDef, ToolFunctionDef};
     use httptest::{Expectation, matchers::*, responders::*};
+
+    #[test]
+    fn invalid_argument_classification_is_sanitized_for_syntax_type_and_object_checks() {
+        let tools = default_tools_def();
+        for (name, arguments) in [
+            (
+                "execute_process",
+                r#"{"program":"fixture", "args":"SECRET_VALUE"}"#,
+            ),
+            (
+                "execute_process",
+                r#"{"program":"fixture", "SECRET_KEY":true}"#,
+            ),
+            ("execute_process", r#"{"program":"SECRET_VALUE""#),
+            ("execute_process", "[]"),
+            ("execute_bash", r#"{"command":17}"#),
+        ] {
+            let message = ChoiceMessageWithTools {
+                refusal: None,
+                provider_state: None,
+                role: "assistant".into(),
+                content: None,
+                tool_calls: vec![crate::llm::types::ToolCall {
+                    id: Some("fixture".into()),
+                    r#type: "function".into(),
+                    function: crate::llm::types::ToolCallFunction {
+                        name: name.into(),
+                        arguments: arguments.into(),
+                    },
+                }],
+            };
+            let error = validate_tool_message(&message, &tools).expect_err("invalid arguments");
+            assert_eq!(
+                error.downcast_ref::<LlmErrorKind>(),
+                Some(&LlmErrorKind::InvalidToolArguments)
+            );
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name));
+            assert!(!detail.contains("SECRET_VALUE") && !detail.contains("SECRET_KEY"));
+        }
+    }
 
     #[test]
     fn blank_final_gate_preserves_tool_only_turns_and_rejects_state_only_turns() {

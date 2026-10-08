@@ -502,6 +502,11 @@ and remove it yourself if present. To review content explicitly, use:
 dgc session evidence <SESSION_ID> --include-content
 ```
 
+Invalid tool arguments are rejected before any tool in the batch executes. The
+main agent requests correction at most twice per run, using the supplied schema;
+these requests count toward iteration, token, and elapsed budgets and remain
+cancellable. Unknown tools and invalid batch IDs fail without this correction.
+
 ## 🛠️ Tools and Commands
 
 ### File System Tools
