@@ -19,6 +19,7 @@ pub mod doc;
 pub mod edit;
 pub mod execute;
 pub mod find_file;
+pub mod impact;
 pub mod observation;
 
 pub mod list;

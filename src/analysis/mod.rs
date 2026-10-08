@@ -37,7 +37,7 @@ pub use symbol_identity::{
     fingerprint_symbol_source, is_targetable_kind, normalize_relative_path, source_span,
     symbol_source,
 };
-pub use symbol_utils::{SymbolSpan, find_enclosing_symbol, list_symbols};
+pub use symbol_utils::{SymbolSpan, find_enclosing_symbol, index_symbols_by_file, list_symbols};
 pub use ts_js_collector::{JavaScriptExtractor, TypeScriptExtractor};
 
 pub mod context;

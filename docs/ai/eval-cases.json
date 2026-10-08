@@ -49,5 +49,41 @@
     "expected_skills": ["dgc-tool-dev"],
     "acceptance": ["Identifies absent default schema and present internal dispatch", "Makes no workspace changes", "Does not claim the behavior was fixed"],
     "workspace_policy": "read_only"
+  },
+  {
+    "case_id": "impact-single-file-fix",
+    "prompt": "Fix a single-file bug, then use impact_analyze to recommend verification. Prefer a focused check when evidence supports it; otherwise run the broad project test command. Do not claim unexecuted tests passed.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["impact_analyze recommendation consulted", "Verification actually executed via execute_process", "No unexecuted test claimed as passed", "Required Rust checks pass"]
+  },
+  {
+    "case_id": "impact-multi-module-change",
+    "prompt": "Change code spanning two modules with callers in a third module. Use impact_analyze to identify affected files and recommend verification for each affected language ecosystem.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Impacted callers identified", "Each affected language has a recommendation", "Broad fallback present", "No automatic test execution assumed"]
+  },
+  {
+    "case_id": "impact-refactor-with-callers",
+    "prompt": "Refactor a widely-called function. Use impact_analyze with max_depth 2, inspect truncated/ambiguous warnings, and fall back to broad verification when the graph is incomplete.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Transitive callers considered", "Truncation warning honored with broad verification", "Deterministic recommendation", "No invented test filter"]
+  },
+  {
+    "case_id": "impact-ambiguous-dependencies",
+    "prompt": "Change a symbol whose name occurs in multiple files. Use impact_analyze and treat name-only matches conservatively; recommend broad verification rather than claiming exact coverage.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Ambiguous edges not presented as exact", "Broad verification recommended", "No false coverage claim"]
+  },
+  {
+    "case_id": "impact-no-identifiable-tests",
+    "prompt": "Change code with no identifiable test candidates. Use impact_analyze and fall back to project-level verification with an explicit unknown-coverage reason.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Unknown coverage explicitly reported", "Project-level fallback recommended", "No invented test command"]
+  },
+  {
+    "case_id": "impact-requires-full-verification",
+    "prompt": "Change a deleted file or a file with missing RepoMap coverage. Use impact_analyze, report impact as unknown, and run full verification without claiming focused coverage.",
+    "expected_skills": ["dgc-tool-dev", "dgc-verify"],
+    "acceptance": ["Deleted/missing impact marked unknown", "Full verification executed", "Obligations not marked fulfilled from recommendation alone"]
   }
 ]

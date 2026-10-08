@@ -778,6 +778,17 @@ impl FsTools {
             .await
     }
 
+    /// Current in-memory RepoMap snapshot for read-only analysis.
+    ///
+    /// Returns `None` when the initial build has not populated the shared
+    /// map yet. Unlike `search_repomap`, this never triggers an on-demand
+    /// rebuild: `impact_analyze` is read-only and must not mutate or
+    /// rebuild persistent analysis state as a side effect. Callers report
+    /// a missing map as partial analysis with broader verification.
+    pub async fn current_repomap_snapshot(&self) -> Option<RepoMap> {
+        self.repomap.read().await.clone()
+    }
+
     pub fn plan_write(
         &self,
         items: Vec<plan::PlanItem>,
