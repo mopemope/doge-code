@@ -116,6 +116,7 @@ impl TuiExecutor {
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
             last_user_prompt: None,
+            feedback_submissions: Default::default(),
             deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),
             conversation_history: Arc::new(Mutex::new(crate::llm::ChatHistory::new())), // Initialize conversation history
             session_manager,

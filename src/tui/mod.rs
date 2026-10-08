@@ -44,3 +44,8 @@ mod test_completion;
 mod test_search_navigation;
 
 mod job_messages;
+
+mod review_feedback;
+
+#[cfg(test)]
+mod review_feedback_tests;

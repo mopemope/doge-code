@@ -68,6 +68,22 @@ Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}
 
 Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
 
+### Inline review feedback
+
+`src/features/review_feedback/` owns immutable hunk ranges/content identities and
+typed feedback batches. `src/tui/review_feedback.rs` owns a separate modal editor,
+ephemeral draft and display projection. Comment input takes priority over normal
+prompt shortcuts; saving cannot dispatch an instruction. `FsTools` validates the
+sealed source capture non-destructively before confirmation/dispatch and again
+inside the managed workspace-write job, before model work or directive recording.
+`agent_job.rs` reuses conversation/plan and the existing loop. Generated target
+metadata is assistant evidence; exact comment text is recorded as observed user
+input. Original review context and submitted revision/job identity remain separate
+from the repair capture, so repair rollback cannot undo the source run. Terminal
+failure overrides any preliminary completion display; comments are not resolution
+records. Keep this path typed rather than passing feedback through slash/shell
+routing. No new LLM tool or persistent wire format is introduced.
+
 ### Adding a TUI slash command
 
 1. Implement the handler in `src/tui/commands/handlers/slash_commands/<name>.rs` (see existing files; `help.rs` owns the help listing).

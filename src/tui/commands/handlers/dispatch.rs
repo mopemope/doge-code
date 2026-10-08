@@ -51,6 +51,44 @@ impl CommandHandler for TuiExecutor {
     fn review_payload(&self, id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
         self.tools.review_payload(id)
     }
+    fn validate_review_feedback(
+        &self,
+        batch: &crate::features::review_feedback::FeedbackBatch,
+    ) -> anyhow::Result<()> {
+        if self.jobs.foreground_id().is_some() {
+            anyhow::bail!("Foreground work is running; comments retained.");
+        }
+        anyhow::ensure!(self.client.is_some(), "No model client; comments retained.");
+        self.tools.validate_review_feedback(batch)
+    }
+    fn submit_review_feedback(
+        &mut self,
+        mut batch: crate::features::review_feedback::FeedbackBatch,
+        ui: &mut TuiApp,
+    ) -> anyhow::Result<crate::jobs::JobId> {
+        let key = (batch.id.clone(), batch.revision);
+        anyhow::ensure!(
+            !self.feedback_submissions.contains(&key),
+            "This batch revision was already submitted; comments retained."
+        );
+        self.validate_review_feedback(&batch)?;
+        batch.original_directive_ids = self.tools.review_feedback_directives(&batch)?;
+        if self.ui_tx.is_none() {
+            self.set_ui_tx(ui.sender());
+        }
+        let job = crate::tui::commands::agent_job::spawn_agent_turn(
+            self,
+            ui,
+            "[Review feedback batch]",
+            "Apply the confirmed hunk comments using the existing plan.".into(),
+            false,
+            crate::tui::commands::agent_job::AgentTurnProvenance::ReviewFeedback {
+                batch: Box::new(batch),
+            },
+        )?;
+        self.feedback_submissions.insert(key);
+        Ok(job)
+    }
     fn dismiss_review(&self, id: &str) {
         self.tools.dismiss_review(id);
     }
@@ -206,6 +244,41 @@ impl CommandHandler for TuiExecutor {
     }
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
+        if let Some(id) = crate::jobs::JobId::parse_arg(producer)
+            && let Some(job) = self.jobs.get_snapshot(id)
+            && job.status.is_terminal()
+            && let Some(draft) = ui.review_feedback.as_mut().filter(|d| d.job_id == Some(id))
+        {
+            if job.status == crate::jobs::JobStatus::Failed {
+                draft.outcome = Some(format!(
+                    "Failed: {}. {}",
+                    job.error.as_deref().unwrap_or("Repair job failed"),
+                    draft.outcome.as_deref().unwrap_or("Comments retained.")
+                ));
+            } else if draft.outcome.is_none() {
+                draft.outcome = Some(format!(
+                    "Repair job {}: {}. Comments retained; inspect the full resulting diff.",
+                    id, job.status
+                ));
+            }
+            ui.dirty = true;
+            if ui.latest_agent_job_id == Some(id)
+                && let Some(payload) = self.tools.finish_review_for_job(id)
+            {
+                let review = crate::tui::diff_review::DiffReviewState::from_payload(
+                    crate::tools::provenance::enrich_diff_review_with_evidence(
+                        &self.tools,
+                        payload,
+                    ),
+                );
+                if ui.diff_review.as_ref().and_then(|r| r.review_id.as_ref())
+                    != review.review_id.as_ref()
+                {
+                    ui.feedback_review_arrived(&review);
+                    ui.diff_review = Some(review);
+                }
+            }
+        }
         if !self.handle_evidence_completed(producer, ui)
             && !self.handle_compact_completed(producer, ui)
         {
