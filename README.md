@@ -869,6 +869,10 @@ dgc session delete 0198abcd
 ```
 
 In the TUI, `/session list` shows the same table with the current session marked, and `/session switch <id>` accepts ID prefixes as well.
+A successful `/session switch` or `/session clear` also clears the saved previous
+instruction and its implicit edit target. Before using `/edit-symbol`, submit a
+fresh instruction containing the target `@path:line` or `@path#Lline`. Unsent input
+drafts are retained, and failed transitions preserve the saved input.
 
 Session checkpoints replace `session.json` atomically using a private sibling
 temporary file, with a shared 16 MiB save/read limit. A failure before replacement

@@ -85,6 +85,7 @@ impl TuiExecutor {
                 let id = args[1];
                 match self.switch_to_session(id) {
                     Ok(session_after_switch) => {
+                        self.reset_session_input(ui);
                         ui.clear_log();
                         ui.push_log(format!(
                             "Switched to session: {} ({})",
@@ -165,6 +166,7 @@ impl TuiExecutor {
             }
             "clear" => match self.clear_runtime_conversation() {
                 Ok(outcome) => {
+                    self.reset_session_input(ui);
                     ui.push_log("Cleared current session conversation.");
                     if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed {
                         message,
