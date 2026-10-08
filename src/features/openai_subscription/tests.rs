@@ -2904,18 +2904,87 @@ async fn responses_retry_after_retry_count_boundaries_preserve_original_error() 
     }
 }
 
-#[tokio::test]
-async fn responses_retry_after_long_hint_remains_under_total_deadline() {
-    for hint in ["60", "300"] {
-        let (_server, _temp, mut client) = retry_after_fixture(Some(hint), 1, false).await;
-        client.llm_cfg.request_timeout_ms = 100;
-        let error = client
+async fn assert_long_hint_remains_under_total_deadline(hint: &str) {
+    use tracing::instrument::WithSubscriber;
+    let expected_delay_ms = hint.parse::<u64>().expect("hint seconds") * 1000;
+    let (_server, _temp, mut client) = retry_after_fixture(Some(hint), 1, false).await;
+    // Generous deadline: enough for credential/file + connect init even under
+    // parallel CI load, still far below 60s/300s hints. Removes the 100ms
+    // fixed-timeout race where init alone could exceed the deadline and
+    // produce 0 POSTs (the observed CI flake).
+    client.llm_cfg.request_timeout_ms = 10_000;
+
+    let fmt_capture = crate::test_support::DiagnosticCapture::default();
+    let subscriber = crate::test_support::json_subscriber(&fmt_capture);
+
+    // Spawn so the test can observe retry-wait entry (real time) before
+    // pausing the clock. `OpenAIClient::clone` shares the usage ledger.
+    let task_client = client.clone();
+    let handle = tokio::spawn(async move {
+        task_client
             .chat_once("test-model", vec![user("hi")], None)
+            .with_subscriber(subscriber)
             .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("Responses request deadline exceeded"));
-        assert_eq!(client.usage_snapshot().attempts, 1);
-    }
+    });
+
+    // Real-time phase: first POST must arrive, 503 processed, retry wait
+    // scheduled with the exact server hint. This distinguishes "deadline
+    // during retry wait" (1 POST + event) from "deadline before POST"
+    // (0 POST, no event). Uses robust fmt JSON + numeric parsing.
+    let scheduled =
+        crate::test_support::wait_for_retry_delay(&fmt_capture, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "hint={hint} must emit Responses retry scheduled; logs={}",
+                    fmt_capture.text()
+                )
+            });
+    assert_eq!(
+        scheduled, expected_delay_ms,
+        "hint={hint} must be honoured, never shortened"
+    );
+
+    // Virtual-time phase: advance beyond the generous deadline without
+    // waiting seconds in real time. The 60s/300s retry sleep stays pending;
+    // only the total deadline fires. Test-only clock; production clock
+    // untouched.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
+    let error = handle
+        .await
+        .unwrap_or_else(|_| panic!("hint={hint} task join"))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("Responses request deadline exceeded"),
+        "hint={hint} must report deadline, got: {error:#}"
+    );
+    assert_eq!(
+        client.usage_snapshot().attempts,
+        1,
+        "hint={hint} must send exactly 1 POST"
+    );
+    assert_eq!(
+        client.usage_snapshot().usage_records,
+        0,
+        "hint={hint} must not record provider usage"
+    );
+    assert_eq!(
+        client.usage_snapshot().total_tokens,
+        0,
+        "hint={hint} must not inflate provider total_tokens"
+    );
+    // `_server` drop verifies Exactly(1) POST; no second POST occurred.
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_retry_after_long_hint_60s_remains_under_total_deadline() {
+    assert_long_hint_remains_under_total_deadline("60").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_retry_after_long_hint_300s_remains_under_total_deadline() {
+    assert_long_hint_remains_under_total_deadline("300").await;
 }
 
 #[tokio::test]

@@ -82,4 +82,7 @@ libc = "0.2"
 
 [dev-dependencies]
 httptest = "0.16"
+# Virtual-time helpers (`pause`/`advance`) for deterministic deadline tests.
+# Test-only; production clock code is unchanged.
+tokio = { version = "1", features = ["test-util"] }
 
