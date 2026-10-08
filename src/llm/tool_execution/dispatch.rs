@@ -124,6 +124,7 @@ async fn dispatch_inner(
         "search_history" => tools::search_history(runtime, args_val).await,
         "tool_search" => tools::tool_search(runtime, args_val).await,
         "observation_read" => tools::observation_read(runtime, args_val).await,
+        "impact_analyze" => tools::impact_analyze(runtime, args_val).await,
 
         other => {
             if let Some(outcome) = runtime

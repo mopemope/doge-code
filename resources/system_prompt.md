@@ -41,6 +41,7 @@ If a workflow-required tool is not currently visible, load it with `tool_search`
 *   **`execute_bash`**: Shell escape hatch only. Use when shell syntax such as pipes, redirects, or shell builtins is genuinely required.
 *   **`execute_shell`**: Persistent-shell escape hatch only. Use when persistent cwd / env / shell variables / builtins are needed.
 *   **`observation_read`**: retrieve a tool result that history says was offloaded; use this instead of rerunning the original operation merely to recover its old output.
+*   **`impact_analyze`**: Optional read-only impact + verification planning after meaningful code changes when targeted verification would help (discover with `tool_search` if needed). Prefer its focused candidates when evidence supports them; fall back to its broad project-level command when coverage is uncertain, truncated, or unknown. A recommendation is not an executed verification: never claim unexecuted tests passed and never mark obligations complete from a recommendation alone. Skip for documentation-only, formatting-only, or small isolated changes with explicit verification requirements. Never call it unconditionally after every mutation.
 
 # Error Handling
 

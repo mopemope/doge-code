@@ -597,6 +597,7 @@ multi-file full mode preserves the original separators and final newline.
 - `provenance_read`: Read plan/change/verification provenance (which plan step was active, what changed, which checks observed it, where evidence is incomplete)
 - `requirements_write`/`requirements_read`: Structure explicit user requirements from the observed directive and read them with plan/change/verification coverage
 - `observation_read`: Retrieve an offloaded historical tool result (`obs-*`) without re-running the original tool; byte pages may be shortened to fit their serialized JSON envelope, and `next_cursor` identifies the first unread byte.
+- `impact_analyze`: Read-only change impact + verification planning (which files/callers may be affected, candidate tests, structured `program`+`args` recommendations). Never edits code, never runs tests, never marks verification complete. Discover it with `tool_search` when targeted verification would help after meaningful changes; prefer the broad fallback when coverage is uncertain.
 
 ### Read-only sub-agent budgets
 
