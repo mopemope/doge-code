@@ -1009,4 +1009,48 @@ mod task_output_tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_process_unknown_keys_never_spawn_and_valid_args_run_once() -> Result<()> {
+        use std::{os::unix::fs::PermissionsExt, sync::Arc};
+        let root = tempfile::tempdir()?;
+        let program = root.path().join("fixture-program");
+        let marker = root.path().join("invocations.log");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'ran\\n' >> invocations.log\nprintf '%s\\n' \"$@\"\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+        let cfg = Arc::new(crate::config::AppConfig {
+            project_root: root.path().to_path_buf(),
+            execution: crate::config::ExecutionConfig {
+                allowed_programs: vec![program.display().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let fs_tools = crate::tools::FsTools::new(Arc::new(tokio::sync::RwLock::new(None)), cfg);
+        let runtime =
+            crate::llm::tool_runtime::ToolRuntime::build(&fs_tools, None, "fixture", None).await?;
+        for (key, value) in [
+            ("arguments", serde_json::json!(["wrong"])),
+            ("working_directory", serde_json::json!(root.path())),
+            ("timeout", serde_json::json!(1)),
+        ] {
+            let mut args = serde_json::json!({"program": program, "args": ["intended argument"]});
+            args[key] = value;
+            let error = super::execute_process(&runtime, &args)
+                .await
+                .expect_err("unknown field must fail before spawn");
+            assert!(error.to_string().contains("unknown field"), "{error:#}");
+            assert!(!marker.exists(), "{key} must not launch the fixture");
+        }
+        let args = serde_json::json!({"program": program, "args": ["intended argument"], "cwd": root.path(), "env": {}, "timeout_ms": 5000});
+        let output = super::execute_process(&runtime, &args).await?;
+        assert!(output.is_success, "{:?}", output.value);
+        assert_eq!(output.value["stdout"], "intended argument\n");
+        assert_eq!(std::fs::read_to_string(marker)?, "ran\n");
+        Ok(())
+    }
 }
