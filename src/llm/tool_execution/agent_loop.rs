@@ -26,6 +26,7 @@ use crate::tui::commands::prompt::build_system_prompt;
 
 const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
 const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
+const MAX_TOOL_ARGUMENT_CORRECTIONS: usize = 2;
 
 /// Snapshot observations into the session before returning messages.
 /// History messages flow back to the TUI/session via the return value;
@@ -559,6 +560,7 @@ pub async fn run_agent_loop(
     let mut consecutive_plan_write_no_change_count = 0usize;
     let mut budget_governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
     let mut reactive_guard = ReactiveRetryGuard::new();
+    let mut tool_argument_corrections = 0usize;
     // Client-side prefix-stability diagnostics (observational only).
     // Session-local; no persistence needed.
     let mut previous_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
@@ -1592,6 +1594,36 @@ pub async fn run_agent_loop(
                             }
                         }
                     }
+                }
+
+                if let Some(LlmErrorKind::InvalidToolArguments) = e.downcast_ref::<LlmErrorKind>() {
+                    run_budget.charge_request(
+                        current_estimate,
+                        &ledger_before_request,
+                        &ledger_after_fail,
+                    );
+                    if tool_argument_corrections >= MAX_TOOL_ARGUMENT_CORRECTIONS {
+                        return Err(e.context("tool argument correction limit reached"));
+                    }
+                    tool_argument_corrections += 1;
+                    reasoning_controller.observe_json_recovery();
+                    // Preflight guarantees this failed batch produced no effects.
+                    // Only the sanitized validation summary reaches the model.
+                    history.push(ChatMessage {
+                        provider_state: None,
+                        role: "user".into(),
+                        content: Some(format!(
+                            "Error: {e}. No tools in the rejected batch were executed. Correct the tool arguments using the supplied tool schema, including field names and JSON types, and submit a corrected batch."
+                        )),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    });
+                    if let Some(tx) = &ui_tx {
+                        let _ = tx.send(
+                            "::status:warning:Invalid tool arguments received. Requesting correction...".to_string(),
+                        );
+                    }
+                    continue;
                 }
 
                 if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {

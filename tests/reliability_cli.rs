@@ -624,6 +624,11 @@ fn malformed_or_unadvertised_sibling_never_executes_a_valid_write_prefix() {
         json!({"content":42}),
         json!({"content":"valid","unknown_tool":true}),
     ] {
+        let expected_requests = if malformed.get("unknown_tool").is_some() {
+            1
+        } else {
+            3
+        };
         let project = Project::new(false);
         let existing = project.root.join("keep.txt");
         let prefix = project.root.join("must-not-exist.txt");
@@ -662,8 +667,79 @@ fn malformed_or_unadvertised_sibling_never_executes_a_valid_write_prefix() {
             std::fs::read_to_string(&existing).expect("original"),
             "KEEP USER CONTENT\n"
         );
-        assert_eq!(server.requests.lock().expect("requests").len(), 1);
+        assert_eq!(
+            server.requests.lock().expect("requests").len(),
+            expected_requests
+        );
     }
+}
+
+#[test]
+fn argument_correction_real_cli_rejects_batch_then_writes_only_corrected_target() {
+    let project = Project::new(false);
+    let sibling = project.root.join("invalid-batch-sibling");
+    let target = project.root.join("corrected-target");
+    let sibling_fixture = sibling.clone();
+    let target_fixture = target.clone();
+    let server = Server::new(move |n, request| {
+        if n == 1 {
+            response(
+                "",
+                vec![
+                    call(
+                        "sibling",
+                        "fs_write",
+                        json!({"path":sibling_fixture,"content":"no"}),
+                    ),
+                    call(
+                        "bad",
+                        "fs_write",
+                        json!({"path":target_fixture,"content":17}),
+                    ),
+                ],
+                "tool_calls",
+            )
+        } else if n == 2 {
+            assert!(
+                !sibling_fixture.exists() && !target_fixture.exists(),
+                "entire invalid batch had no effects"
+            );
+            assert!(
+                request["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .last()
+                    .expect("feedback")["content"]
+                    .as_str()
+                    .expect("content")
+                    .contains("schema")
+            );
+            response(
+                "",
+                vec![call(
+                    "corrected",
+                    "fs_write",
+                    json!({"path":target_fixture,"content":"corrected once"}),
+                )],
+                "tool_calls",
+            )
+        } else {
+            response("done", vec![], "stop")
+        }
+    });
+    let result = project.command(&server).output().expect("CLI");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(output_json(&result)["success"], true);
+    assert!(!sibling.exists());
+    assert_eq!(
+        std::fs::read_to_string(target).expect("target"),
+        "corrected once"
+    );
+    assert_eq!(server.requests.lock().expect("requests").len(), 3);
 }
 
 #[test]
