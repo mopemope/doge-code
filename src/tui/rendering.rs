@@ -93,6 +93,8 @@ impl TuiApp {
             self.render_line_selector(f, size);
         } else if self.comment_editor.is_some() || self.feedback_confirmation {
             self.render_feedback_modal(f, size);
+        } else if self.comment_list.is_some() {
+            self.render_comment_list(f, size);
         }
     }
 
@@ -511,7 +513,7 @@ impl TuiApp {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
-            "←/→ file · ↑/↓ scroll · [/] hunk · c hunk comment · l lines · d delete · s confirm · n new · h history · v source · a accept · r rollback · e evidence · q dismiss"
+            "←/→ file · ↑/↓ scroll · [/] hunk · c hunk comment · l lines · m comments · d delete · s confirm · n new · h history · v source · a accept · r rollback · e evidence · q dismiss"
                 .to_string()
         } else {
             format!(
@@ -532,6 +534,145 @@ impl TuiApp {
             ),
         );
         f.render_widget(instructions, layout[footer_idx]);
+    }
+
+    fn render_comment_list(&self, f: &mut Frame, area: Rect) {
+        let Some(list) = &self.comment_list else {
+            return;
+        };
+        f.render_widget(Clear, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length((area.height.saturating_sub(8) / 3).max(3)),
+                Constraint::Min(1),
+                Constraint::Length(5),
+            ])
+            .split(area);
+        let draft = self
+            .review_feedback
+            .as_ref()
+            .filter(|d| d.batch.id == list.batch_id && d.batch.revision == list.revision);
+        let comments = draft.map(|d| d.batch.comments.as_slice()).unwrap_or(&[]);
+        let header = format!(
+            "Saved comments {}/{} | active batch only",
+            if comments.is_empty() {
+                0
+            } else {
+                list.selected + 1
+            },
+            comments.len()
+        );
+        f.render_widget(
+            Paragraph::new(header)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Manage saved comments"),
+                ),
+            parts[0],
+        );
+        let width = parts[1].width.saturating_sub(2) as usize;
+        let mut rows = Vec::new();
+        let mut selected_row = 0;
+        let mut selected_end = 0;
+        for (i, c) in comments.iter().enumerate() {
+            if i == list.selected {
+                selected_row = rows.len();
+            }
+            let preview = c
+                .text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(96)
+                .collect::<String>();
+            let label = format!(
+                "{} {}. {} | {}\n  {}",
+                if i == list.selected { ">" } else { " " },
+                i + 1,
+                c.anchor.path,
+                c.anchor.target_label(),
+                preview
+            );
+            let style = if i == list.selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            rows.extend(
+                crate::tui::review_feedback::wrap_cells(&label, width)
+                    .into_iter()
+                    .map(|s| Line::styled(s, style)),
+            );
+            if i == list.selected {
+                selected_end = rows.len();
+            }
+        }
+        let height = parts[1].height.saturating_sub(2) as usize;
+        let offset = selected_row.min(selected_end.saturating_sub(height));
+        f.render_widget(
+            Paragraph::new(rows.into_iter().skip(offset).collect::<Vec<_>>()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("↑/↓ selects comment"),
+            ),
+            parts[1],
+        );
+        let mut detail = comments
+            .get(list.selected)
+            .map(|c| {
+                format!(
+                    "{} | {}\n{}\n\nComment:\n{}",
+                    c.anchor.path,
+                    c.anchor.target_label(),
+                    c.anchor.target_excerpt(),
+                    c.text
+                )
+            })
+            .unwrap_or_else(|| {
+                "No saved comments. Esc closes; c or l adds comments in review focus.".into()
+            });
+        if let Some(error) = &list.error {
+            detail = format!("Action blocked: {error}\n\n{detail}");
+        }
+        let rows = crate::tui::review_feedback::wrap_cells(
+            &detail,
+            parts[2].width.saturating_sub(2) as usize,
+        );
+        let scroll = list.detail_scroll.min(
+            rows.len()
+                .saturating_sub(parts[2].height.saturating_sub(2) as usize),
+        );
+        f.render_widget(
+            Paragraph::new(
+                rows.into_iter()
+                    .skip(scroll)
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Selected target and complete comment"),
+            ),
+            parts[2],
+        );
+        let help = if list.confirm_delete {
+            "Delete only this selected comment? Enter confirms; Esc keeps it. Files and other comments stay unchanged."
+        } else {
+            "↑/↓ select · Enter jump · e edit · d delete · s batch · Esc close\n←/→ or wheel: detail. Stale targets view only."
+        };
+        let footer = help;
+        f.render_widget(
+            Paragraph::new(footer)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL)),
+            parts[3],
+        );
     }
 
     fn render_line_selector(&self, f: &mut Frame, area: Rect) {
@@ -703,7 +844,7 @@ impl TuiApp {
                     "Blocked: {error} | Esc keeps comments · n new batch · h history · d discards batch · v source/latest"
                 )
             } else {
-                "Enter: submit one repair run (may use several model/tool iterations). Esc: keep editing. n: archive/new batch. h: history. d: discard active batch. v: source/latest. All changes stay applied; repair may change other paths.".into()
+                "Enter: submit one repair run (may use several model/tool iterations). Esc: keep editing. m: manage comments. n: archive/new batch. h: history. d: discard active batch. v: source/latest. All changes stay applied; repair may change other paths.".into()
             };
             f.render_widget(
                 Paragraph::new(help)

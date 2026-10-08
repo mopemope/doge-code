@@ -577,7 +577,10 @@ impl TuiApp {
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {
-                            if self.line_selector.is_some() || self.scroll_feedback_history(-3) {
+                            if self.line_selector.is_some()
+                                || self.scroll_feedback_history(-3)
+                                || self.scroll_comment_list(-3)
+                            {
                             } else if self.key_help_open {
                                 self.scroll_key_help(-3);
                             } else {
@@ -585,7 +588,10 @@ impl TuiApp {
                             }
                         }
                         event::MouseEventKind::ScrollDown => {
-                            if self.line_selector.is_some() || self.scroll_feedback_history(3) {
+                            if self.line_selector.is_some()
+                                || self.scroll_feedback_history(3)
+                                || self.scroll_comment_list(3)
+                            {
                             } else if self.key_help_open {
                                 self.scroll_key_help(3);
                             } else {
@@ -723,6 +729,10 @@ impl TuiApp {
         use crossterm::event::KeyCode;
 
         match key.code {
+            KeyCode::Char('m') if key.kind == event::KeyEventKind::Press => {
+                self.open_comment_list();
+                Ok(true)
+            }
             KeyCode::Char('l') if key.kind == event::KeyEventKind::Press => {
                 self.start_line_selection();
                 Ok(true)
@@ -1897,6 +1907,47 @@ mod tests {
 #[cfg(test)]
 mod inline_feedback_routing_tests {
     use super::*;
+    #[test]
+    fn feedback_comment_list_routes_m_and_consumes_modified_shortcuts() {
+        let mut ui = TuiApp::new_for_test("comments", None, "default");
+        let payload = DiffReviewPayload {
+            session_id: Some("session".into()),
+            review_id: Some("review".into()),
+            reject_reason: None,
+            diff: "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n".into(),
+            files: vec!["a".into()],
+            evidence: vec![],
+            evidence_warnings: vec![],
+        };
+        ui.diff_review = Some(DiffReviewState::from_payload(payload));
+        ui.diff_review_focus = DiffReviewFocus::Review;
+        ui.start_comment();
+        ui.handle_paste("保存済み日本語");
+        ui.save_comment();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.comment_list.is_some());
+        for code in [KeyCode::Char('r'), KeyCode::Char('p')] {
+            ui.handle_ui_key(
+                event::KeyEvent::new(code, KeyModifiers::CONTROL),
+                &mut terminal,
+            )
+            .unwrap();
+        }
+        assert_eq!(ui.input_mode, InputMode::Normal);
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.comment_list.is_none());
+        assert!(!ui.diff_review.as_ref().unwrap().rejectable); // no live handler: view only
+    }
     #[test]
     fn feedback_modal_owns_modified_keys_and_reopens_after_dismissal() {
         let mut ui = TuiApp::new_for_test("feedback", None, "default");
