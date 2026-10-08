@@ -92,7 +92,7 @@ impl TuiApp {
         self.start_comment_at(anchor);
     }
 
-    fn start_comment_at(&mut self, anchor: Anchor) {
+    pub(crate) fn start_comment_at(&mut self, anchor: Anchor) {
         if self
             .review_feedback
             .as_ref()
@@ -211,14 +211,25 @@ impl TuiApp {
             self.push_log("[feedback] Comment exceeds 64 KiB; shorten it before saving.");
             return;
         }
-        draft.batch.comments.retain(|c| c.anchor != editor.anchor);
-        if !text.trim().is_empty() {
+        if let Some(index) = draft
+            .batch
+            .comments
+            .iter()
+            .position(|c| c.anchor == editor.anchor)
+        {
+            if text.trim().is_empty() {
+                draft.batch.comments.remove(index);
+            } else {
+                draft.batch.comments[index].text = text;
+            }
+        } else if !text.trim().is_empty() {
             draft.batch.comments.push(Comment {
                 anchor: editor.anchor,
                 text,
             });
         }
         draft.batch.revision += 1;
+        self.sync_comment_list();
         self.push_log("[feedback] Comment saved locally. No model request was made.");
         self.dirty = true;
     }
@@ -309,7 +320,9 @@ impl TuiApp {
 
     fn prepare_fresh_feedback(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.comment_editor.is_none() && self.line_selector.is_none(),
+            self.comment_editor.is_none()
+                && self.line_selector.is_none()
+                && self.comment_list.is_none(),
             "Save or cancel comment editing first; comments retained."
         );
         anyhow::ensure!(
@@ -472,6 +485,9 @@ impl TuiApp {
         if self.handle_line_selection_key(key) {
             return true;
         }
+        if self.comment_editor.is_none() && self.handle_comment_list_key(key) {
+            return true;
+        }
         if self.comment_editor.is_none() && !self.feedback_confirmation {
             return false;
         }
@@ -501,6 +517,11 @@ impl TuiApp {
                 }
                 KeyCode::Enter if key.kind == KeyEventKind::Press && key.modifiers.is_empty() => {
                     self.submit_feedback()
+                }
+                KeyCode::Char('m')
+                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+                {
+                    self.open_comment_list()
                 }
                 KeyCode::Char('n')
                     if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
@@ -570,6 +591,7 @@ impl TuiApp {
         } else if !self.feedback_confirmation
             && self.feedback_history_view.is_none()
             && self.line_selector.is_none()
+            && self.comment_list.is_none()
             && self.diff_review_focus == DiffReviewFocus::Input
             && self.input_mode == crate::tui::state::InputMode::Normal
         {
