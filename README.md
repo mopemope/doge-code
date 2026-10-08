@@ -1306,6 +1306,12 @@ search_result_limit = 5  # 1-10
 
 ### Preflight Context Governor
 
+Context calibration uses the prompt usage reported by the current validated
+response. Missing or zero prompt usage preserves the previous accurate sample;
+it does not reuse a shared counter from another response. Native compaction
+resets calibration even when usage is missing. Consumed usage and missing-usage
+budget estimates remain accounted separately.
+
 - Before each request Doge-Code measures the current footprint
   (messages + active tool schemas + runtime overlay + overhead) and reduces
   pressure as overlay drop, then recoverable Observation Store offload, then

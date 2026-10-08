@@ -1,6 +1,8 @@
 use crate::config::{ReasoningEffort, ReasoningMode};
 use crate::llm::LlmErrorKind;
-use crate::llm::chat_with_tools::{ChatResponseWithTools, ChoiceMessageWithTools};
+use crate::llm::chat_with_tools::{
+    ChatResponseWithTools, ChoiceMessageWithTools, ToolResponseWithUsage,
+};
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::message_utils::clean_json_text;
 use crate::llm::reasoning::resolve_hint_for_support;
@@ -105,6 +107,34 @@ pub async fn chat_tools_once_with_activation(
     cancel: Option<tokio_util::sync::CancellationToken>,
     ui_tx: Option<Sender<String>>,
 ) -> Result<ChoiceMessageWithTools> {
+    chat_tools_once_with_activation_and_usage(
+        client,
+        model,
+        messages,
+        base_tools,
+        active_tools,
+        reasoning_effort,
+        reasoning_mode,
+        cancel,
+        ui_tx,
+    )
+    .await
+    .map(|response| response.message)
+}
+
+/// Response-local usage for main-agent context calibration.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn chat_tools_once_with_activation_and_usage(
+    client: &OpenAIClient,
+    model: &str,
+    messages: &[ChatMessage],
+    base_tools: &[ToolDef],
+    active_tools: &[ToolDef],
+    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_mode: ReasoningMode,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    ui_tx: Option<Sender<String>>,
+) -> Result<ToolResponseWithUsage> {
     crate::llm::history::validate_tool_blocks(messages, false)?;
     if let Some(auth) = &client.subscription {
         let capabilities = crate::llm::capabilities::resolve(
@@ -116,28 +146,29 @@ pub async fn chat_tools_once_with_activation(
         );
         let effort =
             resolve_hint_for_support(capabilities.reasoning, &reasoning_mode, reasoning_effort);
-        let message = crate::features::openai_subscription::responses::infer_with_activation(
-            client,
-            auth,
-            model,
-            messages,
-            base_tools,
-            active_tools,
-            effort,
-            cancel.unwrap_or_default(),
-        )
-        .await
-        .map_err(|error| {
-            if error
-                .downcast_ref::<crate::features::openai_subscription::ProviderError>()
-                .is_some_and(|provider| is_context_length_exceeded_code(&provider.code))
-            {
-                error.context(LlmErrorKind::ContextLengthExceeded)
-            } else {
-                error
-            }
-        })?;
-        validate_tool_message_with_activation(&message, base_tools, active_tools)?;
+        let message =
+            crate::features::openai_subscription::responses::infer_with_activation_and_usage(
+                client,
+                auth,
+                model,
+                messages,
+                base_tools,
+                active_tools,
+                effort,
+                cancel.unwrap_or_default(),
+            )
+            .await
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<crate::features::openai_subscription::ProviderError>()
+                    .is_some_and(|provider| is_context_length_exceeded_code(&provider.code))
+                {
+                    error.context(LlmErrorKind::ContextLengthExceeded)
+                } else {
+                    error
+                }
+            })?;
+        validate_tool_message_with_activation(&message.message, base_tools, active_tools)?;
         return Ok(message);
     }
     anyhow::ensure!(
@@ -247,7 +278,7 @@ async fn chat_tools_once_attempt(
     reasoning_effort: Option<ReasoningEffort>,
     reasoning_mode: ReasoningMode,
     cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Result<ChoiceMessageWithTools, RequestAttemptFailure> {
+) -> Result<ToolResponseWithUsage, RequestAttemptFailure> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 
     let url = client.endpoint();
@@ -502,6 +533,7 @@ async fn chat_tools_once_attempt(
     if let Some(usage) = &body.usage {
         client.record_usage(usage);
     }
+    let prompt_tokens = body.usage.as_ref().map(|usage| usage.prompt_tokens);
     let usage_present = body.usage.is_some();
     let choice_count = body.choices.len();
 
@@ -554,7 +586,10 @@ async fn chat_tools_once_attempt(
             "llm chat_tools_once response"
         );
     }
-    Ok(msg.message)
+    Ok(ToolResponseWithUsage {
+        message: msg.message,
+        prompt_tokens,
+    })
 }
 
 /// One preflight for both provider protocols, before any batch sibling executes.
@@ -663,6 +698,7 @@ async fn chat_tools_once_inner(
         cancel,
     )
     .await
+    .map(|response| response.message)
     .map_err(|failure| failure.source)
 }
 
@@ -676,6 +712,100 @@ mod tests {
     use crate::llm::tool_def::default_tools_def;
     use crate::llm::types::{ToolDef, ToolFunctionDef};
     use httptest::{Expectation, matchers::*, responders::*};
+
+    #[tokio::test]
+    async fn usage_calibration_chat_metadata_is_response_local_across_missing_zero_and_counter_overwrite()
+     {
+        let mut used = assistant_done_response();
+        used["usage"] =
+            serde_json::json!({"prompt_tokens":12,"completion_tokens":3,"total_tokens":15});
+        let missing = assistant_done_response();
+        let mut zero = assistant_done_response();
+        zero["usage"] =
+            serde_json::json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0});
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(3)
+                .respond_with(httptest::cycle![
+                    json_encoded(used),
+                    json_encoded(missing),
+                    json_encoded(zero)
+                ]),
+        );
+        let client = OpenAIClient::new(server.url_str(""), "fixture").expect("client");
+        let mut gov = crate::llm::context_budget::ContextBudgetGovernor::new(Default::default());
+        let fp = crate::llm::context_budget::RequestFootprint::new(1000, 0, 0);
+        for expected in [Some(12), None, Some(0)] {
+            let response = chat_tools_once_with_activation_and_usage(
+                &client,
+                "fixture",
+                &user_message(),
+                &[],
+                &[],
+                None,
+                ReasoningMode::Off,
+                None,
+                None,
+            )
+            .await
+            .expect("response");
+            assert_eq!(response.prompt_tokens, expected);
+            assert_eq!(response.message.content.as_deref(), Some("done"));
+            client.set_prompt_tokens(999_999);
+            gov.observe_response_usage(Some(fp), response.prompt_tokens, false);
+            assert_eq!(
+                gov.previous_usage()
+                    .expect("first accurate sample")
+                    .actual_prompt_tokens,
+                12
+            );
+        }
+        let usage = client.usage_snapshot();
+        assert_eq!(usage.attempts, 3);
+        assert_eq!(usage.usage_records, 2);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn usage_calibration_retry_returns_only_successful_response_usage() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let mut response = assistant_done_response();
+        response["usage"] =
+            serde_json::json!({"prompt_tokens":123,"completion_tokens":4,"total_tokens":127});
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(2)
+                .respond_with(httptest::cycle![status_code(503), json_encoded(response)]),
+        );
+        let client = OpenAIClient::new(server.url_str(""), "fixture")
+            .expect("client")
+            .with_llm_config(crate::config::LlmConfig {
+                max_retries: 1,
+                retry_base_ms: 1,
+                retry_jitter_ms: 0,
+                ..Default::default()
+            });
+        client.set_prompt_tokens(999_999);
+        let response = chat_tools_once_with_activation_and_usage(
+            &client,
+            "fixture",
+            &user_message(),
+            &[],
+            &[],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("retried response");
+        assert_eq!(response.prompt_tokens, Some(123));
+        let usage = client.usage_snapshot();
+        assert_eq!(usage.attempts, 2);
+        assert_eq!(usage.usage_records, 1);
+        assert_eq!(usage.total_tokens, 127);
+    }
 
     #[test]
     fn invalid_argument_classification_is_sanitized_for_syntax_type_and_object_checks() {

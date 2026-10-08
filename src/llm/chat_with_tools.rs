@@ -28,6 +28,13 @@ pub struct ChoiceMessageWithTools {
     pub tool_calls: Vec<ToolCall>,
 }
 
+/// Validated response and usage from that exact response, never shared counters.
+#[derive(Debug)]
+pub(crate) struct ToolResponseWithUsage {
+    pub message: ChoiceMessageWithTools,
+    pub prompt_tokens: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoiceWithTools {
     pub index: usize,

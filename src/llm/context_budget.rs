@@ -326,13 +326,30 @@ impl ContextBudgetGovernor {
     }
 
     /// Record the actual provider usage for the footprint just sent.
-    /// Call immediately after a successful response, before sub-agent
-    /// execution can overwrite the shared per-request counter.
+    /// Zero is not a useful calibration sample; preserve the previous sample.
     pub fn observe_actual(&mut self, footprint: RequestFootprint, prompt_tokens: u32) {
+        if prompt_tokens == 0 {
+            return;
+        }
         self.previous_usage = Some(ObservedRequestUsage {
             footprint_bytes: footprint.total_json_bytes,
             actual_prompt_tokens: prompt_tokens as u64,
         });
+    }
+
+    /// Calibrate only from usage attached to this validated response. A native
+    /// compaction boundary invalidates the pre-request footprint even with usage.
+    pub fn observe_response_usage(
+        &mut self,
+        footprint: Option<RequestFootprint>,
+        prompt_tokens: Option<u32>,
+        native_compacted: bool,
+    ) {
+        if native_compacted {
+            self.reset_after_native_compaction();
+        } else if let (Some(footprint), Some(prompt_tokens)) = (footprint, prompt_tokens) {
+            self.observe_actual(footprint, prompt_tokens);
+        }
     }
 
     /// Reset calibration after a native server-side compaction boundary.
@@ -581,6 +598,42 @@ mod tests {
         assert_eq!(heuristic_estimate(0), 512);
         assert_eq!(heuristic_estimate(1), 1 + 512);
         assert_eq!(heuristic_estimate(4), 2 + 512);
+    }
+
+    #[test]
+    fn usage_calibration_missing_zero_and_unmeasured_samples_preserve_accurate_calibration() {
+        let fp = RequestFootprint::new(10_000, 0, 0);
+        let mut gov = governor();
+        gov.observe_response_usage(Some(fp), None, false);
+        gov.observe_actual(fp, 0);
+        assert_eq!(gov.estimate(fp).source, TokenEstimateSource::Heuristic);
+        gov.observe_response_usage(Some(fp), Some(12_000), false);
+        let previous = gov.previous_usage();
+        for (footprint, tokens) in [(Some(fp), None), (Some(fp), Some(0)), (None, Some(99_000))] {
+            gov.observe_response_usage(footprint, tokens, false);
+            assert_eq!(gov.previous_usage(), previous);
+        }
+        assert_eq!(gov.estimate(fp).source, TokenEstimateSource::Calibrated);
+    }
+
+    #[test]
+    fn usage_calibration_native_boundary_resets_before_any_response_sample() {
+        let fp = RequestFootprint::new(10_000, 0, 0);
+        for tokens in [None, Some(0), Some(12_000)] {
+            let mut gov = governor();
+            gov.observe_actual(fp, 12_000);
+            gov.observe_response_usage(Some(fp), tokens, true);
+            assert!(gov.previous_usage().is_none());
+            gov.observe_response_usage(Some(fp), None, false);
+            assert_eq!(gov.estimate(fp).source, TokenEstimateSource::Heuristic);
+            gov.observe_response_usage(Some(fp), Some(1000), false);
+            assert_eq!(
+                gov.previous_usage()
+                    .expect("fresh sample")
+                    .actual_prompt_tokens,
+                1000
+            );
+        }
     }
 
     #[test]
