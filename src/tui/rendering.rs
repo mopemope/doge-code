@@ -87,6 +87,9 @@ impl TuiApp {
         if self.key_help_open {
             self.render_key_help(f, chunks[1]);
         }
+        if self.comment_editor.is_some() || self.feedback_confirmation {
+            self.render_feedback_modal(f, size);
+        }
     }
 
     fn render_status_line(&self, f: &mut Frame, area: Rect, model: Option<&str>, theme: &Theme) {
@@ -362,6 +365,8 @@ impl TuiApp {
         // the event loop can account for the visible window.
         self.diff_viewport_height
             .set(layout[diff_idx].height.saturating_sub(2) as usize);
+        self.diff_viewport_width
+            .set(layout[diff_idx].width.saturating_sub(2) as usize);
 
         // file list
         let items: Vec<ListItem> = review
@@ -370,6 +375,13 @@ impl TuiApp {
             .enumerate()
             .map(|(idx, file)| {
                 let mut label = file.path.clone();
+                if self.review_feedback.as_ref().is_some_and(|d| {
+                    d.repair_review_id == review.review_id
+                        && d.repair_review_id.is_some()
+                        && !d.batch.comments.iter().any(|c| c.anchor.path == file.path)
+                }) {
+                    label.push_str(" [outside comments]");
+                }
                 let additions = file.additions();
                 let removals = file.removals();
                 if additions > 0 || removals > 0 {
@@ -391,7 +403,8 @@ impl TuiApp {
             .border_style(theme.border_style)
             .title("Changed Files (←/→ to focus)");
         let files_list = List::new(items).block(files_block);
-        f.render_widget(files_list, layout[0]);
+        let mut file_state = ListState::default().with_selected(Some(review.selected));
+        f.render_stateful_widget(files_list, layout[0], &mut file_state);
 
         // diff content (with compact evidence summary when pane hidden)
         let diff_title = if show_evidence {
@@ -401,30 +414,57 @@ impl TuiApp {
         } else {
             "Diff Preview (↑/↓ scroll)".to_string()
         };
+        let diff_title = if let Some(draft) = self
+            .review_feedback
+            .as_ref()
+            .filter(|d| d.repair_review_id == review.review_id && d.repair_review_id.is_some())
+        {
+            let outside = review
+                .files
+                .iter()
+                .filter(|f| !draft.batch.comments.iter().any(|c| c.anchor.path == f.path))
+                .count();
+            format!(
+                "Repair | outside commented paths: {outside} | batch {}",
+                draft.batch.id
+            )
+        } else {
+            diff_title
+        };
         let diff_block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style)
             .title(diff_title);
 
         if let Some(file) = review.files.get(review.selected) {
-            let diff_lines: Vec<Line> = file
-                .lines
+            let projection = self.diff_projection();
+            let diff_lines: Vec<Line> = projection
                 .iter()
-                .map(|diff_line| {
-                    let style = match diff_line.kind {
+                .map(|row| {
+                    let mut style = match row.kind {
                         DiffLineKind::Header => Style::default().fg(Color::Cyan),
                         DiffLineKind::FileMeta => Style::default().fg(Color::Magenta),
                         DiffLineKind::HunkHeader => Style::default().fg(Color::Yellow),
                         DiffLineKind::Addition => Style::default().fg(Color::Green),
                         DiffLineKind::Removal => Style::default().fg(Color::Red),
                         DiffLineKind::Context => Style::default().fg(Color::DarkGray),
-                        DiffLineKind::Other => Style::default(),
+                        DiffLineKind::Other => Style::default().fg(Color::Cyan),
                     };
-                    Line::from(Span::styled(diff_line.content.clone(), style))
+                    if row.selected {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    Line::from(Span::styled(row.content.clone(), style))
                 })
                 .collect();
 
-            let scroll = file.scroll.min(u16::MAX as usize) as u16;
+            let scroll = file
+                .scroll
+                .min(
+                    projection
+                        .len()
+                        .saturating_sub(layout[diff_idx].height.saturating_sub(2) as usize),
+                )
+                .min(u16::MAX as usize) as u16;
             let paragraph = Paragraph::new(diff_lines)
                 .block(diff_block)
                 .scroll((scroll, 0));
@@ -467,7 +507,7 @@ impl TuiApp {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
-            "Review changes: ↑/↓ scroll, PgUp/PgDn fast, ←/→ file, e evidence, a accept, r reject, q dismiss"
+            "←/→ file · ↑/↓ scroll · [/] hunk · c comment · d delete · s confirm · v source · a accept · r rollback · e evidence · q dismiss"
                 .to_string()
         } else {
             format!(
@@ -488,6 +528,116 @@ impl TuiApp {
             ),
         );
         f.render_widget(instructions, layout[footer_idx]);
+    }
+
+    fn render_feedback_modal(&self, f: &mut Frame, area: Rect) {
+        f.render_widget(Clear, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(1),
+                Constraint::Length(4),
+            ])
+            .split(area);
+        if let Some(editor) = &self.comment_editor {
+            let a = &editor.anchor;
+            let heading = format!(
+                "Comment: {} | old {},{} → new {},{}",
+                a.path, a.hunk.old.start, a.hunk.old.count, a.hunk.new.start, a.hunk.new.count
+            );
+            f.render_widget(
+                Paragraph::new(heading)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Hunk comment (saved locally)"),
+                    ),
+                parts[0],
+            );
+            let body = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(parts[1]);
+            f.render_widget(
+                Paragraph::new(editor.anchor.hunk.excerpt.clone())
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(Block::default().borders(Borders::ALL).title("Source hunk")),
+                body[0],
+            );
+            f.render_widget(&editor.textarea, body[1]);
+            f.render_widget(Paragraph::new("Enter saves (empty deletes) · Alt+Enter newline · Esc cancels editing. Saving never invokes AI; ordinary input is preserved.").wrap(ratatui::widgets::Wrap{trim:false}).block(Block::default().borders(Borders::ALL)),parts[2]);
+        } else if let Some(draft) = &self.review_feedback {
+            let title = format!(
+                "Confirm {} comments | batch {} revision {} | source {}",
+                draft.batch.comments.len(),
+                draft.batch.id,
+                draft.batch.revision,
+                draft.batch.source.review_id.as_deref().unwrap_or("unknown")
+            );
+            f.render_widget(
+                Paragraph::new(title)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("One batch repair"),
+                    ),
+                parts[0],
+            );
+            let mut text = String::new();
+            for c in &draft.batch.comments {
+                text.push_str(&format!(
+                    "{} | old {},{} → new {},{}\n{}\n\n",
+                    c.anchor.path,
+                    c.anchor.hunk.old.start,
+                    c.anchor.hunk.old.count,
+                    c.anchor.hunk.new.start,
+                    c.anchor.hunk.new.count,
+                    c.text
+                ));
+            }
+            if let Some(outcome) = &draft.outcome {
+                text.push_str(outcome);
+                text.push('\n');
+            }
+            let rows = crate::tui::review_feedback::wrap_cells(
+                &text,
+                parts[1].width.saturating_sub(2) as usize,
+            );
+            let scroll = self.feedback_confirmation_scroll.min(
+                rows.len()
+                    .saturating_sub(parts[1].height.saturating_sub(2) as usize),
+            );
+            f.render_widget(
+                Paragraph::new(
+                    rows.into_iter()
+                        .skip(scroll)
+                        .map(Line::from)
+                        .collect::<Vec<_>>(),
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("All saved comments · ↑/↓ or PgUp/PgDn"),
+                ),
+                parts[1],
+            );
+            let help = if let Some(error) = &self.feedback_error {
+                format!(
+                    "Blocked: {error} | Esc keeps comments · d discards batch · v source/latest"
+                )
+            } else {
+                "Enter: submit one repair run (may use several model/tool iterations). Esc: keep editing. d: discard batch. v: source/latest. All changes stay applied; repair may change other paths.".into()
+            };
+            f.render_widget(
+                Paragraph::new(help)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(Block::default().borders(Borders::ALL)),
+                parts[2],
+            );
+        }
     }
 
     fn evidence_lines(review: &crate::tui::diff_review::DiffReviewState) -> Vec<Line<'static>> {

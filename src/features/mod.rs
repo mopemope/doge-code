@@ -15,3 +15,5 @@ pub mod worktree_manager;
 pub mod openai_subscription;
 
 pub mod human_review;
+
+pub mod review_feedback;

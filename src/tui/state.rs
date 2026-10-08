@@ -297,6 +297,12 @@ pub struct TuiApp {
     pub last_heartbeat: Option<std::time::Instant>,
     // Diff review panel state (populated from `::diff_review:` agent messages)
     pub diff_review: Option<DiffReviewState>,
+    pub(crate) review_feedback: Option<crate::tui::review_feedback::FeedbackDraft>,
+    pub(crate) comment_editor: Option<crate::tui::review_feedback::CommentEditor>,
+    pub(crate) feedback_confirmation: bool,
+    pub(crate) feedback_confirmation_scroll: usize,
+    pub(crate) feedback_error: Option<String>,
+    pub(crate) diff_viewport_width: std::cell::Cell<usize>,
     pub diff_review_focus: DiffReviewFocus,
     /// Height of the diff preview viewport, updated during rendering.
     /// Cell because rendering only has `&self`.
@@ -546,6 +552,12 @@ impl TuiApp {
             task_queue: VecDeque::new(),
             last_heartbeat: None,
             diff_review: None,
+            review_feedback: None,
+            comment_editor: None,
+            feedback_confirmation: false,
+            feedback_confirmation_scroll: 0,
+            feedback_error: None,
+            diff_viewport_width: std::cell::Cell::new(40),
             diff_review_focus: DiffReviewFocus::Input,
             diff_viewport_height: std::cell::Cell::new(0),
             diff_rejected_pending: false,
@@ -1038,7 +1050,12 @@ impl TuiApp {
                 if self._mouse_capture.is_some() {
                     let _ = execute!(stdout, crossterm::event::DisableMouseCapture);
                 }
-                let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+                let _ = execute!(
+                    stdout,
+                    terminal::LeaveAlternateScreen,
+                    crossterm::event::DisableBracketedPaste,
+                    cursor::Show
+                );
                 let _ = terminal::disable_raw_mode();
                 // Mouse capture is automatically disabled when the guard is dropped
                 let _ = self._mouse_capture.take();
@@ -1053,7 +1070,8 @@ impl TuiApp {
             stdout,
             terminal::EnterAlternateScreen,
             cursor::Hide,
-            mouse_capture
+            mouse_capture,
+            crossterm::event::EnableBracketedPaste
         )?;
 
         tracing::info!("TUI initialized with mouse capture enabled");

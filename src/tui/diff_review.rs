@@ -2,6 +2,7 @@ use crate::diff_review::{DiffFileEvidence, DiffReviewPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffReviewState {
+    pub source: DiffReviewPayload,
     pub session_id: Option<String>,
     pub review_id: Option<String>,
     pub reject_reason: Option<String>,
@@ -20,6 +21,7 @@ pub struct DiffReviewState {
 
 impl DiffReviewState {
     pub fn from_payload(payload: DiffReviewPayload) -> Self {
+        let source = payload.clone();
         let rejectable = payload.review_id.is_some()
             && payload.reject_reason.is_none()
             && !payload.files.is_empty();
@@ -69,6 +71,16 @@ impl DiffReviewState {
             files.push(DiffFileState::new("workspace".to_string()));
         }
 
+        for file in &mut files {
+            file.hunks = crate::features::review_feedback::parse_hunks(
+                &file
+                    .lines
+                    .iter()
+                    .map(|l| l.content.clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+
         // Attach evidence by exact path match.
         let mut evidence_by_path: std::collections::HashMap<String, DiffFileEvidence> =
             std::collections::HashMap::new();
@@ -82,6 +94,7 @@ impl DiffReviewState {
         }
 
         Self {
+            source,
             session_id: payload.session_id,
             review_id: payload.review_id,
             reject_reason: payload.reject_reason,
@@ -134,6 +147,8 @@ pub struct DiffFileState {
     pub lines: Vec<DiffLine>,
     pub scroll: usize,
     pub evidence: Option<DiffFileEvidence>,
+    pub hunks: Vec<crate::features::review_feedback::Hunk>,
+    pub selected_hunk: usize,
 }
 
 impl DiffFileState {
@@ -143,6 +158,8 @@ impl DiffFileState {
             lines: Vec::new(),
             scroll: 0,
             evidence: None,
+            hunks: Vec::new(),
+            selected_hunk: 0,
         }
     }
 

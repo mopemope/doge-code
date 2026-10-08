@@ -1161,8 +1161,52 @@ After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatica
   - `a` — accept changes (keep them applied)
   - `r` — restore this review’s captured pre-edit contents, preserving Git’s index. Only files captured as missing before creation are removed. The agent is notified of restored changes on your next instruction
   - `q` / `Esc` — dismiss the panel (changes remain applied). During rollback, Esc requests cancellation and the panel stays open until the result; accept/dismiss are disabled
+  - `[` / `]` — select the previous/next supported hunk (old and new line numbers are shown)
+  - `c` — add or edit a comment on the selected hunk; `d` deletes its saved comment
+  - `s` — review all saved comments and explicitly confirm one batch repair
+  - `v` — toggle the retained source review and latest resulting review when a feedback draft exists
   - `←`/`→` — switch between changed files
   - `↑`/`↓` — scroll; `PgUp`/`PgDn` — fast scroll; `Home`/`End` — jump to top/bottom
+
+### Hunk comments and batch repair
+
+With review focus (`F6`), select a file with `←`/`→`, a hunk with `[`/`]`, then
+press `c`. The separate comment editor displays the path, old/new ranges, and
+source hunk. Japanese/Unicode input and bracketed paste are supported. `Enter`
+saves locally, `Alt+Enter` inserts a newline, and `Esc` cancels editing while
+keeping the previously saved comment. Saving an empty comment deletes it. The
+ordinary prompt draft is preserved, and saving never calls a model.
+
+Comments can span multiple files and hunks. Press `s` to inspect the complete
+batch (scroll with arrows or page keys). `Enter` explicitly starts one repair
+run using the current conversation and plan; `Esc` keeps the comments for more
+editing. `d` on this confirmation screen explicitly discards the whole batch;
+`v` returns to the retained source/latest review. A repair run can contain several
+model/tool iterations; this is not a promise of one API call or fixed cost.
+
+Original changes stay applied before repair. Comments are anchored to their
+source session/review, path, old/new ranges, and hunk identity. All captured source
+files must still match their exact post-edit snapshots, both at confirmation and
+after the managed job acquires the workspace write gate. External changes, a new
+review/session, expired capture, rollback or foreground work block stale submission
+and retain the text. Old-side coordinates remain available for deletion hunks;
+malformed, combined, binary or unsupported hunks remain viewable without repair
+targeting. Comments are never automatically reattached by line number.
+
+Inspect the complete repair diff, including the count of files outside commented
+paths. Existing tool permissions still apply; uncommented files/lines are not
+immutable. Rollback on that diff undoes this repair run, preserving the original
+changes. Cancellation, errors and resource-budget stops retain comments and show
+captured partial changes. Job completion does not mark comments resolved.
+Duplicate submission of the same batch revision is blocked. After dismissing the
+panel, `F6` reopens the retained source for viewing. `s` remains available
+to inspect saved text; `v` switches source/latest diff. Accept/dismiss expires the
+active capture, so retained comments cannot then be submitted against it.
+
+Drafts are memory-local and do not survive restart. Initial limits are 128
+comments, 64 KiB of comment text and 128 KiB of selected hunk context. Arbitrary
+line ranges, automatic re-anchoring and strict write confinement are outside this
+initial version. Review receipts do not cover shell/remote changes.
 
 Reject runs as a foreground workspace-write job. Before any restoration, every
 captured target must still match its reviewed contents and have the expected file
