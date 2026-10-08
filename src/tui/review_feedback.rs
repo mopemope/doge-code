@@ -17,6 +17,44 @@ pub struct FeedbackDraft {
     pub stale: bool,
 }
 
+impl FeedbackDraft {
+    pub(crate) fn empty(source: crate::tui::diff_review::DiffReviewState) -> Self {
+        Self {
+            batch: FeedbackBatch {
+                id: uuid::Uuid::now_v7().to_string(),
+                revision: 0,
+                source: source.source.clone(),
+                comments: vec![],
+                original_directive_ids: vec![],
+            },
+            source,
+            latest_review: None,
+            job_id: None,
+            submitted_revision: None,
+            repair_review_id: None,
+            outcome: None,
+            stale: false,
+        }
+    }
+    fn archived(&self) -> crate::features::review_feedback::history::ArchivedFeedback {
+        crate::features::review_feedback::history::ArchivedFeedback {
+            batch: self.batch.clone(),
+            job_id: self.job_id,
+            submitted_revision: self.submitted_revision,
+            repair_review_id: self.repair_review_id.clone(),
+            outcome: self.outcome.clone(),
+            stale: self.stale,
+        }
+    }
+}
+
+pub struct HistoryView {
+    pub selected: usize,
+    pub scroll: usize,
+    pub source: bool,
+    pub confirm_delete: bool,
+}
+
 pub struct CommentEditor {
     pub anchor: Anchor,
     pub textarea: TextArea<'static>,
@@ -49,7 +87,7 @@ impl TuiApp {
             .as_ref()
             .is_some_and(|d| d.batch.source.review_id.as_ref() != Some(&anchor.review_id))
         {
-            self.push_log("[feedback] Saved comments belong to another review. s opens them; d on confirmation explicitly discards the batch.");
+            self.push_log("[feedback] Saved comments belong to another review. n archives them and starts an empty batch on this review; h browses history. s inspects the active comments.");
             return;
         }
         if self.foreground_busy() {
@@ -57,27 +95,10 @@ impl TuiApp {
             return;
         }
         if self.review_feedback.is_none() {
-            let source = self
-                .diff_review
-                .as_ref()
-                .expect("anchor has review")
-                .clone();
-            self.review_feedback = Some(FeedbackDraft {
-                batch: FeedbackBatch {
-                    id: uuid::Uuid::now_v7().to_string(),
-                    revision: 0,
-                    source: source.source.clone(),
-                    comments: vec![],
-                    original_directive_ids: Vec::new(),
-                },
-                source,
-                latest_review: None,
-                job_id: None,
-                submitted_revision: None,
-                repair_review_id: None,
-                outcome: None,
-                stale: false,
-            });
+            let Some(source) = self.diff_review.as_ref().cloned() else {
+                return;
+            };
+            self.review_feedback = Some(FeedbackDraft::empty(source));
         }
         let text = self
             .review_feedback
@@ -145,7 +166,7 @@ impl TuiApp {
             || self.diff_review.as_ref().and_then(|r| r.review_id.as_ref())
                 != draft.batch.source.review_id.as_ref()
         {
-            return Some("Another review arrived; saved comments cannot be reattached. Inspect or discard this batch explicitly.".into());
+            return Some("Another review arrived; saved comments cannot be reattached. n archives this batch and starts a new one on the current live review.".into());
         }
         if self.foreground_busy() || self.diff_review.as_ref().is_some_and(|r| r.rejecting) {
             return Some("Foreground work/rollback is running. Wait before submitting.".into());
@@ -189,8 +210,178 @@ impl TuiApp {
         self.dirty = true;
     }
 
+    /// Archive only after validating the current source; no model/directive dispatch.
+    pub(crate) fn start_fresh_feedback(&mut self) {
+        let result = self.prepare_fresh_feedback();
+        if let Err(error) = result {
+            self.feedback_error = Some(error.to_string());
+            self.push_log(format!("[feedback] {error}"));
+        }
+        self.dirty = true;
+    }
+
+    fn prepare_fresh_feedback(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.comment_editor.is_none(),
+            "Save or cancel comment editing first; comments retained."
+        );
+        anyhow::ensure!(
+            !self.foreground_busy(),
+            "Foreground work is running; comments retained."
+        );
+        let source = self
+            .diff_review
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No current review; comments retained."))?;
+        anyhow::ensure!(
+            source.rejectable
+                && !source.rejecting
+                && source.files.iter().any(|f| !f.hunks.is_empty()),
+            "Current review has no available repair capture/hunks; comments retained."
+        );
+        if let Some(draft) = &self.review_feedback {
+            anyhow::ensure!(
+                source.review_id != draft.batch.source.review_id,
+                "This batch already belongs to the current review. Continue with c; comments retained."
+            );
+        }
+        self.handler
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No handler; comments retained."))?
+            .validate_review_feedback_source(&source.source)?;
+        let source = source.clone();
+        if let Some(draft) = &self.review_feedback {
+            self.feedback_history.archive(draft.archived())?;
+        }
+        self.review_feedback = Some(FeedbackDraft::empty(source));
+        self.feedback_confirmation = false;
+        self.feedback_error = None;
+        self.diff_review_focus = DiffReviewFocus::Review;
+        self.push_log("[feedback] Empty batch attached to current review. Previous comments stay read-only in h history. c adds new comments; no model request was made.");
+        Ok(())
+    }
+
+    pub(crate) fn open_feedback_history(&mut self) {
+        self.feedback_history_view = Some(HistoryView {
+            selected: self.feedback_history.len().saturating_sub(1),
+            scroll: 0,
+            source: false,
+            confirm_delete: false,
+        });
+        self.dirty = true;
+    }
+
+    fn handle_feedback_history_key(&mut self, key: KeyEvent) -> bool {
+        let Some(view) = self.feedback_history_view.as_mut() else {
+            return false;
+        };
+        if key.kind == KeyEventKind::Release {
+            return true;
+        }
+        if view.confirm_delete {
+            if key.kind == KeyEventKind::Press && key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Esc => view.confirm_delete = false,
+                    KeyCode::Enter => {
+                        self.feedback_history.remove(view.selected);
+                        view.selected = view
+                            .selected
+                            .min(self.feedback_history.len().saturating_sub(1));
+                        view.scroll = 0;
+                        view.confirm_delete = false;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc if key.kind == KeyEventKind::Press => {
+                    self.feedback_history_view = None
+                }
+                KeyCode::Left => {
+                    view.selected = view.selected.saturating_sub(1);
+                    view.scroll = 0;
+                }
+                KeyCode::Right => {
+                    view.selected = view
+                        .selected
+                        .saturating_add(1)
+                        .min(self.feedback_history.len().saturating_sub(1));
+                    view.scroll = 0;
+                }
+                KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
+                KeyCode::Down => view.scroll = view.scroll.saturating_add(1),
+                KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(10),
+                KeyCode::PageDown => view.scroll = view.scroll.saturating_add(10),
+                KeyCode::Home => view.scroll = 0,
+                KeyCode::End => view.scroll = usize::MAX,
+                KeyCode::Char('v')
+                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+                {
+                    view.source = !view.source;
+                    view.scroll = 0;
+                }
+                KeyCode::Char('d')
+                    if key.kind == KeyEventKind::Press
+                        && key.modifiers.is_empty()
+                        && self.feedback_history.get(view.selected).is_some() =>
+                {
+                    view.confirm_delete = true
+                }
+                _ => {}
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    pub(crate) fn scroll_feedback_history(&mut self, delta: isize) -> bool {
+        if let Some(view) = self.feedback_history_view.as_mut() {
+            if !view.confirm_delete {
+                view.scroll = view.scroll.saturating_add_signed(delta);
+            }
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn archived_job_message(&mut self, producer: crate::jobs::JobId, message: &str) {
+        if let Some(json) = message.strip_prefix("::feedback_outcome:")
+            && let Ok(outcome) =
+                serde_json::from_str::<crate::features::review_feedback::FeedbackOutcome>(json)
+            && outcome.job_id == producer
+        {
+            self.feedback_history.record_outcome(&outcome);
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn apply_feedback_outcome(
+        &mut self,
+        outcome: crate::features::review_feedback::FeedbackOutcome,
+    ) {
+        if let Some(draft) = self.review_feedback.as_mut().filter(|d| {
+            d.batch.id == outcome.batch_id
+                && d.batch.revision == outcome.revision
+                && d.job_id == Some(outcome.job_id)
+        }) && !draft
+            .outcome
+            .as_ref()
+            .is_some_and(|s| s.starts_with("Failed:"))
+        {
+            draft.outcome = Some(outcome.outcome.clone());
+        }
+        self.feedback_history.record_outcome(&outcome);
+        self.dirty = true;
+    }
+
     /// Higher priority than normal input, including modified keys and repeats.
     pub(crate) fn handle_feedback_key(&mut self, key: KeyEvent) -> bool {
+        if self.handle_feedback_history_key(key) {
+            return true;
+        }
         if self.comment_editor.is_none() && !self.feedback_confirmation {
             return false;
         }
@@ -220,6 +411,16 @@ impl TuiApp {
                 }
                 KeyCode::Enter if key.kind == KeyEventKind::Press && key.modifiers.is_empty() => {
                     self.submit_feedback()
+                }
+                KeyCode::Char('n')
+                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+                {
+                    self.start_fresh_feedback()
+                }
+                KeyCode::Char('h')
+                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+                {
+                    self.open_feedback_history()
                 }
                 KeyCode::Char('v')
                     if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
@@ -277,6 +478,7 @@ impl TuiApp {
                 editor.textarea.insert_str(clean);
             }
         } else if !self.feedback_confirmation
+            && self.feedback_history_view.is_none()
             && self.diff_review_focus == DiffReviewFocus::Input
             && self.input_mode == crate::tui::state::InputMode::Normal
         {

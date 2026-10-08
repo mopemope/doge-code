@@ -30,6 +30,12 @@ pub trait CommandHandler {
     fn review_payload(&self, _id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
         None
     }
+    fn validate_review_feedback_source(
+        &self,
+        _source: &crate::diff_review::DiffReviewPayload,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Feedback source validation is unavailable.")
+    }
     fn validate_review_feedback(
         &self,
         _batch: &crate::features::review_feedback::FeedbackBatch,

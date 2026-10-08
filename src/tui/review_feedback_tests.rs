@@ -25,6 +25,16 @@ impl CommandHandler for Handler {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn validate_review_feedback_source(
+        &self,
+        source: &crate::diff_review::DiffReviewPayload,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.fail && source.review_id.is_some() && source.session_id.is_some(),
+            "Source expired"
+        );
+        Ok(())
+    }
     fn validate_review_feedback(&self, batch: &FeedbackBatch) -> anyhow::Result<()> {
         batch.validate_structure()
     }
@@ -197,4 +207,174 @@ fn feedback_large_hunk_projection_has_correct_linear_coordinates() {
             .content
             .contains("10000 +行10000")
     );
+}
+
+fn next_review(ui: &mut TuiApp, id: &str) {
+    let mut source = payload();
+    source.review_id = Some(id.into());
+    let state = DiffReviewState::from_payload(source);
+    ui.feedback_review_arrived(&state);
+    ui.diff_review = Some(state);
+}
+#[test]
+fn feedback_history_archives_unsent_and_new_comments_bind_only_current_review() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "以前の未送信コメント");
+    let previous = ui.review_feedback.as_ref().unwrap().batch.clone();
+    next_review(&mut ui, "repair-one");
+    ui.start_fresh_feedback();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ui.feedback_history.len(), 1);
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().batch.comments,
+        previous.comments
+    );
+    assert!(
+        ui.review_feedback
+            .as_ref()
+            .unwrap()
+            .batch
+            .comments
+            .is_empty()
+    );
+    assert_ne!(ui.review_feedback.as_ref().unwrap().batch.id, previous.id);
+    save(&mut ui, "次の修正コメント");
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments[0]
+            .anchor
+            .review_id,
+        "repair-one"
+    );
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().batch.comments[0]
+            .anchor
+            .review_id,
+        "review"
+    );
+    let current = ui.diff_review.clone();
+    ui.open_feedback_history();
+    ui.handle_paste("history paste must not type");
+    for code in [
+        KeyCode::Char('v'),
+        KeyCode::Char('c'),
+        KeyCode::Char('s'),
+        KeyCode::Enter,
+        KeyCode::Char('r'),
+        KeyCode::Char('n'),
+    ] {
+        ui.handle_feedback_key(key(code));
+    }
+    assert_eq!(ui.diff_review, current);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ui.textarea.lines(), ["keep ordinary 日本語"]);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    assert!(ui.feedback_history_view.is_none());
+    assert_eq!(ui.diff_review, current);
+}
+#[test]
+fn feedback_history_full_keeps_active_text_and_confirmed_deletion_only() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "original 日本語");
+    for i in 0..8 {
+        next_review(&mut ui, &format!("repair-{i}"));
+        ui.start_fresh_feedback();
+        save(&mut ui, &format!("unsent-{i}"));
+    }
+    assert_eq!(ui.feedback_history.len(), 8);
+    let active = ui.review_feedback.as_ref().unwrap().batch.clone();
+    next_review(&mut ui, "ninth");
+    ui.start_fresh_feedback();
+    assert!(
+        ui.feedback_error
+            .as_ref()
+            .unwrap()
+            .contains("history is full")
+    );
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        active.comments
+    );
+    ui.open_feedback_history();
+    ui.handle_feedback_key(KeyEvent::new_with_kind(
+        KeyCode::Char('d'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    ));
+    assert!(!ui.feedback_history_view.as_ref().unwrap().confirm_delete);
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handle_feedback_key(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    ));
+    assert_eq!(ui.feedback_history.len(), 8);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    assert_eq!(ui.feedback_history.len(), 8);
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(ui.feedback_history.len(), 7);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    ui.start_fresh_feedback();
+    assert!(ui.feedback_error.is_none());
+    assert_eq!(ui.feedback_history.len(), 8);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn feedback_history_missing_source_and_old_scoped_results_cannot_change_new_batch() {
+    let (mut ui, _) = ui(false);
+    save(&mut ui, "保存コメント");
+    ui.review_feedback.as_mut().unwrap().job_id = Some(crate::jobs::JobId(1));
+    let old = ui.review_feedback.as_ref().unwrap().batch.clone();
+    next_review(&mut ui, "repair");
+    ui.start_fresh_feedback();
+    let current = ui.review_feedback.as_ref().unwrap().batch.id.clone();
+    ui.latest_agent_job_id = Some(crate::jobs::JobId(2));
+    let outcome = crate::features::review_feedback::FeedbackOutcome {
+        batch_id: old.id,
+        revision: old.revision,
+        job_id: crate::jobs::JobId(1),
+        outcome: "Partial: budget".into(),
+    };
+    let message = format!(
+        "::feedback_outcome:{}",
+        serde_json::to_string(&outcome).unwrap()
+    );
+    ui.archived_job_message(crate::jobs::JobId(2), &message);
+    assert!(ui.feedback_history.get(0).unwrap().outcome.is_none());
+    ui.archived_job_message(crate::jobs::JobId(1), &message);
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().outcome.as_deref(),
+        Some("Partial: budget")
+    );
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.id, current);
+    assert!(ui.review_feedback.as_ref().unwrap().outcome.is_none());
+    ui.diff_review = None;
+    ui.start_fresh_feedback();
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.id, current);
+    assert!(
+        ui.feedback_error
+            .as_ref()
+            .unwrap()
+            .contains("No current review")
+    );
+}
+#[test]
+fn feedback_history_mouse_resize_keeps_ordinary_scroll_and_source_view() {
+    let (mut ui, _) = ui(false);
+    save(&mut ui, "以前のコメント");
+    next_review(&mut ui, "repair");
+    ui.start_fresh_feedback();
+    let before = ui.diff_review.clone();
+    let offset = ui.scroll_state.offset;
+    ui.open_feedback_history();
+    assert!(ui.scroll_feedback_history(3));
+    assert_eq!(ui.feedback_history_view.as_ref().unwrap().scroll, 3);
+    assert_eq!(ui.scroll_state.offset, offset);
+    for (w, h) in [(120, 32), (45, 15), (8, 4)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+    }
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    assert_eq!(ui.diff_review, before);
 }
