@@ -452,7 +452,7 @@ async fn subscription_refusal_and_malformed_mutation_share_preflight() -> Result
             Some(&if refused {
                 crate::llm::LlmErrorKind::Incomplete
             } else {
-                crate::llm::LlmErrorKind::Client
+                crate::llm::LlmErrorKind::InvalidToolArguments
             })
         );
         assert_eq!(

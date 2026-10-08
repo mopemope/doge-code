@@ -658,7 +658,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 error.downcast_ref::<LlmErrorKind>(),
-                Some(&LlmErrorKind::Client)
+                Some(&LlmErrorKind::InvalidToolArguments)
             );
             let rendered = format!("{error:#}\n{error:?}");
             let logs = capture.text();
