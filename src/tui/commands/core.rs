@@ -30,6 +30,19 @@ pub trait CommandHandler {
     fn review_payload(&self, _id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
         None
     }
+    fn validate_review_feedback(
+        &self,
+        _batch: &crate::features::review_feedback::FeedbackBatch,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Feedback is unavailable in this handler.")
+    }
+    fn submit_review_feedback(
+        &mut self,
+        _batch: crate::features::review_feedback::FeedbackBatch,
+        _ui: &mut TuiApp,
+    ) -> anyhow::Result<crate::jobs::JobId> {
+        anyhow::bail!("Feedback is unavailable in this handler.")
+    }
     fn dismiss_review(&self, _id: &str) {}
     fn reject_review(&mut self, _id: &str, _ui: &mut TuiApp) {}
 
@@ -71,6 +84,7 @@ pub struct TuiExecutor {
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) jobs: JobManager,
     pub(crate) last_user_prompt: Option<String>,
+    pub(crate) feedback_submissions: std::collections::HashSet<(String, u64)>,
     /// Consume-once store for post-terminal Test/Lint follow-up payloads,
     /// keyed by producing `JobId`. Staged by producers, consumed by
     /// `handle_deferred_followup` after the completion hook fires.

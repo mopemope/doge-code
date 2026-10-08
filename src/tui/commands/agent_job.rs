@@ -19,10 +19,19 @@ use crate::tui::view::TuiApp;
 /// - `Internal`: synthetic work with no user directive (`none()`).
 #[derive(Debug, Clone)]
 pub enum AgentTurnProvenance {
-    ObserveUserPrompt { raw_input: String },
-    ObserveUserCustomCommand { raw_input: String },
-    InheritDirective { directive_id: String },
+    ObserveUserPrompt {
+        raw_input: String,
+    },
+    ObserveUserCustomCommand {
+        raw_input: String,
+    },
+    InheritDirective {
+        directive_id: String,
+    },
     Internal,
+    ReviewFeedback {
+        batch: Box<crate::features::review_feedback::FeedbackBatch>,
+    },
 }
 
 impl AgentTurnProvenance {
@@ -30,7 +39,7 @@ impl AgentTurnProvenance {
         match self {
             Self::ObserveUserPrompt { .. } => Some(DirectiveOrigin::TuiPrompt),
             Self::ObserveUserCustomCommand { .. } => Some(DirectiveOrigin::TuiCustomCommand),
-            Self::InheritDirective { .. } | Self::Internal => None,
+            Self::InheritDirective { .. } | Self::Internal | Self::ReviewFeedback { .. } => None,
         }
     }
 
@@ -38,7 +47,7 @@ impl AgentTurnProvenance {
         match self {
             Self::ObserveUserPrompt { raw_input }
             | Self::ObserveUserCustomCommand { raw_input } => Some(raw_input.as_str()),
-            Self::InheritDirective { .. } | Self::Internal => None,
+            Self::InheritDirective { .. } | Self::Internal | Self::ReviewFeedback { .. } => None,
         }
     }
 }
@@ -155,7 +164,10 @@ pub(crate) fn spawn_agent_turn(
     }
 
     let model = executor.cfg.model.clone();
-    let cfg = executor.cfg.clone();
+    let mut cfg = executor.cfg.clone();
+    if matches!(provenance, AgentTurnProvenance::ReviewFeedback { .. }) {
+        cfg.show_diff = false;
+    }
     let fs = executor.tools.clone();
     let conversation_history = executor.conversation_history.clone();
     let session_manager = executor.session_manager.clone();
@@ -190,13 +202,43 @@ pub(crate) fn spawn_agent_turn(
     if !skip_plan {
         executor.enforce_plan_context(&mut msgs, &content, Some(ui));
     }
-    msgs.push(crate::llm::ChatMessage {
-        provider_state: None,
-        role: "user".into(),
-        content: Some(content.clone()),
-        tool_calls: vec![],
-        tool_call_id: None,
-    });
+    if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance {
+        if let Err(error) = fs.validate_review_feedback(batch) {
+            ui.push_log(format!("[feedback] {error}"));
+            return Err(JobStartError::ShuttingDown);
+        }
+        let evidence = match batch.evidence() {
+            Ok(text) => text,
+            Err(error) => {
+                ui.push_log(format!("[feedback] {error}"));
+                return Err(JobStartError::ShuttingDown);
+            }
+        };
+        msgs.push(crate::llm::ChatMessage {
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some(evidence),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+        for comment in &batch.comments {
+            msgs.push(crate::llm::ChatMessage {
+                provider_state: None,
+                role: "user".into(),
+                content: Some(comment.text.clone()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+        }
+    } else {
+        msgs.push(crate::llm::ChatMessage {
+            provider_state: None,
+            role: "user".into(),
+            content: Some(content.clone()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+    }
 
     if let Err(error) = crate::llm::validate_tool_blocks(&msgs, false) {
         ui.push_log(format!("[ERROR] {error}"));
@@ -228,6 +270,16 @@ pub(crate) fn spawn_agent_turn(
         let scoped_ui_tx;
         (scoped_ui_tx, _forwarder) = crate::tui::job_messages::scoped_sender(ui_tx, ctx.id);
         let ui_tx = scoped_ui_tx;
+        if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance_for_job
+            && let Err(error) = fs.validate_review_feedback(batch)
+        {
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send(format!("[feedback] {error}"));
+            }
+            return JobRunOutcome::Failed {
+                message: crate::jobs::types::bound_error(&error.to_string()),
+            };
+        }
         let fs = fs.with_review_capture(ctx.id);
         let token = ctx.cancellation_token();
         if let Some(tx) = &ui_tx {
@@ -271,6 +323,30 @@ pub(crate) fn spawn_agent_turn(
             AgentTurnProvenance::InheritDirective { directive_id } => {
                 crate::provenance::ProvenanceAttribution::with_directive(directive_id.clone())
             }
+            AgentTurnProvenance::ReviewFeedback { batch } => {
+                let mut first = None;
+                for comment in &batch.comments {
+                    match crate::tools::provenance::record_directive_observed(
+                        &fs,
+                        DirectiveOrigin::TuiPrompt,
+                        &comment.text,
+                        &comment.text,
+                    ) {
+                        Ok(env) => {
+                            if first.is_none() {
+                                first = Some(env.event_id);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "feedback directive recording failed");
+                            let _ = fs.mark_current_session_provenance_failure();
+                        }
+                    }
+                }
+                first
+                    .map(crate::provenance::ProvenanceAttribution::with_directive)
+                    .unwrap_or_else(crate::provenance::ProvenanceAttribution::none)
+            }
             AgentTurnProvenance::Internal => crate::provenance::ProvenanceAttribution::none(),
         };
         let res = crate::llm::run_agent_loop(
@@ -285,6 +361,53 @@ pub(crate) fn spawn_agent_turn(
             attribution,
         )
         .await;
+        if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance_for_job {
+            let outcome = match &res {
+                Ok(run) if run.status == crate::llm::tool_execution::AgentRunStatus::Partial => {
+                    format!(
+                        "Partial: {} budget",
+                        run.stop_reason
+                            .as_ref()
+                            .map(|r| r.as_str())
+                            .unwrap_or("unknown")
+                    )
+                }
+                Ok(_) => {
+                    "Completed (inspect changes; comments are not automatically resolved)".into()
+                }
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<LlmErrorKind>(),
+                        Some(LlmErrorKind::Cancelled)
+                    ) =>
+                {
+                    "Cancelled; any applied changes remain available for review/rollback".into()
+                }
+                Err(_) => "Failed; any applied changes remain available for review/rollback".into(),
+            };
+            if let Some(tx) = &ui_tx
+                && let Ok(json) =
+                    serde_json::to_string(&crate::features::review_feedback::FeedbackOutcome {
+                        batch_id: batch.id.clone(),
+                        revision: batch.revision,
+                        job_id: ctx.id,
+                        outcome,
+                    })
+            {
+                let _ = tx.send(format!("::feedback_outcome:{json}"));
+            }
+        }
+        if matches!(
+            provenance_for_job,
+            AgentTurnProvenance::ReviewFeedback { .. }
+        ) && let Some(payload) = fs.seal_review()
+            && let Some(tx) = &ui_tx
+        {
+            let enriched = crate::tools::provenance::enrich_diff_review_with_evidence(&fs, payload);
+            if let Ok(json) = serde_json::to_string(&enriched) {
+                let _ = tx.send(format!("::diff_review:{json}"));
+            }
+        }
         let tokens_used = client.get_prompt_tokens_used();
         let total_tokens = client.get_total_tokens_used();
         match res {

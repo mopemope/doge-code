@@ -220,11 +220,101 @@ impl FsTools {
         let payload = capture.payload();
         (!payload.files.is_empty() || payload.reject_reason.is_some()).then_some(payload)
     }
+    pub(crate) fn finish_review_for_job(
+        &self,
+        job: crate::jobs::JobId,
+    ) -> Option<DiffReviewPayload> {
+        let registry = self.review_registry.lock().ok()?;
+        let mut capture = registry.as_ref()?.lock().ok()?;
+        if !capture.id.starts_with(&format!("{job}-")) {
+            return None;
+        }
+        capture.sealed = true;
+        let payload = capture.payload();
+        (!payload.files.is_empty() || payload.reject_reason.is_some()).then_some(payload)
+    }
     pub(crate) fn review_payload(&self, id: &str) -> Option<DiffReviewPayload> {
         let registry = self.review_registry.lock().unwrap();
         let capture = registry.as_ref()?.lock().unwrap();
         (capture.id == id).then(|| capture.payload())
     }
+    pub(crate) fn review_feedback_directives(
+        &self,
+        batch: &crate::features::review_feedback::FeedbackBatch,
+    ) -> anyhow::Result<Vec<String>> {
+        self.validate_review_feedback(batch)?;
+        let ids = {
+            let registry = self
+                .review_registry
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Review registry unavailable."))?;
+            let capture = registry
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Review expired."))?
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Review unavailable."))?;
+            capture
+                .receipts
+                .iter()
+                .filter_map(|(_, id)| id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let mut directives = std::collections::BTreeSet::new();
+        if let Some(loaded) = crate::tools::provenance::load_current_events(self)? {
+            for event in loaded.events {
+                if ids.contains(&event.event_id)
+                    && let Some(id) = event.directive_id()
+                {
+                    directives.insert(id.to_owned());
+                }
+            }
+        }
+        Ok(directives.into_iter().collect())
+    }
+    /// Non-destructive validation, repeated after JobManager acquires the write gate.
+    pub(crate) fn validate_review_feedback(
+        &self,
+        batch: &crate::features::review_feedback::FeedbackBatch,
+    ) -> anyhow::Result<()> {
+        batch.validate_structure()?;
+        let registry = self
+            .review_registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Review registry unavailable."))?;
+        let capture = registry
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Review expired; comments retained."))?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Review capture unavailable."))?;
+        anyhow::ensure!(
+            capture.sealed
+                && !capture.rejecting
+                && capture.restored == 0
+                && capture.reason.is_none(),
+            "Review cannot accept feedback; comments retained."
+        );
+        anyhow::ensure!(
+            Some(&capture.id) == batch.source.review_id.as_ref()
+                && capture.session == batch.source.session_id
+                && capture.session == self.get_current_session().map(|s| s.meta.id),
+            "Review/session changed; comments retained."
+        );
+        anyhow::ensure!(
+            capture.payload().diff == batch.source.diff
+                && capture.payload().files == batch.source.files,
+            "Source review changed; comments retained."
+        );
+        for (path, (_, after)) in capture.aggregate() {
+            let checked = checked_path(&capture.root, &path)?;
+            anyhow::ensure!(
+                exact(&mutation::read_text_snapshot(&checked)?, &after),
+                "Workspace changed at {}; comments retained.",
+                checked.display()
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn interrupted_review_report(
         &self,
         id: &str,

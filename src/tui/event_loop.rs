@@ -139,6 +139,21 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(json) = msg.strip_prefix("::feedback_outcome:") {
+                        if let Ok(outcome) = serde_json::from_str::<
+                            crate::features::review_feedback::FeedbackOutcome,
+                        >(json)
+                            && let Some(draft) = self.review_feedback.as_mut().filter(|d| {
+                                d.batch.id == outcome.batch_id
+                                    && d.batch.revision == outcome.revision
+                                    && d.job_id == Some(outcome.job_id)
+                            })
+                        {
+                            draft.outcome = Some(outcome.outcome);
+                            self.dirty = true;
+                        }
+                        continue;
+                    }
                     // Diff review handling
                     if let Some(payload) = msg.strip_prefix("::diff_review:") {
                         if let Ok(payload) = serde_json::from_str::<DiffReviewPayload>(payload) {
@@ -165,6 +180,7 @@ impl TuiApp {
                                         .unwrap_or("No turn-owned rollback capture.")
                                 )
                             };
+                            self.feedback_review_arrived(&review_state);
                             self.diff_review = Some(review_state);
                             self.diff_review_focus = DiffReviewFocus::Input;
                             self.diff_rejected_pending = false;
@@ -201,6 +217,7 @@ impl TuiApp {
                             evidence_warnings: Vec::new(),
                         };
                         let review_state = DiffReviewState::from_payload(payload);
+                        self.feedback_review_arrived(&review_state);
                         self.diff_review = Some(review_state);
                         self.diff_review_focus = DiffReviewFocus::Input;
                         self.diff_rejected_pending = false;
@@ -559,6 +576,7 @@ impl TuiApp {
                 tracing::debug!("Event captured: {:?}", event);
 
                 match event {
+                    Event::Paste(text) => self.handle_paste(&text),
                     Event::Resize(w, h) => {
                         self.handle_resize(w, h);
                     }
@@ -637,7 +655,21 @@ impl TuiApp {
         {
             return Ok(false);
         }
+        if self.handle_feedback_key(key) {
+            return Ok(false);
+        }
         if self.handle_key_help_key(key) {
+            return Ok(false);
+        }
+        if self.input_mode == InputMode::Normal
+            && self.diff_review.is_none()
+            && self.review_feedback.is_some()
+            && key.code == KeyCode::F(6)
+            && key.modifiers.is_empty()
+        {
+            if key.kind == event::KeyEventKind::Press {
+                self.show_feedback_source();
+            }
             return Ok(false);
         }
         if self.input_mode == InputMode::Normal && self.diff_review.is_some() {
@@ -690,6 +722,30 @@ impl TuiApp {
         use crossterm::event::KeyCode;
 
         match key.code {
+            KeyCode::Char('v') if key.kind == event::KeyEventKind::Press => {
+                self.show_feedback_source();
+                Ok(true)
+            }
+            KeyCode::Char('[') => {
+                self.move_hunk(-1);
+                Ok(true)
+            }
+            KeyCode::Char(']') => {
+                self.move_hunk(1);
+                Ok(true)
+            }
+            KeyCode::Char('c') if key.kind == event::KeyEventKind::Press => {
+                self.start_comment();
+                Ok(true)
+            }
+            KeyCode::Char('d') if key.kind == event::KeyEventKind::Press => {
+                self.delete_comment();
+                Ok(true)
+            }
+            KeyCode::Char('s') if key.kind == event::KeyEventKind::Press => {
+                self.confirm_feedback();
+                Ok(true)
+            }
             KeyCode::Esc | KeyCode::Char('q') => {
                 if self.diff_review.as_ref().is_some_and(|r| r.rejecting) {
                     if key.code == KeyCode::Esc {
@@ -959,6 +1015,7 @@ impl TuiApp {
         }
 
         let viewport = self.diff_viewport_height.get().max(1);
+        let row_count = self.diff_projection().len();
         if let Some(review) = self.diff_review.as_mut()
             && let Some(file) = review.files.get_mut(review.selected)
         {
@@ -966,7 +1023,7 @@ impl TuiApp {
                 return;
             }
 
-            let max_scroll = file.lines.len().saturating_sub(viewport) as isize;
+            let max_scroll = row_count.saturating_sub(viewport) as isize;
             let current = file.scroll as isize;
             let mut next = current + delta;
             if next < 0 {
@@ -982,10 +1039,11 @@ impl TuiApp {
 
     fn set_diff_scroll(&mut self, position: usize) {
         let viewport = self.diff_viewport_height.get().max(1);
+        let row_count = self.diff_projection().len();
         if let Some(review) = self.diff_review.as_mut()
             && let Some(file) = review.files.get_mut(review.selected)
         {
-            let max_scroll = file.lines.len().saturating_sub(viewport);
+            let max_scroll = row_count.saturating_sub(viewport);
             file.scroll = position.min(max_scroll);
             self.dirty = true;
         }
@@ -993,13 +1051,14 @@ impl TuiApp {
 
     fn jump_diff_scroll_to_end(&mut self) {
         let viewport = self.diff_viewport_height.get().max(1);
+        let row_count = self.diff_projection().len();
         if let Some(review) = self.diff_review.as_mut()
             && let Some(file) = review.files.get_mut(review.selected)
         {
             if file.lines.is_empty() {
                 return;
             }
-            file.scroll = file.lines.len().saturating_sub(viewport);
+            file.scroll = row_count.saturating_sub(viewport);
             self.dirty = true;
         }
     }
@@ -1819,5 +1878,66 @@ mod tests {
         ui.diff_review = Some(DiffReviewState::from_payload(payload));
         ui.reject_diff_review().unwrap();
         assert!(!ui.diff_review.unwrap().rejectable);
+    }
+}
+
+#[cfg(test)]
+mod inline_feedback_routing_tests {
+    use super::*;
+    #[test]
+    fn feedback_modal_owns_modified_keys_and_reopens_after_dismissal() {
+        let mut ui = TuiApp::new_for_test("feedback", None, "default");
+        let payload = DiffReviewPayload {
+            session_id: Some("fixture-session".into()),
+            review_id: Some("fixture-review".into()),
+            reject_reason: None,
+            diff: "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n".into(),
+            files: vec!["a".into()],
+            evidence: vec![],
+            evidence_warnings: vec![],
+        };
+        ui.diff_review = Some(DiffReviewState::from_payload(payload));
+        ui.textarea = ratatui_textarea::TextArea::from(vec!["ordinary draft".to_owned()]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        for key in [
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        ] {
+            ui.handle_ui_key(key, &mut terminal).unwrap();
+        }
+        assert!(ui.comment_editor.is_some());
+        assert_eq!(ui.input_mode, InputMode::Normal);
+        ui.handle_paste("日本語");
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            &mut terminal,
+        )
+        .unwrap();
+        ui.handle_paste("二行目");
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.review_feedback.as_ref().unwrap().batch.comments[0].text,
+            "日本語\n二行目"
+        );
+        assert_eq!(ui.textarea.lines(), ["ordinary draft"]);
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.diff_review.is_none());
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(ui.diff_review.is_some());
+        assert_eq!(ui.diff_review_focus, DiffReviewFocus::Review);
     }
 }

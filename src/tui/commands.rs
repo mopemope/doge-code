@@ -7,3 +7,6 @@ pub mod session;
 pub mod session_state;
 
 pub use self::core::{CommandHandler, TuiExecutor};
+
+#[cfg(test)]
+mod review_feedback_tests;
