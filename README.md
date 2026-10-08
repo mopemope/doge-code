@@ -1162,7 +1162,8 @@ After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatica
   - `r` — restore this review’s captured pre-edit contents, preserving Git’s index. Only files captured as missing before creation are removed. The agent is notified of restored changes on your next instruction
   - `q` / `Esc` — dismiss the panel (changes remain applied). During rollback, Esc requests cancellation and the panel stays open until the result; accept/dismiss are disabled
   - `[` / `]` — select the previous/next supported hunk (old and new line numbers are shown)
-  - `c` — add or edit a comment on the selected hunk; `d` deletes its saved comment
+  - `c` — add or edit a comment on the selected hunk; `d` deletes that whole-hunk comment
+  - `l` — select a line or contiguous range within the selected hunk
   - `s` — review all saved comments and explicitly confirm one batch repair
   - `n` — archive the active batch and start empty comments on the current live review
   - `h` — browse previous batches and source diffs read-only
@@ -1178,6 +1179,21 @@ source hunk. Japanese/Unicode input and bracketed paste are supported. `Enter`
 saves locally, `Alt+Enter` inserts a newline, and `Esc` cancels editing while
 keeping the previously saved comment. Saving an empty comment deletes it. The
 ordinary prompt draft is preserved, and saving never calls a model.
+
+For a narrower target, press `l`. Up/Down selects one diff row; Shift+Up/Down
+extends a contiguous selection within the same hunk (Home/End, with or without
+Shift, are also available). Old/new line numbers and selected rows are shown,
+including old-only coordinates for deletions. Enter opens the Japanese/Unicode
+comment editor for that exact selection; Esc cancels without changing comments
+or the ordinary prompt. Headers and no-newline markers are not selectable.
+
+Several line/range comments can coexist with a whole-hunk comment. To edit or
+remove a range comment, select the same rows with `l`; Enter loads its saved text,
+and saving empty text deletes only that target. `d` in the main diff deletes the
+whole-hunk comment. Confirmation and read-only history show each target's old/new
+coordinates. Every selected excerpt and coordinate must still derive exactly from
+the frozen original hunk; there is no automatic reattachment after edits. Selecting
+or saving makes no model request and does not restrict where repair tools can write.
 
 Comments can span multiple files and hunks. Press `s` to inspect the complete
 batch (scroll with arrows or page keys). `Enter` explicitly starts one repair
@@ -1221,9 +1237,9 @@ record; `Esc` cancels removal. This removes only history, leaving files and acti
 comments intact.
 
 Drafts and history are memory-local and do not survive restart. Initial limits are 128
-comments, 64 KiB of comment text and 128 KiB of selected hunk context. Arbitrary
-line ranges, automatic re-anchoring and strict write confinement are outside this
-initial version. Review receipts do not cover shell/remote changes.
+comments, 64 KiB of comment text and 128 KiB of selected hunk context.
+Cross-hunk ranges, automatic re-anchoring and strict write confinement are outside
+this version. Review receipts do not cover shell/remote changes.
 
 Reject runs as a foreground workspace-write job. Before any restoration, every
 captured target must still match its reviewed contents and have the expected file
