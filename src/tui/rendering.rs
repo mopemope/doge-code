@@ -89,6 +89,8 @@ impl TuiApp {
         }
         if self.feedback_history_view.is_some() {
             self.render_feedback_history(f, size);
+        } else if self.line_selector.is_some() {
+            self.render_line_selector(f, size);
         } else if self.comment_editor.is_some() || self.feedback_confirmation {
             self.render_feedback_modal(f, size);
         }
@@ -509,7 +511,7 @@ impl TuiApp {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
-            "←/→ file · ↑/↓ scroll · [/] hunk · c comment · d delete · s confirm · n new · h history · v source · a accept · r rollback · e evidence · q dismiss"
+            "←/→ file · ↑/↓ scroll · [/] hunk · c hunk comment · l lines · d delete · s confirm · n new · h history · v source · a accept · r rollback · e evidence · q dismiss"
                 .to_string()
         } else {
             format!(
@@ -532,6 +534,76 @@ impl TuiApp {
         f.render_widget(instructions, layout[footer_idx]);
     }
 
+    fn render_line_selector(&self, f: &mut Frame, area: Rect) {
+        let Some(view) = &self.line_selector else {
+            return;
+        };
+        f.render_widget(Clear, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(4),
+            ])
+            .split(area);
+        f.render_widget(
+            Paragraph::new(format!(
+                "{} | ↑/↓ moves · Shift+↑/↓ extends",
+                view.anchor.path
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Select diff lines"),
+            ),
+            parts[0],
+        );
+        let rows = crate::features::review_feedback::selection::rows(&view.anchor.hunk);
+        let (start, end) = (view.cursor.min(view.pivot), view.cursor.max(view.pivot));
+        let width = parts[1].width.saturating_sub(2) as usize;
+        let mut lines = Vec::new();
+        let mut cursor_row = 0;
+        for (index, row) in rows.iter().enumerate() {
+            if index == view.cursor {
+                cursor_row = lines.len();
+            }
+            let text = format!(
+                "{} old {} new {} | {}",
+                if (start..=end).contains(&index) {
+                    ">"
+                } else {
+                    " "
+                },
+                row.old.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                row.new.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                row.text
+            );
+            let style = if (start..=end).contains(&index) {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            lines.extend(
+                crate::tui::review_feedback::wrap_cells(&text, width)
+                    .into_iter()
+                    .map(|s| Line::styled(s, style)),
+            );
+        }
+        let height = parts[1].height.saturating_sub(2) as usize;
+        let offset = cursor_row.saturating_sub(height.saturating_sub(1));
+        f.render_widget(
+            Paragraph::new(lines.into_iter().skip(offset).collect::<Vec<_>>()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Frozen source rows (old/new numbers)"),
+            ),
+            parts[1],
+        );
+        f.render_widget(Paragraph::new("Enter edits this exact selection · Esc cancels. Plain movement selects one line; Shift movement extends within this hunk. Header/newline markers are not targets. No model request.").wrap(ratatui::widgets::Wrap { trim:false }).block(Block::default().borders(Borders::ALL)), parts[2]);
+    }
+
     fn render_feedback_modal(&self, f: &mut Frame, area: Rect) {
         f.render_widget(Clear, area);
         let parts = Layout::default()
@@ -544,18 +616,17 @@ impl TuiApp {
             .split(area);
         if let Some(editor) = &self.comment_editor {
             let a = &editor.anchor;
-            let heading = format!(
-                "Comment: {} | old {},{} → new {},{}",
-                a.path, a.hunk.old.start, a.hunk.old.count, a.hunk.new.start, a.hunk.new.count
-            );
+            let heading = format!("Comment: {} | {}", a.path, a.target_label());
             f.render_widget(
                 Paragraph::new(heading)
                     .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Hunk comment (saved locally)"),
-                    ),
+                    .block(Block::default().borders(Borders::ALL).title(
+                        if a.selection.is_some() {
+                            "Line comment (saved locally)"
+                        } else {
+                            "Hunk comment (saved locally)"
+                        },
+                    )),
                 parts[0],
             );
             let body = Layout::default()
@@ -563,9 +634,13 @@ impl TuiApp {
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(parts[1]);
             f.render_widget(
-                Paragraph::new(editor.anchor.hunk.excerpt.clone())
+                Paragraph::new(editor.anchor.target_excerpt())
                     .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(Block::default().borders(Borders::ALL).title("Source hunk")),
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Source target"),
+                    ),
                 body[0],
             );
             f.render_widget(&editor.textarea, body[1]);
@@ -591,12 +666,9 @@ impl TuiApp {
             let mut text = String::new();
             for c in &draft.batch.comments {
                 text.push_str(&format!(
-                    "{} | old {},{} → new {},{}\n{}\n\n",
+                    "{} | {}\n{}\n\n",
                     c.anchor.path,
-                    c.anchor.hunk.old.start,
-                    c.anchor.hunk.old.count,
-                    c.anchor.hunk.new.start,
-                    c.anchor.hunk.new.count,
+                    c.anchor.target_label(),
                     c.text
                 ));
             }
@@ -703,12 +775,9 @@ impl TuiApp {
                 ));
                 for c in &entry.batch.comments {
                     text.push_str(&format!(
-                        "{} | old {},{} → new {},{}\n{}\n\n",
+                        "{} | {}\n{}\n\n",
                         c.anchor.path,
-                        c.anchor.hunk.old.start,
-                        c.anchor.hunk.old.count,
-                        c.anchor.hunk.new.start,
-                        c.anchor.hunk.new.count,
+                        c.anchor.target_label(),
                         c.text
                     ));
                 }

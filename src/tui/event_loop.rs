@@ -577,7 +577,7 @@ impl TuiApp {
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {
-                            if self.scroll_feedback_history(-3) {
+                            if self.line_selector.is_some() || self.scroll_feedback_history(-3) {
                             } else if self.key_help_open {
                                 self.scroll_key_help(-3);
                             } else {
@@ -585,7 +585,7 @@ impl TuiApp {
                             }
                         }
                         event::MouseEventKind::ScrollDown => {
-                            if self.scroll_feedback_history(3) {
+                            if self.line_selector.is_some() || self.scroll_feedback_history(3) {
                             } else if self.key_help_open {
                                 self.scroll_key_help(3);
                             } else {
@@ -723,6 +723,10 @@ impl TuiApp {
         use crossterm::event::KeyCode;
 
         match key.code {
+            KeyCode::Char('l') if key.kind == event::KeyEventKind::Press => {
+                self.start_line_selection();
+                Ok(true)
+            }
             KeyCode::Char('n') if key.kind == event::KeyEventKind::Press => {
                 self.start_fresh_feedback();
                 Ok(true)
@@ -1911,12 +1915,25 @@ mod inline_feedback_routing_tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         for key in [
             event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
-            event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            event::KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
             event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
         ] {
             ui.handle_ui_key(key, &mut terminal).unwrap();
         }
-        assert!(ui.comment_editor.is_some());
+        assert!(ui.line_selector.is_some());
+        ui.handle_ui_key(
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut terminal,
+        )
+        .unwrap();
+        assert!(
+            ui.comment_editor
+                .as_ref()
+                .unwrap()
+                .anchor
+                .selection
+                .is_some()
+        );
         assert_eq!(ui.input_mode, InputMode::Normal);
         ui.handle_paste("日本語");
         ui.handle_ui_key(
