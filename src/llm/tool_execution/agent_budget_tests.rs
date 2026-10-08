@@ -72,6 +72,49 @@ fn assistant_done(content: &str) -> serde_json::Value {
     serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":content}}]})
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn execute_process_unknown_keys_reject_batch_before_any_sibling_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    for key in ["arguments", "working_directory", "timeout"] {
+        let root = tempfile::tempdir().expect("root");
+        let program = root.path().join("fixture-program");
+        std::fs::write(&program, "#!/bin/sh\nprintf 'ran\\n' >> process-marker\n")
+            .expect("program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("permissions");
+        let mut args = serde_json::json!({"program": program, "args": []});
+        args[key] = serde_json::json!("typo");
+        let calls = vec![
+            tool_call(
+                "fs_write",
+                "valid-first",
+                serde_json::json!({"path":"sibling-marker", "content":"must not run"}),
+            ),
+            tool_call("execute_process", "invalid-second", args),
+        ];
+        let (client, requests, server) = fixture(vec![
+            (200, assistant_with_calls(calls)),
+            (200, assistant_done("done")),
+        ])
+        .await;
+        let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
+        cfg.execution.allowed_programs = vec![program.display().to_string()];
+        let result = run_with_cfg(&client, cfg, user_msg("fixture"), None).await;
+        server.abort();
+        assert!(result.is_err(), "{key} must be rejected");
+        assert!(
+            !root.path().join("process-marker").exists(),
+            "{key} must not spawn"
+        );
+        assert!(
+            !root.path().join("sibling-marker").exists(),
+            "{key} must reject the entire batch before dispatch"
+        );
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+    }
+}
+
 fn assistant_done_with_usage(content: &str, total: u32, prompt: u32) -> serde_json::Value {
     serde_json::json!({
         "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":content}}],
