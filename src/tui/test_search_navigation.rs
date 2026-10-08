@@ -159,3 +159,71 @@ fn file_relative_preview_opens_original_path_and_cancel_preserves_draft() {
     }
     assert_eq!(*calls.lock().unwrap(), [format!("/open {path}")]);
 }
+
+#[test]
+fn long_history_query_tail_tracks_typing_backspace_resize_and_repeated_search() {
+    let mut app = TuiApp::new_for_test("query", None, "dark");
+    let query = format!("{}日本語e\u{301}🙂終端", "prefix-".repeat(12));
+    let original = format!("{query}\ncomplete original history");
+    app.input_history = vec![original.clone()];
+    app.textarea.insert_str("preserved\ndraft");
+    let draft = app.textarea.lines().to_vec();
+    for _ in 0..3 {
+        app.enter_history_search();
+        for c in query.chars() {
+            handle_history_search_key(&mut app, key(KeyCode::Char(c))).unwrap();
+        }
+        for (width, height) in [(40, 12), (24, 8), (120, 32), (40, 12)] {
+            let rendered = screen(&mut app, width, height);
+            assert!(rendered.contains("日本語e\u{301}🙂終端_"), "{rendered}");
+            assert_eq!(app.history_search_state.as_ref().unwrap().query, query);
+            assert_eq!(
+                app.history_search_state.as_ref().unwrap().results,
+                std::slice::from_ref(&original)
+            );
+        }
+        handle_history_search_key(&mut app, key(KeyCode::Backspace)).unwrap();
+        assert!(screen(&mut app, 40, 12).contains("日本語e\u{301}🙂終_"));
+        handle_history_search_key(&mut app, key(KeyCode::Char('端'))).unwrap();
+        handle_history_search_key(&mut app, key(KeyCode::Esc)).unwrap();
+        assert_eq!(app.textarea.lines(), draft);
+    }
+    app.enter_history_search();
+    for c in query.chars() {
+        handle_history_search_key(&mut app, key(KeyCode::Char(c))).unwrap();
+    }
+    handle_history_search_key(&mut app, key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.textarea.lines().join("\n"), original);
+    assert!(app.pending_instructions.is_empty());
+}
+
+#[test]
+fn long_file_query_tail_keeps_complete_filter_and_cancelled_draft() {
+    let mut app = TuiApp::new_for_test("query", None, "dark");
+    app.textarea.insert_str("file draft");
+    let query = format!("{}日本語e\u{301}終端", "long-path-".repeat(10));
+    let path = format!("{query}.rs");
+    app.input_mode = InputMode::FileSearch;
+    app.file_search_state = Some(FileSearchState {
+        query: String::new(),
+        all_files: vec![path.clone()],
+        results: vec![path.clone()],
+        selected_index: 0,
+        loading: false,
+    });
+    for c in query.chars() {
+        handle_file_search_key(&mut app, key(KeyCode::Char(c))).unwrap();
+    }
+    for (width, height) in [(40, 12), (24, 8), (120, 32), (40, 12)] {
+        let rendered = screen(&mut app, width, height);
+        assert!(rendered.contains("日本語e\u{301}終端_"), "{rendered}");
+        assert_eq!(app.file_search_state.as_ref().unwrap().query, query);
+        assert_eq!(
+            app.file_search_state.as_ref().unwrap().results,
+            std::slice::from_ref(&path)
+        );
+    }
+    let cancel = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    handle_file_search_key(&mut app, cancel).unwrap();
+    assert_eq!(app.textarea.lines(), &["file draft"]);
+}

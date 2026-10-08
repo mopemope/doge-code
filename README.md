@@ -1132,6 +1132,11 @@ multiline entries). File previews use project-relative paths. Empty results
 and file scanning are shown explicitly. Search temporarily reduces the draft
 pane to leave room for results without changing its text.
 
+Long search queries keep their end caret visible while typing, deleting, or
+resizing. A leading `…` marks a hidden prefix; narrow query rows shorten the
+label to `Find:` or omit it to leave room for text. Japanese characters and
+combined Unicode characters remain intact, and filtering uses the full query.
+
 After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatically shows an inline diff review panel (enabled by default via `show_diff = true`):
 
 - **Scoped to agent changes**: the TUI diff covers captured text mutations from this turn, from the first pre-edit contents to the last committed contents; existing staged, unstaged and untracked user content is the baseline
