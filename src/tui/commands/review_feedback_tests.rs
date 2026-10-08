@@ -92,6 +92,7 @@ async fn fixture() -> (TuiExecutor, TuiApp, tempfile::TempDir, FeedbackBatch) {
         .flat_map(|f| {
             f.hunks.iter().map(|h| Comment {
                 anchor: Anchor {
+                    selection: None,
                     version: 1,
                     session_id: source.session_id.clone().unwrap(),
                     review_id: source.review_id.clone().unwrap(),
@@ -588,7 +589,16 @@ async fn feedback_terminal_persistence_failure_overrides_premature_completion_no
 
 #[tokio::test]
 async fn feedback_history_two_managed_repairs_preserve_sources_and_second_only_rollback() {
-    let (mut executor, mut ui, _dir, original) = fixture().await;
+    let (mut executor, mut ui, _dir, mut original) = fixture().await;
+    original.comments[0].anchor.selection = Some(
+        crate::features::review_feedback::selection::select(
+            &original.comments[0].anchor.hunk,
+            0,
+            0,
+        )
+        .unwrap(),
+    );
+    ui.review_feedback.as_mut().unwrap().batch = original.clone();
     let path = executor.cfg.project_root.join("a.txt");
     let mut second = write(&path);
     second["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
@@ -652,7 +662,11 @@ async fn feedback_history_two_managed_repairs_preserve_sources_and_second_only_r
             .is_empty()
     );
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
-    ui.start_comment();
+    ui.start_line_selection();
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
     assert!(ui.comment_editor.is_some());
     ui.handle_paste("二回目だけを改善してください");
     ui.handle_feedback_key(crossterm::event::KeyEvent::new(
