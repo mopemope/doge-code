@@ -1164,6 +1164,7 @@ After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatica
   - `[` / `]` — select the previous/next supported hunk (old and new line numbers are shown)
   - `c` — add or edit a comment on the selected hunk; `d` deletes that whole-hunk comment
   - `l` — select a line or contiguous range within the selected hunk
+  - `m` — select a saved comment, jump to its source target, edit it or confirm deletion of that one comment
   - `s` — review all saved comments and explicitly confirm one batch repair
   - `n` — archive the active batch and start empty comments on the current live review
   - `h` — browse previous batches and source diffs read-only
@@ -1187,8 +1188,25 @@ including old-only coordinates for deletions. Enter opens the Japanese/Unicode
 comment editor for that exact selection; Esc cancels without changing comments
 or the ordinary prompt. Headers and no-newline markers are not selectable.
 
-Several line/range comments can coexist with a whole-hunk comment. To edit or
-remove a range comment, select the same rows with `l`; Enter loads its saved text,
+Press `m` to manage the active batch's saved comments. Up/Down or page keys
+select a comment; the list shows its file, whole-hunk/selected-range coordinates
+and preview, with the full source target and text below. Left/Right or the mouse
+wheel scrolls the detail. Enter jumps to that exact retained source file/hunk/row.
+`e` directly edits the saved target without reconstructing its range; saving or
+canceling returns to the list and preserves comment order. `d` then Enter removes
+only the selected comment; Esc cancels deletion. `s` opens the existing batch
+confirmation; merely browsing, jumping, editing or deleting never calls a model.
+Esc closes the list without changing the current diff or ordinary prompt.
+
+Editing and deletion require the original live capture/session and exact source
+snapshots; deletion rechecks them at confirmation. Stale targets remain viewable,
+and jumping to one opens a read-only retained source; `v` returns to the latest
+review. Foreground work/rollback blocks jump, edit and deletion. Archived `h`
+history remains read-only and cannot enter this active-batch editor. Comments
+remain process-local; this does not restore drafts after restart.
+
+Several line/range comments can coexist with a whole-hunk comment. You can also edit or
+remove a range comment by selecting the same rows with `l`; Enter loads its saved text,
 and saving empty text deletes only that target. `d` in the main diff deletes the
 whole-hunk comment. Confirmation and read-only history show each target's old/new
 coordinates. Every selected excerpt and coordinate must still derive exactly from

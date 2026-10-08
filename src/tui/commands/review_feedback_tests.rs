@@ -635,6 +635,16 @@ async fn feedback_history_two_managed_repairs_preserve_sources_and_second_only_r
     ui.handler = Some(handler);
     let first_repair = ui.diff_review.as_ref().unwrap().source.clone();
     // An external edit blocks a new batch without discarding the submitted text.
+    ui.open_comment_list();
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(ui.comment_editor.is_none()); // original capture expired after first repair
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
     std::fs::write(&path, "external edit").unwrap();
     ui.start_fresh_feedback();
     assert!(ui.feedback_error.is_some());
@@ -673,7 +683,46 @@ async fn feedback_history_two_managed_repairs_preserve_sources_and_second_only_r
         crossterm::event::KeyCode::Enter,
         crossterm::event::KeyModifiers::NONE,
     ));
-    ui.confirm_feedback();
+    ui.open_comment_list();
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    std::fs::write(&path, "external during delete confirmation").unwrap();
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.comments.len(), 1);
+    assert!(ui.comment_list.as_ref().unwrap().error.is_some());
+    std::fs::write(&path, "repair-only change").unwrap();
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(
+        ui.comment_editor
+            .as_ref()
+            .unwrap()
+            .anchor
+            .selection
+            .is_some()
+    );
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(ui.comment_list.is_some());
+    assert!(ui.comment_list.as_ref().unwrap().error.is_none());
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
     ui.submit_feedback();
     let second = ui.review_feedback.as_ref().unwrap().job_id.unwrap();
     assert_ne!(first, second);

@@ -94,6 +94,13 @@ require a model client. The read-only `h` overlay consumes editing/submit/rollba
 keys and mouse scrolling. Delayed outcomes update archived display metadata only
 when batch, revision and producing job match, never active authority. History is
 process-local; confirmed deletion removes only the selected record.
+`feedback_comments.rs` manages only the active batch with frozen batch/revision
+identity. Exact saved anchors drive navigation/edit/delete; selectable-row indexes
+are mapped back to raw source rows while excluding newline markers. Deletion
+requires Press confirmation and revalidates the live source at that point. Stale
+navigation is view-only; busy/rollback blocks navigation and mutations. The editor
+owns input ahead of its retained list; saves replace an existing target in place,
+then refresh list revision/selection. Archive keys remain consumed by history.
 No new LLM tool or persistent wire format is introduced.
 
 ### Adding a TUI slash command

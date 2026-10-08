@@ -14,8 +14,12 @@ fn payload() -> crate::diff_review::DiffReviewPayload {
 struct Handler {
     calls: Arc<AtomicUsize>,
     fail: bool,
+    busy: bool,
 }
 impl CommandHandler for Handler {
+    fn foreground_busy(&self) -> bool {
+        self.busy
+    }
     fn handle(&mut self, _: &str, _: &mut TuiApp) {
         panic!("feedback must never enter ordinary dispatch");
     }
@@ -59,6 +63,7 @@ fn ui(fail: bool) -> (TuiApp, Arc<AtomicUsize>) {
     ui.handler = Some(Box::new(Handler {
         calls: calls.clone(),
         fail,
+        busy: false,
     }));
     (ui, calls)
 }
@@ -511,5 +516,217 @@ fn feedback_line_selection_stale_source_and_resize_cancel_preserve_comments() {
         ui.review_feedback.as_ref().unwrap().batch.comments[0].text,
         "保存コメント"
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn feedback_comment_list_exact_range_edit_order_cancel_delete_and_jump() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "hunk全体");
+    ui.start_line_selection();
+    ui.handle_feedback_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.handle_paste("削除と追加の範囲");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.diff_review.as_mut().unwrap().selected = 1;
+    save(&mut ui, "別ファイルの日本語");
+    let before = ui.review_feedback.as_ref().unwrap().batch.clone();
+    let normal = ui.textarea.lines().to_vec();
+    ui.open_comment_list();
+    ui.handle_paste("一覧に貼っても通常入力に混ざらない");
+    for (width, height) in [(120, 32), (45, 15), (8, 4)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+    }
+    ui.handle_feedback_key(key(KeyCode::End));
+    ui.handle_feedback_key(key(KeyCode::Char('e')));
+    assert_eq!(
+        ui.comment_editor.as_ref().unwrap().anchor,
+        before.comments[2].anchor
+    );
+    ui.handle_paste("取消す変更");
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    assert!(ui.comment_list.is_some());
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        before.comments
+    );
+    ui.handle_feedback_key(key(KeyCode::Char('e')));
+    ui.comment_editor.as_mut().unwrap().textarea =
+        TextArea::from(vec!["更新後の日本語".to_string(), "二行目".to_string()]);
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    let comments = &ui.review_feedback.as_ref().unwrap().batch.comments;
+    assert_eq!(comments[2].anchor, before.comments[2].anchor);
+    assert_eq!(comments[2].text, "更新後の日本語\n二行目");
+    assert_eq!(comments[..2], before.comments[..2]);
+    assert_eq!(ui.comment_list.as_ref().unwrap().selected, 2);
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handle_feedback_key(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    ));
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.comments.len(), 3);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        before.comments[..2]
+    );
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert!(ui.comment_list.is_none());
+    assert_eq!(ui.diff_review.as_ref().unwrap().selected, 0);
+    assert_eq!(
+        ui.diff_review
+            .as_ref()
+            .unwrap()
+            .current_file()
+            .unwrap()
+            .selected_hunk,
+        0
+    );
+    let file = ui.diff_review.as_ref().unwrap().current_file().unwrap();
+    let raw = before.comments[1].anchor.hunk.start_row + 1;
+    let projected = ui
+        .diff_projection()
+        .iter()
+        .position(|r| r.raw_row == Some(raw))
+        .unwrap();
+    assert_eq!(file.scroll, projected);
+    assert_eq!(ui.textarea.lines(), normal);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn feedback_comment_list_marker_rows_stale_guard_and_read_only_history() {
+    let (mut ui, calls) = ui(false);
+    let mut source = payload();
+    source.files = vec!["a.rs".into()];
+    source.diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n".into();
+    ui.diff_review = Some(DiffReviewState::from_payload(source));
+    ui.start_line_selection();
+    ui.handle_feedback_key(key(KeyCode::Down));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.handle_paste("追加行の日本語");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.open_comment_list();
+    let ordinary_offset = ui.scroll_state.offset;
+    assert!(ui.scroll_comment_list(3));
+    assert_eq!(ui.scroll_state.offset, ordinary_offset);
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    let file = ui.diff_review.as_ref().unwrap().current_file().unwrap();
+    assert_eq!(ui.diff_projection()[file.scroll].raw_row, Some(6)); // skip old no-newline marker
+    ui.open_comment_list();
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    let original = ui.review_feedback.as_ref().unwrap().batch.clone();
+    next_review(&mut ui, "repair-review");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        original.comments
+    );
+    assert!(ui.comment_list.as_ref().unwrap().error.is_some());
+    ui.handle_feedback_key(key(KeyCode::Esc)); // cancel deletion
+    ui.handle_feedback_key(key(KeyCode::Char('e')));
+    assert!(ui.comment_editor.is_none());
+    ui.handle_feedback_key(key(KeyCode::Enter)); // explicit readonly source jump
+    assert!(!ui.diff_review.as_ref().unwrap().rejectable);
+    ui.show_feedback_source();
+    assert_eq!(
+        ui.diff_review.as_ref().unwrap().review_id.as_deref(),
+        Some("repair-review")
+    );
+    ui.start_fresh_feedback();
+    assert_eq!(ui.feedback_history.len(), 1);
+    ui.open_feedback_history();
+    for code in [
+        KeyCode::Char('m'),
+        KeyCode::Char('e'),
+        KeyCode::Char('s'),
+        KeyCode::Enter,
+        KeyCode::Char('r'),
+    ] {
+        ui.handle_feedback_key(key(code));
+    }
+    assert!(ui.comment_list.is_none());
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().batch.comments,
+        original.comments
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn feedback_comment_list_busy_revision_guard_last_delete_and_empty() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "最後のコメント");
+    ui.open_comment_list();
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handler = Some(Box::new(Handler {
+        calls: calls.clone(),
+        fail: false,
+        busy: true,
+    }));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.comments.len(), 1);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert!(ui.comment_list.is_some());
+    ui.handler = Some(Box::new(Handler {
+        calls: calls.clone(),
+        fail: true,
+        busy: false,
+    }));
+    ui.handle_feedback_key(key(KeyCode::Char('e')));
+    assert!(ui.comment_editor.is_none());
+    ui.handler = Some(Box::new(Handler {
+        calls: calls.clone(),
+        fail: false,
+        busy: false,
+    }));
+    ui.review_feedback.as_mut().unwrap().batch.revision += 1;
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    assert!(
+        ui.comment_list
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("batch changed")
+    );
+    assert!(!ui.comment_list.as_ref().unwrap().confirm_delete);
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    ui.open_comment_list();
+    let batch_id = ui.review_feedback.as_ref().unwrap().batch.id.clone();
+    ui.start_fresh_feedback();
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.id, batch_id);
+    ui.handle_feedback_key(key(KeyCode::Char('d')));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert!(
+        ui.review_feedback
+            .as_ref()
+            .unwrap()
+            .batch
+            .comments
+            .is_empty()
+    );
+    for code in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::End,
+        KeyCode::Enter,
+        KeyCode::Char('d'),
+        KeyCode::Char('e'),
+    ] {
+        ui.handle_feedback_key(key(code));
+    }
+    assert_eq!(ui.comment_list.as_ref().unwrap().selected, 0);
+    assert!(ui.comment_editor.is_none());
+    ui.handle_feedback_key(key(KeyCode::Char('s')));
+    assert!(ui.feedback_confirmation);
+    assert!(ui.feedback_error.is_some());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
