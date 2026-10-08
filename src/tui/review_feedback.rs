@@ -55,6 +55,12 @@ pub struct HistoryView {
     pub confirm_delete: bool,
 }
 
+pub struct LineSelector {
+    pub anchor: Anchor,
+    pub cursor: usize,
+    pub pivot: usize,
+}
+
 pub struct CommentEditor {
     pub anchor: Anchor,
     pub textarea: TextArea<'static>,
@@ -68,6 +74,7 @@ impl TuiApp {
         }
         let file = review.current_file()?;
         Some(Anchor {
+            selection: None,
             version: 1,
             session_id: review.session_id.clone()?,
             review_id: review.review_id.clone()?,
@@ -82,6 +89,10 @@ impl TuiApp {
             self.push_log("[feedback] This review/hunk cannot be targeted. Unsupported diffs remain viewable.");
             return;
         };
+        self.start_comment_at(anchor);
+    }
+
+    fn start_comment_at(&mut self, anchor: Anchor) {
         if self
             .review_feedback
             .as_ref()
@@ -109,6 +120,82 @@ impl TuiApp {
         let textarea = TextArea::from(text.split('\n').map(str::to_owned).collect::<Vec<_>>());
         self.comment_editor = Some(CommentEditor { anchor, textarea });
         self.dirty = true;
+    }
+
+    pub(crate) fn start_line_selection(&mut self) {
+        let Some(anchor) = self.feedback_anchor() else {
+            return;
+        };
+        if self.foreground_busy()
+            || self
+                .review_feedback
+                .as_ref()
+                .is_some_and(|d| d.batch.source.review_id.as_ref() != Some(&anchor.review_id))
+        {
+            self.push_log("[feedback] Wait for work or press n on the current review; saved comments retained.");
+            return;
+        }
+        if !crate::features::review_feedback::selection::rows(&anchor.hunk).is_empty() {
+            self.line_selector = Some(LineSelector {
+                anchor,
+                cursor: 0,
+                pivot: 0,
+            });
+            self.dirty = true;
+        }
+    }
+
+    fn handle_line_selection_key(&mut self, key: KeyEvent) -> bool {
+        let Some(view) = self.line_selector.as_mut() else {
+            return false;
+        };
+        if key.kind == KeyEventKind::Release {
+            return true;
+        }
+        let count = crate::features::review_feedback::selection::rows(&view.anchor.hunk).len();
+        if key.code == KeyCode::Esc && key.kind == KeyEventKind::Press {
+            self.line_selector = None;
+        } else if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && key.kind == KeyEventKind::Press
+        {
+            let mut anchor = view.anchor.clone();
+            match crate::features::review_feedback::selection::select(
+                &anchor.hunk,
+                view.cursor.min(view.pivot),
+                view.cursor.max(view.pivot),
+            ) {
+                Ok(selection) => {
+                    anchor.selection = Some(selection);
+                    self.line_selector = None;
+                    // A new review may have arrived while selecting; never reattach the frozen target.
+                    if self.feedback_anchor().is_some_and(|current| {
+                        current.review_id == anchor.review_id && current.hunk == anchor.hunk
+                    }) {
+                        self.start_comment_at(anchor);
+                    } else {
+                        self.push_log("[feedback] Source changed while selecting; selection canceled, comments retained.");
+                    }
+                }
+                Err(error) => self.push_log(format!("[feedback] {error}")),
+            }
+        } else if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+            let next = match key.code {
+                KeyCode::Up => Some(view.cursor.saturating_sub(1)),
+                KeyCode::Down => Some(view.cursor.saturating_add(1).min(count.saturating_sub(1))),
+                KeyCode::Home => Some(0),
+                KeyCode::End => Some(count.saturating_sub(1)),
+                _ => None,
+            };
+            if let Some(next) = next {
+                view.cursor = next;
+                if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                    view.pivot = next;
+                }
+            }
+        }
+        self.dirty = true;
+        true
     }
 
     pub(crate) fn save_comment(&mut self) {
@@ -222,7 +309,7 @@ impl TuiApp {
 
     fn prepare_fresh_feedback(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.comment_editor.is_none(),
+            self.comment_editor.is_none() && self.line_selector.is_none(),
             "Save or cancel comment editing first; comments retained."
         );
         anyhow::ensure!(
@@ -382,6 +469,9 @@ impl TuiApp {
         if self.handle_feedback_history_key(key) {
             return true;
         }
+        if self.handle_line_selection_key(key) {
+            return true;
+        }
         if self.comment_editor.is_none() && !self.feedback_confirmation {
             return false;
         }
@@ -479,6 +569,7 @@ impl TuiApp {
             }
         } else if !self.feedback_confirmation
             && self.feedback_history_view.is_none()
+            && self.line_selector.is_none()
             && self.diff_review_focus == DiffReviewFocus::Input
             && self.input_mode == crate::tui::state::InputMode::Normal
         {
@@ -642,22 +733,28 @@ impl TuiApp {
                     .review_feedback
                     .as_ref()
                     .filter(|d| d.batch.source.review_id == review.review_id)
-                && let Some(comment) = draft
+            {
+                for comment in draft
                     .batch
                     .comments
                     .iter()
-                    .find(|c| c.anchor.path == file.path && c.anchor.hunk == *h)
-            {
-                for text in wrap_cells(
-                    &format!("Comment: {}", comment.text),
-                    self.diff_viewport_width.get(),
-                ) {
-                    rows.push(DisplayRow {
-                        content: text,
-                        kind: DiffLineKind::Other,
-                        selected,
-                        raw_row: None,
-                    });
+                    .filter(|c| c.anchor.path == file.path && c.anchor.hunk == *h)
+                {
+                    for text in wrap_cells(
+                        &format!(
+                            "Comment ({}): {}",
+                            comment.anchor.target_label(),
+                            comment.text
+                        ),
+                        self.diff_viewport_width.get(),
+                    ) {
+                        rows.push(DisplayRow {
+                            content: text,
+                            kind: DiffLineKind::Other,
+                            selected,
+                            raw_row: None,
+                        });
+                    }
                 }
             }
         }

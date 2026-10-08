@@ -378,3 +378,138 @@ fn feedback_history_mouse_resize_keeps_ordinary_scroll_and_source_view() {
     ui.handle_feedback_key(key(KeyCode::Esc));
     assert_eq!(ui.diff_review, before);
 }
+
+#[test]
+fn feedback_line_selection_multiple_targets_edit_cancel_delete_and_forgery() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "hunk全体");
+    ui.start_line_selection();
+    ui.handle_paste("通常入力に混ざらない");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.handle_paste("削除行の日本語");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.start_line_selection();
+    ui.handle_feedback_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    ui.handle_paste("削除と追加の範囲");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    let batch = ui.review_feedback.as_ref().unwrap().batch.clone();
+    ui.diff_viewport_width.set(120);
+    let projection = ui
+        .diff_projection()
+        .iter()
+        .map(|r| r.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for text in [
+        "hunk全体",
+        "削除行の日本語",
+        "削除と追加の範囲",
+        "selected lines",
+    ] {
+        assert!(projection.contains(text), "{projection}");
+    }
+    assert_eq!(batch.comments.len(), 3);
+    batch.validate_structure().unwrap();
+    assert!(
+        batch.comments[1]
+            .anchor
+            .selection
+            .as_ref()
+            .unwrap()
+            .new
+            .is_none()
+    );
+    assert_eq!(
+        batch.comments[2]
+            .anchor
+            .selection
+            .as_ref()
+            .unwrap()
+            .new
+            .as_ref()
+            .unwrap()
+            .start,
+        1
+    );
+    assert!(batch.evidence().unwrap().contains("selection"));
+    let mut forged = batch.clone();
+    forged.comments[1]
+        .anchor
+        .selection
+        .as_mut()
+        .unwrap()
+        .old
+        .as_mut()
+        .unwrap()
+        .start = 2;
+    assert!(forged.validate_structure().is_err());
+    forged = batch.clone();
+    forged.comments[1]
+        .anchor
+        .selection
+        .as_mut()
+        .unwrap()
+        .excerpt = "-forged".into();
+    assert!(forged.validate_structure().is_err());
+    forged = batch.clone();
+    forged.comments.push(batch.comments[1].clone());
+    assert!(forged.validate_structure().is_err());
+    let old_json = serde_json::to_value(&batch.comments[0].anchor).unwrap();
+    assert!(old_json.get("selection").is_none());
+    let old: crate::features::review_feedback::Anchor = serde_json::from_value(old_json).unwrap();
+    assert!(old.selection.is_none());
+    ui.start_line_selection();
+    ui.handle_feedback_key(key(KeyCode::Esc));
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        batch.comments
+    );
+    ui.start_line_selection();
+    ui.handle_feedback_key(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    ));
+    assert!(ui.line_selector.is_some());
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(
+        ui.comment_editor.as_ref().unwrap().textarea.lines(),
+        ["削除行の日本語"]
+    );
+    ui.comment_editor.as_mut().unwrap().textarea = TextArea::default();
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.comments.len(), 2);
+    assert!(
+        ui.review_feedback
+            .as_ref()
+            .unwrap()
+            .batch
+            .comments
+            .iter()
+            .any(|c| c.anchor.selection.is_none())
+    );
+    assert_eq!(ui.textarea.lines(), ["keep ordinary 日本語"]);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn feedback_line_selection_stale_source_and_resize_cancel_preserve_comments() {
+    let (mut ui, calls) = ui(false);
+    save(&mut ui, "保存コメント");
+    ui.start_line_selection();
+    for (width, height) in [(120, 32), (45, 15), (8, 4)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui.view(f, None)).unwrap();
+    }
+    next_review(&mut ui, "different-review");
+    ui.handle_feedback_key(key(KeyCode::Enter));
+    assert!(ui.line_selector.is_none());
+    assert!(ui.comment_editor.is_none());
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments[0].text,
+        "保存コメント"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

@@ -71,7 +71,12 @@ Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `
 ### Inline review feedback
 
 `src/features/review_feedback/` owns immutable hunk ranges/content identities and
-typed feedback batches. `src/tui/review_feedback.rs` owns a separate modal editor,
+typed feedback batches. Optional `Anchor.selection` derives selectable diff rows,
+old/new coordinates and exact excerpt identity from the retained full hunk;
+validation recomputes it before dispatch. Absent selection remains a whole-hunk
+comment and serializes as before. Distinct selections can share a hunk. The `l`
+modal freezes its source, consumes prompt shortcuts/paste and cancels if a new
+review arrives before editing. History displays selected coordinates read-only. `src/tui/review_feedback.rs` owns a separate modal editor,
 ephemeral draft and display projection. Comment input takes priority over normal
 prompt shortcuts; saving cannot dispatch an instruction. `FsTools` validates the
 sealed source capture non-destructively before confirmation/dispatch and again

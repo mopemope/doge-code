@@ -9,7 +9,7 @@ pub fn identity(text: &str) -> String {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LineRange {
     pub start: usize,
     pub count: usize,
@@ -125,6 +125,8 @@ pub struct Anchor {
     pub review_identity: String,
     pub path: String,
     pub hunk: Hunk,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<selection::Selection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,9 +190,15 @@ impl FeedbackBatch {
                     .any(|(path, hunks)| path == &a.path && hunks.contains(&a.hunk)),
                 "Unsupported or changed hunk."
             );
+            if let Some(selected) = &a.selection {
+                anyhow::ensure!(
+                    selection::select(&a.hunk, selected.start_row, selected.end_row)? == *selected,
+                    "Selected source rows changed."
+                );
+            }
             anyhow::ensure!(
-                seen.insert((&a.path, &a.hunk.identity)),
-                "Duplicate hunk comment."
+                seen.insert((&a.path, &a.hunk.identity, &a.selection)),
+                "Duplicate comment target."
             );
         }
         Ok(())
@@ -250,3 +258,32 @@ pub struct FeedbackOutcome {
 }
 
 pub mod history;
+
+pub mod selection;
+impl Anchor {
+    pub fn target_label(&self) -> String {
+        fn label(range: Option<&LineRange>) -> String {
+            range
+                .map(|r| format!("{},{}", r.start, r.count))
+                .unwrap_or_else(|| "—".into())
+        }
+        if let Some(s) = &self.selection {
+            format!(
+                "selected lines | old {} → new {}",
+                label(s.old.as_ref()),
+                label(s.new.as_ref())
+            )
+        } else {
+            format!(
+                "hunk | old {},{} → new {},{}",
+                self.hunk.old.start, self.hunk.old.count, self.hunk.new.start, self.hunk.new.count
+            )
+        }
+    }
+    pub fn target_excerpt(&self) -> &str {
+        self.selection
+            .as_ref()
+            .map(|s| s.excerpt.as_str())
+            .unwrap_or(&self.hunk.excerpt)
+    }
+}
