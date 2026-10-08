@@ -585,3 +585,124 @@ async fn feedback_terminal_persistence_failure_overrides_premature_completion_no
             .starts_with("Failed: Could not save session checkpoint")
     );
 }
+
+#[tokio::test]
+async fn feedback_history_two_managed_repairs_preserve_sources_and_second_only_rollback() {
+    let (mut executor, mut ui, _dir, original) = fixture().await;
+    let path = executor.cfg.project_root.join("a.txt");
+    let mut second = write(&path);
+    second["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+        json!({"path":path,"content":"second repair 日本語"})
+            .to_string()
+            .into();
+    let provider = Provider::new(
+        vec![
+            (200, write(&path)),
+            (200, done()),
+            (200, second),
+            (200, done()),
+        ],
+        false,
+    )
+    .await;
+    provider.configure(&mut executor);
+    ui.handler = Some(Box::new(executor));
+    ui.confirm_feedback();
+    ui.submit_feedback();
+    let first = ui.review_feedback.as_ref().unwrap().job_id.unwrap();
+    terminal(
+        ui.handler
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TuiExecutor>()
+            .unwrap(),
+        first,
+    )
+    .await;
+    let mut handler = ui.handler.take().unwrap();
+    handler.handle_job_completed(&first.to_string(), &mut ui);
+    ui.handler = Some(handler);
+    let first_repair = ui.diff_review.as_ref().unwrap().source.clone();
+    // An external edit blocks a new batch without discarding the submitted text.
+    std::fs::write(&path, "external edit").unwrap();
+    ui.start_fresh_feedback();
+    assert!(ui.feedback_error.is_some());
+    assert_eq!(ui.feedback_history.len(), 0);
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.comments,
+        original.comments
+    );
+    std::fs::write(&path, "repair-only change").unwrap();
+    ui.start_fresh_feedback();
+    assert!(ui.feedback_error.is_none(), "{:?}", ui.feedback_error);
+    assert_eq!(ui.feedback_history.len(), 1);
+    let fresh = ui.review_feedback.as_ref().unwrap().batch.id.clone();
+    assert_ne!(fresh, original.id);
+    assert_eq!(
+        ui.review_feedback.as_ref().unwrap().batch.source.review_id,
+        first_repair.review_id
+    );
+    assert!(
+        ui.review_feedback
+            .as_ref()
+            .unwrap()
+            .batch
+            .comments
+            .is_empty()
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    ui.start_comment();
+    assert!(ui.comment_editor.is_some());
+    ui.handle_paste("二回目だけを改善してください");
+    ui.handle_feedback_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    ui.confirm_feedback();
+    ui.submit_feedback();
+    let second = ui.review_feedback.as_ref().unwrap().job_id.unwrap();
+    assert_ne!(first, second);
+    terminal(
+        ui.handler
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TuiExecutor>()
+            .unwrap(),
+        second,
+    )
+    .await;
+    let mut handler = ui.handler.take().unwrap();
+    handler.handle_job_completed(&second.to_string(), &mut ui);
+    let second_review = ui.diff_review.as_ref().unwrap().source.clone();
+    handler.handle_job_completed(&first.to_string(), &mut ui);
+    assert_eq!(
+        ui.diff_review.as_ref().unwrap().source.review_id,
+        second_review.review_id
+    );
+    assert_eq!(ui.review_feedback.as_ref().unwrap().batch.id, fresh);
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().batch.comments,
+        original.comments
+    );
+    assert_eq!(
+        ui.feedback_history.get(0).unwrap().batch.source.diff,
+        original.source.diff
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 4);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "second repair 日本語"
+    );
+    let executor = handler.as_any().downcast_ref::<TuiExecutor>().unwrap();
+    let report = executor
+        .tools
+        .reject_review(
+            second_review.review_id.as_deref().unwrap(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    assert!(report.error.is_none(), "{report:?}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "repair-only change");
+}

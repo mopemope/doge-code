@@ -89,6 +89,7 @@ impl TuiApp {
                                 continue;
                             };
                             if !self.accept_job_message(id) {
+                                self.archived_job_message(id, message);
                                 continue;
                             }
                             (message.to_string(), true)
@@ -143,14 +144,8 @@ impl TuiApp {
                         if let Ok(outcome) = serde_json::from_str::<
                             crate::features::review_feedback::FeedbackOutcome,
                         >(json)
-                            && let Some(draft) = self.review_feedback.as_mut().filter(|d| {
-                                d.batch.id == outcome.batch_id
-                                    && d.batch.revision == outcome.revision
-                                    && d.job_id == Some(outcome.job_id)
-                            })
                         {
-                            draft.outcome = Some(outcome.outcome);
-                            self.dirty = true;
+                            self.apply_feedback_outcome(outcome);
                         }
                         continue;
                     }
@@ -582,14 +577,16 @@ impl TuiApp {
                     }
                     Event::Mouse(mouse_event) => match mouse_event.kind {
                         event::MouseEventKind::ScrollUp => {
-                            if self.key_help_open {
+                            if self.scroll_feedback_history(-3) {
+                            } else if self.key_help_open {
                                 self.scroll_key_help(-3);
                             } else {
                                 self.scroll_up(3);
                             }
                         }
                         event::MouseEventKind::ScrollDown => {
-                            if self.key_help_open {
+                            if self.scroll_feedback_history(3) {
+                            } else if self.key_help_open {
                                 self.scroll_key_help(3);
                             } else {
                                 self.scroll_down(3);
@@ -663,12 +660,16 @@ impl TuiApp {
         }
         if self.input_mode == InputMode::Normal
             && self.diff_review.is_none()
-            && self.review_feedback.is_some()
+            && (self.review_feedback.is_some() || !self.feedback_history.is_empty())
             && key.code == KeyCode::F(6)
             && key.modifiers.is_empty()
         {
             if key.kind == event::KeyEventKind::Press {
-                self.show_feedback_source();
+                if self.review_feedback.is_some() {
+                    self.show_feedback_source();
+                } else {
+                    self.open_feedback_history();
+                }
             }
             return Ok(false);
         }
@@ -722,6 +723,14 @@ impl TuiApp {
         use crossterm::event::KeyCode;
 
         match key.code {
+            KeyCode::Char('n') if key.kind == event::KeyEventKind::Press => {
+                self.start_fresh_feedback();
+                Ok(true)
+            }
+            KeyCode::Char('h') if key.kind == event::KeyEventKind::Press => {
+                self.open_feedback_history();
+                Ok(true)
+            }
             KeyCode::Char('v') if key.kind == event::KeyEventKind::Press => {
                 self.show_feedback_source();
                 Ok(true)

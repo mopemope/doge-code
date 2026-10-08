@@ -1164,6 +1164,8 @@ After file modifications (`fs_write`, `edit`, `apply_patch`), the TUI automatica
   - `[` / `]` — select the previous/next supported hunk (old and new line numbers are shown)
   - `c` — add or edit a comment on the selected hunk; `d` deletes its saved comment
   - `s` — review all saved comments and explicitly confirm one batch repair
+  - `n` — archive the active batch and start empty comments on the current live review
+  - `h` — browse previous batches and source diffs read-only
   - `v` — toggle the retained source review and latest resulting review when a feedback draft exists
   - `←`/`→` — switch between changed files
   - `↑`/`↓` — scroll; `PgUp`/`PgDn` — fast scroll; `Home`/`End` — jump to top/bottom
@@ -1203,7 +1205,22 @@ panel, `F6` reopens the retained source for viewing. `s` remains available
 to inspect saved text; `v` switches source/latest diff. Accept/dismiss expires the
 active capture, so retained comments cannot then be submitted against it.
 
-Drafts are memory-local and do not survive restart. Initial limits are 128
+To comment on a repair result, focus its current diff and press `n`. This explicitly
+archives the previous batch and creates an empty batch anchored to the current live
+capture. Previous comments are not carried forward or marked resolved. Starting a
+batch makes no model request. Missing/expired captures, external edits, rollback,
+foreground work and full history block this action while preserving active text.
+
+Press `h` to browse archived comments: Left/Right selects a batch, arrows/page keys
+or the mouse wheel scroll, `v` toggles its frozen source diff, and `Esc` returns to
+the current review without changing the ordinary prompt. History is read-only and
+cannot submit repairs or restore files. It holds at most eight batches within a
+16 MiB serialized snapshot budget (including reserved outcome metadata). Nothing is
+automatically evicted. `d` then `Enter` explicitly removes the selected history
+record; `Esc` cancels removal. This removes only history, leaving files and active
+comments intact.
+
+Drafts and history are memory-local and do not survive restart. Initial limits are 128
 comments, 64 KiB of comment text and 128 KiB of selected hunk context. Arbitrary
 line ranges, automatic re-anchoring and strict write confinement are outside this
 initial version. Review receipts do not cover shell/remote changes.

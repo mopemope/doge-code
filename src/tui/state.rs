@@ -298,6 +298,8 @@ pub struct TuiApp {
     // Diff review panel state (populated from `::diff_review:` agent messages)
     pub diff_review: Option<DiffReviewState>,
     pub(crate) review_feedback: Option<crate::tui::review_feedback::FeedbackDraft>,
+    pub(crate) feedback_history: crate::features::review_feedback::history::FeedbackHistory,
+    pub(crate) feedback_history_view: Option<crate::tui::review_feedback::HistoryView>,
     pub(crate) comment_editor: Option<crate::tui::review_feedback::CommentEditor>,
     pub(crate) feedback_confirmation: bool,
     pub(crate) feedback_confirmation_scroll: usize,
@@ -553,6 +555,8 @@ impl TuiApp {
             last_heartbeat: None,
             diff_review: None,
             review_feedback: None,
+            feedback_history: Default::default(),
+            feedback_history_view: None,
             comment_editor: None,
             feedback_confirmation: false,
             feedback_confirmation_scroll: 0,
