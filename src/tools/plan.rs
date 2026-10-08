@@ -278,7 +278,8 @@ pub fn plan_write_tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "plan_write".to_string(),
             description: DESCRIPTION.to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -289,7 +290,7 @@ pub fn plan_write_tool_def() -> ToolDef {
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string"},
-                                "parent_id": {"type": "string", "nullable": true},
+                                "parent_id": {"type": ["string", "null"]},
                                 "content": {"type": "string", "minLength": 1},
                                 "status": {
                                     "type": "string",
@@ -359,6 +360,7 @@ pub fn plan_read_tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {},
+                "required": [],
                 "additionalProperties": false,
             }),
         },
