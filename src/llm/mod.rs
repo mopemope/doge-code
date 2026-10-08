@@ -57,6 +57,8 @@ pub enum LlmErrorKind {
     Authentication,
     #[error("deserialization error")]
     Deserialize,
+    #[error("invalid tool arguments")]
+    InvalidToolArguments,
     #[error("request cancelled")]
     Cancelled,
     #[error("context length exceeded")]

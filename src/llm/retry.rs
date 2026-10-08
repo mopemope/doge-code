@@ -136,7 +136,8 @@ pub(crate) fn should_retry(failure: &RequestAttemptFailure) -> bool {
         LlmErrorKind::Cancelled
         | LlmErrorKind::Authentication
         | LlmErrorKind::ContextLengthExceeded
-        | LlmErrorKind::Deserialize => return false,
+        | LlmErrorKind::Deserialize
+        | LlmErrorKind::InvalidToolArguments => return false,
         _ => {}
     }
 
@@ -353,6 +354,11 @@ mod tests {
             None
         )));
         assert!(!should_retry(&failure(LlmErrorKind::Cancelled, None, None)));
+        assert!(!should_retry(&failure(
+            LlmErrorKind::InvalidToolArguments,
+            None,
+            None
+        )));
     }
 
     #[test]
