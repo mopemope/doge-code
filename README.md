@@ -1327,6 +1327,10 @@ an explicit value takes precedence over model defaults.
   (`obs-*` + `observation_read`) before full compaction; unseen results are
   never offloaded or summarized until the model has seen them once
 - LLM-based summarization preserves essential context
+- Automatic local summarization is applied only when the complete serialized
+  history becomes smaller. A rejected summary leaves history and recoverable
+  observations intact; its consumed usage is still counted. Manual `/compact`
+  retains its explicit summarization behavior.
 - Recent-file / automatic memory hints are injected only as bootstrap context for the first request; they are never stored in durable conversation history
 - Recent conversation tail is retained across compaction (tool-call pairs kept intact)
 - Structured format for files accessed, actions taken, and outcomes
