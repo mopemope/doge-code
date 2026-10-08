@@ -428,6 +428,229 @@ async fn argument_correction_does_not_retry_invalid_identity_or_catalog() {
 }
 
 #[tokio::test]
+async fn usage_calibration_missing_response_usage_does_not_reuse_previous_prompt_counter() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    for previous_prompt_tokens in [0, 250_000] {
+        let root = tempfile::tempdir().expect("root");
+        for name in ["first.txt", "second.txt"] {
+            std::fs::write(root.path().join(name), "fixture content").expect("file");
+        }
+        let (client, requests, server) = fixture(vec![
+            (
+                200,
+                assistant_with_calls(vec![tool_call(
+                    "fs_read",
+                    "first",
+                    serde_json::json!({"path":root.path().join("first.txt")}),
+                )]),
+            ),
+            (
+                200,
+                assistant_with_calls(vec![tool_call(
+                    "fs_read",
+                    "second",
+                    serde_json::json!({"path":root.path().join("second.txt")}),
+                )]),
+            ),
+            (200, assistant_done("done")),
+        ])
+        .await;
+        // A previous turn's telemetry must not become a sample for these
+        // responses, which deliberately omit usage altogether.
+        client.set_prompt_tokens(previous_prompt_tokens);
+        let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
+        cfg.context_budget.mode = crate::config::ContextBudgetMode::Auto;
+        cfg.llm.context_window_size = Some(50_000);
+        let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()));
+        let run = run_agent_loop(
+            &client,
+            "test-model",
+            &fs,
+            user_msg("read two fixtures"),
+            None,
+            None,
+            &cfg,
+            None,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        .expect("completed");
+        server.abort();
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        let requests = requests.lock().expect("requests");
+        let summaries = requests
+            .iter()
+            .filter(|r| r["messages"][0]["content"] == crate::llm::compact_history::COMPACT_PROMPT)
+            .count();
+        println!(
+            "previous_prompt_tokens={previous_prompt_tokens} normal_and_aux_requests={} compaction_requests={summaries}",
+            requests.len()
+        );
+        assert_eq!(
+            summaries,
+            0,
+            "usage was absent: an old counter must not cause compaction ({} total requests)",
+            requests.len()
+        );
+        assert_eq!(requests.len(), 3, "only normal requests are expected");
+        assert!(
+            requests.iter().all(|r| r.get("tools").is_some()),
+            "all calls are normal agent requests"
+        );
+        assert_eq!(run.budget.request_attempts, 3);
+        assert_eq!(run.budget.usage_records, 0);
+    }
+}
+
+#[tokio::test]
+async fn usage_calibration_missing_after_argument_correction_preserves_charges_without_extra_summary()
+ {
+    let root = tempfile::tempdir().expect("root");
+    let invalid = assistant_calls_with_usage(
+        vec![tool_call(
+            "fs_write",
+            "bad",
+            serde_json::json!({"path":root.path().join("out"),"content":17}),
+        )],
+        250_005,
+        250_000,
+    );
+    let corrected = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "fixed",
+        serde_json::json!({"path":root.path().join("out"),"content":"corrected"}),
+    )]);
+    let (client, requests, server) = fixture(vec![
+        (200, invalid),
+        (200, corrected),
+        (200, assistant_done("done")),
+    ])
+    .await;
+    let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
+    cfg.llm.context_window_size = Some(50_000);
+    let run = run_with_project_root(&client, cfg, user_msg("write fixture"), None)
+        .await
+        .expect("done");
+    server.abort();
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    assert_eq!(run.budget.tool_calls, 1);
+    assert_eq!(run.budget.request_attempts, 3);
+    assert_eq!(run.budget.usage_records, 1);
+    assert_eq!(run.budget.provider_reported_tokens, 250_005);
+    assert!(run.budget.charged_tokens >= 250_005);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("out")).expect("out"),
+        "corrected"
+    );
+    let requests = requests.lock().expect("requests");
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|r| r.get("tools").is_some()));
+}
+
+#[tokio::test]
+async fn usage_calibration_missing_after_local_compaction_does_not_use_summary_usage() {
+    let root = tempfile::tempdir().expect("root");
+    for name in ["first", "second", "third"] {
+        std::fs::write(root.path().join(name), "fixture").expect("file");
+    }
+    let call = |name: &str| {
+        tool_call(
+            "fs_read",
+            name,
+            serde_json::json!({"path":root.path().join(name)}),
+        )
+    };
+    let mut first = assistant_calls_with_usage(vec![call("first")], 10_001, 10_000);
+    first["choices"][0]["message"]["content"] =
+        serde_json::json!("discardable reasoning ".repeat(1000));
+    let (client,requests,server)=fixture(vec![
+        (200,first),
+        (200,assistant_calls_with_usage(vec![call("second")],10_001,10_000)),
+        (400,serde_json::json!({"error":{"code":"context_length_exceeded","message":"fixture overflow"}})),
+        (200,assistant_done_with_usage("short summary",250_001,250_000)),
+        (200,assistant_with_calls(vec![call("third")])),
+        (200,assistant_done("done")),
+    ]).await;
+    let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
+    cfg.llm.context_window_size = Some(50_000);
+    let run = run_with_project_root(&client, cfg, user_msg("read fixtures"), None)
+        .await
+        .expect("done");
+    server.abort();
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    assert_eq!(run.budget.tool_calls, 3);
+    assert_eq!(run.budget.request_attempts, 6);
+    assert_eq!(run.budget.usage_records, 3);
+    assert_eq!(run.budget.provider_reported_tokens, 270_003);
+    assert!(run.budget.charged_tokens >= 270_003);
+    let requests = requests.lock().expect("requests");
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["messages"][0]["content"] == crate::llm::compact_history::COMPACT_PROMPT)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn usage_calibration_cancellation_keeps_reported_usage_and_never_dispatches_pending_response()
+{
+    let root = tempfile::tempdir().expect("root");
+    std::fs::write(root.path().join("input"), "fixture").expect("input");
+    let first = assistant_calls_with_usage(
+        vec![tool_call(
+            "fs_read",
+            "first",
+            serde_json::json!({"path":root.path().join("input")}),
+        )],
+        16,
+        12,
+    );
+    let mut pending = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "pending",
+        serde_json::json!({"path":root.path().join("out"),"content":"must not run"}),
+    )]);
+    pending["_fixture_delay_ms"] = serde_json::json!(2000);
+    let (client, requests, server) = fixture(vec![(200, first), (200, pending)]).await;
+    let cancel = CancellationToken::new();
+    let canceller = cancel.clone();
+    let captured = requests.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            if captured.lock().expect("requests").len() >= 2 {
+                canceller.cancel();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    });
+    let err = run_with_project_root(
+        &client,
+        test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf()),
+        user_msg("read"),
+        Some(cancel),
+    )
+    .await
+    .expect_err("cancelled");
+    task.abort();
+    server.abort();
+    assert_eq!(
+        err.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(&crate::llm::LlmErrorKind::Cancelled)
+    );
+    assert!(!root.path().join("out").exists());
+    let usage = client.usage_snapshot();
+    assert_eq!(usage.attempts, 2);
+    assert_eq!(usage.usage_records, 1);
+    assert_eq!(usage.total_tokens, 16);
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+}
+
+#[tokio::test]
 async fn iteration_partial_allows_two_requests_then_finalization() {
     // max_iterations=2: requests #1 and #2 allowed, #3 blocked, finalization free.
     let search_call = tool_call("search_memory", "call_1", serde_json::json!({"query":"x"}));
