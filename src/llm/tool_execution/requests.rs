@@ -1021,6 +1021,167 @@ mod tests {
         OpenAIClient::new(format!("{}/", server.url_str("")), "test-key").unwrap()
     }
 
+    fn wire_has_invalid_strict_object(body: &serde_json::Value) -> bool {
+        body["tools"].as_array().is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool["function"]["strict"] == true
+                    && !crate::llm::tool_def::strict_object_contract(
+                        &tool["function"]["parameters"],
+                    )
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn luna_deferred_plan_schema_survives_activation_and_tool_result_round_trip() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        // Reconstruct the name-sorted activation set from the reported failure.
+        // The two MCP entries keep plan_write at tools[7], without starting MCP.
+        let mut entries: Vec<_> = default_tools_def()
+            .into_iter()
+            .map(|definition| ToolCatalogEntry {
+                searchable_text: build_searchable_text(&definition, &ToolSource::Builtin),
+                definition,
+                source: ToolSource::Builtin,
+            })
+            .collect();
+        for name in ["activate_project", "write_memory"] {
+            entries.push(remote_fixture_entry(
+                &format!("mcp_serena_{name}"),
+                "serena",
+                name,
+                "fixture",
+            ));
+        }
+        let catalog = ToolCatalog::from_entries(entries, &ToolRoutingConfig::default());
+        catalog
+            .activate(&[
+                "mcp_serena_activate_project".into(),
+                "mcp_serena_write_memory".into(),
+                "plan_read".into(),
+                "plan_write".into(),
+                "write_memory".into(),
+            ])
+            .await;
+        let tools = catalog.active_tool_defs().await;
+        assert_eq!(tools[7].function.name, "plan_write");
+
+        // Model the provider's structural rejection, not a canned unconditional
+        // success. Non-strict schemas retain optional fields and open metadata.
+        server.expect(Expectation::matching(all_of![
+            request::method_path("POST", "/v1/chat/completions"),
+            request::body(json_decoded(wire_has_invalid_strict_object)),
+        ]).times(1).respond_with(status_code(400).body(
+            r#"{"error":{"type":"invalid_request_error","code":"invalid_function_parameters","param":"tools[7].function.parameters","message":"synthetic strict object contract failure"}}"#,
+        )));
+        let response = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls",
+        "message":{"role":"assistant","content":null,"tool_calls":[{
+            "id":"call_plan","type":"function","function":{"name":"plan_write",
+            "arguments":r#"{"items":[{"id":"step1","content":"fixture","status":"pending"}]}"#}
+        }]}}]});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(json_decoded(not(wire_has_invalid_strict_object))),
+                request::body(json_decoded(|body: &serde_json::Value| {
+                    body["messages"].as_array().is_some_and(|messages| {
+                        messages.len() == 1 && messages[0]["role"] == "user"
+                    })
+                })),
+            ])
+            .times(1)
+            .respond_with(json_encoded(response)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(json_decoded(not(wire_has_invalid_strict_object))),
+                request::body(json_decoded(|body: &serde_json::Value| {
+                    body["messages"].as_array().is_some_and(|messages| {
+                        messages.len() == 3
+                            && messages[1]["role"] == "assistant"
+                            && messages[1]["tool_calls"][0]["id"] == "call_plan"
+                            && messages[1]["tool_calls"][0]["function"]["name"] == "plan_write"
+                            && messages[2]["role"] == "tool"
+                            && messages[2]["tool_call_id"] == "call_plan"
+                            && messages[2]["content"] == r#"{"ok":true}"#
+                    })
+                })),
+            ])
+            .times(1)
+            .respond_with(json_encoded(assistant_done_response())),
+        );
+        let client = test_client_for(&server);
+        let mut messages = user_message();
+        // Re-create the old invalid strict flag to prove the mock rejects it.
+        let mut legacy = tools.clone();
+        legacy[7].function.strict = Some(true);
+        let error = chat_tools_once(
+            &client,
+            "gpt-6-luna",
+            &messages,
+            &legacy,
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect_err("legacy schema 400");
+        assert!(format!("{error:#}").contains("invalid_function_parameters"));
+        assert_eq!(
+            client.usage_snapshot().attempts,
+            1,
+            "permanent 400 is not retried"
+        );
+        let message = chat_tools_once(
+            &client,
+            "gpt-6-luna",
+            &messages,
+            &tools,
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("activated request");
+        let args: crate::tools::plan::PlanWriteArgs =
+            serde_json::from_str(&message.tool_calls[0].function.arguments)
+                .expect("optional plan fields may be omitted");
+        assert_eq!(args.mode, crate::tools::plan::PlanWriteMode::Replace);
+        assert!(args.items[0].parent_id.is_none());
+        assert!(args.items[0].verification_obligations.is_empty());
+        messages.push(ChatMessage {
+            provider_state: None,
+            role: message.role,
+            content: message.content,
+            tool_calls: message.tool_calls,
+            tool_call_id: None,
+        });
+        messages.push(ChatMessage {
+            provider_state: None,
+            role: "tool".into(),
+            content: Some(r#"{"ok":true}"#.into()),
+            tool_calls: vec![],
+            tool_call_id: Some("call_plan".into()),
+        });
+        let message = chat_tools_once(
+            &client,
+            "gpt-6-luna",
+            &messages,
+            &tools,
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect("paired tool-result request");
+        assert_eq!(message.content.as_deref(), Some("done"));
+        assert_eq!(client.usage_snapshot().attempts, 3);
+    }
+
     #[tokio::test]
     async fn test_first_payload_defers_remote_and_builtin_schemas() {
         let server = crate::test_support::HTTP_SERVER_POOL.get_server();
