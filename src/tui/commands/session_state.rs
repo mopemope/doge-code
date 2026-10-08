@@ -131,6 +131,12 @@ impl TuiExecutor {
         history.clear();
         drop(history);
         self.report_session_save_outcome(&outcome);
+        self.reset_session_input(ui);
+        Ok(new_id)
+    }
+
+    /// Drop prior-session instructions after a successful UI transition.
+    pub(crate) fn reset_session_input(&mut self, ui: &mut TuiApp) {
         self.last_user_prompt = None;
         ui.last_user_input = None;
         ui.last_observed_directive_id = None;
@@ -143,7 +149,6 @@ impl TuiExecutor {
         // collide with the new session's first turn and attach the wrong
         // directive id. Clearing the raw/effective/id inputs above is
         // sufficient to drop stale state.
-        Ok(new_id)
     }
 
     /// Switch to the target session, replacing the runtime conversation with
@@ -796,6 +801,104 @@ mod tests {
         let restored = runtime_messages(&executor);
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content.as_deref(), Some("in B"));
+    }
+
+    fn seed_old_session_input(executor: &mut TuiExecutor, ui: &mut TuiApp) {
+        let old = "edit @src/old.rs:12";
+        executor.last_user_prompt = Some(old.into());
+        ui.last_user_input = Some(old.into());
+        ui.last_observed_raw_input = Some(old.into());
+        ui.last_observed_effective_input = Some(old.into());
+        ui.last_observed_directive_id = Some("old-directive".into());
+        ui.last_observed_seq = 41;
+    }
+
+    fn assert_session_input_reset(executor: &TuiExecutor, ui: &TuiApp) {
+        assert!(executor.last_user_prompt.is_none());
+        assert!(ui.last_user_input.is_none());
+        assert!(ui.last_observed_raw_input.is_none());
+        assert!(ui.last_observed_effective_input.is_none());
+        assert!(ui.last_observed_directive_id.is_none());
+        assert_eq!(ui.last_observed_seq, 41);
+    }
+
+    #[test]
+    fn session_input_switch_drops_old_retry_and_symbol_target() {
+        let (mut executor, _dir) = test_executor();
+        let target = executor
+            .session_manager
+            .lock()
+            .expect("manager")
+            .store
+            .create()
+            .expect("target");
+        let mut ui = TuiApp::new_for_test("test", None, "dark");
+        seed_old_session_input(&mut executor, &mut ui);
+        executor
+            .handle_session_command(&format!("switch {}", target.meta.id), &mut ui)
+            .expect("switch");
+        assert_eq!(current_session_id(&executor), target.meta.id);
+        assert_session_input_reset(&executor, &ui);
+    }
+
+    #[test]
+    fn session_input_clear_drops_old_retry_and_symbol_target() {
+        let (mut executor, _dir) = test_executor();
+        persist_runtime(&executor, &[user_msg("old")]);
+        executor.replace_conversation_from_messages(vec![user_msg("old")]);
+        let id = current_session_id(&executor);
+        let mut ui = TuiApp::new_for_test("test", None, "dark");
+        seed_old_session_input(&mut executor, &mut ui);
+        executor
+            .handle_session_command("clear", &mut ui)
+            .expect("clear");
+        assert_eq!(current_session_id(&executor), id);
+        assert!(runtime_messages(&executor).is_empty());
+        assert_session_input_reset(&executor, &ui);
+    }
+
+    #[test]
+    fn session_input_failed_switch_and_clear_preserve_retry_and_target() {
+        let (mut executor, _dir) = test_executor();
+        persist_runtime(&executor, &[user_msg("old")]);
+        executor.replace_conversation_from_messages(vec![user_msg("old")]);
+        let id = current_session_id(&executor);
+        let path = executor
+            .session_manager
+            .lock()
+            .expect("manager")
+            .store
+            .session_dir(&id)
+            .join("session.json");
+        let original = std::fs::metadata(&path).expect("metadata").permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).expect("readonly");
+        let mut ui = TuiApp::new_for_test("test", None, "dark");
+        seed_old_session_input(&mut executor, &mut ui);
+        for command in ["switch missing-session", "clear"] {
+            executor
+                .handle_session_command(command, &mut ui)
+                .expect("command reports failure");
+            assert_eq!(current_session_id(&executor), id);
+            assert_eq!(
+                executor.last_user_prompt.as_deref(),
+                Some("edit @src/old.rs:12")
+            );
+            assert_eq!(ui.last_user_input.as_deref(), Some("edit @src/old.rs:12"));
+            assert_eq!(ui.last_observed_raw_input, ui.last_user_input);
+            assert_eq!(ui.last_observed_effective_input, ui.last_user_input);
+            assert_eq!(
+                ui.last_observed_directive_id.as_deref(),
+                Some("old-directive")
+            );
+            assert_eq!(ui.last_observed_seq, 41);
+            assert_eq!(
+                runtime_messages(&executor)[0].content.as_deref(),
+                Some("old")
+            );
+        }
+        std::fs::set_permissions(&path, original).expect("restore");
     }
 
     #[test]
