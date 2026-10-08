@@ -82,7 +82,14 @@ input. Original review context and submitted revision/job identity remain separa
 from the repair capture, so repair rollback cannot undo the source run. Terminal
 failure overrides any preliminary completion display; comments are not resolution
 records. Keep this path typed rather than passing feedback through slash/shell
-routing. No new LLM tool or persistent wire format is introduced.
+routing. `history.rs` bounds archived batch/source snapshots by count and serialized
+bytes without automatic eviction. Explicit `n` validates the current live source
+before archiving and replacing the active batch; empty source validation does not
+require a model client. The read-only `h` overlay consumes editing/submit/rollback
+keys and mouse scrolling. Delayed outcomes update archived display metadata only
+when batch, revision and producing job match, never active authority. History is
+process-local; confirmed deletion removes only the selected record.
+No new LLM tool or persistent wire format is introduced.
 
 ### Adding a TUI slash command
 

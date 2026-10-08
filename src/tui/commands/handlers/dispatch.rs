@@ -51,6 +51,12 @@ impl CommandHandler for TuiExecutor {
     fn review_payload(&self, id: &str) -> Option<crate::diff_review::DiffReviewPayload> {
         self.tools.review_payload(id)
     }
+    fn validate_review_feedback_source(
+        &self,
+        source: &crate::diff_review::DiffReviewPayload,
+    ) -> anyhow::Result<()> {
+        self.tools.validate_review_feedback_source(source)
+    }
     fn validate_review_feedback(
         &self,
         batch: &crate::features::review_feedback::FeedbackBatch,
@@ -244,6 +250,13 @@ impl CommandHandler for TuiExecutor {
     }
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
+        if let Some(id) = crate::jobs::JobId::parse_arg(producer)
+            && let Some(job) = self.jobs.get_snapshot(id)
+            && job.status.is_terminal()
+        {
+            ui.feedback_history.record_terminal(&job);
+        }
+
         if let Some(id) = crate::jobs::JobId::parse_arg(producer)
             && let Some(job) = self.jobs.get_snapshot(id)
             && job.status.is_terminal()

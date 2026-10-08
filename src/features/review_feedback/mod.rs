@@ -248,3 +248,5 @@ pub struct FeedbackOutcome {
     pub job_id: crate::jobs::JobId,
     pub outcome: String,
 }
+
+pub mod history;
