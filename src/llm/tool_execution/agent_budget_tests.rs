@@ -100,9 +100,9 @@ async fn execute_process_unknown_keys_reject_batch_before_any_sibling_runs() {
         .await;
         let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
         cfg.execution.allowed_programs = vec![program.display().to_string()];
-        let result = run_with_cfg(&client, cfg, user_msg("fixture"), None).await;
+        let result = run_with_project_root(&client, cfg, user_msg("fixture"), None).await;
         server.abort();
-        assert!(result.is_err(), "{key} must be rejected");
+        assert!(result.is_ok(), "{key} may be corrected without dispatch");
         assert!(
             !root.path().join("process-marker").exists(),
             "{key} must not spawn"
@@ -111,7 +111,7 @@ async fn execute_process_unknown_keys_reject_batch_before_any_sibling_runs() {
             !root.path().join("sibling-marker").exists(),
             "{key} must reject the entire batch before dispatch"
         );
-        assert_eq!(requests.lock().expect("requests").len(), 1);
+        assert_eq!(requests.lock().expect("requests").len(), 2);
     }
 }
 
@@ -199,6 +199,232 @@ async fn run_with_cfg(
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
+}
+
+async fn run_with_project_root(
+    client: &crate::llm::client_core::OpenAIClient,
+    cfg: AppConfig,
+    messages: Vec<ChatMessage>,
+    cancel: Option<CancellationToken>,
+) -> Result<super::agent_budget::AgentRunResult> {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let fs = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg.clone()));
+    run_agent_loop(
+        client,
+        "test-model",
+        &fs,
+        messages,
+        None,
+        cancel,
+        &cfg,
+        None,
+        crate::provenance::ProvenanceAttribution::none(),
+    )
+    .await
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn argument_correction_rejects_invalid_batch_then_runs_corrected_process_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("root");
+    let program = root.path().join("fixture-program");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> invocations\n",
+    )
+    .expect("program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+        .expect("permissions");
+    let invalid = assistant_with_calls(vec![
+        tool_call(
+            "fs_write",
+            "sibling",
+            serde_json::json!({"path":"sibling-marker","content":"no"}),
+        ),
+        tool_call(
+            "execute_process",
+            "bad",
+            serde_json::json!({"program":program,"args":"SECRET_INVALID_ARGUMENT"}),
+        ),
+    ]);
+    let corrected = assistant_with_calls(vec![tool_call(
+        "execute_process",
+        "fixed",
+        serde_json::json!({"program":program,"args":["literal argument"],"cwd":root.path()}),
+    )]);
+    let (client, requests, server) = fixture(vec![
+        (200, invalid),
+        (200, corrected),
+        (200, assistant_done("done")),
+    ])
+    .await;
+    let mut cfg = test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf());
+    cfg.execution.allowed_programs = vec![program.display().to_string()];
+    let run = run_with_project_root(&client, cfg, user_msg("run"), None)
+        .await
+        .expect("corrected");
+    server.abort();
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    assert_eq!(run.budget.iterations, 3);
+    assert_eq!(run.budget.request_attempts, 3);
+    assert_eq!(run.budget.tool_calls, 1);
+    assert!(run.budget.charged_tokens > 0);
+    assert!(!root.path().join("sibling-marker").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("invocations")).expect("invocations"),
+        "literal argument\n"
+    );
+    let requests = requests.lock().expect("requests");
+    assert_eq!(requests.len(), 3);
+    let feedback = requests[1]["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .expect("feedback")["content"]
+        .as_str()
+        .expect("content");
+    assert!(feedback.contains("execute_process") && feedback.contains("schema"));
+    assert!(!feedback.contains("SECRET_INVALID_ARGUMENT"));
+    assert!(
+        requests[1]["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .all(|m| m["role"] != "tool")
+    );
+}
+
+#[tokio::test]
+async fn argument_correction_is_bounded_without_budget_configuration() {
+    let invalid = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "bad",
+        serde_json::json!({"path":"out","content":17}),
+    )]);
+    let (client, requests, server) = fixture(vec![(200, invalid)]).await;
+    let root = tempfile::tempdir().expect("root");
+    let err = run_with_project_root(
+        &client,
+        test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf()),
+        user_msg("run"),
+        None,
+    )
+    .await
+    .expect_err("finite correction");
+    server.abort();
+    assert!(err.to_string().contains("correction limit"));
+    assert_eq!(requests.lock().expect("requests").len(), 3);
+    assert!(!root.path().join("out").exists());
+}
+
+#[tokio::test]
+async fn argument_correction_charges_failed_request_before_iteration_budget_stop() {
+    let invalid = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "bad",
+        serde_json::json!({"path":"out","content":17}),
+    )]);
+    let (client, requests, server) =
+        fixture(vec![(200, invalid), (200, assistant_done("partial"))]).await;
+    let cfg = test_cfg(AgentBudgetConfig {
+        max_iterations: 1,
+        ..Default::default()
+    });
+    let run = run_with_cfg(&client, cfg, user_msg("run"), None)
+        .await
+        .expect("partial");
+    server.abort();
+    assert_eq!(run.status, AgentRunStatus::Partial);
+    assert_eq!(run.stop_reason, Some(AgentStopReason::IterationBudget));
+    assert_eq!(run.budget.tool_calls, 0);
+    assert_eq!(run.budget.request_attempts, 2);
+    assert!(run.budget.charged_tokens > 0);
+    assert!(run.budget.finalization_succeeded);
+    let requests = requests.lock().expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].get("tools").is_none());
+}
+
+#[tokio::test]
+async fn argument_correction_cancellation_never_dispatches_corrected_batch() {
+    let root = tempfile::tempdir().expect("root");
+    let invalid = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "bad",
+        serde_json::json!({"path":"out","content":17}),
+    )]);
+    let mut corrected = assistant_with_calls(vec![tool_call(
+        "fs_write",
+        "fixed",
+        serde_json::json!({"path":"out","content":"no"}),
+    )]);
+    corrected["_fixture_delay_ms"] = serde_json::json!(2000);
+    let (client, requests, server) = fixture(vec![(200, invalid), (200, corrected)]).await;
+    let cancel = CancellationToken::new();
+    let canceller = cancel.clone();
+    let captured = requests.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            if captured.lock().expect("requests").len() >= 2 {
+                canceller.cancel();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    });
+    let err = run_with_project_root(
+        &client,
+        test_cfg_with_root(AgentBudgetConfig::default(), root.path().to_path_buf()),
+        user_msg("run"),
+        Some(cancel),
+    )
+    .await
+    .expect_err("cancelled");
+    task.abort();
+    server.abort();
+    assert_eq!(
+        err.downcast_ref::<crate::llm::LlmErrorKind>(),
+        Some(&crate::llm::LlmErrorKind::Cancelled)
+    );
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert!(!root.path().join("out").exists());
+}
+
+#[tokio::test]
+async fn argument_correction_does_not_retry_invalid_identity_or_catalog() {
+    for calls in [
+        vec![tool_call("not_in_catalog", "bad", serde_json::json!({}))],
+        vec![
+            tool_call(
+                "fs_write",
+                "duplicate",
+                serde_json::json!({"path":"out","content":17}),
+            ),
+            tool_call(
+                "fs_write",
+                "duplicate",
+                serde_json::json!({"path":"out","content":"no"}),
+            ),
+        ],
+    ] {
+        let (client, requests, server) = fixture(vec![(200, assistant_with_calls(calls))]).await;
+        let err = run_with_cfg(
+            &client,
+            test_cfg(AgentBudgetConfig::default()),
+            user_msg("run"),
+            None,
+        )
+        .await
+        .expect_err("nonargument failure");
+        server.abort();
+        assert_eq!(
+            err.downcast_ref::<crate::llm::LlmErrorKind>(),
+            Some(&crate::llm::LlmErrorKind::Client)
+        );
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+    }
 }
 
 #[tokio::test]
