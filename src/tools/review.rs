@@ -277,6 +277,12 @@ impl FsTools {
         batch: &crate::features::review_feedback::FeedbackBatch,
     ) -> anyhow::Result<()> {
         batch.validate_structure()?;
+        self.validate_review_feedback_source(&batch.source)
+    }
+    pub(crate) fn validate_review_feedback_source(
+        &self,
+        source: &crate::diff_review::DiffReviewPayload,
+    ) -> anyhow::Result<()> {
         let registry = self
             .review_registry
             .lock()
@@ -294,14 +300,13 @@ impl FsTools {
             "Review cannot accept feedback; comments retained."
         );
         anyhow::ensure!(
-            Some(&capture.id) == batch.source.review_id.as_ref()
-                && capture.session == batch.source.session_id
+            Some(&capture.id) == source.review_id.as_ref()
+                && capture.session == source.session_id
                 && capture.session == self.get_current_session().map(|s| s.meta.id),
             "Review/session changed; comments retained."
         );
         anyhow::ensure!(
-            capture.payload().diff == batch.source.diff
-                && capture.payload().files == batch.source.files,
+            capture.payload().diff == source.diff && capture.payload().files == source.files,
             "Source review changed; comments retained."
         );
         for (path, (_, after)) in capture.aggregate() {

@@ -87,7 +87,9 @@ impl TuiApp {
         if self.key_help_open {
             self.render_key_help(f, chunks[1]);
         }
-        if self.comment_editor.is_some() || self.feedback_confirmation {
+        if self.feedback_history_view.is_some() {
+            self.render_feedback_history(f, size);
+        } else if self.comment_editor.is_some() || self.feedback_confirmation {
             self.render_feedback_modal(f, size);
         }
     }
@@ -507,7 +509,7 @@ impl TuiApp {
             "Rollback running: Esc cancels; wait for the result before accepting or dismissing."
                 .to_string()
         } else if review.rejectable {
-            "←/→ file · ↑/↓ scroll · [/] hunk · c comment · d delete · s confirm · v source · a accept · r rollback · e evidence · q dismiss"
+            "←/→ file · ↑/↓ scroll · [/] hunk · c comment · d delete · s confirm · n new · h history · v source · a accept · r rollback · e evidence · q dismiss"
                 .to_string()
         } else {
             format!(
@@ -626,10 +628,10 @@ impl TuiApp {
             );
             let help = if let Some(error) = &self.feedback_error {
                 format!(
-                    "Blocked: {error} | Esc keeps comments · d discards batch · v source/latest"
+                    "Blocked: {error} | Esc keeps comments · n new batch · h history · d discards batch · v source/latest"
                 )
             } else {
-                "Enter: submit one repair run (may use several model/tool iterations). Esc: keep editing. d: discard batch. v: source/latest. All changes stay applied; repair may change other paths.".into()
+                "Enter: submit one repair run (may use several model/tool iterations). Esc: keep editing. n: archive/new batch. h: history. d: discard active batch. v: source/latest. All changes stay applied; repair may change other paths.".into()
             };
             f.render_widget(
                 Paragraph::new(help)
@@ -638,6 +640,120 @@ impl TuiApp {
                 parts[2],
             );
         }
+    }
+
+    fn render_feedback_history(&self, f: &mut Frame, area: Rect) {
+        let Some(view) = &self.feedback_history_view else {
+            return;
+        };
+        f.render_widget(Clear, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(1),
+                Constraint::Length(4),
+            ])
+            .split(area);
+        let entry = self.feedback_history.get(view.selected);
+        let title = if let Some(entry) = entry {
+            format!(
+                "History {}/{} | source {} | batch {} | revision {}",
+                view.selected + 1,
+                self.feedback_history.len(),
+                entry.batch.source.review_id.as_deref().unwrap_or("unknown"),
+                entry.batch.id,
+                entry.batch.revision
+            )
+        } else {
+            "No archived feedback batches. n on a new live review archives the active batch.".into()
+        };
+        f.render_widget(
+            Paragraph::new(title)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Read-only feedback history"),
+                ),
+            parts[0],
+        );
+        let mut text = String::new();
+        if let Some(entry) = entry {
+            if view.source {
+                text = entry.batch.source.diff.clone();
+            } else {
+                text.push_str(&format!(
+                    "Captured session: {}\n",
+                    entry
+                        .batch
+                        .source
+                        .session_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                ));
+                text.push_str(&format!(
+                    "{} saved comments | {}\n",
+                    entry.batch.comments.len(),
+                    if entry.submitted_revision.is_some() {
+                        "Previously submitted; no resolution inferred"
+                    } else {
+                        "Unsent snapshot; cannot submit from history"
+                    }
+                ));
+                for c in &entry.batch.comments {
+                    text.push_str(&format!(
+                        "{} | old {},{} → new {},{}\n{}\n\n",
+                        c.anchor.path,
+                        c.anchor.hunk.old.start,
+                        c.anchor.hunk.old.count,
+                        c.anchor.hunk.new.start,
+                        c.anchor.hunk.new.count,
+                        c.text
+                    ));
+                }
+                if let Some(outcome) = &entry.outcome {
+                    text.push_str(outcome);
+                }
+            }
+        }
+        let rows = crate::tui::review_feedback::wrap_cells(
+            &text,
+            parts[1].width.saturating_sub(2) as usize,
+        );
+        let scroll = view.scroll.min(
+            rows.len()
+                .saturating_sub(parts[1].height.saturating_sub(2) as usize),
+        );
+        f.render_widget(
+            Paragraph::new(
+                rows.into_iter()
+                    .skip(scroll)
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if view.source {
+                        "Archived source diff (no edit/rollback authority)"
+                    } else {
+                        "Archived comments (not resolved automatically)"
+                    }),
+            ),
+            parts[1],
+        );
+        let help = if view.confirm_delete {
+            "Remove this archived batch and its saved comments? Enter confirms; Esc keeps it. Files/current batch remain unchanged."
+        } else {
+            "←/→ batch · ↑/↓ or PgUp/PgDn scroll · v comments/source · Esc returns current review · d then Enter removes this history record. Read-only; no model calls."
+        };
+        f.render_widget(
+            Paragraph::new(help)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL)),
+            parts[2],
+        );
     }
 
     fn evidence_lines(review: &crate::tui::diff_review::DiffReviewState) -> Vec<Line<'static>> {
