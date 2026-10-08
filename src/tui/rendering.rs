@@ -777,7 +777,7 @@ fn render_search<'a>(
     ])
     .split(inner);
     f.render_widget(
-        Paragraph::new(format!("Search: {query}_")).style(theme.input_style),
+        Paragraph::new(search_query_line(query, chunks[0].width as usize)).style(theme.input_style),
         chunks[0],
     );
     let items: Vec<ListItem> = results
@@ -817,9 +817,81 @@ fn render_search<'a>(
     );
 }
 
+/// Search editing appends/removes at the end; keep that caret in view without
+/// changing the full query used to filter results. Recompute on every resize.
+fn search_query_line(query: &str, width: usize) -> Line<'_> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    if width == 0 {
+        return Line::default();
+    }
+    let prefix = match width {
+        32.. => "Search: ",
+        24.. => "Find: ",
+        _ => "",
+    };
+    let available = width - prefix.len() - 1; // Always reserve the end caret.
+    let (ellipsis, visible) = if UnicodeWidthStr::width(query) <= available {
+        ("", query)
+    } else {
+        let ellipsis = if available > 0 { "…" } else { "" };
+        let budget = available.saturating_sub(1);
+        let mut start = query.len();
+        let mut used = 0;
+        for (index, grapheme) in query.grapheme_indices(true).rev() {
+            let cells = UnicodeWidthStr::width(grapheme);
+            if used + cells > budget {
+                break;
+            }
+            used += cells;
+            start = index;
+        }
+        (ellipsis, &query[start..])
+    };
+    Line::from(vec![
+        Span::raw(prefix),
+        Span::raw(ellipsis),
+        Span::raw(visible),
+        Span::raw("_"),
+    ])
+}
+
 #[cfg(test)]
 mod search_preview_tests {
-    use super::search_preview;
+    use super::{search_preview, search_query_line};
+
+    #[test]
+    fn query_viewport_preserves_graphemes_and_caret_within_cell_budget() {
+        use unicode_width::UnicodeWidthStr;
+        let family = "👩‍👩‍👧‍👦";
+        let query = format!("{}日本語e\u{301}{family}🇯🇵終端", "prefix-".repeat(40));
+        for width in 0..=130 {
+            let row = search_query_line(&query, width).to_string();
+            assert!(
+                UnicodeWidthStr::width(row.as_str()) <= width,
+                "{width}: {row}"
+            );
+            if width > 0 {
+                assert!(row.ends_with('_'));
+            } else {
+                assert!(row.is_empty());
+            }
+        }
+        for tail in ["e\u{301}", family, "🇯🇵"] {
+            let query = format!("{}{tail}", "prefix-".repeat(40));
+            assert!(
+                search_query_line(&query, 8)
+                    .to_string()
+                    .ends_with(&format!("{tail}_"))
+            );
+        }
+        assert_eq!(search_query_line("界", 1).to_string(), "_");
+        assert_eq!(search_query_line("界", 2).to_string(), "…_");
+        assert_eq!(search_query_line("界", 3).to_string(), "界_");
+        assert_eq!(search_query_line("", 40).to_string(), "Search: _");
+        assert_eq!(search_query_line("short", 40).to_string(), "Search: short_");
+    }
 
     #[test]
     fn previews_bound_large_rows_and_mark_clipped_combining_text() {
