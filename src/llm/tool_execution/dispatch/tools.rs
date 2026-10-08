@@ -935,6 +935,37 @@ pub async fn observation_read(
     }
 }
 
+/// Read-only change impact analysis + verification planning.
+///
+/// Never edits code, never runs tests, never fulfills obligations, and
+/// never rewrites provenance. Recommendations are structured `program` +
+/// `args` candidates the agent may decide to execute.
+pub async fn impact_analyze(
+    runtime: &ToolRuntime<'_>,
+    args: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let params: crate::tools::impact::ImpactAnalyzeArgs = serde_json::from_value(args.clone())
+        .map_err(|e| anyhow!("invalid impact_analyze args: {e}"))?;
+    match crate::tools::impact::impact_analyze(runtime.fs, params, runtime.cancel_token.clone())
+        .await
+    {
+        Ok(res) => {
+            let value = serde_json::to_value(&res)?;
+            let changed = res.changed_files.len();
+            let verify = res.verification.len();
+            Ok(ToolOutput {
+                value: value.clone(),
+                is_success: true,
+                result_summary: format!(
+                    "Impact analysis {:?}: {changed} changed file(s), {verify} verification candidate(s)",
+                    res.analysis_status.as_str(),
+                ),
+            })
+        }
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
 #[cfg(test)]
 mod task_output_tests {
     use super::*;

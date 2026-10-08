@@ -4,6 +4,7 @@ pub mod structured_test_results;
 pub mod verification_context;
 pub mod verification_snapshot;
 
+pub mod change_impact;
 pub mod semantic_edit;
 pub mod test_gen;
 pub mod testing;
