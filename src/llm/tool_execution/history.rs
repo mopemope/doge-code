@@ -66,6 +66,12 @@ enum OffloadOutcome {
     SkippedNoSaving,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalCompactionKind {
+    Automatic,
+    Manual,
+}
+
 impl HistoryManager {
     pub fn new(
         client: OpenAIClient,
@@ -1211,16 +1217,19 @@ impl HistoryManager {
         if self.messages.len() <= 2 || self.messages.iter().all(|m| m.role == "system") {
             return Ok(false);
         }
-        self.perform_compaction_cancellable(Some(cancel)).await
+        self.perform_compaction_cancellable(Some(cancel), LocalCompactionKind::Manual)
+            .await
     }
 
     async fn perform_compaction(&mut self) -> Result<bool> {
-        self.perform_compaction_cancellable(None).await
+        self.perform_compaction_cancellable(None, LocalCompactionKind::Automatic)
+            .await
     }
 
     async fn perform_compaction_cancellable(
         &mut self,
         cancel: Option<tokio_util::sync::CancellationToken>,
+        kind: LocalCompactionKind,
     ) -> Result<bool> {
         // Defense in depth: every local summarizer entry refuses when the
         // subscription native path owns compaction.
@@ -1297,9 +1306,22 @@ impl HistoryManager {
                             compact_result.compacted_message,
                         ),
                     };
-                    let after_bytes = crate::llm::context_budget::serialized_size(&after_prefix)
-                        .map(|n| n as usize)
-                        .unwrap_or(0);
+                    let after_bytes =
+                        crate::llm::context_budget::serialized_size(&after_prefix)? as usize;
+                    if kind == LocalCompactionKind::Automatic && after_bytes >= before_bytes {
+                        info!(
+                            budget_action = "compact_no_progress",
+                            before_bytes,
+                            after_bytes,
+                            "keeping canonical history: automatic summary did not reduce its size"
+                        );
+                        if let Some(tx) = &self.ui_tx {
+                            let _ = tx.send("::status:waiting:Summary did not reduce history; keeping current context...".to_string());
+                        }
+                        // The summarizer's usage remains recorded. Neither canonical
+                        // messages nor observation reachability changed, so do not GC.
+                        return Ok(false);
+                    }
                     info!(
                         budget_action = "compact",
                         protected_unseen_count = suffix_unseen,
@@ -1591,6 +1613,173 @@ mod tests {
         let client =
             crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
         HistoryManager::new(client, messages, None, fs, config)
+    }
+
+    fn compaction_progress_fixture(
+        messages: Vec<ChatMessage>,
+        summary: &str,
+    ) -> (HistoryManager, tempfile::TempDir, httptest::Server) {
+        use httptest::{Expectation, matchers::request, responders::json_encoded};
+        let server = httptest::ServerBuilder::new()
+            .bind_addr(([127, 0, 0, 1], 0).into())
+            .run()
+            .expect("server");
+        server.expect(Expectation::matching(request::method_path("POST", "/v1/chat/completions")).times(1).respond_with(json_encoded(serde_json::json!({
+            "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":summary}}],
+            "usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17}
+        }))));
+        let root = tempfile::tempdir().expect("root");
+        let config = crate::config::AppConfig {
+            project_root: root.path().to_path_buf(),
+            mcp_servers: vec![],
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(config.clone()),
+        );
+        let client =
+            OpenAIClient::new(format!("{}/", server.url_str("")), "fixture").expect("client");
+        (
+            HistoryManager::new(client, messages, None, fs, config),
+            root,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn compaction_progress_rejects_growing_automatic_candidates_without_gc_or_usage_loss() {
+        for reactive in [false, true] {
+            let original = vec![
+                make_msg("system", "authority"),
+                make_msg("user", &"u".repeat(5000)),
+                make_msg("assistant", "small reply"),
+                make_msg("user", &"v".repeat(5000)),
+            ];
+            let (mut manager, _root, _server) =
+                compaction_progress_fixture(original.clone(), "additional summary");
+            let observation = manager
+                .observations
+                .write()
+                .expect("store")
+                .insert(
+                    "old-call".into(),
+                    "fs_read".into(),
+                    "recoverable bytes".into(),
+                    32,
+                )
+                .expect("observation");
+            let before = serde_json::to_value(manager.as_slice()).expect("before");
+            let store_before =
+                serde_json::to_value(manager.observations_snapshot()).expect("store before");
+            let compacted = if reactive {
+                manager.compact_reactive().await
+            } else {
+                manager.compact_for_budget_pressure().await
+            }
+            .expect("compaction");
+            assert!(!compacted, "a growing candidate is no progress");
+            assert_eq!(
+                serde_json::to_value(manager.as_slice()).expect("after"),
+                before
+            );
+            assert_eq!(
+                serde_json::to_value(manager.observations_snapshot()).expect("store after"),
+                store_before
+            );
+            assert!(manager.observations_snapshot().contains(&observation));
+            let usage = manager.client.usage_snapshot();
+            assert_eq!(usage.attempts, 1);
+            assert_eq!(usage.usage_records, 1);
+            assert_eq!(usage.total_tokens, 17);
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_progress_rejects_equal_size_automatic_candidate() {
+        let mut original = vec![
+            make_msg("system", "authority"),
+            make_msg("user", "keep directive"),
+        ];
+        original.extend((0..8).map(|_| make_msg("assistant", &"x".repeat(1000))));
+        let before = crate::llm::context_budget::serialized_size(&original).expect("before");
+        let empty = HistoryManager::merge_compacted_history(&original, make_msg("assistant", ""));
+        let summary = "s".repeat(
+            (before - crate::llm::context_budget::serialized_size(&empty).expect("empty")) as usize,
+        );
+        let candidate =
+            HistoryManager::merge_compacted_history(&original, make_msg("assistant", &summary));
+        assert_eq!(
+            crate::llm::context_budget::serialized_size(&candidate).expect("candidate"),
+            before
+        );
+        let (mut manager, _root, _server) = compaction_progress_fixture(original.clone(), &summary);
+        assert!(
+            !manager
+                .compact_for_budget_pressure()
+                .await
+                .expect("compaction")
+        );
+        assert_eq!(
+            serde_json::to_value(manager.as_slice()).expect("after"),
+            serde_json::to_value(original).expect("before")
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_progress_accepts_shrinking_candidate_preserving_directives_and_unseen_pair()
+    {
+        let mut original = vec![
+            make_msg("system", "authority"),
+            make_msg("user", "keep directive"),
+        ];
+        original.extend((0..8).map(|_| make_msg("assistant", &"x".repeat(2000))));
+        let suffix = vec![
+            make_assistant_with_tool_calls("unseen", "read"),
+            make_tool_msg("unseen", &"protected".repeat(1000)),
+        ];
+        original.extend(suffix.clone());
+        let (mut manager, _root, _server) = compaction_progress_fixture(original, "short summary");
+        manager.unseen_tool_results.insert("unseen".into());
+        let before = manager.messages_json_bytes();
+        assert!(
+            manager
+                .compact_for_budget_pressure()
+                .await
+                .expect("compaction")
+        );
+        assert!(manager.messages_json_bytes() < before);
+        assert_eq!(
+            serde_json::to_value(&manager.as_slice()[manager.len() - 2..]).expect("suffix"),
+            serde_json::to_value(suffix).expect("before suffix")
+        );
+        assert!(
+            manager
+                .as_slice()
+                .iter()
+                .any(|m| m.role == "user" && m.content.as_deref() == Some("keep directive"))
+        );
+        assert!(manager.unseen_tool_results.contains("unseen"));
+    }
+
+    #[tokio::test]
+    async fn compaction_progress_manual_summary_preserves_existing_nonshrinking_behavior() {
+        let original = vec![
+            make_msg("system", "authority"),
+            make_msg("user", &"u".repeat(5000)),
+            make_msg("assistant", "small reply"),
+            make_msg("user", &"v".repeat(5000)),
+        ];
+        let (mut manager, _root, _server) =
+            compaction_progress_fixture(original, "requested summary");
+        let before = manager.messages_json_bytes();
+        assert!(
+            manager
+                .compact_manually(tokio_util::sync::CancellationToken::new())
+                .await
+                .expect("manual")
+        );
+        assert!(manager.messages_json_bytes() > before);
     }
 
     #[test]

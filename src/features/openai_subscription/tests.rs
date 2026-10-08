@@ -1134,12 +1134,20 @@ async fn compaction_keeps_unseen_output_block_exact_and_offloads_only_seen_resul
     let mut messages = vec![];
     for i in 0..6 {
         messages.push(user(&format!("old exchange {i}")));
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("old reasoning ".repeat(500)),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_state: None,
+        });
     }
+    let protected_start = messages.len();
     messages.push(protected.clone());
     let mut history =
         crate::llm::tool_execution::history::HistoryManager::new(client, messages, None, fs, cfg);
     history.push_tool_result(Some("call_test".into()), "large tool result ".repeat(5000));
-    let before = serde_json::to_value(&history.as_slice()[6..])?;
+    let before = serde_json::to_value(&history.as_slice()[protected_start..])?;
     assert!(history.compact_for_budget_pressure().await?);
     let start = history
         .protected_suffix_start_for_unseen()
