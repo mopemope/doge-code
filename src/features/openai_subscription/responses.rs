@@ -3,6 +3,7 @@ use super::{
     auth::AuthHandle,
     sse::{Decoder, InferenceEvent},
 };
+use crate::llm::ToolResponseWithUsage;
 use crate::{
     config::ReasoningEffort,
     llm::{ChatMessage, ChoiceMessageWithTools, ToolCall, ToolCallFunction, ToolDef, Usage},
@@ -861,6 +862,7 @@ pub async fn infer(
         completed(response, &auth.account, model, tools)
     })
     .await
+    .map(|response| response.message)
 }
 
 /// Shared POST + SSE loop. Request projection and completion validation
@@ -872,7 +874,7 @@ async fn execute_infer_request(
     request: &Request,
     cancel: CancellationToken,
     validate_completed: impl Fn(&Value) -> Result<(ChoiceMessageWithTools, Option<Usage>)>,
-) -> Result<ChoiceMessageWithTools> {
+) -> Result<ToolResponseWithUsage> {
     let attempts = client.llm_cfg.max_retries.min(3) + 1;
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(client.llm_cfg.request_timeout_ms.max(1));
@@ -953,10 +955,14 @@ async fn execute_infer_request(
                     match event {
                         InferenceEvent::Completed { response } => {
                             let (result, usage) = validate_completed(&response)?;
+                            let prompt_tokens = usage.as_ref().map(|usage| usage.prompt_tokens);
                             if let Some(usage) = usage {
                                 client.record_usage(&usage);
                             }
-                            return Ok(result);
+                            return Ok(ToolResponseWithUsage {
+                                message: result,
+                                prompt_tokens,
+                            });
                         }
                         InferenceEvent::Failed { response } => {
                             return Err(ProviderError::from_body(
@@ -1001,6 +1007,31 @@ pub async fn infer_with_activation(
     effort: Option<ReasoningEffort>,
     cancel: CancellationToken,
 ) -> Result<ChoiceMessageWithTools> {
+    infer_with_activation_and_usage(
+        client,
+        auth,
+        model,
+        messages,
+        base_tools,
+        active_tools,
+        effort,
+        cancel,
+    )
+    .await
+    .map(|response| response.message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn infer_with_activation_and_usage(
+    client: &crate::llm::OpenAIClient,
+    auth: &AuthHandle,
+    model: &str,
+    messages: &[ChatMessage],
+    base_tools: &[ToolDef],
+    active_tools: &[ToolDef],
+    effort: Option<ReasoningEffort>,
+    cancel: CancellationToken,
+) -> Result<ToolResponseWithUsage> {
     let compact_threshold = client.responses_compact_threshold();
     let request = build_with_activation(
         model,

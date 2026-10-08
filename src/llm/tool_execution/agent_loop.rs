@@ -1485,7 +1485,7 @@ pub async fn run_agent_loop(
                     warn!("run_agent_loop cancelled before chat_tools_once");
                     Err(anyhow!(LlmErrorKind::Cancelled))
                 }
-                res = crate::llm::tool_execution::requests::chat_tools_once_with_activation(
+                res = crate::llm::tool_execution::requests::chat_tools_once_with_activation_and_usage(
                     client,
                     model,
                     request_messages.as_slice(),
@@ -1498,7 +1498,7 @@ pub async fn run_agent_loop(
                 ) => res,
             }
         };
-        let msg = match chat_result {
+        let response = match chat_result {
             Ok(msg) => msg,
             Err(e) => {
                 // Failed attempts still cost budget (never free) when the loop
@@ -1659,6 +1659,8 @@ pub async fn run_agent_loop(
                 return Err(e.context(agent_error));
             }
         };
+        let prompt_tokens = response.prompt_tokens;
+        let msg = response.message;
         // Reconcile the successful request: max(reported, estimate) plus one
         // estimate per missing retry attempt. Provider telemetry is never
         // mutated with estimates. Server-side compaction is part of this
@@ -1679,14 +1681,16 @@ pub async fn run_agent_loop(
             .provider_state
             .as_ref()
             .is_some_and(|state| state.contains_compaction());
+        budget_governor.observe_response_usage(
+            sent_footprint,
+            prompt_tokens,
+            native_compaction_occurred,
+        );
         if native_compaction_occurred {
-            budget_governor.reset_after_native_compaction();
             debug!(
                 responses_native_compaction_observed = true,
                 "skipping calibration sample for native-compacted response"
             );
-        } else if let Some(fp) = sent_footprint {
-            budget_governor.observe_actual(fp, client.get_prompt_tokens_used());
         }
         reactive_guard.record_success();
         // A complete model response means every tool result in the request
@@ -1714,7 +1718,7 @@ pub async fn run_agent_loop(
             let additional_appended = wire_exposed_additional(history.as_slice()).len();
             if last_cache.cached_tokens.is_some() || last_cache.cache_write_tokens.is_some() {
                 debug!(
-                    prompt_tokens = client.get_prompt_tokens_used(),
+                    prompt_tokens = ?prompt_tokens,
                     cached_tokens = last_cache.cached_tokens.unwrap_or(0),
                     cached_reported = last_cache.cached_tokens.is_some(),
                     cache_write_tokens = last_cache.cache_write_tokens.unwrap_or(0),
@@ -1735,7 +1739,7 @@ pub async fn run_agent_loop(
                 );
             } else {
                 debug!(
-                    prompt_tokens = client.get_prompt_tokens_used(),
+                    prompt_tokens = ?prompt_tokens,
                     tool_count = current.tool_count,
                     base_tool_count = current.tool_count,
                     additional_tools_appended = additional_appended,
