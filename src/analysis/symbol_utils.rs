@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,27 @@ pub fn list_symbols(repo_map: &RepoMap, file: &Path) -> Result<Vec<SymbolSpan>> 
         .collect();
 
     Ok(symbols)
+}
+
+/// Build a project-relative file -> symbol index map in O(S).
+///
+/// Each symbol's file is normalized once so callers can resolve "all symbols
+/// in file X" without scanning the whole map per file. Symbols that cannot
+/// be relativized under `project_root` (stale cache entries, outside-root
+/// paths) are skipped: no validated project-relative query can match them.
+/// Index vectors preserve `RepoMap.symbols` order.
+pub fn index_symbols_by_file(
+    repo_map: &RepoMap,
+    project_root: &Path,
+) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, symbol) in repo_map.symbols.iter().enumerate() {
+        let Ok(rel) = crate::analysis::normalize_relative_path(project_root, &symbol.file) else {
+            continue;
+        };
+        index.entry(rel).or_default().push(idx);
+    }
+    index
 }
 
 /// 指定ファイルと行番号を含む「もっとも内側のシンボル」を返す。
@@ -212,5 +234,38 @@ mod tests {
             .expect("symbol expected");
 
         assert_eq!(sym.name, "inner");
+    }
+
+    #[test]
+    fn index_symbols_by_file_groups_and_skips_outside_root() {
+        let root = Path::new("/proj");
+        let mut repo = RepoMap::default();
+        repo.symbols.push(make_symbol(
+            "a",
+            &PathBuf::from("/proj/src/a.rs"),
+            1,
+            2,
+            None,
+            SymbolKind::Function,
+        ));
+        repo.symbols.push(make_symbol(
+            "b",
+            &PathBuf::from("/proj/src/a.rs"),
+            3,
+            4,
+            None,
+            SymbolKind::Function,
+        ));
+        repo.symbols.push(make_symbol(
+            "outside",
+            &PathBuf::from("/other/x.rs"),
+            1,
+            2,
+            None,
+            SymbolKind::Function,
+        ));
+        let index = index_symbols_by_file(&repo, root);
+        assert_eq!(index.get("src/a.rs").map(Vec::len), Some(2));
+        assert!(!index.keys().any(|k| k.contains("/other/")));
     }
 }

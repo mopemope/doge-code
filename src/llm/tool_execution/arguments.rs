@@ -27,6 +27,7 @@ pub(super) fn validate_builtin_arguments(name: &str, arguments: &Value) -> Resul
             typed::<crate::tools::requirements::RequirementsWriteArgs>(arguments)
         }
         "task" => typed::<crate::tools::task::TaskParams>(arguments),
+        "impact_analyze" => typed::<crate::tools::impact::ImpactAnalyzeArgs>(arguments),
         "execute_bash" | "execute_shell" => required_strings(arguments, &["command"]),
         "write_memory" => required_strings(arguments, &["key", "content"]),
         "run_workflow" => required_strings(arguments, &["workflow_name"]),
