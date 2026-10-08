@@ -76,6 +76,8 @@ impl TuiApp {
                     && self.diff_review_focus == DiffReviewFocus::Review =>
             {
                 entries.push("F6: return focus to input; draft text is preserved.");
+                entries.push("[ / ]: select hunk. c: add/edit comment. d: delete selected comment. s: confirm all saved comments. v: source/latest review.");
+                entries.push("Comment editor: Enter saves locally; Alt+Enter newline; Esc cancels. Confirmation: Enter starts one repair run; Esc keeps comments; d discards batch; v shows source/latest review.");
                 if let Some(review) = &self.diff_review {
                     if review.rejecting {
                         entries.push("Rollback running: close help, then Esc to request cancellation. Wait for the result before accepting or dismissing.");
