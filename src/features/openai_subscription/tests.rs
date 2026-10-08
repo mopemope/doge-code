@@ -2056,6 +2056,78 @@ async fn attempt_budget_responses_scoped_hook_gates_send_and_preserves_usage() {
 }
 
 #[tokio::test]
+async fn usage_calibration_native_metadata_and_compaction_boundary_are_response_local() -> Result<()>
+{
+    use crate::llm::context_budget::{ContextBudgetGovernor, RequestFootprint};
+    for (compacted, prompt) in [
+        (false, Some(12)),
+        (false, None),
+        (false, Some(0)),
+        (true, Some(12)),
+        (true, None),
+    ] {
+        let mut output = vec![text_output()];
+        if compacted {
+            output.insert(0, compaction_item("usage-boundary"));
+        }
+        let mut body = response(output);
+        match prompt {
+            None => {
+                body.as_object_mut().expect("body").remove("usage");
+            }
+            Some(0) => {
+                body["usage"] = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0});
+            }
+            _ => {}
+        }
+        let wire = format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed","response":body})
+        );
+        let (_server, _temp, client) = mock_native_client(wire, 102_400).await;
+        client.set_prompt_tokens(999_999);
+        let result =
+            crate::llm::tool_execution::requests::chat_tools_once_with_activation_and_usage(
+                &client,
+                "test-model",
+                &[user("hi")],
+                &[],
+                &[],
+                None,
+                crate::config::ReasoningMode::Off,
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(result.prompt_tokens, prompt);
+        let fp = RequestFootprint::new(10_000, 0, 0);
+        let mut gov = ContextBudgetGovernor::new(Default::default());
+        gov.observe_actual(fp, 7);
+        client.set_prompt_tokens(888_888);
+        let native = result
+            .message
+            .provider_state
+            .as_ref()
+            .is_some_and(|s| s.contains_compaction());
+        assert_eq!(native, compacted);
+        gov.observe_response_usage(Some(fp), result.prompt_tokens, native);
+        if compacted {
+            assert!(gov.previous_usage().is_none());
+        } else {
+            assert_eq!(
+                gov.previous_usage().expect("sample").actual_prompt_tokens,
+                if prompt == Some(12) { 12 } else { 7 }
+            );
+        }
+        let usage = client.usage_snapshot();
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(usage.usage_records, u64::from(prompt.is_some()));
+        assert_eq!(usage.total_tokens, if prompt == Some(12) { 16 } else { 0 });
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_single_response_is_single_budget_charge() -> Result<()> {
     // Main-agent budget: one provider response with compaction is exactly
     // one usage record, never a second internal charge.
