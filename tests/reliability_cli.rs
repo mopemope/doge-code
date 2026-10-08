@@ -760,7 +760,7 @@ fn reactive_compaction_retains_project_authority_and_unseen_result() {
         }
         match index {
             1 => response(
-                "",
+                &"discardable old reasoning ".repeat(500),
                 vec![call("seen", "fs_read", json!({"path":seen_path}))],
                 "tool_calls",
             ),
