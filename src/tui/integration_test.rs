@@ -81,3 +81,45 @@ mod tests {
         Ok(())
     }
 }
+
+#[test]
+fn opencode_connection_survives_narrow_footer_and_busy_status() -> Result<()> {
+    use ratatui::{Terminal, backend::TestBackend};
+    for provider in [
+        crate::features::openai_subscription::ProviderKind::OpencodeGo,
+        crate::features::openai_subscription::ProviderKind::OpencodeZen,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let cfg = crate::config::AppConfig {
+            provider,
+            model: "gpt-6-luna".into(),
+            project_root: dir.path().into(),
+            ..Default::default()
+        };
+        for (width, status) in [
+            (40, crate::tui::state::Status::Ready),
+            (40, crate::tui::state::Status::Thinking),
+            (40, crate::tui::state::Status::Running),
+            (60, crate::tui::state::Status::Error),
+            (120, crate::tui::state::Status::Ready),
+        ] {
+            let mut app = TuiApp::new_for_test("diagnostics", Some(cfg.model.clone()), "default");
+            app.status = status;
+            app.inference_label = Some(cfg.inference_label());
+            app.detailed_status = Some("A very long status which would hide the provider".into());
+            let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+            terminal.draw(|frame| app.view(frame, Some(&cfg.model)))?;
+            let rendered = terminal.backend().to_string();
+            let footer = rendered.lines().next().unwrap();
+            assert!(
+                footer.contains(crate::features::opencode::provider_name(provider)),
+                "{footer}"
+            );
+            assert!(footer.contains("gpt-6-luna"), "{footer}");
+            if width <= 60 {
+                assert!(footer.contains("NO KEY"), "{footer}");
+            }
+        }
+    }
+    Ok(())
+}

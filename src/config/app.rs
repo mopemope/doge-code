@@ -20,6 +20,7 @@ use super::loading::{load_file_config, load_project_config};
 
 // Default threshold for auto-compacting conversation history
 pub const DEFAULT_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD: u32 = 250_000;
+pub const FALLBACK_CONTEXT_WINDOW: u32 = 128_000;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 300_000;
 
 #[derive(thiserror::Error, Debug)]
@@ -142,7 +143,9 @@ impl AppConfig {
     }
 
     pub fn get_effective_compaction_limit(&self) -> u32 {
-        let context_window_size = self.get_context_window_size().unwrap_or(128_000);
+        let context_window_size = self
+            .get_context_window_size()
+            .unwrap_or(FALLBACK_CONTEXT_WINDOW);
         let safety_limit = (context_window_size as f64 * 0.8) as u32;
         let auto_compact_threshold = self.auto_compact_prompt_token_threshold_for_current_model();
         std::cmp::min(auto_compact_threshold, safety_limit)
