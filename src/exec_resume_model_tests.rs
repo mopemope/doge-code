@@ -44,6 +44,135 @@ fn seed(cfg: &AppConfig, binding: bool) -> (SessionStore, String, Vec<u8>) {
 }
 
 #[tokio::test]
+async fn cli_session_selection_new_and_empty_latest_save_model_then_resume() {
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        for latest in [false, true] {
+            for key in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut cfg = config(temp.path(), provider);
+                cfg.model = "glm-5.3".into();
+                cfg.resume = latest.then(|| "latest".into());
+                cfg.api_key = key.then(|| "SYNTHETIC_LOCAL_ONLY".into());
+                let executor = Executor::new(cfg.clone()).await.unwrap();
+                let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+                let summaries = store.list_with_stats().unwrap();
+                assert_eq!(summaries.len(), 1);
+                let id = summaries[0].meta.id.clone();
+                let saved = store.load(&id).unwrap();
+                let selection = saved
+                    .model_selection
+                    .as_ref()
+                    .expect("new CLI selection is recorded");
+                assert_eq!(selection.provider, provider);
+                assert_eq!(selection.model, "glm-5.3");
+                assert!(saved.inference_binding.is_none());
+                assert!(saved.conversation.is_empty());
+                let before = std::fs::read(store.session_dir(&id).join("session.json")).unwrap();
+                assert!(!String::from_utf8_lossy(&before).contains("SYNTHETIC_LOCAL_ONLY"));
+                drop(executor);
+                cfg.model = "gpt-6-luna".into();
+                cfg.resume = Some(if latest {
+                    "latest".into()
+                } else {
+                    id[..8].into()
+                });
+                let resumed = Executor::new(cfg).await.unwrap();
+                assert_eq!(resumed.cfg.model, "glm-5.3");
+                assert_eq!(resumed.tools.config.model, "glm-5.3");
+                assert_eq!(resumed.client.is_some(), key);
+                assert_eq!(
+                    std::fs::read(store.session_dir(&id).join("session.json")).unwrap(),
+                    before
+                );
+                assert_eq!(store.list_with_stats().unwrap().len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn cli_session_selection_new_bound_checkpoint_resumes_after_startup_model_change() {
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = config(temp.path(), provider);
+        cfg.model = "glm-5.3".into();
+        let executor = Executor::new(cfg.clone()).await.unwrap();
+        let client = executor.client.as_ref().unwrap();
+        let binding = client.inference_binding(&cfg.model).unwrap();
+        let manager = executor
+            .tools
+            .get_session_manager_wrapper()
+            .get_session_manager()
+            .as_ref()
+            .unwrap();
+        let id = {
+            let mut manager = manager.lock().unwrap();
+            manager.bind_inference(binding.clone()).unwrap();
+            manager.current_session_id().unwrap()
+        };
+        assert_eq!(client.usage_snapshot().attempts, 0);
+        drop(executor);
+        cfg.model = "gpt-6-luna".into();
+        cfg.resume = Some(id.clone());
+        cfg.api_key = None;
+        let resumed = Executor::new(cfg).await.unwrap();
+        assert_eq!(resumed.cfg.model, "glm-5.3");
+        let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+        let saved = store.load(&id).unwrap();
+        assert_eq!(saved.model_selection.unwrap().model, "glm-5.3");
+        assert_eq!(saved.inference_binding.as_deref(), Some(binding.as_str()));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_session_selection_create_failure_preserves_existing_checkpoint_and_retries() {
+    use std::os::unix::fs::PermissionsExt;
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = config(temp.path(), provider);
+        cfg.model = "glm-5.3".into();
+        let (store, existing, before) = seed(&cfg, false);
+        let root = temp.path().join(".doge/sessions");
+        let mode = std::fs::metadata(&root).unwrap().permissions();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = Executor::new(cfg.clone()).await;
+        std::fs::set_permissions(&root, mode).unwrap();
+        assert!(result.is_err(), "failed save must not publish an executor");
+        assert_eq!(store.list_with_stats().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read(store.session_dir(&existing).join("session.json")).unwrap(),
+            before
+        );
+        let executor = Executor::new(cfg).await.unwrap();
+        assert_eq!(store.list_with_stats().unwrap().len(), 2);
+        assert_eq!(
+            executor.client.as_ref().unwrap().usage_snapshot().attempts,
+            0
+        );
+        assert_eq!(
+            std::fs::read(store.session_dir(&existing).join("session.json")).unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_session_selection_generic_provider_keeps_legacy_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = AppConfig {
+        project_root: temp.path().into(),
+        api_key: None,
+        ..Default::default()
+    };
+    let executor = Executor::new(cfg).await.unwrap();
+    assert!(executor.client.is_none());
+    let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+    let id = &store.list_with_stats().unwrap()[0].meta.id;
+    assert!(store.load(id).unwrap().model_selection.is_none());
+}
+
+#[tokio::test]
 async fn cli_resume_model_restores_selection_for_id_latest_with_and_without_binding() {
     for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
         for latest in [false, true] {
