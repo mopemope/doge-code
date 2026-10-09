@@ -95,6 +95,9 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub meta: SessionMeta,
+    /// Non-secret recorded selection; legacy sessions have no recorded model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<SessionModelSelection>,
     /// Last updated timestamp (RFC3339 string, mirrors `SessionData.timestamp`)
     pub updated_at: String,
     /// Number of conversation entries
@@ -284,6 +287,7 @@ impl SessionData {
     pub fn summary(&self) -> SessionSummary {
         SessionSummary {
             meta: self.meta.clone(),
+            model_selection: self.model_selection.clone(),
             updated_at: self.timestamp.clone(),
             messages: self.conversation.len(),
             token_count: self.token_count,
