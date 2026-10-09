@@ -203,6 +203,7 @@ impl TuiExecutor {
                     );
                 }
                 msgs.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "system".into(),
                     content: Some("The saved execution plan could not be read. This does not mean no plan exists. Do not overwrite it with plan_write mode=\"replace\" to bypass this error. Report the read failure and inspect or recover the stored plan before work that depends on it; an unrelated small task may proceed without a plan.".into()),

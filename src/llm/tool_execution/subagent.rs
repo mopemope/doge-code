@@ -83,6 +83,7 @@ impl Drop for LastRequestGuard<'_> {
 
 fn message(role: &str, content: String) -> ChatMessage {
     ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: role.into(),
         content: Some(content),
@@ -114,6 +115,8 @@ fn measure(
             0,
             client.responses_compact_threshold(),
         )
+    } else if client.api_key_responses(model)? {
+        governor.measure_api_key_responses(&client.responses_identity(), model, messages, tools, 0)
     } else {
         governor.measure(messages, tools)
     }
@@ -209,6 +212,7 @@ async fn run_subagent_inner(
                 ));
             }
             messages.push(ChatMessage {
+                reasoning: msg.reasoning.clone(),
                 provider_state: msg.provider_state.clone(),
                 role: "assistant".into(),
                 content: msg.content.clone(),

@@ -276,6 +276,32 @@ impl ContextBudgetGovernor {
         ))
     }
 
+    pub(crate) fn measure_api_key_responses(
+        &self,
+        identity: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        overlay: u64,
+    ) -> Result<RequestFootprint> {
+        let mut request = crate::features::openai_subscription::responses::build_api_key(
+            model, identity, messages, tools, None,
+        )?;
+        let mut opaque = 0u64;
+        for item in &mut request.input {
+            if let Some(object) = item.as_object_mut()
+                && object.remove("encrypted_content").is_some()
+            {
+                opaque += 1;
+            }
+        }
+        Ok(RequestFootprint::new(
+            serialized_size(&request.input)?.saturating_add(opaque.saturating_mul(1536)),
+            serialized_size(&request.tools)?,
+            overlay,
+        ))
+    }
+
     /// Measure with a separately known overlay size for telemetry.
     /// `message_json_bytes` already includes the overlay; this only records
     /// the overlay portion without changing the total.
@@ -421,6 +447,7 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: role.into(),
             content: Some(content.into()),
@@ -431,6 +458,7 @@ mod tests {
 
     fn tool_msg(id: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some(content.into()),
@@ -441,6 +469,7 @@ mod tests {
 
     fn assistant_call(id: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -799,6 +828,7 @@ mod tests {
         let g = governor();
         let base = vec![msg("system", "prompt"), msg("user", "work")];
         let overlay = ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some("<RuntimeContext>\nrecent files\n</RuntimeContext>".into()),
@@ -933,6 +963,7 @@ mod append_only_tests {
 
     fn user_msg() -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("hi".into()),
@@ -955,6 +986,7 @@ mod append_only_tests {
         // Post-activation history: tool_search call + result + marker.
         // Build marker via trusted active set (single edit).
         let search_call = ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -969,6 +1001,7 @@ mod append_only_tests {
             tool_call_id: None,
         };
         let search_result = ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some("{}".into()),
@@ -976,6 +1009,7 @@ mod append_only_tests {
             tool_call_id: Some("c1".into()),
         };
         let marker = ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(
                 crate::features::openai_subscription::ProviderState::activation(
                     "a".into(),

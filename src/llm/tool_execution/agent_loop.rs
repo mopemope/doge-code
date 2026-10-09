@@ -147,6 +147,7 @@ fn rebase_missing_activations(
         missing.clone(),
     );
     history.push(ChatMessage {
+        reasoning: Default::default(),
         provider_state: Some(state),
         role: "developer".into(),
         content: None,
@@ -291,6 +292,7 @@ fn block_plan_write_call(
     let blocked_content = truncate_tool_output(blocked.to_string(), PLAN_WRITE_TOOL_NAME);
     history.push_tool_result(tc.id.clone(), blocked_content);
     pending_interventions.push(ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "system".into(),
         content: Some(plan_write_block_system_message(reason).to_string()),
@@ -402,11 +404,28 @@ pub async fn run_agent_loop(
     _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
     attribution: crate::provenance::ProvenanceAttribution,
 ) -> Result<AgentRunResult> {
+    let model = client.wire_model(model)?;
+    let conversation_client =
+        if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
+            match crate::utils::safe_std_lock(manager, "session_manager")?.current_session_id() {
+                Some(id) => client.for_conversation(&id)?,
+                None => client.clone(),
+            }
+        } else {
+            client.clone()
+        };
+    let client = &conversation_client;
     debug!("run_agent_loop called");
     crate::llm::history::validate_tool_blocks(&messages, false)?;
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
         let binding = match client.account_label() {
             Some(account) => format!("openai:{account}:{model}"),
+            None if crate::features::opencode::default_base(client.provider).is_some() => format!(
+                "{:?}:{}:{:?}:{model}",
+                client.provider,
+                client.base_url.trim_end_matches('/'),
+                crate::features::opencode::api(client.provider, model)?
+            ),
             None => "openai-compatible".to_owned(),
         };
         crate::utils::safe_std_lock(manager, "session_manager")?.bind_inference(binding)?;
@@ -428,6 +447,14 @@ pub async fn run_agent_loop(
                 active_tools,
                 overlay,
                 client.responses_compact_threshold(),
+            )
+        } else if client.api_key_responses(model)? {
+            governor.measure_api_key_responses(
+                &client.responses_identity(),
+                model,
+                messages,
+                active_tools,
+                overlay,
             )
         } else {
             governor.measure_with_overlay(messages, active_tools, overlay)
@@ -457,6 +484,7 @@ pub async fn run_agent_loop(
         if !has_system_prompt {
             debug!("Injecting default system prompt");
             let system_msg = ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "system".into(),
                 content: Some(build_system_prompt(cfg)),
@@ -622,6 +650,7 @@ pub async fn run_agent_loop(
         let finalize_messages: Vec<ChatMessage> = {
             let mut v = history.as_slice().to_vec();
             v.push(ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "user".into(),
                 content: Some(partial_finalization_prompt(reason)),
@@ -645,6 +674,16 @@ pub async fn run_agent_loop(
                         client.responses_compact_threshold(),
                     )
                     .ok()
+            } else if client.api_key_responses(model).unwrap_or(false) {
+                budget_governor
+                    .measure_api_key_responses(
+                        &client.responses_identity(),
+                        model,
+                        &finalize_messages,
+                        &[],
+                        0,
+                    )
+                    .ok()
             } else {
                 budget_governor.measure(&finalize_messages, &[]).ok()
             }?;
@@ -656,6 +695,7 @@ pub async fn run_agent_loop(
         };
         if !can_finalize {
             history.push(ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".into(),
                 content: Some(fallback.clone()),
@@ -751,6 +791,7 @@ pub async fn run_agent_loop(
                     run_budget.finalization_succeeded = true;
                     let content = msg.content.clone().unwrap_or_default();
                     history.push(ChatMessage {
+                        reasoning: msg.reasoning.clone(),
                         provider_state: msg.provider_state.clone(),
                         role: "assistant".into(),
                         content: Some(content.clone()),
@@ -790,6 +831,7 @@ pub async fn run_agent_loop(
                     warn!("partial finalization returned tool calls; using local fallback");
                 }
                 history.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "assistant".into(),
                     content: Some(fallback.clone()),
@@ -833,6 +875,7 @@ pub async fn run_agent_loop(
                 }
                 warn!(error = %e, "partial finalization failed; using local fallback");
                 history.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "assistant".into(),
                     content: Some(fallback.clone()),
@@ -1614,6 +1657,7 @@ pub async fn run_agent_loop(
                     // Preflight guarantees this failed batch produced no effects.
                     // Only the sanitized validation summary reaches the model.
                     history.push(ChatMessage {
+                        reasoning: Default::default(),
                         provider_state: None,
                         role: "user".into(),
                         content: Some(format!(
@@ -1643,6 +1687,7 @@ pub async fn run_agent_loop(
                         e
                     );
                     history.push(ChatMessage {
+                        reasoning: Default::default(),
                         provider_state: None,
                         role: "user".into(),
                         content: Some(feedback),
@@ -1782,6 +1827,7 @@ pub async fn run_agent_loop(
             }
 
             history.push(ChatMessage {
+                reasoning: msg.reasoning.clone(),
                 provider_state: msg.provider_state.clone(),
                 role: "assistant".into(),
                 content: msg.content.clone(),
@@ -1868,6 +1914,7 @@ pub async fn run_agent_loop(
         }
 
         history.push(ChatMessage {
+            reasoning: msg.reasoning.clone(),
             provider_state: msg.provider_state.clone(),
             role: "assistant".into(),
             content: msg.content.clone(),
@@ -2498,6 +2545,7 @@ File modification detected. You MUST now verify your changes:
                 }
 
                 pending_interventions.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "system".into(), // Escalated to system role
                     content: Some(warning_msg),
@@ -2531,6 +2579,7 @@ File modification detected. You MUST now verify your changes:
                         tx.send("::status:warning:Progress stalled. Intervening...".to_string());
                 }
                 pending_interventions.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "user".into(),
                     content: Some(stall_warning),
@@ -2552,6 +2601,7 @@ File modification detected. You MUST now verify your changes:
 
                 if let Some(hint) = crate::llm::tool_execution::error::get_error_hint(&err_str) {
                     pending_interventions.push(ChatMessage {
+                        reasoning: Default::default(),
                         provider_state: None,
                         role: "user".into(),
                         content: Some(hint.to_string()),
@@ -2596,6 +2646,7 @@ File modification detected. You MUST now verify your changes:
                     fresh,
                 );
                 history.push(ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: Some(state),
                     role: "developer".into(),
                     content: None,
@@ -2719,6 +2770,7 @@ mod tests {
         .expect("test client");
         let messages = vec![
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "system".into(),
                 content: Some("test system prompt".to_string()),
@@ -2726,6 +2778,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "user".into(),
                 content: Some("cache".to_string()),
@@ -3044,6 +3097,7 @@ mod tests {
         let client =
             crate::llm::client_core::OpenAIClient::new("http://127.0.0.1:1", "k").expect("client");
         let messages = vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("fresh task".into()),
@@ -3084,6 +3138,7 @@ mod append_only_agent_tests {
 
     fn user_msg(text: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(text.into()),
@@ -3096,6 +3151,7 @@ mod append_only_agent_tests {
         let mut sorted: Vec<String> = names.into_iter().map(str::to_string).collect();
         sorted.sort();
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(
                 crate::features::openai_subscription::ProviderState::activation(
                     "acc".into(),
@@ -3211,6 +3267,7 @@ mod append_only_agent_tests {
         // call and result (it only appends at tail after results).
         let mut history = test_history_manager();
         history.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,

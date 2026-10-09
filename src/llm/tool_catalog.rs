@@ -1034,6 +1034,7 @@ mod tests {
         let catalog = ToolCatalog::from_entries(core_entries(), &deferred_routing());
         assert!(!catalog.is_active("task").await);
         let messages = vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -1260,6 +1261,7 @@ mod tests {
             &deferred_routing(),
         );
         let messages = vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,

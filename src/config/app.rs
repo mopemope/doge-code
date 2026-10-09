@@ -132,6 +132,7 @@ impl AppConfig {
                 ApiKind::ChatCompletions
             }
             crate::features::openai_subscription::ProviderKind::Openai => ApiKind::Responses,
+            provider => crate::features::opencode::api(provider, &self.model).ok()?,
         };
         resolve(self.provider, &self.base_url, api, &self.model, false).context_window
     }
@@ -174,26 +175,77 @@ impl AppConfig {
         {
             anyhow::bail!("Select a ChatGPT model with --model. Run dgc models --provider openai.");
         }
+        let opencode_base = crate::features::opencode::default_base(provider);
         let api_key = cli
             .api_key
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .or(project_cfg.api_key)
-            .or(file_cfg.api_key);
-        let base_url = if cli.base_url.is_empty() {
-            std::env::var("OPENAI_BASE_URL")
+            .or_else(|| {
+                std::env::var(if opencode_base.is_some() {
+                    "OPENCODE_API_KEY"
+                } else {
+                    "OPENAI_API_KEY"
+                })
                 .ok()
-                .or(project_cfg.base_url)
-                .or(file_cfg.base_url)
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+            })
+            .or(crate::features::opencode::config_value(
+                provider,
+                project_cfg.provider,
+                project_cfg.api_key,
+            ))
+            .or(crate::features::opencode::config_value(
+                provider,
+                file_cfg.provider,
+                file_cfg.api_key,
+            ));
+        let base_url = if cli.base_url.is_empty() {
+            std::env::var(if opencode_base.is_some() {
+                "OPENCODE_BASE_URL"
+            } else {
+                "OPENAI_BASE_URL"
+            })
+            .ok()
+            .or(crate::features::opencode::config_value(
+                provider,
+                project_cfg.provider,
+                project_cfg.base_url,
+            ))
+            .or(crate::features::opencode::config_value(
+                provider,
+                file_cfg.provider,
+                file_cfg.base_url,
+            ))
+            .unwrap_or_else(|| {
+                opencode_base
+                    .unwrap_or("https://api.openai.com/v1")
+                    .to_string()
+            })
         } else {
             cli.base_url
         };
         let model = if cli.model.is_empty() {
-            std::env::var("OPENAI_MODEL")
-                .ok()
-                .or(project_cfg.model)
-                .or(file_cfg.model)
-                .unwrap_or_else(|| "gpt-4o-mini".to_string())
+            std::env::var(if opencode_base.is_some() {
+                "OPENCODE_MODEL"
+            } else {
+                "OPENAI_MODEL"
+            })
+            .ok()
+            .or(crate::features::opencode::config_value(
+                provider,
+                project_cfg.provider,
+                project_cfg.model,
+            ))
+            .or(crate::features::opencode::config_value(
+                provider,
+                file_cfg.provider,
+                file_cfg.model,
+            ))
+            .unwrap_or_else(|| {
+                if opencode_base.is_some() {
+                    "gpt-6-luna"
+                } else {
+                    "gpt-4o-mini"
+                }
+                .to_string()
+            })
         } else {
             cli.model
         };
@@ -306,6 +358,11 @@ impl AppConfig {
         } else {
             base_url
         };
+        let model = crate::features::opencode::model_id(provider, &model)?.to_owned();
+        crate::features::opencode::validate_base(provider, &base_url)?;
+        if opencode_base.is_some() {
+            crate::features::opencode::api(provider, &model)?;
+        }
         let config = Self {
             provider,
             base_url,
@@ -550,6 +607,8 @@ fn resolve_provider(
         return match environment {
             "openai-compatible" => Ok(ProviderKind::OpenaiCompatible),
             "openai" => Ok(ProviderKind::Openai),
+            "opencode-go" => Ok(ProviderKind::OpencodeGo),
+            "opencode-zen" => Ok(ProviderKind::OpencodeZen),
             _ => anyhow::bail!("invalid DGC_PROVIDER"),
         };
     }

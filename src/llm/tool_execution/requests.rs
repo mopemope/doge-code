@@ -137,6 +137,7 @@ pub(crate) async fn chat_tools_once_with_activation_and_usage(
 ) -> Result<ToolResponseWithUsage> {
     // Also cover tools-free budget finalization and direct non-streaming calls.
     // Canonical bootstrap data must not become provider authority messages.
+    let model = client.wire_model(model)?;
     let projected = crate::llm::runtime_context::RequestMessages::borrowed(messages);
     let messages = projected.as_slice();
     crate::llm::history::validate_tool_blocks(messages, false)?;
@@ -174,6 +175,28 @@ pub(crate) async fn chat_tools_once_with_activation_and_usage(
             })?;
         validate_tool_message_with_activation(&message.message, base_tools, active_tools)?;
         return Ok(message);
+    }
+    if client.api_key_responses(model)? {
+        let capabilities = crate::llm::capabilities::resolve(
+            client.provider,
+            &client.base_url,
+            crate::llm::capabilities::ApiKind::Responses,
+            model,
+            !active_tools.is_empty(),
+        );
+        let effort =
+            resolve_hint_for_support(capabilities.reasoning, &reasoning_mode, reasoning_effort);
+        let response = crate::features::openai_subscription::responses::infer_api_key(
+            client,
+            model,
+            messages,
+            active_tools,
+            effort,
+            cancel.unwrap_or_default(),
+        )
+        .await?;
+        validate_tool_message(&response.message, active_tools)?;
+        return Ok(response);
     }
     anyhow::ensure!(
         !messages.iter().any(|m| m.provider_state.is_some()),
@@ -343,7 +366,7 @@ async fn chat_tools_once_attempt(
     headers.insert(AUTHORIZATION, auth_value);
 
     let cancel_token = cancel.unwrap_or_default();
-    let req_builder = client.inner.post(&url).headers(headers).json(&req);
+    let req_builder = client.request_headers(client.inner.post(&url).headers(headers).json(&req));
 
     let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
     let resp_fut = tokio::time::timeout(timeout_duration, async {
@@ -884,6 +907,7 @@ mod tests {
         ] {
             let message = ChoiceMessageWithTools {
                 refusal: None,
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".into(),
                 content: None,
@@ -913,6 +937,7 @@ mod tests {
         for content in [None, Some(""), Some(" \n\t")] {
             let mut message = ChoiceMessageWithTools {
                 refusal: None,
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".into(),
                 content: content.map(str::to_owned),
@@ -951,6 +976,7 @@ mod tests {
         }
         let message = ChoiceMessageWithTools {
             refusal: None,
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("  done  ".into()),
@@ -1068,6 +1094,7 @@ mod tests {
 
     fn user_message() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("do the thing".into()),
@@ -1212,6 +1239,7 @@ mod tests {
         assert!(args.items[0].parent_id.is_none());
         assert!(args.items[0].verification_obligations.is_empty());
         messages.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: message.role,
             content: message.content,
@@ -1219,6 +1247,7 @@ mod tests {
             tool_call_id: None,
         });
         messages.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some(r#"{"ok":true}"#.into()),

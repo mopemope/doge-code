@@ -69,7 +69,14 @@ pub fn resolve(
         (ProviderKind::OpenaiCompatible, ApiKind::ChatCompletions)
             | (ProviderKind::Openai, ApiKind::Responses)
     );
-    let reasoning = if !route_matches {
+    let reasoning = if matches!(
+        provider,
+        ProviderKind::OpencodeGo | ProviderKind::OpencodeZen
+    ) && api == ApiKind::Responses
+        && model == "gpt-6-luna"
+    {
+        ReasoningSupport::Supported
+    } else if !route_matches {
         ReasoningSupport::Unknown
     } else {
         match endpoint {

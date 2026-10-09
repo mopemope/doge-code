@@ -1218,6 +1218,7 @@ mod tests {
                 sm.update_current_session_with_history(&[crate::llm::ChatMessage {
                     role: "user".into(),
                     content: Some("pending".into()),
+                    reasoning: Default::default(),
                     provider_state: None,
                     tool_calls: vec![],
                     tool_call_id: None,
