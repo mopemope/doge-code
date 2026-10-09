@@ -110,7 +110,7 @@ dgc session list
 dgc session show <id>
 dgc session delete <id>
 ```
-Non-interactive session management. Sessions are listed most recently updated first, and IDs may be given as prefixes (e.g. `0198abcd`).
+Non-interactive session management. Sessions are listed most recently updated first. The list shows prefixes that uniquely identify each currently listed session (at least eight characters); use the displayed prefix or full ID for `show`, `--resume` and TUI `switch`. Each entry also shows its recorded provider/model. Legacy sessions explicitly show that their startup selection was not recorded.
 
 ## 🔧 Installation
 
@@ -1010,7 +1010,7 @@ dgc session show 0198abcd
 dgc session delete 0198abcd
 ```
 
-In the TUI, `/session list` shows the same table with the current session marked, and `/session switch <id>` accepts ID prefixes as well.
+In the TUI, `/session list` shows the same entries with the current session marked, and `/session switch <id>` accepts the displayed unique prefixes as well. Prefixes may grow as new sessions are added; ambiguous prefixes are rejected. `/session new` reports durability warnings from both the previous checkpoint and the new checkpoint, while a successful atomic save keeps the new session active.
 A successful `/session switch` or `/session clear` also clears the saved previous
 instruction and its implicit edit target. Before using `/edit-symbol`, submit a
 fresh instruction containing the target `@path:line` or `@path#Lline`. Unsent input
