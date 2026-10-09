@@ -10,6 +10,26 @@ pub fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// Keep displayed prefixes resolvable within the current listing.
+fn unique_prefix<'a>(id: &'a str, sorted_ids: &[&str]) -> &'a str {
+    let index = sorted_ids.partition_point(|other| *other < id);
+    let mut needed = 8;
+    // Sorted neighbors have the longest shared prefixes. Avoid comparing every
+    // pair when model sessions have accumulated beyond the retention limit.
+    let previous = index.checked_sub(1).and_then(|i| sorted_ids.get(i));
+    for other in previous.into_iter().chain(sorted_ids.get(index + 1)) {
+        let shared = id
+            .chars()
+            .zip(other.chars())
+            .take_while(|(left, right)| left == right)
+            .count();
+        needed = needed.max(shared + 1);
+    }
+    id.char_indices()
+        .nth(needed)
+        .map_or(id, |(end, _)| &id[..end])
+}
+
 /// Format an RFC3339 timestamp as a compact local time (`MM-DD HH:MM`).
 /// Falls back to the raw string when parsing fails.
 pub fn format_timestamp(rfc3339: &str) -> String {
@@ -62,9 +82,24 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
         return "No sessions found.".to_string();
     }
 
+    let mut sorted_ids: Vec<_> = summaries
+        .iter()
+        .map(|summary| summary.meta.id.as_str())
+        .collect();
+    sorted_ids.sort_unstable();
+    let prefixes: Vec<_> = summaries
+        .iter()
+        .map(|summary| unique_prefix(&summary.meta.id, &sorted_ids))
+        .collect();
+    let id_width = prefixes
+        .iter()
+        .map(|id| id.chars().count() + 1)
+        .max()
+        .unwrap_or(9)
+        .max(9);
     let header = format!(
         "{} {} {} {} {}",
-        pad_right("ID", 9),
+        pad_right("ID", id_width),
         pad_right("TITLE", TITLE_WIDTH + 1),
         pad_right("UPDATED", UPDATED_WIDTH + 1),
         pad_left("TOKENS", NUM_WIDTH),
@@ -73,7 +108,7 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
     let mut out = header;
     out.push('\n');
 
-    for summary in summaries {
+    for (summary, prefix) in summaries.iter().zip(prefixes) {
         let marker = if current_id
             .is_some_and(|cur| summary.meta.id == cur || summary.meta.id.starts_with(cur))
         {
@@ -81,17 +116,25 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
         } else {
             " "
         };
-        let id = format!("{}{}", marker, short_id(&summary.meta.id));
+        let id = format!("{marker}{prefix}");
         let title = truncate_title(&summary.meta.title, TITLE_WIDTH);
         let updated = format_timestamp(&summary.updated_at);
         out.push_str(&format!(
             "{} {} {} {} {}\n",
-            pad_right(&id, 9),
+            pad_right(&id, id_width),
             pad_right(&title, TITLE_WIDTH + 1),
             pad_right(&updated, UPDATED_WIDTH + 1),
             pad_left(&summary.token_count.to_string(), NUM_WIDTH),
             pad_left(&summary.requests.to_string(), 5)
         ));
+        match &summary.model_selection {
+            Some(selection) => out.push_str(&format!(
+                "  Model: {} / {:?}\n",
+                crate::features::opencode::provider_name(selection.provider),
+                selection.model
+            )),
+            None => out.push_str("  Model: legacy (startup selection not recorded)\n"),
+        }
     }
 
     // Trim the trailing newline for log-friendly output.
@@ -145,6 +188,7 @@ mod tests {
                 title: "Fix login bug".to_string(),
                 title_is_default: false,
             },
+            model_selection: None,
             updated_at: "2026-09-04T10:30:00+00:00".to_string(),
             messages: 12,
             token_count: 3456,
@@ -190,6 +234,50 @@ mod tests {
         let summary = sample_summary();
         let out = format_summary_list(std::slice::from_ref(&summary), None);
         assert!(!out.contains('*'));
+    }
+
+    #[test]
+    fn session_operation_list_uses_unique_prefixes_for_same_time_ids() {
+        let first = sample_summary();
+        let mut second = first.clone();
+        second.meta.id = "0198abcd-1235-5678-9abc-def012345678".into();
+        let out = format_summary_list(&[first.clone(), second.clone()], None);
+        let ids: Vec<_> = out
+            .lines()
+            .filter(|line| line.trim_start().starts_with("0198abcd"))
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(first.meta.id.starts_with(ids[0]));
+        assert!(second.meta.id.starts_with(ids[1]));
+        assert!(!second.meta.id.starts_with(ids[0]));
+        assert!(!first.meta.id.starts_with(ids[1]));
+    }
+
+    #[test]
+    fn session_operation_list_labels_recorded_models_and_legacy_without_secrets() {
+        let mut selected = sample_summary();
+        selected.model_selection = Some(crate::session::data::SessionModelSelection {
+            provider: crate::features::openai_subscription::ProviderKind::OpencodeZen,
+            model: "muse-spark-1.3-contributor-free".into(),
+        });
+        let legacy = sample_summary();
+        let out = format_summary_list(&[selected.clone(), legacy.clone()], None);
+        assert!(out.contains("opencode-zen / \"muse-spark-1.3-contributor-free\""));
+        assert!(out.contains("legacy (startup selection not recorded)"));
+        let value = serde_json::to_value(selected).unwrap();
+        assert_eq!(
+            value["model_selection"]["model"],
+            "muse-spark-1.3-contributor-free"
+        );
+        assert!(value["model_selection"].get("api_key").is_none());
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("model_selection")
+                .is_none()
+        );
     }
 
     #[test]

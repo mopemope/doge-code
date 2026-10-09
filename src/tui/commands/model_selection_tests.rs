@@ -439,3 +439,70 @@ fn model_selection_allows_idle_persistent_shell_pty() {
     executor.start_model_session("glm-5.3", &mut ui).unwrap();
     assert_eq!(executor.cfg.model, "glm-5.3");
 }
+
+#[test]
+fn session_operation_list_prefixes_resolve_switch_resume_and_render() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (mut executor, mut ui, _dir) = fixture(false);
+    let original = id(&executor);
+    let selected = executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    let (summaries, legacy) = {
+        let manager = executor.session_manager.lock().unwrap();
+        let (legacy, _lease, _outcome) = manager
+            .store
+            .create_with_lease(Some("旧形式 日本語".into()))
+            .unwrap();
+        (manager.store.list_with_stats().unwrap(), legacy.meta.id)
+    };
+    let listing = crate::session::format::format_summary_list(&summaries, Some(&selected));
+    let prefixes: Vec<_> = listing
+        .lines()
+        .skip(1)
+        .filter(|line| !line.starts_with("  Model:"))
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .unwrap()
+                .trim_start_matches('*')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(prefixes.len(), 3);
+    let resolved: Vec<_> = {
+        let manager = executor.session_manager.lock().unwrap();
+        prefixes
+            .iter()
+            .map(|prefix| manager.store.resolve_id_prefix(prefix).unwrap())
+            .collect()
+    };
+    for target in [&original, &selected, &legacy] {
+        assert!(resolved.contains(target));
+    }
+    let selected_prefix = &prefixes[resolved.iter().position(|id| id == &selected).unwrap()];
+    let original_prefix = &prefixes[resolved.iter().position(|id| id == &original).unwrap()];
+    executor.switch_to_session(original_prefix).unwrap();
+    assert_eq!(executor.cfg.model, "gpt-6-luna");
+    executor.resume_session(selected_prefix).unwrap();
+    assert_eq!(executor.cfg.model, "glm-5.3");
+    for width in [40, 80, 110] {
+        ui.clear_log();
+        ui.push_log(&listing);
+        let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
+        terminal.draw(|frame| ui.view(frame, None)).unwrap();
+        let screen = terminal.backend().to_string();
+        for prefix in &prefixes {
+            assert!(screen.contains(prefix), "{width}: {screen}");
+        }
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .flat_map(|cell| cell.symbol().chars())
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        for marker in ["opencode-go", "glm-5.3", "gpt-6-luna", "legacy", "日本語"] {
+            assert!(rendered.contains(marker), "{width}: {marker}: {screen}");
+        }
+    }
+}

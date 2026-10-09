@@ -204,13 +204,20 @@ impl SessionManager {
     /// Create a new session with an optional initial prompt.
     /// If `initial_prompt` is provided the session title will be set and persisted.
     pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
+        self.create_session_with_outcome(initial_prompt).map(|_| ())
+    }
+
+    pub(crate) fn create_session_with_outcome(
+        &mut self,
+        initial_prompt: Option<String>,
+    ) -> Result<(String, crate::session::store::SessionSaveOutcome)> {
         self.flush_before_transition()?;
         let (session, lease, outcome) = self.store.create_with_lease(initial_prompt)?;
         let id = session.meta.id.clone();
         self.current_session = Some(session);
         self.current_lease = Some(lease);
         self.adopt_save_outcome(&id, &outcome);
-        Ok(())
+        Ok((id, outcome))
     }
 
     /// Save the complete new selection before publishing it as current.
