@@ -77,7 +77,12 @@ impl TuiApp {
         self.render_main_content(f, chunks[1], &plan, &self.theme);
         self.render_input_area(f, chunks[2]);
 
+        if self.model_picker.is_some() {
+            self.render_model_picker(f, chunks[1]);
+        }
+
         if self.completion_active
+            && self.model_picker.is_none()
             && !self.key_help_open
             && !self.completion_candidates.is_empty()
             && self.diff_review_focus != crate::tui::state::DiffReviewFocus::Review
@@ -96,6 +101,83 @@ impl TuiApp {
         } else if self.comment_list.is_some() {
             self.render_comment_list(f, size);
         }
+    }
+
+    fn render_model_picker(&self, f: &mut Frame, area: Rect) {
+        let Some(picker) = &self.model_picker else {
+            return;
+        };
+        f.render_widget(Clear, area);
+        let block = Block::default().borders(Borders::ALL).title(format!(
+            "Models: {}",
+            crate::features::opencode::provider_name(picker.provider)
+        ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let parts = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(7),
+        ])
+        .split(inner);
+        f.render_widget(
+            Paragraph::new(format!(
+                "Search: {}\nEnter: NEW session | Esc: cancel",
+                picker.query
+            )),
+            parts[0],
+        );
+        if inner.width > 0 && inner.height > 0 {
+            use unicode_width::UnicodeWidthStr;
+            let column =
+                (8 + picker.query.width()).min(usize::from(inner.width.saturating_sub(1))) as u16;
+            f.set_cursor_position((inner.x + column, inner.y));
+        }
+        let results = picker.results();
+        let items: Vec<ListItem> = results
+            .iter()
+            .map(|spec| {
+                ListItem::new(format!(
+                    "{} | {} | {}",
+                    spec.id,
+                    spec.api.name(),
+                    if spec.api.adapter().is_some() {
+                        "yes"
+                    } else {
+                        "NO"
+                    }
+                ))
+            })
+            .collect();
+        if items.is_empty() {
+            f.render_widget(Paragraph::new("No matching models"), parts[1]);
+        } else {
+            let mut state = ListState::default().with_selected(Some(picker.selected));
+            f.render_stateful_widget(
+                List::new(items)
+                    .highlight_symbol("> ")
+                    .highlight_style(Style::default().fg(Color::Cyan)),
+                parts[1],
+                &mut state,
+            );
+        }
+        let detail = if let Some(error) = &picker.error {
+            error.clone()
+        } else if let Some(spec) = results.get(picker.selected) {
+            format!(
+                "{}\n{}\n{}\nOffline snapshot {}; no live check",
+                spec.id,
+                spec.api.name(),
+                spec.api.reason(),
+                crate::features::opencode::catalog::SNAPSHOT
+            )
+        } else {
+            "Edit search or Esc to cancel".into()
+        };
+        f.render_widget(
+            Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
+            parts[2],
+        );
     }
 
     fn render_status_line(&self, f: &mut Frame, area: Rect, model: Option<&str>, theme: &Theme) {

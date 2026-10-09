@@ -180,18 +180,13 @@ async fn manual_compact_rejects_overlap_and_saves_before_adopting() {
     assert_eq!(executor.jobs.foreground_id(), Some(id));
     assert_eq!(mock.count(), 1);
     assert_eq!(memory(&executor), before);
-    assert!(
-        executor
-            .switch_to_session(
-                &executor
-                    .session_manager
-                    .lock()
-                    .unwrap()
-                    .current_session_id()
-                    .unwrap()
-            )
-            .is_err()
-    );
+    let current_id = executor
+        .session_manager
+        .lock()
+        .unwrap()
+        .current_session_id()
+        .unwrap();
+    assert!(executor.switch_to_session(&current_id).is_err());
     assert!(executor.clear_runtime_conversation().is_err());
     mock.release();
     assert_eq!(terminal(&executor, id).await.status, JobStatus::Completed);

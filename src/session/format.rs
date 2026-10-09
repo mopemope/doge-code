@@ -103,7 +103,7 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
 
 /// Render detailed information about a single session.
 pub fn format_detail(data: &SessionData) -> String {
-    format!(
+    let detail = format!(
         "Session {}{}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Messages: {}\n  Tokens: {}\n  Requests: {}\n  Tool calls: {}\n  Lines edited: {}\n  Changed files: {}",
         short_id(&data.meta.id),
         if data.meta.id.len() > 8 {
@@ -120,7 +120,16 @@ pub fn format_detail(data: &SessionData) -> String {
         data.tool_calls,
         data.lines_edited,
         data.changed_files.len()
-    )
+    );
+    if let Some(selection) = &data.model_selection {
+        format!(
+            "{detail}\n  Model selection: {} / {:?} (session-local)",
+            crate::features::opencode::provider_name(selection.provider),
+            selection.model
+        )
+    } else {
+        detail
+    }
 }
 
 #[cfg(test)]

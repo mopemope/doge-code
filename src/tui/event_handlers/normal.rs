@@ -16,7 +16,7 @@ type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 /// Only control commands bypass the ordinary instruction queue.
 fn is_immediate_control_command(line: &str) -> bool {
     let line = line.trim();
-    line == "/jobs" || line.split_whitespace().next() == Some("/cancel")
+    line == "/jobs" || matches!(line.split_whitespace().next(), Some("/cancel" | "/models"))
 }
 
 fn queued_input_preview(input: &str) -> String {
