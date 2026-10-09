@@ -3,8 +3,20 @@ use crate::features::openai_subscription::ProviderKind;
 use crate::llm::capabilities::ApiKind;
 use anyhow::{Result, bail};
 
+mod catalog;
+pub use catalog::{catalog, lookup, print_catalog};
+
 pub const GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 pub const ZEN_BASE: &str = "https://opencode.ai/zen/v1";
+
+pub fn provider_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::OpencodeGo => "opencode-go",
+        ProviderKind::OpencodeZen => "opencode-zen",
+        ProviderKind::Openai => "openai",
+        ProviderKind::OpenaiCompatible => "openai-compatible",
+    }
+}
 
 pub fn default_base(provider: ProviderKind) -> Option<&'static str> {
     match provider {
@@ -55,102 +67,15 @@ pub fn model_id(provider: ProviderKind, model: &str) -> Result<&str> {
 /// sending a key or accidentally selecting a billable alternative route.
 /// Sources (2026-10-09): https://docs.opencode.ai/docs/go/ and /zen/.
 pub fn api(provider: ProviderKind, model: &str) -> Result<ApiKind> {
-    let id = model_id(provider, model)?;
-    let common_chat = matches!(
-        id,
-        "glm-5.3-flash"
-            | "glm-5.3"
-            | "glm-5.2"
-            | "deepseek-v4.1-flash"
-            | "deepseek-v4-pro"
-            | "deepseek-v4-flash"
-            | "deepseek-v4-flash-vision-exp"
-    );
-    let supported = match provider {
-        ProviderKind::OpencodeGo => match id {
-            "grok-4.7"
-            | "grok-4.6"
-            | "gpt-6-luna"
-            | "gpt-5.6-luna"
-            | "muse-spark-1.3-contributor"
-            | "muse-spark-1.2-contributor" => Some(ApiKind::Responses),
-            "kimi-k3"
-            | "kimi-k2.7-code"
-            | "kimi-k2.6"
-            | "longcat-2.0"
-            | "longcat-2.5-preview-free"
-            | "step-5-preview-free"
-            | "mimo-v2.6-flash"
-            | "mimo-v2.6-pro"
-            | "mimo-v2.5"
-            | "mimo-v2.5-pro"
-            | "hy4-preview"
-            | "hy3"
-            | "space-bunny" => Some(ApiKind::ChatCompletions),
-            _ if common_chat => Some(ApiKind::ChatCompletions),
-            _ => None,
-        },
-        ProviderKind::OpencodeZen => match id {
-            "gpt-6-astra"
-            | "gpt-6-sol"
-            | "gpt-6.1-sol"
-            | "gpt-6-luna"
-            | "gpt-5.6-sol"
-            | "gpt-5.6-terra"
-            | "gpt-5.6-luna"
-            | "gpt-5.5"
-            | "gpt-5.5-pro"
-            | "gpt-5.4"
-            | "gpt-5.4-pro"
-            | "gpt-5.4-mini"
-            | "gpt-5.4-nano"
-            | "gpt-5.3-codex"
-            | "gpt-5.3-codex-spark"
-            | "gpt-5.2"
-            | "gpt-5.2-codex"
-            | "gpt-5.1"
-            | "gpt-5.1-codex"
-            | "gpt-5.1-codex-max"
-            | "gpt-5.1-codex-mini"
-            | "gpt-5"
-            | "gpt-5-codex"
-            | "gpt-5-nano"
-            | "grok-4.7"
-            | "grok-4.6"
-            | "grok-4.5"
-            | "grok-build-0.1"
-            | "muse-spark-1.3"
-            | "muse-spark-1.2"
-            | "muse-spark-1.3-contributor-free" => Some(ApiKind::Responses),
-            "qwen3.8-max"
-            | "minimax-m3"
-            | "minimax-m2.7"
-            | "minimax-m2.5"
-            | "glm-5.1"
-            | "glm-5"
-            | "kimi-k2.5"
-            | "kimi-k2.6"
-            | "kimi-k2.7-code"
-            | "kimi-k3"
-            | "mistral-large-4"
-            | "big-pickle"
-            | "space-bunny-free"
-            | "longcat-2.5-preview-free"
-            | "step-5-preview-free"
-            | "exo-free"
-            | "mimo-v2.6-flash-free"
-            | "mimo-v2.5-free"
-            | "ling-3.1-flash-free"
-            | "ling-3.0-flash-fin-free"
-            | "nemotron-3-ultra-free"
-            | "nemotron-3.5-lightning-free" => Some(ApiKind::ChatCompletions),
-            _ if common_chat => Some(ApiKind::ChatCompletions),
-            _ => None,
-        },
-        _ => bail!("not an OpenCode provider"),
-    };
-    supported.ok_or_else(|| anyhow::anyhow!(
-        "OpenCode model {id} has an unsupported or unknown API; only verified Chat Completions and Responses routes are supported (Messages/Google are unavailable)"))
+    let spec = lookup(provider, model)?;
+    spec.api.adapter().ok_or_else(|| {
+        anyhow::anyhow!(
+            "OpenCode model {} uses {}: {}",
+            spec.id,
+            spec.api.name(),
+            spec.api.reason()
+        )
+    })
 }
 
 pub fn validate_base(provider: ProviderKind, base: &str) -> Result<()> {

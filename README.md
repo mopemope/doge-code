@@ -265,8 +265,39 @@ Routing follows the [Go](https://docs.opencode.ai/docs/go/) and
 Supported Chat Completions models include GLM, Kimi and DeepSeek; GPT 6 Luna uses
 API-key Responses. Messages, Google, System One and unknown models fail before
 sending a request. For example, `qwen3.8-max` uses Messages on Go and is unavailable
-there, while its Zen Chat Completions route is supported. `dgc models` still
-supports the ChatGPT OAuth catalog only; use the linked OpenCode tables for IDs.
+there, while its Zen Chat Completions route is supported.
+
+Inspect the offline, dated gateway endpoint catalog without a key, config loading
+or network access:
+
+```bash
+dgc models --provider opencode-go
+dgc models --provider opencode-zen
+dgc models --provider opencode-go --model opencode-go/gpt-6-luna
+```
+
+Each row shows the documented model ID, API type, dgc adapter support and reason.
+Messages/Google/SystemOne rows are documented gateway models but remain unsupported
+by dgc. `--model` resolves a matching alias to its canonical ID; unknown IDs,
+mismatched prefixes and unsupported selections exit with an error. A supported
+adapter does not establish live availability, subscription access or remaining
+allowance. `dgc models --provider openai` keeps the existing OAuth account catalog.
+
+The TUI status line shows the selected Go/Zen provider, model and key presence;
+key presence does not verify authentication. `dgc --provider opencode-go diagnostics`,
+startup logs and `/tokens` show the
+fixed endpoint and API, context source and reasoning policy without exposing keys.
+`diagnostics` reads normal configuration but does not load OAuth credentials, start
+MCP or call inference; catalog listing additionally bypasses configuration loading.
+Context capacity is either known route/model metadata, a manual `[llm]
+context_window_size` override, or unknown. For unknown capacity, the 128,000-token
+fallback is only an estimate used to calculate the 80% compaction limit; it is
+never displayed as verified model capacity. The effective limit is the minimum of
+that safety limit and the configured model-specific compaction threshold.
+Reasoning diagnostics distinguish adaptive hints, explicit fixed effort overrides,
+provider defaults and adapter-forced `none` on applicable OpenAI tool requests.
+They describe the main-agent request policy, not measured server thinking;
+auxiliary requests may omit hints.
 
 Every OpenCode inference request identifies dgc with `User-Agent: dgc/<version>`
 and `x-opencode-session`. Main requests, retries, research subagents, documentation,
@@ -277,8 +308,9 @@ process-local ID. Keys are not part of persisted provider bindings.
 API-key Responses sends standard flat function tools and retains opaque reasoning
 items through tool round trips and session resume. Chat Completions retains optional
 `reasoning_content` / `reasoning_details` in assistant history without displaying
-it. Only verified reasoning controls are sent; other OpenCode models use provider
-defaults. This does not guarantee that `reasoning.mode = "off"` disables provider
+it. Automatic reasoning hints use verified support metadata; models with unknown
+support use provider defaults. An explicit `fixed` mode sends the configured effort
+even with unknown support; provider acceptance is not guaranteed. This does not guarantee that `reasoning.mode = "off"` disables provider
 thinking. Local compaction summarizes completed historical text/tool data and
 retains unseen tool-result batches exactly; it does not send OAuth-only namespaces,
 activation items or unverified native compaction controls to OpenCode. Set
