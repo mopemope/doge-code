@@ -68,6 +68,30 @@ impl OpenAIClient {
         messages: &[ChatMessage],
         cancel: Option<CancellationToken>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        let model = self.wire_model(model)?;
+        if self.api_key_responses(model)? {
+            let response = crate::features::openai_subscription::responses::infer_api_key(
+                self,
+                model,
+                messages,
+                &[],
+                None,
+                cancel.unwrap_or_default(),
+            )
+            .await?;
+            anyhow::ensure!(
+                response.message.refusal.is_none()
+                    && response
+                        .message
+                        .content
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                LlmErrorKind::Incomplete
+            );
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok(response.message.content.unwrap_or_default())
+            })));
+        }
         if let Some(auth) = &self.subscription {
             let result = crate::features::openai_subscription::responses::infer(
                 self,
@@ -145,6 +169,7 @@ impl OpenAIClient {
                 .post(url.clone())
                 .headers(headers.clone())
                 .json(&req);
+            let request = self.request_headers(request);
             let fut = async {
                 self.record_request_attempt();
                 request.send().await
@@ -512,6 +537,7 @@ mod tests {
 
     fn stream_messages() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("hi".into()),

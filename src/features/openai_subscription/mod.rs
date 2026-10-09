@@ -14,6 +14,8 @@ pub enum ProviderKind {
     #[default]
     OpenaiCompatible,
     Openai,
+    OpencodeGo,
+    OpencodeZen,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -134,7 +136,7 @@ impl ProviderState {
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "ChatGPT request failed (HTTP {status:?}, code {code}, request {request_id:?}). {recovery}"
+    "Provider request failed (HTTP {status:?}, code {code}, request {request_id:?}). {recovery}"
 )]
 pub struct ProviderError {
     pub status: Option<u16>,
@@ -166,6 +168,10 @@ impl ProviderError {
             .unwrap_or("unknown_error")
             .to_owned();
         let (retryable, recovery) = match code.as_str() {
+            _ if crate::llm::retry::is_permanent_quota_code(&code) => (
+                false,
+                "Provider quota is exhausted. Review usage in the provider console; no alternative billing route is selected.",
+            ),
             "subscription_sharing_usage_limit_exceeded" => (
                 false,
                 "ChatGPT plan usage is paused. Review limits in ChatGPT Settings > Usage.",
@@ -187,7 +193,7 @@ impl ProviderError {
             }
             _ if matches!(status, Some(401 | 403)) => (
                 false,
-                "Check the selected ChatGPT account and granted permissions; sign in again if access was revoked.",
+                "Check the selected provider authentication and granted permissions; sign in again if access was revoked.",
             ),
             _ => (
                 false,

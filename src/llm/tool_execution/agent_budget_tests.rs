@@ -156,6 +156,7 @@ fn test_cfg_with_root(agent_budget: AgentBudgetConfig, root: std::path::PathBuf)
 fn user_msg(content: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some("test system".to_string()),
@@ -163,6 +164,7 @@ fn user_msg(content: &str) -> Vec<ChatMessage> {
             tool_call_id: None,
         },
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.to_string()),
@@ -1356,6 +1358,7 @@ async fn responses_pairing_survives_budget_synthetic() {
     // still project to Responses input without orphan errors.
     let call_id = "call_resp";
     let assistant = ChatMessage {
+        reasoning: Default::default(),
         provider_state: Some(crate::features::openai_subscription::ProviderState {
             version: 1,
             account: "test-account".to_string(),
@@ -1372,6 +1375,7 @@ async fn responses_pairing_survives_budget_synthetic() {
         tool_call_id: None,
     };
     let synthetic = ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "tool".into(),
         content: Some(

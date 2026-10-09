@@ -18,6 +18,8 @@ pub struct ChatRequestWithTools {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoiceMessageWithTools {
+    #[serde(default, flatten)]
+    pub reasoning: crate::llm::types::ReasoningPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

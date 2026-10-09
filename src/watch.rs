@@ -87,6 +87,14 @@ pub async fn run_watch_mode(cfg: AppConfig) -> Result<()> {
     // Use Arc<Mutex<>> for thread-safe access to file processing tracking
     let last_processed: WatchEntries = Arc::new(Mutex::new(HashMap::new()));
     let tools = watch_tools(&cfg)?;
+    let llm_client =
+        if let Some(manager) = tools.get_session_manager_wrapper().get_session_manager() {
+            let id = crate::utils::safe_std_lock(manager, "session_manager")?
+                .get_current_session_id()?;
+            llm_client.for_conversation(&id)?
+        } else {
+            llm_client
+        };
 
     let (tx, rx) = channel();
 
@@ -644,6 +652,7 @@ async fn execute_llm_task(
 
     let messages = vec![
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".to_string(),
             content: Some(system_prompt),
@@ -651,6 +660,7 @@ async fn execute_llm_task(
             tool_call_id: None,
         },
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".to_string(),
             content: Some(user_prompt),

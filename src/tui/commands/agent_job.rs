@@ -144,7 +144,9 @@ pub(crate) fn spawn_agent_turn(
     let client = match executor.client.clone() {
         Some(client) => client,
         None => {
-            ui.push_log("OPENAI_API_KEY not set; cannot call LLM.");
+            ui.push_log(crate::features::opencode::missing_auth_message(
+                executor.cfg.provider,
+            ));
             return Err(JobStartError::ShuttingDown);
         }
     };
@@ -177,6 +179,7 @@ pub(crate) fn spawn_agent_turn(
     let mut msgs = Vec::new();
     let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&executor.cfg);
     msgs.push(crate::llm::ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "system".into(),
         content: Some(sys_prompt),
@@ -210,6 +213,7 @@ pub(crate) fn spawn_agent_turn(
             }
         };
         msgs.push(crate::llm::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some(evidence),
@@ -218,6 +222,7 @@ pub(crate) fn spawn_agent_turn(
         });
         for comment in &batch.comments {
             msgs.push(crate::llm::ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "user".into(),
                 content: Some(comment.text.clone()),
@@ -227,6 +232,7 @@ pub(crate) fn spawn_agent_turn(
         }
     } else {
         msgs.push(crate::llm::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.clone()),
@@ -1100,6 +1106,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
             .expect("permissions");
         let updated = vec![crate::llm::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("new canonical history".into()),

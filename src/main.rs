@@ -47,15 +47,15 @@ pub struct Cli {
     /// Inference billing provider (default: existing API-key provider)
     #[arg(long, value_enum)]
     pub provider: Option<features::openai_subscription::ProviderKind>,
-    /// OpenAI-compatible API base URL (no default; falls back to env OPENAI_BASE_URL or config file)
+    /// API base URL (OpenCode uses OPENCODE_BASE_URL or its provider-specific default)
     #[arg(long, default_value = "")]
     pub base_url: String,
 
-    /// Model name (no default; falls back to env OPENAI_MODEL or config file)
+    /// Model ID (OpenCode uses OPENCODE_MODEL; other providers use OPENAI_MODEL)
     #[arg(long, default_value = "")]
     pub model: String,
 
-    /// API key (set via env OPENAI_API_KEY recommended)
+    /// API key (prefer OPENCODE_API_KEY for OpenCode; OPENAI_API_KEY for compatible APIs)
     #[arg(long)]
     pub api_key: Option<String>,
 

@@ -46,6 +46,7 @@ impl ChatHistory {
 
     pub fn push_user(&mut self, content: impl Into<String>) {
         self.push_message(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.into()),
@@ -66,6 +67,7 @@ impl ChatHistory {
 
     pub fn append_assistant(&mut self, content: impl Into<String>) {
         self.push_message(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some(content.into()),
@@ -197,6 +199,7 @@ mod tests {
 
     fn tool_call_msg(id: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -214,6 +217,7 @@ mod tests {
 
     fn tool_result_msg(id: &str, content: String) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some(content),
@@ -230,6 +234,7 @@ mod tests {
             content: Some("user instruction".into()),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning: Default::default(),
             provider_state: None,
         };
         for bad in [
@@ -312,6 +317,7 @@ mod tests {
         let mut h = ChatHistory::new();
         h.push_user("batch");
         h.append_message(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -358,6 +364,7 @@ mod tests {
         };
         let mut h = ChatHistory::new();
         h.push_message(ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(state),
             role: "assistant".into(),
             content: Some("answer".into()),
@@ -396,6 +403,7 @@ mod tests {
     fn durable_filter_strips_system_only() {
         let messages = vec![
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "system".into(),
                 content: Some("default prompt".into()),
@@ -403,6 +411,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "user".into(),
                 content: Some("hi".into()),
@@ -412,6 +421,7 @@ mod tests {
             tool_call_msg("call-1"),
             tool_result_msg("call-1", "output".into()),
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "system".into(),
                 content: Some("loop intervention".into()),
