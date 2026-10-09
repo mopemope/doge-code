@@ -575,6 +575,10 @@ multi-file full mode preserves the original separators and final newline.
 - `edit`: Replace specific code blocks
 - `edit_symbol`: TUI slash command (`/edit-symbol`) to edit entire symbols (functions, structs, etc.)
 
+Tools with optional arguments use non-strict function schemas so omitted fields
+keep their documented defaults. This includes plan, requirements, provenance,
+and memory search/write tools; memory metadata can contain arbitrary JSON.
+
 ### Session Management
 - `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions). `plan_write` returns compact update metadata; `plan_read` retrieves full state
 - `session`: Automatic session persistence and resume

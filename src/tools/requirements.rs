@@ -74,7 +74,8 @@ pub fn requirements_write_tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "requirements_write".to_string(),
             description: "Structure explicit user requirements/constraints from the observed directive. Upserts activate (create or refine) requirements; withdraw_ids explicitly withdraws. Never invent requirements unsupported by the directive. Requires an observed directive.".to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -108,7 +109,8 @@ pub fn requirements_read_tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "requirements_read".to_string(),
             description: "Read structured requirements derived from observed directives, with plan/change/verification coverage. Use to answer what changed for a requirement and which requirements lack verification.".to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
