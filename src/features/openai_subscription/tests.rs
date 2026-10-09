@@ -1937,13 +1937,7 @@ async fn responses_usage_diagnostics_hide_provider_values_in_errors_and_logs() {
             mock_client(wire).await
         };
         let capture = crate::test_support::DiagnosticCapture::default();
-        let writer = capture.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || writer.clone())
-            .finish();
+        let subscriber = crate::test_support::diagnostic_subscriber(&capture);
         let error = crate::llm::tool_execution::requests::chat_tools_once(
             &client,
             "test-model",
@@ -3012,13 +3006,7 @@ async fn responses_retry_after_wait_is_cancellable_without_resend() {
         let (_server, _temp, mut client) = retry_after_fixture(Some(hint), 1, false).await;
         client.llm_cfg.request_timeout_ms = 5000;
         let capture = crate::test_support::DiagnosticCapture::default();
-        let writer = capture.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || writer.clone())
-            .finish();
+        let subscriber = crate::test_support::diagnostic_subscriber(&capture);
         let token = CancellationToken::new();
         let canceller = token.clone();
         let task = async {
@@ -3056,25 +3044,39 @@ async fn responses_retry_after_wait_is_cancellable_without_resend() {
 async fn responses_retry_after_delay_policy_does_not_multiply_server_hints() {
     use tracing::instrument::WithSubscriber;
     // Two retries exercise the second-attempt path with a real integer hint.
-    let (_server, _temp, mut client) = retry_after_fixture(Some("1"), 3, false).await;
+    let (mut server, _temp, mut client) = retry_after_fixture(Some("1"), 3, false).await;
     client.llm_cfg.max_retries = 2;
     client.llm_cfg.request_timeout_ms = 10000;
     let capture = crate::test_support::DiagnosticCapture::default();
-    let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(move || writer.clone())
-        .finish();
-    let error = client
+    let subscriber = crate::test_support::diagnostic_subscriber(&capture);
+    let request = client
         .chat_once("test-model", vec![user("hi")], None)
-        .with_subscriber(subscriber)
+        .with_subscriber(subscriber);
+    // Rebuild shared callsite interests outside the per-future subscriber,
+    // as concurrent tests without a subscriber can do between retries.
+    let rebuild = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !capture.text().contains("Responses retry scheduled") {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .unwrap_err();
+        .expect("first retry scheduled");
+        std::thread::spawn(tracing::callsite::rebuild_interest_cache)
+            .join()
+            .expect("rebuild interest cache");
+    };
+    let (result, ()) = tokio::join!(request, rebuild);
+    let error = result.unwrap_err();
     assert!(error.downcast_ref::<ProviderError>().is_some());
-    assert_eq!(capture.text().matches("retry_delay_ms=1000").count(), 2);
     assert_eq!(client.usage_snapshot().attempts, 3);
+    server.verify_and_clear();
+    assert_eq!(
+        capture.text().matches("retry_delay_ms=1000").count(),
+        2,
+        "logs={}",
+        capture.text()
+    );
 }
 
 #[tokio::test]
@@ -3084,13 +3086,7 @@ async fn responses_retry_after_local_backoff_uses_one_based_failures() {
     client.llm_cfg.retry_base_ms = 10;
     client.llm_cfg.request_timeout_ms = 5000;
     let capture = crate::test_support::DiagnosticCapture::default();
-    let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(move || writer.clone())
-        .finish();
+    let subscriber = crate::test_support::diagnostic_subscriber(&capture);
     let error = client
         .chat_once("test-model", vec![user("hi")], None)
         .with_subscriber(subscriber)
