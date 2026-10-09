@@ -91,11 +91,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: features::openai_subscription::cli::AuthCommand,
     },
-    /// List account-specific ChatGPT models
+    /// List ChatGPT account models or an offline OpenCode gateway catalog
     Models {
         #[arg(long, value_enum, default_value = "openai")]
         provider: features::openai_subscription::ProviderKind,
+        /// Diagnose one canonical ID or matching provider alias (OpenCode only)
+        #[arg(long)]
+        model: Option<String>,
     },
+    /// Explain selected connection, context and reasoning policy without inference
+    Diagnostics,
     /// Run in TUI mode (default if no subcommand is provided)
     #[command()]
     Tui,
@@ -198,10 +203,17 @@ async fn run_cli() -> Result<()> {
             _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await }
         };
     }
-    if let Some(Commands::Models { provider }) = &cli.command {
+    if let Some(Commands::Models { provider, model }) = &cli.command {
+        if features::opencode::default_base(*provider).is_some() {
+            return features::opencode::print_catalog(*provider, model.as_deref());
+        }
         anyhow::ensure!(
             *provider == features::openai_subscription::ProviderKind::Openai,
-            "models currently supports openai only"
+            "No catalog for arbitrary OpenAI-compatible endpoints; select openai, opencode-go or opencode-zen"
+        );
+        anyhow::ensure!(
+            model.is_none(),
+            "--model selection is available for OpenCode catalogs only"
         );
         let cancel = tokio_util::sync::CancellationToken::new();
         let operation = features::openai_subscription::cli::models(
@@ -216,6 +228,13 @@ async fn run_cli() -> Result<()> {
 
     let cfg = AppConfig::from_cli(cli.clone())?;
     // info!(?cfg, "app config");
+
+    if let Some(Commands::Diagnostics) = &cli.command {
+        for line in cfg.inference_diagnostics() {
+            println!("{line}");
+        }
+        return Ok(());
+    }
 
     // Handle `dgc session` early: no repomap, no MCP server, no LLM setup.
     if let Some(Commands::Session { command }) = &cli.command {
@@ -368,7 +387,12 @@ async fn run_cli() -> Result<()> {
         }
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
         // Handled early, before repomap/MCP initialization.
-        Some(Commands::Auth { .. } | Commands::Models { .. } | Commands::Session { .. }) => {
+        Some(
+            Commands::Auth { .. }
+            | Commands::Models { .. }
+            | Commands::Session { .. }
+            | Commands::Diagnostics,
+        ) => {
             unreachable!("session subcommand handled earlier")
         }
     }
@@ -385,8 +409,7 @@ async fn run_tui(
         &cfg.theme, // pass theme name
     )?;
     // Set auto-compact threshold in the UI from configuration
-    app.auto_compact_prompt_token_threshold =
-        cfg.auto_compact_prompt_token_threshold_for_current_model();
+    app.auto_compact_prompt_token_threshold = cfg.get_effective_compaction_limit();
 
     // Initialize remaining context tokens
     let context_size = cfg.get_context_window_size();
@@ -440,6 +463,13 @@ async fn run_tui(
             cfg.model
         ));
         app.push_log("ChatGPT plan usage: review limits in ChatGPT Settings > Usage. Token counts do not indicate remaining allowance.");
+    }
+
+    if features::opencode::default_base(cfg.provider).is_some() {
+        app.inference_label = Some(cfg.inference_label());
+    }
+    for line in cfg.inference_diagnostics() {
+        app.push_log(line);
     }
 
     let mut exec = exec;

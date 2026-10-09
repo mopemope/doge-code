@@ -832,3 +832,35 @@ async fn opencode_redirects_do_not_switch_billing_routes() {
     );
     assert_eq!(client.usage_snapshot().attempts, 1);
 }
+
+#[test]
+fn catalog_entries_are_unique_and_match_runtime_routes() {
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        let mut ids = std::collections::HashSet::new();
+        for spec in catalog(provider) {
+            assert!(ids.insert(spec.id), "duplicate {}", spec.id);
+            assert_eq!(api(provider, spec.id).ok(), spec.api.adapter());
+            assert_eq!(lookup(provider, spec.id).unwrap().api, spec.api);
+        }
+        assert!(
+            catalog(provider)
+                .iter()
+                .any(|spec| spec.api.adapter().is_none())
+        );
+    }
+    assert_eq!(
+        lookup(ProviderKind::OpencodeGo, "qwen3.8-max")
+            .unwrap()
+            .api
+            .name(),
+        "Messages"
+    );
+    assert_eq!(
+        lookup(ProviderKind::OpencodeZen, "qwen3.8-max")
+            .unwrap()
+            .api
+            .name(),
+        "Chat Completions"
+    );
+    assert!(lookup(ProviderKind::OpencodeGo, "opencode/gpt-6-luna").is_err());
+}
