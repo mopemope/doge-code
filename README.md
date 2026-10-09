@@ -1394,6 +1394,18 @@ Verification failures are returned to LLM for automatic correction.
   complex-work planning and explicit user instructions. RepoMap and delegation
   are optional task aids. This changes availability and guidance; improved
   model completion rates or token savings have not been measured.
+- Project guidance is loaded from one configured instruction file, or the first
+  root file in `AGENTS.md`, `QWEN.md`, `GEMINI.md` order. An explicitly configured
+  missing file does not fall back to another file. Nested guidance and skill
+  bodies are read only when relevant; they are not automatically loaded by dgc.
+  Explicit user requests override project workflow preferences within the base
+  constraints and tool permissions.
+- Recent-file/memory hints, saved-plan summaries, and recent TUI shell output
+  are quoted JSON data sent with user role, rather than provider system authority.
+  They supply context, not permission. Bootstrap data remains excluded from
+  durable session conversation. This reduces one instruction-injection surface;
+  prompt guidance and quoting do not guarantee model compliance or replace tool
+  permission checks. See [instruction policy](docs/ai/instruction-policy.md).
 - Activated tools appear in the next LLM request and stay active for the run.
 - Already-active matches never consume activation capacity: the search limit
   bounds inactive activation, and active matches are reported separately.
