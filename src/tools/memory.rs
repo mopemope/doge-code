@@ -209,7 +209,8 @@ pub fn write_memory_tool_def() -> ToolDef {
             description:
                 "Write content to a persistent memory (markdown file). Overwrites existing memory."
                     .to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -248,6 +249,7 @@ pub fn list_memories_tool_def() -> ToolDef {
             parameters: json!({
                 "type": "object",
                 "properties": {},
+                "required": [],
                 "additionalProperties": false
             }),
         },
@@ -260,7 +262,8 @@ pub fn search_memory_tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "search_memory".to_string(),
             description: "Search memories by query string (content/key) and/or tags.".to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: json!({
                 "type": "object",
                 "properties": {

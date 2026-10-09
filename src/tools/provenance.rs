@@ -920,7 +920,8 @@ pub fn tool_def() -> ToolDef {
         function: ToolFunctionDef {
             name: "provenance_read".to_string(),
             description: "Read provenance linking directives, requirements, plan steps, committed changes, and observed verification commands. Use this to inspect what changed, which checks ran afterward, and where evidence is incomplete.".to_string(),
-            strict: Some(true),
+            // Optional fields retain omission/default semantics; strict requires all properties.
+            strict: Some(false),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1507,7 +1508,11 @@ mod tests {
     fn test_provenance_tool_def_registered_shape() {
         let def = tool_def();
         assert_eq!(def.function.name, "provenance_read");
-        assert_eq!(def.function.strict, Some(true));
+        assert_eq!(def.function.strict, Some(false));
+        let args: ProvenanceReadArgs = serde_json::from_value(serde_json::json!({}))
+            .expect("all read filters remain optional");
+        assert!(args.plan_item_id.is_none());
+        assert!(!args.include_diff && !args.include_content);
     }
 
     #[test]

@@ -99,6 +99,7 @@ pub fn undo_tool_def() -> ToolDef {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {},
+                "required": [],
                 "additionalProperties": false,
             }),
         },
