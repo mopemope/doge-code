@@ -202,7 +202,7 @@ impl CommandHandler for TuiExecutor {
             }
             _ => {
                 // Rest of content moved to exec.rs
-                // Default behavior enforces plan context (skip_plan = false)
+                // Default behavior includes saved plan context (skip_plan = false)
                 self.handle_dispatch_rest(line, ui, false);
             }
         }

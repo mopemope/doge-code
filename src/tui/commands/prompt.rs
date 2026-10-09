@@ -125,6 +125,31 @@ mod tests {
     }
 
     #[test]
+    fn planning_policy_keeps_small_task_exception_and_complex_work_tracking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&cfg);
+        for text in [
+            "A plan or requirements ledger is not a prerequisite",
+            "multiple substantive dependent steps",
+            "after initial read-only scoping and before implementation",
+            "there is no minimum step count",
+            "do not treat an old or completed plan as permission",
+        ] {
+            assert!(prompt.contains(text), "rendered policy missing: {text}");
+            assert!(
+                crate::llm::SYSTEM_PROMPT.contains(text),
+                "legacy prompt drift: {text}"
+            );
+        }
+        assert!(!prompt.contains("Produce at least three"));
+        assert!(!prompt.contains("Mandatory Workflow"));
+    }
+
+    #[test]
     fn test_authoritative_prompt_has_no_visible_thinking_requirement() {
         // Use an empty temp project root so AGENTS.md contents cannot affect
         // the result; only the embedded authoritative prompt is checked.
