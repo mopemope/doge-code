@@ -283,6 +283,29 @@ mismatched prefixes and unsupported selections exit with an error. A supported
 adapter does not establish live availability, subscription access or remaining
 allowance. `dgc models --provider openai` keeps the existing OAuth account catalog.
 
+Inside the Go/Zen TUI, `/models` opens the same offline catalog. Type or paste a
+model ID/API name to filter, use Up/Down to move, and Enter to create an empty
+**new session** with a supported model. `/models glm` opens with a search query.
+The selected row shows its API and adapter support reason; unsupported entries
+are inspectable but cannot be selected. Esc, Ctrl+G or Ctrl+C closes the picker
+without changing the current session or draft. Enter key repeats are ignored.
+
+Selection is session-local: no config or key is saved and the provider/billing
+route stays fixed. The new session stores non-secret provider/model metadata;
+`/session switch` and `--resume=<id>` restore it before loading that conversation.
+Provider/account/binding mismatches and unavailable adapters fail before switching.
+Legacy sessions without model selection use the startup model and existing
+binding checks; restore their original startup selection when required. Switching
+is blocked while jobs run, and model selection also requires queued input
+and diff review to finish. A save or client-preparation error keeps the current
+selection/history intact. Creating selected-model sessions never prunes existing
+sessions. A successful atomic checkpoint replacement with unconfirmed directory
+sync is reported as a durability warning rather than a rollback.
+
+The picker currently supports Go/Zen only. OAuth account catalogs remain available
+through `dgc models --provider openai`; arbitrary compatible endpoints have no
+offline catalog. No live model availability or authentication check occurs.
+
 The TUI status line shows the selected Go/Zen provider, model and key presence;
 key presence does not verify authentication. `dgc --provider opencode-go diagnostics`,
 startup logs and `/tokens` show the
@@ -1131,6 +1154,7 @@ The TUI provides various slash commands for quick operations:
 | `/open` | Open a file |
 | `/git-worktree` | Create an isolated linked worktree and branch (does not switch the current session into it) |
 | `/theme` | Change color theme |
+| `/models [search]` | Search the offline Go/Zen catalog; Enter starts a new session with that model, Esc/Ctrl+C cancels |
 | `/tokens` | Display token usage (prompt/cache/reasoning usage when reported by the provider) |
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |

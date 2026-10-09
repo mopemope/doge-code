@@ -570,6 +570,14 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if let Some(picker) = self.model_picker.as_mut() {
+            picker
+                .query
+                .extend(text.chars().filter(|ch| !ch.is_control()).take(256));
+            picker.refresh();
+            self.dirty = true;
+            return;
+        }
         let clean: String = text
             .replace("\r\n", "\n")
             .replace('\r', "\n")

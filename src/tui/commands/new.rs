@@ -92,7 +92,7 @@ impl TuiExecutor {
         tools: FsTools,
         session_manager: Arc<Mutex<SessionManager>>,
     ) -> Result<Self> {
-        let client = OpenAIClient::from_config(&cfg)?;
+        let mut client = OpenAIClient::from_config(&cfg)?;
         // The durable conversation buffer owns no system prompt and no token
         // budget: `run_agent_loop` injects the default system prompt per turn,
         // and context reduction lives in HistoryManager / the governor.
@@ -101,14 +101,31 @@ impl TuiExecutor {
         {
             let mut session_mgr = session_manager.lock().unwrap();
             if cfg.resume.is_none() && session_mgr.current_session.is_none() {
-                session_mgr.create_session(None)?;
+                if crate::features::opencode::default_base(cfg.provider).is_some() {
+                    session_mgr.create_session_with_model(
+                        None,
+                        crate::session::data::SessionModelSelection {
+                            provider: cfg.provider,
+                            model: cfg.model.clone(),
+                        },
+                    )?;
+                } else {
+                    session_mgr.create_session(None)?;
+                }
             }
+        }
+
+        if let Some(client) = client.as_mut()
+            && let Some(id) = session_manager.lock().unwrap().current_session_id()
+        {
+            client.opencode_session = id;
         }
 
         // Pass session manager to tools
         let tools = tools.with_session_manager(session_manager.clone());
 
         Ok(Self {
+            initial_model: cfg.model.clone(),
             cfg: cfg.clone(),
             tools,
             repomap,

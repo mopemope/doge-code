@@ -3,7 +3,7 @@ use crate::features::openai_subscription::ProviderKind;
 use crate::llm::capabilities::ApiKind;
 use anyhow::{Result, bail};
 
-mod catalog;
+pub(crate) mod catalog;
 pub use catalog::{catalog, lookup, print_catalog};
 
 pub const GO_BASE: &str = "https://opencode.ai/zen/go/v1";

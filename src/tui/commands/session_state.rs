@@ -29,6 +29,15 @@ impl TuiExecutor {
         Ok(())
     }
 
+    pub(crate) fn ensure_session_transition_idle(&self) -> Result<()> {
+        self.ensure_session_idle()?;
+        anyhow::ensure!(
+            self.jobs.active_count() == 0,
+            "Background jobs still own session resources; wait for completion before switching"
+        );
+        Ok(())
+    }
+
     /// Replace the runtime conversation with canonical messages.
     pub fn replace_conversation_from_messages(&self, messages: Vec<ChatMessage>) {
         if let Ok(mut history) = self.conversation_history.lock() {
@@ -128,19 +137,37 @@ impl TuiExecutor {
         ui: &mut TuiApp,
         initial_prompt: Option<String>,
     ) -> Result<String> {
-        self.ensure_session_idle()?;
+        self.ensure_session_transition_idle()?;
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (new_id, outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let outcome = sm.flush_before_transition()?;
-            sm.create_session(initial_prompt)?;
+            let outcome = if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+                sm.flush_before_model_transition()?
+            } else {
+                sm.flush_before_transition()?
+            };
+            if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+                sm.create_session_with_model(
+                    initial_prompt,
+                    crate::session::data::SessionModelSelection {
+                        provider: self.cfg.provider,
+                        model: self.cfg.model.clone(),
+                    },
+                )?;
+            } else {
+                sm.create_session(initial_prompt)?;
+            }
             (sm.get_current_session_id()?, outcome)
         };
         history.clear();
         drop(history);
         self.report_session_save_outcome(&outcome);
         self.reset_session_input(ui);
+        if let Some(client) = self.client.as_mut() {
+            client.opencode_session = new_id.clone();
+        }
+        self.sync_selection_ui(ui);
         Ok(new_id)
     }
 
@@ -165,41 +192,72 @@ impl TuiExecutor {
     /// before it becomes current, so a malformed target fails without leaving
     /// `current_session` and the runtime conversation diverged. Repeated
     /// switches always replace, never merge.
-    pub fn switch_to_session(&self, id: &str) -> Result<SessionData> {
-        self.ensure_session_idle()?;
+    pub fn switch_to_session(&mut self, id: &str) -> Result<SessionData> {
+        self.ensure_session_transition_idle()?;
         // Match agent checkpoint lock order and acquire fallible locks before committing.
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
-        let (session, messages, outcome) = {
+        let (session, messages, prepared, outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let outcome = sm.flush_before_transition()?;
-            let (session, messages) = sm.switch_to_validated_session(id)?;
-            (session, messages, outcome)
+            let outcome = if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+                sm.flush_before_model_transition()?
+            } else {
+                sm.flush_before_transition()?
+            };
+            let (session, messages, prepared) = sm.switch_to_prepared_session(id, |session| {
+                self.prepare_session_selection(session)
+            })?;
+            (session, messages, prepared, outcome)
         };
         history.replace(messages);
         drop(history);
         self.report_session_save_outcome(&outcome);
+        self.apply_session_selection(prepared, &session.meta.id);
         Ok(session)
     }
 
     /// Resolve startup resume without creating or deleting a placeholder.
     /// Unknown and malformed targets leave existing sessions untouched.
-    pub fn resume_session(&self, resume_id: &str) -> Result<ResumeOutcome> {
-        self.ensure_session_idle()?;
-        let prepared = {
+    pub fn resume_session(&mut self, resume_id: &str) -> Result<ResumeOutcome> {
+        self.ensure_session_transition_idle()?;
+        let mut history =
+            crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
+        let loaded = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let loaded = match resume_id {
-                "latest" => sm.load_latest_validated_excluding(None)?,
-                id => Some(sm.switch_to_validated_session(id)?),
+            let target = if resume_id == "latest" {
+                sm.store
+                    .list_with_stats()?
+                    .first()
+                    .map(|s| s.meta.id.clone())
+            } else {
+                Some(resume_id.into())
             };
-            if loaded.is_none() && sm.current_session.is_none() {
-                sm.create_session(None)?;
+            if let Some(target) = target {
+                Some(sm.switch_to_prepared_session(&target, |session| {
+                    self.prepare_session_selection(session)
+                })?)
+            } else {
+                if sm.current_session.is_none() {
+                    if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+                        sm.create_session_with_model(
+                            None,
+                            crate::session::data::SessionModelSelection {
+                                provider: self.cfg.provider,
+                                model: self.cfg.model.clone(),
+                            },
+                        )?;
+                    } else {
+                        sm.create_session(None)?;
+                    }
+                }
+                None
             }
-            loaded
         };
-        match prepared {
-            Some((session, messages)) => {
-                self.replace_conversation_from_messages(messages);
+        match loaded {
+            Some((session, messages, prepared)) => {
+                history.replace(messages);
+                drop(history);
+                self.apply_session_selection(prepared, &session.meta.id);
                 Ok(ResumeOutcome::Resumed {
                     session_id: session.meta.id,
                 })
@@ -262,8 +320,12 @@ mod tests {
     #[test]
     fn opencode_conversation_client_tracks_new_switch_and_resume_without_mutating_old_jobs() {
         let (mut executor, _dir) = test_executor();
-        executor.client.as_mut().expect("client").provider =
-            crate::features::openai_subscription::ProviderKind::OpencodeGo;
+        executor.cfg.provider = crate::features::openai_subscription::ProviderKind::OpencodeGo;
+        executor.cfg.base_url = crate::features::opencode::GO_BASE.into();
+        executor.cfg.model = "gpt-6-luna".into();
+        executor.initial_model = executor.cfg.model.clone();
+        executor.tools.config = std::sync::Arc::new(executor.cfg.clone());
+        executor.client = crate::llm::OpenAIClient::from_config(&executor.cfg).expect("client");
         let first_id = current_session_id(&executor);
         let first_job = executor
             .conversation_client()
@@ -467,7 +529,7 @@ mod tests {
             let repomap = std::sync::Arc::new(tokio::sync::RwLock::new(None));
             let tools =
                 crate::tools::FsTools::new(repomap.clone(), std::sync::Arc::new(cfg.clone()));
-            let fresh = TuiExecutor::construct_with_session_manager(
+            let mut fresh = TuiExecutor::construct_with_session_manager(
                 cfg,
                 repomap,
                 tools,
@@ -649,7 +711,7 @@ mod tests {
             )
             .unwrap()
         };
-        let fresh = construct();
+        let mut fresh = construct();
         assert!(fresh.resume_session("missing-id").is_err());
         assert!(
             fresh
@@ -699,7 +761,7 @@ mod tests {
             .store
             .delete(&id)
             .unwrap();
-        let empty = construct();
+        let mut empty = construct();
         assert_eq!(
             empty.resume_session("latest").unwrap(),
             ResumeOutcome::NoPreviousSession
@@ -800,7 +862,7 @@ mod tests {
         let tools =
             crate::tools::FsTools::new(repomap.clone(), std::sync::Arc::new(executor.cfg.clone()));
         let store = SessionStore::new(store_path).expect("reopen store");
-        let fresh = TuiExecutor::construct_with_session_manager(
+        let mut fresh = TuiExecutor::construct_with_session_manager(
             {
                 let mut cfg = executor.cfg.clone();
                 cfg.resume = Some("latest".into());
@@ -830,7 +892,7 @@ mod tests {
 
     #[test]
     fn session_switch_replaces_conversation() {
-        let (executor, _dir) = test_executor();
+        let (mut executor, _dir) = test_executor();
         persist_runtime(&executor, &[user_msg("in A")]);
         let id_a = current_session_id(&executor);
         {
@@ -1034,7 +1096,7 @@ mod tests {
 
     #[test]
     fn malformed_target_fails_without_split_brain() {
-        let (executor, _dir) = test_executor();
+        let (mut executor, _dir) = test_executor();
         persist_runtime(&executor, &[user_msg("healthy")]);
         executor.replace_conversation_from_messages(vec![user_msg("healthy")]);
         let healthy_id = current_session_id(&executor);

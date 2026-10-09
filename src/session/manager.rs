@@ -79,6 +79,13 @@ impl SessionManager {
     pub(crate) fn flush_current_session(
         &mut self,
     ) -> Result<crate::session::store::SessionSaveOutcome> {
+        self.flush_current_session_policy(false)
+    }
+
+    fn flush_current_session_policy(
+        &mut self,
+        preserve_sessions: bool,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
         use crate::session::store::SessionSaveOutcome;
         let Some(session) = self.current_session.as_ref() else {
             self.save_state = SessionSaveState::Durable;
@@ -95,12 +102,15 @@ impl SessionManager {
                 .try_exists()?,
             "session checkpoint was deleted; refusing to recreate it during flush"
         );
-        let result = self.store.save_with_lease(
-            session,
-            self.current_lease
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?,
-        );
+        let lease = self
+            .current_lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("current session has no ownership lease"))?;
+        let result = if preserve_sessions {
+            self.store.save_preserving_sessions(session, lease)
+        } else {
+            self.store.save_with_lease(session, lease)
+        };
         let outcome = match result {
             Err(error @ super::error::SessionError::CapacityExceeded { .. }) => return Err(anyhow::Error::new(error).context("Normal checkpoint remains unsaved; use /session export to recover the in-memory session")),
             result => result?,
@@ -181,6 +191,16 @@ impl SessionManager {
         }
     }
 
+    pub(crate) fn flush_before_model_transition(
+        &mut self,
+    ) -> Result<crate::session::store::SessionSaveOutcome> {
+        if self.has_unsaved_current_session() {
+            self.flush_current_session_policy(true)
+        } else {
+            Ok(crate::session::store::SessionSaveOutcome::Durable)
+        }
+    }
+
     /// Create a new session with an optional initial prompt.
     /// If `initial_prompt` is provided the session title will be set and persisted.
     pub fn create_session(&mut self, initial_prompt: Option<String>) -> Result<()> {
@@ -191,6 +211,31 @@ impl SessionManager {
         self.current_lease = Some(lease);
         self.adopt_save_outcome(&id, &outcome);
         Ok(())
+    }
+
+    /// Save the complete new selection before publishing it as current.
+    /// This explicit user transition never prunes other sessions.
+    pub(crate) fn create_session_with_model(
+        &mut self,
+        initial_prompt: Option<String>,
+        selection: super::data::SessionModelSelection,
+    ) -> Result<(String, crate::session::store::SessionSaveOutcome)> {
+        if self.has_unsaved_current_session() {
+            self.flush_current_session_policy(true)?;
+        }
+        let mut candidate = SessionData::new();
+        if let Some(prompt) = initial_prompt {
+            candidate.set_initial_prompt(&prompt);
+            candidate.meta.title_is_default = false;
+        }
+        candidate.model_selection = Some(selection);
+        let lease = self.store.try_lease(&candidate.meta.id)?;
+        let outcome = self.store.save_preserving_sessions(&candidate, &lease)?;
+        let id = candidate.meta.id.clone();
+        self.current_session = Some(candidate);
+        self.current_lease = Some(lease);
+        self.adopt_save_outcome(&id, &outcome);
+        Ok((id, outcome))
     }
 
     /// Load a session by ID
@@ -236,17 +281,27 @@ impl SessionManager {
         &mut self,
         id: &str,
     ) -> Result<(SessionData, Vec<crate::llm::types::ChatMessage>)> {
-        self.flush_before_transition()?;
+        let (session, messages, ()) = self.switch_to_prepared_session(id, |_| Ok(()))?;
+        Ok((session, messages))
+    }
+
+    pub(crate) fn switch_to_prepared_session<T>(
+        &mut self,
+        id: &str,
+        prepare: impl FnOnce(&SessionData) -> Result<T>,
+    ) -> Result<(SessionData, Vec<crate::llm::types::ChatMessage>, T)> {
+        self.flush_before_model_transition()?;
         let full_id = self.store.resolve_id_prefix(id)?;
         let lease = self.acquire_transition_lease(&full_id)?;
         let session = self.store.load(&full_id)?;
         let messages = session.conversation_messages()?;
+        let prepared = prepare(&session)?;
         self.current_session = Some(session.clone());
         if let Some(lease) = lease {
             self.current_lease = Some(lease);
         }
         self.save_state = SessionSaveState::Durable;
-        Ok((session, messages))
+        Ok((session, messages, prepared))
     }
 
     /// Validate the latest session (optionally skipping one ID, e.g. an

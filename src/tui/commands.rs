@@ -10,3 +10,8 @@ pub use self::core::{CommandHandler, TuiExecutor};
 
 #[cfg(test)]
 mod review_feedback_tests;
+
+pub(crate) mod model_selection;
+
+#[cfg(test)]
+mod model_selection_tests;

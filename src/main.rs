@@ -423,7 +423,7 @@ async fn run_tui(
     // app.push_log("Initializing repomap...");
 
     let exec = match TuiExecutor::new_with_repomap(cfg.clone(), repomap) {
-        Ok(exec) => {
+        Ok(mut exec) => {
             // If resume is requested, hydrate both the SessionManager and the
             // runtime conversation from the same saved session.
             if let Some(resume_id) = cfg.resume.as_deref() {
@@ -452,23 +452,25 @@ async fn run_tui(
         }
     };
 
+    exec.sync_selection_ui(&mut app);
+
     if let Some(account) = exec
         .client
         .as_ref()
         .and_then(|client| client.account_label())
     {
-        app.inference_label = Some(format!("openai | {account} | {}", cfg.model));
+        app.inference_label = Some(format!("openai | {account} | {}", exec.cfg.model));
         app.push_log(format!(
             "Provider: openai | Account: {account} | Model: {}",
-            cfg.model
+            exec.cfg.model
         ));
         app.push_log("ChatGPT plan usage: review limits in ChatGPT Settings > Usage. Token counts do not indicate remaining allowance.");
     }
 
     if features::opencode::default_base(cfg.provider).is_some() {
-        app.inference_label = Some(cfg.inference_label());
+        app.inference_label = Some(exec.cfg.inference_label());
     }
-    for line in cfg.inference_diagnostics() {
+    for line in exec.cfg.inference_diagnostics() {
         app.push_log(line);
     }
 

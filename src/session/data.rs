@@ -109,8 +109,17 @@ pub struct SessionSummary {
     pub changed_files: usize,
 }
 
+/// Non-secret session-local selection. Keys and provider changes are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModelSelection {
+    pub provider: crate::features::openai_subscription::ProviderKind,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<SessionModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_binding: Option<String>,
     /// Provider-reported subtotals. None means legacy history was unmeasured.
@@ -173,6 +182,7 @@ impl SessionData {
             title_is_default: true,
         };
         Self {
+            model_selection: None,
             inference_binding: None,
             usage: Some(Default::default()),
             meta,
