@@ -1500,7 +1500,12 @@ mod limit_status_tests {
     #[test]
     fn search_process_limit_preserves_natural_exit_error_and_signal() {
         use crate::execution::runner::{StreamStop, run_managed_stream};
-        for script in ["printf 'fixture diagnostic' >&2; exit 2", "kill -TERM $$"] {
+        for script in [
+            "printf 'fixture diagnostic' >&2; exit 2",
+            "kill -TERM $$",
+            "exit 141",
+            "kill -PIPE $$",
+        ] {
             let mut command = Command::new("/bin/sh");
             command.args(["-c", script]);
             let output = run_managed_stream(command, |stdout| {
@@ -1516,6 +1521,26 @@ mod limit_status_tests {
                     .to_string()
                     .contains("ripgrep failed")
             );
+        }
+    }
+    #[tokio::test]
+    async fn search_process_async_limit_preserves_natural_exit_errors_and_signals() {
+        use crate::execution::runner::{StreamStop, run_managed_stream_async};
+        for script in ["exit 2", "kill -TERM $$", "exit 141", "kill -PIPE $$"] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let output = run_managed_stream_async(
+                command,
+                tokio_util::sync::CancellationToken::new(),
+                |stdout| {
+                    std::io::copy(stdout, &mut std::io::sink())?;
+                    Ok(((), StreamStop::Limit))
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(check_search_exit(&output).is_err(), "{script}");
         }
     }
 }

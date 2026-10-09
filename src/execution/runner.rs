@@ -234,9 +234,11 @@ pub(crate) fn run_managed_stream<T>(
             .context("failed to start stderr capture")?,
     );
     let parsed = consume(&mut stdout);
-    drop(stdout);
     let stop = parsed.as_ref().map_or(StreamStop::Limit, |(_, stop)| *stop);
+    // Keep the read end open until stop/reap: closing it first can make
+    // a blocked producer exit on SIGPIPE before our intentional stop.
     let finished = owned.finish(stop);
+    drop(stdout);
     let (value, stop) = parsed?;
     let (status, stderr, kill_requested) = finished?;
     Ok(ManagedStreamOutput {
@@ -335,7 +337,12 @@ where
                 token: token.clone(),
             };
             let _permit = permit; // Keep the slot until cleanup and joins finish.
-            let mut parser = tokio::task::spawn_blocking(move || consume(&mut pipe));
+            let mut parser = tokio::task::spawn_blocking(move || {
+                let parsed = consume(&mut pipe);
+                // Return the pipe even on parser error. The cleanup owner keeps
+                // its read end open through cancellation and child reaping.
+                (parsed, pipe)
+            });
             let mut canceled = false;
             let parsed = tokio::select! {
                 biased;
@@ -345,7 +352,7 @@ where
             let stop = parsed
                 .as_ref()
                 .and_then(|value| value.as_ref().ok())
-                .and_then(|value| value.as_ref().ok())
+                .and_then(|(value, _pipe)| value.as_ref().ok())
                 .map_or(StreamStop::Limit, |(_, stop)| *stop);
             let kill_requested = stop == StreamStop::Limit && matches!(child.try_wait(), Ok(None));
             let status: anyhow::Result<_> = if canceled || stop == StreamStop::Limit {
@@ -412,7 +419,8 @@ where
             if canceled || token.is_cancelled() {
                 return Ok(None);
             }
-            let (value, stop) = parsed.context("stream parser task failed")??;
+            let (parsed, _pipe) = parsed.context("stream parser task failed")?;
+            let (value, stop) = parsed?;
             Ok(Some(ManagedStreamOutput {
                 value,
                 stop,
@@ -968,6 +976,69 @@ mod tests {
 mod stream_cancellation_tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_limit_keeps_stdout_open_until_owner_stops_writer() {
+        use std::os::unix::process::ExitStatusExt;
+        for parser_error in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("writer.pid");
+            let (ready, reached_limit) = tokio::sync::oneshot::channel();
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let parser_gate = gate.clone();
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args([
+                "-c",
+                &format!(
+                    "printf '%s' $$ > '{}'; exec dd if=/dev/zero bs=65536 count=20 2>/dev/null",
+                    pid_file.display()
+                ),
+            ]);
+            let task = tokio::spawn(run_managed_stream_async(
+                command,
+                CancellationToken::new(),
+                move |stdout| {
+                    let mut byte = [0];
+                    stdout.read_exact(&mut byte)?;
+                    let _ = ready.send(());
+                    parser_gate.wait();
+                    if parser_error {
+                        anyhow::bail!("fixture parser error");
+                    }
+                    Ok((byte, StreamStop::Limit))
+                },
+            ));
+            reached_limit.await.unwrap();
+            let pid = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+            gate.wait();
+            // Simulate owner scheduling delay after the blocking parser returns.
+            // A closed read end gives the blocked producer SIGPIPE before cleanup.
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                crate::execution::is_process_alive(pid),
+                "writer exited before owner cleanup"
+            );
+            let result = task.await.unwrap();
+            assert!(
+                !crate::execution::is_process_alive(pid),
+                "writer was not reaped"
+            );
+            if parser_error {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("fixture parser error")
+                );
+            } else {
+                let output = result.unwrap().unwrap();
+                assert_eq!(output.value, [0]);
+                assert_eq!(output.status.signal(), Some(libc::SIGKILL));
+                assert!(output.kill_requested);
+            }
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancellable_stream_slot_is_held_until_child_is_reaped() {
