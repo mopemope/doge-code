@@ -581,6 +581,27 @@ and memory search/write tools; memory metadata can contain arbitrary JSON.
 
 ### Session Management
 - `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions). `plan_write` returns compact update metadata; `plan_read` retrieves full state
+
+Planning is required by agent guidance for complex work (multiple substantive
+dependent steps, broad/uncertain scope, or likely interruption/resumption) and
+explicit user requests for a plan. Short questions, focused read-only checks,
+and small localized fixes may proceed directly; ordinary read/edit/verify steps
+do not require a plan by themselves. Discover deferred planning tools with
+`tool_search` when needed. There is no minimum plan step count and no universal
+runtime gate requiring a planning call before every tool.
+
+An active saved plan is context to reconcile with the current request, not
+authorization for new work. Its stable ids and relevant requirement/verification
+links support continuation. Update only when scope or status changes;
+`plan_write` returns compact metadata, so do not read it back merely to confirm
+success. Completed plans remain available through `plan_read` or `/plan show`,
+but are not reactivated by a new instruction. A plan read failure is reported
+without requesting replacement of the stored plan.
+
+The schema's required `items` and item `id`/`content`/`status` apply when calling
+`plan_write`; they do not make calling the tool mandatory for every task.
+Optional arguments keep omission/default behavior with `strict: false`.
+
 - `session`: Automatic session persistence and resume
 - `dgc session list|show|delete`: CLI session management (ID prefixes supported)
 - `--resume` / `--resume=<SESSION_ID>`: Resume the latest or a specific session (TUI and `exec`)

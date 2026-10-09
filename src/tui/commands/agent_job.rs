@@ -200,7 +200,7 @@ pub(crate) fn spawn_agent_turn(
         });
     }
     if !skip_plan {
-        executor.enforce_plan_context(&mut msgs, &content, Some(ui));
+        executor.append_plan_context(&mut msgs, Some(ui));
     }
     if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance {
         if let Err(error) = fs.validate_review_feedback(batch) {
@@ -532,7 +532,7 @@ pub(crate) fn spawn_agent_turn(
 /// untouched so compact-retry keeps replaying the real user input.
 ///
 /// Parity with the historical analysis dispatch: follow-ups run with
-/// plan context enforced (`skip_plan = false`), exactly like a default
+/// saved plan context included (`skip_plan = false`), exactly like a default
 /// user dispatch. This differs from [`TuiExecutor::spawn_internal_followup`]
 /// (which skips plan context) used by the immediate synthetic path.
 pub(crate) fn spawn_synthetic_followup(
