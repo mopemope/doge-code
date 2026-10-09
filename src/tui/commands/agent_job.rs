@@ -189,15 +189,10 @@ pub(crate) fn spawn_agent_turn(
     if !ui.shell_output_buffer.is_empty() {
         let lines: Vec<&str> = ui.shell_output_buffer.lines().rev().take(50).collect();
         let context = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
-        msgs.push(crate::llm::ChatMessage {
-            provider_state: None,
-            role: "system".into(),
-            content: Some(format!(
-                "Recent shell output (last 50 lines):\n```\n{context}\n```"
-            )),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
+        msgs.push(crate::llm::runtime_context::advisory_context_message(
+            "recent_shell_output",
+            serde_json::json!({"last_50_lines": context}),
+        ));
     }
     if !skip_plan {
         executor.append_plan_context(&mut msgs, Some(ui));

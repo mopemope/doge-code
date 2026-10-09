@@ -298,10 +298,10 @@ async fn feedback_batch_real_loop_preserves_conversation_plan_raw_provenance_and
             .is_some_and(|s| s.contains("Original request retained"))
     }));
     assert!(messages.iter().any(|m| {
-        m["role"] == "system"
-            && m["content"]
-                .as_str()
-                .is_some_and(|s| s.contains("Existing plan retained"))
+        m["role"] == "user"
+            && m["content"].as_str().is_some_and(|s| {
+                s.contains("saved_execution_plan") && s.contains("Existing plan retained")
+            })
     }));
     let evidence = messages
         .iter()

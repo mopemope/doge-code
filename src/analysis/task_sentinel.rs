@@ -77,7 +77,7 @@ impl TaskSentinel {
     pub fn check_stalled(&mut self) -> Option<String> {
         if self.consecutive_noop_plan_writes >= PLAN_WRITE_NOOP_THRESHOLD {
             return Some(format!(
-                "WARNING: `plan_write` returned unchanged results {} times in a row. Stop repeating no-op plan updates and either modify code, run a different tool, or answer the user directly.",
+                "WARNING: `plan_write` returned unchanged results {} times in a row. Stop repeating no-op plan updates. Choose an authorized action with new evidence, answer the bounded question, or report a concrete blocker. This warning does not authorize edits or broaden the user's request.",
                 self.consecutive_noop_plan_writes
             ));
         }
@@ -89,20 +89,20 @@ impl TaskSentinel {
 
             if self.consecutive_stall_warnings >= STALL_HARD_THRESHOLD {
                 return Some(format!(
-                    "HARD INTERVENTION: No significant progress detected for the last {} steps ({} consecutive stalled warnings). Stop repeating the same tool calls.\n<MANDATORY_ACTION>\n1. Summarize why the current strategy is failing.\n2. Choose a materially different next action.\n3. If blocked, ask the user for clarification.\n</MANDATORY_ACTION>",
+                    "HARD INTERVENTION: No significant progress detected for the last {} steps ({} consecutive stalled warnings). Stop repeating the same tool calls.\n<MANDATORY_ACTION>\n1. Summarize why the current strategy is failing.\n2. Choose a materially different next action within the user's authorized scope, or answer if sufficient evidence is available.\n3. If blocked, report the concrete blocker and ask only for information needed to proceed.\n</MANDATORY_ACTION>",
                     steps_since_progress, self.consecutive_stall_warnings
                 ));
             }
 
             if self.consecutive_stall_warnings >= STALL_CRITICAL_THRESHOLD {
                 return Some(format!(
-                    "CRITICAL WARNING: No significant progress detected for the last {} steps ({} consecutive stalled warnings). You must change strategy now instead of repeating read/search loops.",
+                    "CRITICAL WARNING: No significant progress detected for the last {} steps ({} consecutive stalled warnings). Change strategy within the user's authorized scope, answer with sufficient evidence, or report a concrete blocker instead of repeating read/search loops.",
                     steps_since_progress, self.consecutive_stall_warnings
                 ));
             }
 
             return Some(format!(
-                "WARNING: No significant progress detected for the last {} steps. You seem to be stuck in a loop of reading or searching. Please review your findings and take ACTION (edit code, update plan, or execute a command).",
+                "WARNING: No significant progress detected for the last {} steps. Review the evidence gathered. Choose a useful action within the user's authorized scope, answer if the requested evidence is sufficient, or report a concrete blocker. Do not edit files merely to satisfy this warning.",
                 steps_since_progress
             ));
         }
@@ -136,6 +136,18 @@ mod tests {
         // 1 step after write - no warning
         sentinel.record_tool_call("fs_read", true);
         assert!(sentinel.check_stalled().is_none());
+    }
+
+    #[test]
+    fn stalled_research_warning_does_not_authorize_unrequested_edits() {
+        let mut sentinel = TaskSentinel::new();
+        for _ in 0..STALL_THRESHOLD {
+            sentinel.record_tool_call("search_text", false);
+        }
+        let warning = sentinel.check_stalled().expect("warning");
+        assert!(warning.contains("authorized scope"));
+        assert!(warning.contains("Do not edit files merely"));
+        assert!(warning.contains("concrete blocker"));
     }
 
     #[test]
