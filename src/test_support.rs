@@ -74,6 +74,38 @@ impl std::io::Write for DiagnosticCapture {
     }
 }
 
+// Keep two dispatchers alive while capturing. With exactly one registered
+// dispatcher, tracing's callsite cache rebuild uses the rebuilding thread's
+// default subscriber. Another test without a subscriber can therefore disable
+// our callsites between polls. This silent dispatcher is never installed as a
+// default, writes nothing, and lives only as long as the capture subscriber.
+fn diagnostic_writer(
+    capture: &DiagnosticCapture,
+) -> impl Fn() -> DiagnosticCapture + Send + Sync + 'static {
+    let keep_alive = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::sink)
+            .finish(),
+    );
+    let writer = capture.clone();
+    move || {
+        let _ = &keep_alive;
+        writer.clone()
+    }
+}
+
+pub(crate) fn diagnostic_subscriber(
+    capture: &DiagnosticCapture,
+) -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(diagnostic_writer(capture))
+        .finish()
+}
+
 /// Build a per-future JSON tracing subscriber writing to `capture`.
 ///
 /// Uses the well-tested `tracing_subscriber::fmt` JSON formatter (no custom
@@ -84,13 +116,12 @@ impl std::io::Write for DiagnosticCapture {
 pub(crate) fn json_subscriber(
     capture: &DiagnosticCapture,
 ) -> impl tracing::Subscriber + Send + Sync {
-    let writer = capture.clone();
     tracing_subscriber::fmt()
         .json()
         .without_time()
         .with_ansi(false)
         .with_max_level(tracing::Level::DEBUG)
-        .with_writer(move || writer.clone())
+        .with_writer(diagnostic_writer(capture))
         .finish()
 }
 
@@ -155,4 +186,38 @@ pub(crate) async fn wait_for_retry_delay(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+#[test]
+fn diagnostic_captures_survive_unsubscribed_rebuild_without_sharing_events() {
+    let first = DiagnosticCapture::default();
+    let first_dispatch = tracing::Dispatch::new(json_subscriber(&first));
+    let emit = |delay| {
+        tracing::dispatcher::with_default(&first_dispatch, || {
+            tracing::debug!(retry_delay_ms = delay, "first capture");
+        });
+    };
+    emit(1234_u64);
+    std::thread::spawn(tracing::callsite::rebuild_interest_cache)
+        .join()
+        .expect("unsubscribed rebuild");
+    emit(5678_u64);
+    let delays: Vec<u64> = first
+        .text()
+        .lines()
+        .map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).expect("JSON event");
+            find_u64_key(&event, "retry_delay_ms").expect("numeric retry delay")
+        })
+        .collect();
+    assert_eq!(delays, [1234, 5678]);
+
+    let second = DiagnosticCapture::default();
+    let second_dispatch = tracing::Dispatch::new(diagnostic_subscriber(&second));
+    tracing::dispatcher::with_default(&second_dispatch, || {
+        tracing::debug!("second capture");
+    });
+    assert!(second.text().contains("second capture"));
+    assert!(!first.text().contains("second capture"));
+    assert!(!second.text().contains("first capture"));
 }
