@@ -1036,6 +1036,13 @@ preserves the live conversation, observations and unseen results. After replacem
 a directory-sync warning adopts the cleared checkpoint in memory and reports the
 unconfirmed durability.
 
+Both TUI and `exec --resume` restore a session's recorded OpenCode model before
+continuing inference. The session's provider must match the startup
+provider; resume never changes the billing route. Provider/model binding
+mismatches and unsupported selections fail before the session becomes active.
+Legacy sessions without a recorded selection keep the startup model and must
+still match any recorded inference binding.
+
 While a foreground job owns the session, TUI session creation, switching, deletion,
 resume and clearing wait for the job to release it, including its final checkpoint.
 A final save failure marks the job failed and keeps the complete in-memory checkpoint
