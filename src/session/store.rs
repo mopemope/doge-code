@@ -334,6 +334,24 @@ impl SessionStore {
         lease: &super::lease::SessionLease,
         limit: u64,
     ) -> Result<SessionSaveOutcome, SessionError> {
+        self.save_with_lease_policy(data, lease, limit, true)
+    }
+
+    pub(crate) fn save_preserving_sessions(
+        &self,
+        data: &SessionData,
+        lease: &super::lease::SessionLease,
+    ) -> Result<SessionSaveOutcome, SessionError> {
+        self.save_with_lease_policy(data, lease, MAX_SESSION_BYTES, false)
+    }
+
+    fn save_with_lease_policy(
+        &self,
+        data: &SessionData,
+        lease: &super::lease::SessionLease,
+        limit: u64,
+        retention: bool,
+    ) -> Result<SessionSaveOutcome, SessionError> {
         lease.validate(&self.root, &data.meta.id)?;
         self.ensure_writable()?;
         validate_id(&data.meta.id)?;
@@ -397,7 +415,10 @@ impl SessionStore {
                 message: format!("session replaced, but directory sync failed: {error}"),
             });
         }
-        if let Err(error) = cleanup_old_sessions(self, Some(&data.meta.id)) {
+        if retention
+            && data.model_selection.is_none()
+            && let Err(error) = cleanup_old_sessions(self, Some(&data.meta.id))
+        {
             tracing::warn!(%error, "session checkpoint saved; retention cleanup skipped");
         }
 

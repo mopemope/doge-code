@@ -7,3 +7,6 @@ mod normal;
 pub use file_search::handle_file_search_key;
 pub use history_search::handle_history_search_key;
 pub use normal::handle_normal_mode_key;
+
+mod model_picker;
+pub(crate) use model_picker::handle_model_picker_key;

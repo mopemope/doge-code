@@ -153,6 +153,19 @@ impl OpenAIClient {
         }
     }
 
+    pub(crate) fn inference_binding(&self, model: &str) -> Result<String> {
+        Ok(match self.account_label() {
+            Some(account) => format!("openai:{account}:{model}"),
+            None if crate::features::opencode::default_base(self.provider).is_some() => format!(
+                "{:?}:{}:{:?}:{model}",
+                self.provider,
+                self.base_url.trim_end_matches('/'),
+                crate::features::opencode::api(self.provider, model)?
+            ),
+            None => "openai-compatible".into(),
+        })
+    }
+
     /// Non-secret endpoint/protocol binding, independent of the API key.
     pub(crate) fn responses_identity(&self) -> String {
         format!(

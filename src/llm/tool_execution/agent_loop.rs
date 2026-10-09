@@ -418,16 +418,7 @@ pub async fn run_agent_loop(
     debug!("run_agent_loop called");
     crate::llm::history::validate_tool_blocks(&messages, false)?;
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
-        let binding = match client.account_label() {
-            Some(account) => format!("openai:{account}:{model}"),
-            None if crate::features::opencode::default_base(client.provider).is_some() => format!(
-                "{:?}:{}:{:?}:{model}",
-                client.provider,
-                client.base_url.trim_end_matches('/'),
-                crate::features::opencode::api(client.provider, model)?
-            ),
-            None => "openai-compatible".to_owned(),
-        };
+        let binding = client.inference_binding(model)?;
         crate::utils::safe_std_lock(manager, "session_manager")?.bind_inference(binding)?;
     }
 

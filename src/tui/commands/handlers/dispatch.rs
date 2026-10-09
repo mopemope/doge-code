@@ -30,6 +30,14 @@ use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
 // This allows each command to be tested independently and keeps dispatch.rs focused on routing.
 
 impl CommandHandler for TuiExecutor {
+    fn select_model_for_new_session(
+        &mut self,
+        model: &str,
+        ui: &mut TuiApp,
+    ) -> anyhow::Result<String> {
+        self.start_model_session(model, ui)
+    }
+
     fn prepare_exit(&mut self, ui: &mut TuiApp) -> anyhow::Result<bool> {
         self.prepare_session_exit(ui)
     }
@@ -144,6 +152,14 @@ impl CommandHandler for TuiExecutor {
                 self,
                 ui,
                 line.strip_prefix("/evidence").unwrap_or("").trim(),
+            );
+            return;
+        }
+        if line.split_whitespace().next() == Some("/models") {
+            crate::tui::commands::handlers::slash_commands::models::handle_models(
+                self,
+                ui,
+                line.strip_prefix("/models").unwrap_or("").trim(),
             );
             return;
         }

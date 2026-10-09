@@ -14,6 +14,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 pub trait CommandHandler {
+    fn select_model_for_new_session(
+        &mut self,
+        _model: &str,
+        _ui: &mut TuiApp,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("Model selection unavailable")
+    }
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
     fn foreground_job_id(&self) -> Option<crate::jobs::JobId> {
         None
@@ -82,6 +89,7 @@ pub trait CommandHandler {
 
 pub struct TuiExecutor {
     pub(crate) cfg: crate::config::AppConfig,
+    pub(crate) initial_model: String,
     pub(crate) tools: FsTools,
     pub(crate) repomap: Arc<RwLock<Option<RepoMap>>>,
     pub(crate) client: Option<OpenAIClient>,
