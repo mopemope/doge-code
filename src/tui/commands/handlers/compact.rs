@@ -12,7 +12,14 @@ impl TuiExecutor {
             ui.push_log(format!("[ERROR] Cannot compact: {error}"));
             return;
         }
-        let Some(client) = self.client.clone() else {
+        let client = match self.conversation_client() {
+            Ok(client) => client,
+            Err(error) => {
+                ui.push_log(format!("[ERROR] Cannot bind compaction session: {error}"));
+                return;
+            }
+        };
+        let Some(client) = client else {
             ui.push_log("[ERROR] LLM client is not configured. Cannot compact conversation.");
             return;
         };

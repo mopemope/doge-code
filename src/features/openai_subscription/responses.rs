@@ -26,6 +26,8 @@ pub struct Request {
     reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<Vec<ContextManagement>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<Vec<&'static str>>,
 }
 
 /// Server-side native compaction directive for `POST /responses`.
@@ -259,6 +261,7 @@ pub fn build(
                 json!({"type":"namespace","name":"dgc","description":"doge-code local tools","tools":functions}),
             ]
         },
+        include: None,
         store: false,
         stream: true,
         reasoning: effort.map(|e| json!({"effort":e.as_api_str()})),
@@ -547,6 +550,7 @@ pub fn build_with_activation(
                 json!({"type":"namespace","name":"dgc","description":"doge-code local tools","tools":functions}),
             ]
         },
+        include: None,
         store: false,
         stream: true,
         reasoning: effort.map(|e| json!({"effort":e.as_api_str()})),
@@ -686,6 +690,7 @@ pub fn completed(
             role: "assistant".into(),
             content: Some(text),
             tool_calls,
+            reasoning: Default::default(),
             provider_state: Some(ProviderState {
                 version: 1,
                 account: account.to_owned(),
@@ -809,6 +814,7 @@ pub fn completed_with_activation(
             role: "assistant".into(),
             content: Some(text),
             tool_calls,
+            reasoning: Default::default(),
             provider_state: Some(ProviderState::assistant(
                 account.to_owned(),
                 model.to_owned(),
@@ -829,6 +835,78 @@ fn response_usage(response: &Value) -> Result<Option<Usage>> {
             anyhow::anyhow!("invalid Responses usage: {summary}")
         })
     }).transpose()
+}
+
+/// Standard stateless API-key Responses projection. OAuth's namespace and
+/// additional_tools are deliberately not part of this protocol.
+pub(crate) fn build_api_key(
+    model: &str,
+    identity: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    effort: Option<ReasoningEffort>,
+) -> Result<Request> {
+    for message in messages {
+        if let Some(state) = &message.provider_state {
+            state.validate_role_binding(&message.role)?;
+            anyhow::ensure!(
+                state
+                    .output
+                    .iter()
+                    .all(|item| item.get("namespace").is_none() && !is_compaction_item(item)),
+                "API-key Responses cannot replay OAuth extensions or native compaction"
+            );
+        }
+    }
+    let mut request = build(model, identity, messages, tools, effort, None)?;
+    for item in &mut request.input {
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            item.as_object_mut()
+                .context("function call must be object")?
+                .remove("namespace");
+        }
+    }
+    request.tools = tools.iter().map(tool_function_json).collect();
+    if model.starts_with("gpt-") {
+        request.include = Some(vec!["reasoning.encrypted_content"]);
+    }
+    Ok(request)
+}
+
+pub(crate) async fn infer_api_key(
+    client: &crate::llm::OpenAIClient,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    effort: Option<ReasoningEffort>,
+    cancel: CancellationToken,
+) -> Result<ToolResponseWithUsage> {
+    let identity = client.responses_identity();
+    let request = build_api_key(model, &identity, messages, tools, effort)?;
+    execute_infer_request(client, None, &request, cancel, |response| {
+        let output = response
+            .get("output")
+            .and_then(Value::as_array)
+            .context("Responses output missing")?;
+        anyhow::ensure!(
+            output
+                .iter()
+                .all(|item| item.get("namespace").is_none() && !is_compaction_item(item)),
+            "API-key Responses returned an unsupported protocol extension"
+        );
+        completed(response, &identity, model, tools)
+    })
+    .await
+    .map_err(|error| {
+        if error
+            .downcast_ref::<ProviderError>()
+            .is_some_and(|e| crate::llm::retry::is_context_length_exceeded_code(&e.code))
+        {
+            error.context(crate::llm::LlmErrorKind::ContextLengthExceeded)
+        } else {
+            error
+        }
+    })
 }
 
 pub async fn infer(
@@ -858,7 +936,7 @@ pub async fn infer(
             "responses request contract"
         );
     }
-    execute_infer_request(client, auth, &request, cancel, |response| {
+    execute_infer_request(client, Some(auth), &request, cancel, |response| {
         completed(response, &auth.account, model, tools)
     })
     .await
@@ -870,7 +948,7 @@ pub async fn infer(
 /// injected; transport, retry, timeout, and usage accounting are common.
 async fn execute_infer_request(
     client: &crate::llm::OpenAIClient,
-    auth: &AuthHandle,
+    auth: Option<&AuthHandle>,
     request: &Request,
     cancel: CancellationToken,
     validate_completed: impl Fn(&Value) -> Result<(ChoiceMessageWithTools, Option<Usage>)>,
@@ -880,11 +958,22 @@ async fn execute_infer_request(
         + Duration::from_millis(client.llm_cfg.request_timeout_ms.max(1));
     let result = async {
         for attempt in 0..attempts {
-            let bearer = auth.bearer(&cancel).await?;
+            let (http, endpoint, bearer) = if let Some(auth) = auth {
+                (
+                    &auth.http,
+                    format!("{}/responses", auth.resource),
+                    auth.bearer(&cancel).await?,
+                )
+            } else {
+                (
+                    &client.inner,
+                    format!("{}/responses", client.base_url.trim_end_matches('/')),
+                    client.api_key.clone(),
+                )
+            };
             client.begin_request_attempt()?;
-            let response = auth
-                .http
-                .post(format!("{}/responses", auth.resource))
+            let response = client
+                .request_headers(http.post(endpoint))
                 // Override the shorter OAuth timeout for long-running inference.
                 // The outer deadline includes refresh and all retry attempts.
                 .timeout(Duration::from_millis(
@@ -1049,7 +1138,7 @@ pub(crate) async fn infer_with_activation_and_usage(
             "responses request contract"
         );
     }
-    execute_infer_request(client, auth, &request, cancel, |response| {
+    execute_infer_request(client, Some(auth), &request, cancel, |response| {
         completed_with_activation(response, &auth.account, model, base_tools, active_tools)
     })
     .await

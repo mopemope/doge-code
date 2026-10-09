@@ -136,7 +136,7 @@ impl HistoryManager {
         for id in interrupted {
             // The process may have stopped during a batch. Never claim that an
             // unfinished call ran or automatically replay its possible side effect.
-            messages.push(ChatMessage { provider_state:None, role:"tool".into(),
+            messages.push(ChatMessage { reasoning: Default::default(), provider_state:None, role:"tool".into(),
                 content:Some("Tool execution interrupted; outcome unknown. Inspect the workspace before deciding whether to retry.".into()),
                 tool_calls:vec![], tool_call_id:Some(id.clone()) });
             unseen.insert(id);
@@ -242,6 +242,7 @@ impl HistoryManager {
     pub fn push_tool_result(&mut self, tool_call_id: Option<String>, content: String) {
         let id_clone = tool_call_id.clone();
         self.messages.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some(content),
@@ -715,6 +716,7 @@ impl HistoryManager {
             // `obs-*` remains the retrieval authority.
             let stub = fallback_stub(&tool_name, original_content_bytes);
             let candidate = ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".into(),
                 content: Some(stub),
@@ -743,6 +745,7 @@ impl HistoryManager {
                 .unwrap_or_else(|_| "obs-000001".to_string());
             let probe_stub = observation_stub(&tool_name, original_content_bytes, &peeked);
             let probe = ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".into(),
                 content: Some(probe_stub),
@@ -769,6 +772,7 @@ impl HistoryManager {
             Some(obs_id) => {
                 let stub = observation_stub(&tool_name, original_content_bytes, &obs_id);
                 let candidate = ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "tool".into(),
                     content: Some(stub),
@@ -796,6 +800,7 @@ impl HistoryManager {
                 // Store full: safe non-recoverable fallback, never evicting.
                 let stub = fallback_stub(&tool_name, original_content_bytes);
                 let candidate = ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "tool".into(),
                     content: Some(stub),
@@ -1577,6 +1582,7 @@ mod tests {
 
     fn make_msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: role.to_string(),
             content: Some(content.to_string()),
@@ -1587,6 +1593,7 @@ mod tests {
 
     fn make_tool_msg(tool_call_id: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".to_string(),
             content: Some(content.to_string()),
@@ -1597,6 +1604,7 @@ mod tests {
 
     fn make_assistant_with_tool_calls(call_id: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".to_string(),
             content: Some(content.to_string()),
@@ -2180,6 +2188,7 @@ mod tests {
             })
             .collect();
         msgs.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("batch".into()),
@@ -2224,6 +2233,7 @@ mod tests {
         let big_a = "A".repeat(2500);
         let big_b = "B".repeat(2500);
         let mk_assistant = |id: &str| ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("read".into()),
@@ -2273,6 +2283,7 @@ mod tests {
     #[test]
     fn test_observation_read_result_does_not_recurse() {
         let mk_obs_assistant = |id: &str| ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("r".into()),
@@ -2315,6 +2326,7 @@ mod tests {
         // Now offload one more large result: must fall back, not evict.
         let big = "Q".repeat(3000);
         mgr.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("r".into()),
@@ -2367,6 +2379,7 @@ mod tests {
         // mark_sent_tool_results_seen, so compaction must skip it.
         let mut mgr = test_manager(vec![make_msg("system", "sys"), make_msg("user", "u")]);
         mgr.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("read".into()),
@@ -2524,6 +2537,7 @@ mod tests {
             .collect();
         let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "batch")];
         msgs.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("batch".into()),
@@ -2793,6 +2807,7 @@ mod tests {
         let (store, id) = store_with_one(&"w".repeat(500));
         let args = format!("{{\"id\":\"{id}\",\"offset\":6000}}");
         let msg = ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("read".into()),
@@ -2822,6 +2837,7 @@ mod tests {
             "summary": [{"text": format!("evidence {id} here")}]
         })];
         let msg = ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(crate::features::openai_subscription::ProviderState {
                 version: 1,
                 account: "test".into(),
@@ -3317,6 +3333,7 @@ mod tests {
 
     fn compaction_assistant() -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(compaction_state()),
             role: "assistant".into(),
             content: Some("after".into()),
@@ -3366,6 +3383,7 @@ mod tests {
     #[test]
     fn native_boundary_with_pending_tool_call_stays_valid() {
         let pending = ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(crate::features::openai_subscription::ProviderState {
                 version: 1,
                 account: "a".into(),
@@ -3529,6 +3547,7 @@ mod append_only_activation_tests {
     #[test]
     fn test_clear_resets_sidecar() {
         let mut mgr = test_manager(vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("hi".into()),
@@ -3563,6 +3582,7 @@ mod append_only_compaction_tests {
 
     fn compaction_assistant() -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: Some(crate::features::openai_subscription::ProviderState {
                 version: 1,
                 account: "a".into(),
@@ -3584,6 +3604,7 @@ mod append_only_compaction_tests {
     fn test_native_compaction_preserves_sidecar() {
         let mut mgr = manager_with_messages(vec![
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "system".into(),
                 content: Some("authority".into()),
@@ -3591,6 +3612,7 @@ mod append_only_compaction_tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "user".into(),
                 content: Some("old".into()),
@@ -3610,6 +3632,7 @@ mod append_only_compaction_tests {
     #[test]
     fn test_interrupted_batch_with_activation_stays_valid() {
         let mut mgr = manager_with_messages(vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -3633,6 +3656,7 @@ mod append_only_compaction_tests {
         assert_eq!(interrupted, vec!["c1".to_string()]);
         for id in interrupted {
             repaired.push(ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".into(),
                 content: Some("Tool execution interrupted; outcome unknown.".into()),

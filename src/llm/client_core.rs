@@ -29,6 +29,8 @@ pub struct UsageTotalsSnapshot {
 
 #[derive(Clone)]
 pub struct OpenAIClient {
+    pub(crate) provider: crate::features::openai_subscription::ProviderKind,
+    pub(crate) opencode_session: String,
     pub(crate) subscription: Option<crate::features::openai_subscription::auth::AuthHandle>,
     pub base_url: String,
     pub api_key: String,
@@ -95,13 +97,69 @@ impl OpenAIClient {
             );
             Ok(Some(client))
         } else {
+            crate::features::opencode::validate_base(cfg.provider, &cfg.base_url)?;
+            if crate::features::opencode::default_base(cfg.provider).is_some() {
+                crate::features::opencode::api(cfg.provider, &cfg.model)?;
+            }
             cfg.api_key
                 .as_ref()
                 .map(|key| {
-                    Self::new(&cfg.base_url, key).map(|c| c.with_llm_config(cfg.llm.clone()))
+                    Self::new(&cfg.base_url, key).map(|mut c| {
+                        c.provider = cfg.provider;
+                        c.with_llm_config(cfg.llm.clone())
+                    })
                 })
                 .transpose()
         }
+    }
+
+    pub(crate) fn wire_model<'a>(&self, model: &'a str) -> Result<&'a str> {
+        let id = crate::features::opencode::model_id(self.provider, model)?;
+        if crate::features::opencode::default_base(self.provider).is_some() {
+            crate::features::opencode::api(self.provider, id)?;
+        }
+        Ok(id)
+    }
+
+    pub(crate) fn api_key_responses(&self, model: &str) -> Result<bool> {
+        if crate::features::opencode::default_base(self.provider).is_none() {
+            return Ok(false);
+        }
+        Ok(crate::features::opencode::api(self.provider, model)?
+            == crate::llm::capabilities::ApiKind::Responses)
+    }
+
+    /// A snapshot for one conversation/job; usage counters remain shared.
+    pub(crate) fn for_conversation(&self, id: &str) -> Result<Self> {
+        reqwest::header::HeaderValue::from_str(id)?;
+        anyhow::ensure!(!id.is_empty(), "conversation ID must not be empty");
+        let mut client = self.clone();
+        client.opencode_session = id.to_owned();
+        Ok(client)
+    }
+
+    pub(crate) fn request_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        let request = request.header(
+            reqwest::header::USER_AGENT,
+            concat!("dgc/", env!("CARGO_PKG_VERSION")),
+        );
+        if crate::features::opencode::default_base(self.provider).is_some() {
+            request.header("x-opencode-session", &self.opencode_session)
+        } else {
+            request
+        }
+    }
+
+    /// Non-secret endpoint/protocol binding, independent of the API key.
+    pub(crate) fn responses_identity(&self) -> String {
+        format!(
+            "{:?}:{}:responses",
+            self.provider,
+            self.base_url.trim_end_matches('/')
+        )
     }
 
     pub fn is_subscription(&self) -> bool {
@@ -137,6 +195,8 @@ impl OpenAIClient {
         let url = base_url.into();
         let inner = reqwest::Client::builder().build()?;
         Ok(Self {
+            provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: url,
             api_key: api_key.into(),
@@ -163,6 +223,13 @@ impl OpenAIClient {
             .connect_timeout(Duration::from_millis(cfg.connect_timeout_ms))
             .timeout(Duration::from_millis(cfg.timeout_ms)) // Use timeout_ms for overall request timeout
             .read_timeout(Duration::from_millis(cfg.timeout_ms)); // Add timeout settings
+        // OpenCode routes must not follow a redirect into another billing
+        // endpoint. A redirect is surfaced as an HTTP failure, never fallback.
+        let builder = if crate::features::opencode::default_base(self.provider).is_some() {
+            builder.redirect(reqwest::redirect::Policy::none())
+        } else {
+            builder
+        };
         // If building fails, keep existing client to avoid panic; but in normal cases it should succeed.
         if let Ok(c) = builder.build() {
             self.inner = c;
@@ -419,8 +486,9 @@ impl OpenAIClient {
         messages: Vec<ChatMessage>,
         cancel: Option<CancellationToken>,
     ) -> Result<ChoiceMessage> {
+        let model = self.wire_model(model)?;
         // Delegate to network module implementation for clarity and to keep this file small
-        if self.is_subscription() {
+        if self.is_subscription() || self.api_key_responses(model)? {
             return self
                 .chat_once_request(
                     &crate::llm::types::ChatRequest {
@@ -468,7 +536,42 @@ impl OpenAIClient {
                 content: result.content.unwrap_or_default(),
             });
         }
-        crate::llm::client_core::network::chat_once_request(self, req, cancel).await
+        let mut value = serde_json::to_value(req)?;
+        if let Some(model) = value.get("model").and_then(serde_json::Value::as_str) {
+            let model = self.wire_model(model)?.to_owned();
+            if self.api_key_responses(&model)? {
+                let messages: Vec<ChatMessage> = serde_json::from_value(
+                    value
+                        .get("messages")
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("request messages missing"))?,
+                )?;
+                let response = crate::features::openai_subscription::responses::infer_api_key(
+                    self,
+                    &model,
+                    &messages,
+                    &[],
+                    None,
+                    cancel.unwrap_or_default(),
+                )
+                .await?;
+                anyhow::ensure!(
+                    response.message.refusal.is_none()
+                        && response
+                            .message
+                            .content
+                            .as_deref()
+                            .is_some_and(|s| !s.trim().is_empty()),
+                    crate::llm::LlmErrorKind::Incomplete
+                );
+                return Ok(ChoiceMessage {
+                    role: response.message.role,
+                    content: response.message.content.unwrap_or_default(),
+                });
+            }
+            value["model"] = model.into();
+        }
+        crate::llm::client_core::network::chat_once_request(self, &value, cancel).await
     }
 }
 
@@ -500,6 +603,7 @@ mod tests {
             .chat_once(
                 "gpt-test",
                 vec![ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "user".into(),
                     content: Some("hi".into()),
@@ -540,6 +644,8 @@ mod tests {
     #[test]
     fn endpoint_normalization() {
         let c = OpenAIClient {
+            provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/v1/".into(),
             api_key: "x".into(),
@@ -560,6 +666,8 @@ mod tests {
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
+            provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/".into(),
             api_key: "x".into(),

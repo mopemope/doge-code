@@ -384,6 +384,7 @@ mod tests {
 
     fn system_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some(content.into()),
@@ -394,6 +395,7 @@ mod tests {
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.into()),
@@ -582,6 +584,7 @@ mod tests {
         let first = vec![system_msg("stable"), user_msg("one")];
         let mut second = first.clone();
         second.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some("answer".into()),
@@ -637,6 +640,7 @@ mod tests {
         let base = vec![system_msg("stable"), user_msg("hi")];
         let mut with_overlay = vec![system_msg("stable")];
         with_overlay.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some("<RuntimeContext>\nrecent\n</RuntimeContext>".into()),
@@ -784,6 +788,7 @@ mod append_only_tests {
 
     fn sys_msg() -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some("stable".into()),

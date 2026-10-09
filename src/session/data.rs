@@ -608,6 +608,7 @@ mod tests {
 
     fn typed_msg(role: &str, content: Option<&str>) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: role.to_string(),
             content: content.map(str::to_string),
@@ -622,6 +623,7 @@ mod tests {
         let messages = vec![
             typed_msg("user", Some("first")),
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".into(),
                 content: None,
@@ -646,6 +648,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".into(),
                 content: Some("content-a".into()),
@@ -653,6 +656,7 @@ mod tests {
                 tool_call_id: Some("call-a".into()),
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".into(),
                 content: Some("content-b".into()),
@@ -683,6 +687,7 @@ mod tests {
         };
         session_data
             .replace_conversation_messages(&[ChatMessage {
+                reasoning: Default::default(),
                 provider_state: Some(state),
                 role: "assistant".into(),
                 content: Some("answer".into()),

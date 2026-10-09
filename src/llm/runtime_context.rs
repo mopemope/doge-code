@@ -19,6 +19,7 @@ pub(crate) fn advisory_context_message(
     data: serde_json::Value,
 ) -> crate::llm::ChatMessage {
     crate::llm::ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "system".into(),
         content: Some(format!(
@@ -272,6 +273,7 @@ impl<'a> RequestMessages<'a> {
     ) -> Self {
         use crate::llm::types::ChatMessage;
         let overlay = ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(rendered),
@@ -314,6 +316,7 @@ mod tests {
 
     fn system(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some(content.to_string()),
@@ -324,6 +327,7 @@ mod tests {
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.to_string()),
@@ -334,6 +338,7 @@ mod tests {
 
     fn assistant(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some(content.to_string()),
@@ -344,6 +349,7 @@ mod tests {
 
     fn assistant_tool_call(id: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -361,6 +367,7 @@ mod tests {
 
     fn tool_result(id: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some("{}".to_string()),

@@ -87,7 +87,8 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
     let mut last_failure: Option<RequestAttemptFailure> = None;
 
     for attempt in 1..=total_attempts {
-        let req_builder = client.inner.post(&url).headers(headers.clone()).json(req);
+        let req_builder =
+            client.request_headers(client.inner.post(&url).headers(headers.clone()).json(req));
 
         let resp_res = tokio::select! {
             biased;
@@ -503,6 +504,7 @@ mod tests {
 
     fn chat_messages() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some("hi".into()),

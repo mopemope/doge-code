@@ -229,6 +229,62 @@ Protected credential storage for Windows is not implemented yet.
 See the official [OSS integration](https://developers.openai.com/siwc/token-sharing-open-source)
 and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
 
+### OpenCode Go / Zen (API key)
+
+Choose `--provider opencode-go` for subscription usage or `--provider opencode-zen`
+for pay-as-you-go Zen. These select different endpoints; dgc never falls back from
+Go to Zen and rejects HTTP redirects that could change routes. Supply a key through `OPENCODE_API_KEY`, `--api-key`, or the existing
+`api_key` config field. `OPENAI_API_KEY` is reserved for the existing compatible
+provider. No ChatGPT OAuth login is needed for these routes.
+
+```sh
+dgc --provider opencode-go --model gpt-6-luna exec "Explain this project"
+dgc --provider opencode-go --model kimi-k2.6
+dgc --provider opencode-zen --model qwen3.8-max
+```
+
+The default bases are `https://opencode.ai/zen/go/v1` and
+`https://opencode.ai/zen/v1`. Configured bases must match the selected provider;
+`OPENCODE_BASE_URL` is an optional explicit override for the same official base.
+The default OpenCode model is `gpt-6-luna`. Bare IDs and matching OpenCode aliases
+(`opencode-go/<id>` / `opencode/<id>`) are accepted; requests send bare IDs.
+OpenCode uses `OPENCODE_MODEL`; legacy `OPENAI_MODEL` remains scoped to the other
+providers. OpenCode reads `api_key`, `base_url` and `model` from a config file only
+when that file selects the same OpenCode provider, preventing legacy keys or
+Go/Zen configuration from silently crossing providers. Other shared settings
+retain the existing precedence. For example:
+
+```toml
+provider = "opencode-go"
+model = "gpt-6-luna"
+# API key is supplied by OPENCODE_API_KEY; no key needs to be stored here.
+```
+
+Routing follows the [Go](https://docs.opencode.ai/docs/go/) and
+[Zen](https://docs.opencode.ai/docs/zen/) endpoint tables verified on 2026-10-09.
+Supported Chat Completions models include GLM, Kimi and DeepSeek; GPT 6 Luna uses
+API-key Responses. Messages, Google, System One and unknown models fail before
+sending a request. For example, `qwen3.8-max` uses Messages on Go and is unavailable
+there, while its Zen Chat Completions route is supported. `dgc models` still
+supports the ChatGPT OAuth catalog only; use the linked OpenCode tables for IDs.
+
+Every OpenCode inference request identifies dgc with `User-Agent: dgc/<version>`
+and `x-opencode-session`. Main requests, retries, research subagents, documentation,
+semantic edits and compaction inherit the conversation ID. Resume reuses the
+persisted ID; a new TUI conversation gets a new ID. Standalone clients use one
+process-local ID. Keys are not part of persisted provider bindings.
+
+API-key Responses sends standard flat function tools and retains opaque reasoning
+items through tool round trips and session resume. Chat Completions retains optional
+`reasoning_content` / `reasoning_details` in assistant history without displaying
+it. Only verified reasoning controls are sent; other OpenCode models use provider
+defaults. This does not guarantee that `reasoning.mode = "off"` disables provider
+thinking. Local compaction summarizes completed historical text/tool data and
+retains unseen tool-result batches exactly; it does not send OAuth-only namespaces,
+activation items or unverified native compaction controls to OpenCode. Set
+`[llm] context_window_size` explicitly when needed: OpenCode capacity is currently
+unknown to dgc. Quota exhaustion fails without changing billing routes.
+
 ## Export evidence for review
 
 After a successful or partial CLI `exec` run, stderr shows the saved session ID

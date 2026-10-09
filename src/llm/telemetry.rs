@@ -394,6 +394,7 @@ mod tests {
 
     fn secret_message(role: &str, content: &str) -> crate::llm::types::ChatMessage {
         crate::llm::types::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: role.into(),
             content: Some(content.into()),

@@ -631,6 +631,7 @@ fn message(role: &str, content: &str) -> crate::llm::ChatMessage {
     crate::llm::ChatMessage {
         role: role.into(),
         content: Some(content.into()),
+        reasoning: Default::default(),
         provider_state: None,
         tool_calls: vec![],
         tool_call_id: None,
@@ -640,6 +641,7 @@ fn call(ids: &[&str]) -> crate::llm::ChatMessage {
     crate::llm::ChatMessage {
         role: "assistant".into(),
         content: None,
+        reasoning: Default::default(),
         provider_state: None,
         tool_call_id: None,
         tool_calls: ids
