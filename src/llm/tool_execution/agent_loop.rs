@@ -229,10 +229,10 @@ fn plan_write_block_error(reason: PlanWriteBlockReason) -> &'static str {
 fn plan_write_block_system_message(reason: PlanWriteBlockReason) -> &'static str {
     match reason {
         PlanWriteBlockReason::RepeatedUnchanged => {
-            "`plan_write` has repeatedly returned unchanged results and was blocked. Stop repeating plan-only updates; proceed with code changes, another tool, or a direct response."
+            "`plan_write` has repeatedly returned unchanged results and was blocked. Stop repeating plan-only updates. Choose an action within the user's authorized scope, answer with sufficient evidence, or report a concrete blocker. This warning does not authorize edits."
         }
         PlanWriteBlockReason::RepeatedIdenticalArgs => {
-            "Repeated identical `plan_write` was blocked. Continue by either answering the user directly or using a different tool with new arguments."
+            "Repeated identical `plan_write` was blocked. Continue within the user's authorized scope by answering with sufficient evidence, choosing a useful tool with new evidence, or reporting a concrete blocker."
         }
     }
 }
@@ -417,6 +417,8 @@ pub async fn run_agent_loop(
                    base_tools: &[crate::llm::ToolDef],
                    active_tools: &[crate::llm::ToolDef],
                    overlay: u64| {
+        let projected = crate::llm::runtime_context::RequestMessages::borrowed(messages);
+        let messages = projected.as_slice();
         if let Some(account) = client.account_label() {
             governor.measure_subscription_with_activation(
                 account,
@@ -626,7 +628,9 @@ pub async fn run_agent_loop(
                 tool_calls: vec![],
                 tool_call_id: None,
             });
-            v
+            crate::llm::runtime_context::RequestMessages::borrowed(&v)
+                .as_slice()
+                .to_vec()
         };
         let finalize_estimate: Option<u64> = (|| {
             let fp = if let Some(account) = client.account_label() {
@@ -2661,7 +2665,16 @@ mod tests {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/v1/chat/completions"),
-                request::body(matches("RuntimeContext")),
+                request::body(json_decoded(|body: &serde_json::Value| {
+                    body["messages"].as_array().is_some_and(|messages| {
+                        messages.iter().any(|m| {
+                            m["role"] == "user"
+                                && m["content"].as_str().is_some_and(|s| {
+                                    s.contains("runtime_context") && s.contains("src/cache.rs")
+                                })
+                        })
+                    })
+                })),
                 request::body(matches("search_memory")),
             ])
             .times(1)
@@ -2670,7 +2683,7 @@ mod tests {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/v1/chat/completions"),
-                request::body(not(matches("RuntimeContext"))),
+                request::body(not(matches("runtime_context"))),
                 request::body(matches("search_memory")),
             ])
             .times(1)
@@ -2744,7 +2757,7 @@ mod tests {
             !updated_messages.iter().any(|m| m
                 .content
                 .as_deref()
-                .is_some_and(|c| c.contains("RuntimeContext"))),
+                .is_some_and(|c| c.contains("runtime_context"))),
             "runtime overlay leaked into updated_messages"
         );
     }

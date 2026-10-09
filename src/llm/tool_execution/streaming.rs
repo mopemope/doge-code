@@ -36,8 +36,9 @@ pub async fn run_agent_streaming_once(
     let cancel_token = cancel.unwrap_or_default();
 
     // Start stream
+    let projected = crate::llm::runtime_context::RequestMessages::borrowed(&messages);
     let mut stream = client
-        .chat_stream(model, messages.as_slice(), Some(cancel_token.clone()))
+        .chat_stream(model, projected.as_slice(), Some(cancel_token.clone()))
         .await?;
     let runtime = ToolRuntime::build(
         fs,

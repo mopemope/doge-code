@@ -64,6 +64,16 @@ keep schema, dispatch, tests, and README in sync.
 
 Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}`). It is embedded at compile time via rust-embed (`src/assets.rs`) — rebuild to pick up changes. Project instructions files (`AGENTS.md` / `QWEN.md` / `GEMINI.md`, or `project_instructions_file` config key) are appended at runtime (`src/tui/commands/prompt.rs`).
 
+`llm::runtime_context::advisory_context_message` quotes TUI bootstrap data in
+JSON. It retains system-shaped internal messages for durable filtering;
+`RequestMessages` lowers that explicit envelope to user role on the provider
+request without mutating canonical history. The main budget estimator measures
+the projected form. Non-streaming requests, tools-free budget finalization, and
+the legacy streaming entry point apply the same projection. Runtime file/memory
+hints are user-role data overlays on the first request only. Never persist a
+projected request as canonical conversation. See [policy](instruction-policy.md)
+for trust boundaries, discovery, and limitations.
+
 ### RepoMap / analysis changes
 
 Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
