@@ -112,6 +112,10 @@ pub struct Executor {
     hook_manager: HookManager,
 }
 
+#[cfg(test)]
+#[path = "exec_resume_model_tests.rs"]
+mod resume_model_tests;
+
 impl Executor {
     /// Creates a new `Executor`.
     /// Initializes the repomap, tools, LLM client, and other necessary components.
@@ -125,76 +129,69 @@ impl Executor {
             session_store,
         )));
 
-        // With --resume, skip the eager fresh session so that "latest"
-        // resolves to the most recently updated pre-existing session.
-        if cfg.resume.is_none() {
-            let mut session_mgr = session_manager
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
-            if session_mgr.current_session.is_none() {
-                session_mgr.create_session(None)?;
-            }
-        }
-        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
-            .with_session_manager(session_manager.clone());
+        // Decode and prepare before publishing the target. In particular,
+        // a saved provider/model must be checked before constructing a client
+        // from startup configuration (which could use another billing route).
+        let resumed = if let Some(resume_id) = cfg.resume.as_deref() {
+            let mut manager = crate::utils::safe_std_lock(&session_manager, "session_manager")?;
+            let target = if resume_id == "latest" {
+                manager
+                    .store
+                    .list_with_stats()?
+                    .first()
+                    .map(|s| s.meta.id.clone())
+            } else {
+                Some(resume_id.into())
+            };
+            target
+                .map(|id| {
+                    manager
+                        .switch_to_prepared_session(&id, |session| {
+                            let selected = crate::session::selection::config_for_session(
+                                session, &cfg, &cfg.model,
+                            )?;
+                            let client = OpenAIClient::from_config(&selected)?;
+                            crate::session::selection::validate_binding(
+                                session,
+                                &selected,
+                                client.as_ref(),
+                            )?;
+                            let client = client
+                                .map(|client| client.for_conversation(&session.meta.id))
+                                .transpose()?;
+                            Ok((selected, client))
+                        })
+                        .with_context(|| format!("Failed to resume session '{resume_id}'"))
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
-        // Only initialize repomap if not disabled
-        // For the exec command, we rely on the main initialization to handle repomap building
-        // to prevent duplicate analyzer work and duplicate logging
+        let mut history = ChatHistory::new();
+        let (cfg, client) = match resumed {
+            Some((session, messages, prepared)) => {
+                info!("Resuming session: {}", session.meta.id);
+                history.replace(crate::llm::durable_conversation_messages(messages));
+                prepared
+            }
+            None => {
+                let client = OpenAIClient::from_config(&cfg)?;
+                let mut manager = crate::utils::safe_std_lock(&session_manager, "session_manager")?;
+                manager.create_session(None)?;
+                let id = manager.get_current_session_id()?;
+                let client = client
+                    .map(|client| client.for_conversation(&id))
+                    .transpose()?;
+                (cfg, client)
+            }
+        };
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()))
+            .with_session_manager(session_manager);
         if cfg.no_repomap {
             info!("Repomap initialization skipped due to --no-repomap flag");
         }
-
-        let client = OpenAIClient::from_config(&cfg)?;
-
-        // Initialize the durable conversation buffer. It owns no system
-        // prompt and no token budget; context reduction lives in
-        // HistoryManager / the Context Budget Governor.
-        let conversation_history = Arc::new(tokio::sync::Mutex::new(ChatHistory::new()));
-
-        // If resume is requested, load the specified (or latest) session and
-        // populate history. Targets are decoded and validated before they
-        // become current: a malformed target fails loudly instead of
-        // committing a session whose conversation cannot be restored.
-        if let Some(resume_id) = cfg.resume.as_deref() {
-            let resumed = {
-                let mut session_mgr = session_manager
-                    .lock()
-                    .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
-                match resume_id {
-                    "latest" => session_mgr.load_latest_validated_excluding(None)?,
-                    id => Some(
-                        session_mgr
-                            .switch_to_validated_session(id)
-                            .with_context(|| format!("Failed to resume session '{id}'"))?,
-                    ),
-                }
-            };
-
-            match resumed {
-                Some((session, messages)) => {
-                    info!("Resuming session: {}", session.meta.id);
-                    let mut history = conversation_history.lock().await;
-                    history.replace(crate::llm::durable_conversation_messages(messages));
-                }
-                None => {
-                    // "latest" with no pre-existing sessions: start fresh.
-                    info!("No sessions to resume; starting a new session");
-                    let mut session_mgr = session_manager
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("Failed to lock session manager: {}", e))?;
-                    session_mgr.create_session(None)?;
-                }
-            }
-        }
-
-        let client = client
-            .map(|client| {
-                let id = crate::utils::safe_std_lock(&session_manager, "session_manager")?
-                    .get_current_session_id()?;
-                client.for_conversation(&id)
-            })
-            .transpose()?;
+        let conversation_history = Arc::new(tokio::sync::Mutex::new(history));
         Ok(Self {
             cfg,
             tools,
