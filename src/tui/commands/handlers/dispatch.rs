@@ -128,7 +128,7 @@ impl CommandHandler for TuiExecutor {
         }
 
         // Quick Execute Command:
-        // Skip implementation plan enforcement for immediate execution
+        // Skip saved-plan projection; shared scope/planning guidance still applies.
         if let Some(rest) = line.strip_prefix("/quick") {
             let args = rest.trim();
             if args.is_empty() {
