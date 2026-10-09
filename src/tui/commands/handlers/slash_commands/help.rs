@@ -12,6 +12,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /theme <name> - Switch theme (dark/light)");
     ui.push_log("  /tools - List available tools");
     ui.push_log("  /tokens - Show token usage");
+    ui.push_log("  /models [search] - Select a Go/Zen model for a NEW session (Esc cancels)");
     ui.push_log("  /compact - Compact conversation history to reduce token usage");
     ui.push_log("  /cancel [job-id] - Cancel the current foreground job or a specific job");
     ui.push_log("  /jobs - List running and recent jobs");

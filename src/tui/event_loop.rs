@@ -625,7 +625,20 @@ impl TuiApp {
         terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
         last_ctrl_c_at: &mut Option<Instant>,
     ) -> Result<bool> {
-        if key.kind == event::KeyEventKind::Release {
+        if key.kind == event::KeyEventKind::Release
+            || (key.code == KeyCode::Enter && key.kind == event::KeyEventKind::Repeat)
+        {
+            return Ok(false);
+        }
+        if self.model_picker.is_some()
+            && key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if key.kind == event::KeyEventKind::Press {
+                self.model_picker = None;
+                self.dirty = true;
+                *last_ctrl_c_at = None;
+            }
             return Ok(false);
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -656,6 +669,10 @@ impl TuiApp {
         if key.kind == event::KeyEventKind::Release
             || (key.code == KeyCode::Esc && key.kind != event::KeyEventKind::Press)
         {
+            return Ok(false);
+        }
+        if self.model_picker.is_some() {
+            crate::tui::event_handlers::handle_model_picker_key(self, key)?;
             return Ok(false);
         }
         if self.handle_feedback_key(key) {
@@ -2016,5 +2033,58 @@ mod inline_feedback_routing_tests {
         .unwrap();
         assert!(ui.diff_review.is_some());
         assert_eq!(ui.diff_review_focus, DiffReviewFocus::Review);
+    }
+}
+
+#[cfg(test)]
+mod model_picker_interrupt_tests {
+    use super::*;
+    #[test]
+    fn model_selection_repeat_enter_after_picker_closes_preserves_draft() {
+        let mut ui = TuiApp::new_for_test("models", None, "default");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 32)).unwrap();
+        ui.textarea.insert_str("preserve draft");
+        let mut last = None;
+        assert!(
+            !ui.handle_terminal_key(
+                event::KeyEvent::new_with_kind(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                    event::KeyEventKind::Repeat
+                ),
+                &mut terminal,
+                &mut last
+            )
+            .unwrap()
+        );
+        assert_eq!(ui.textarea.lines(), ["preserve draft"]);
+        assert!(ui.model_picker.is_none());
+    }
+    #[test]
+    fn model_selection_ctrl_c_cancels_picker_without_exit_or_draft_change() {
+        let mut ui = TuiApp::new_for_test("models", None, "default");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 32)).unwrap();
+        ui.textarea.insert_str("preserve draft");
+        ui.model_picker = Some(
+            crate::features::model_selection::ModelPicker::new(
+                crate::features::openai_subscription::ProviderKind::OpencodeGo,
+                "glm",
+            )
+            .unwrap(),
+        );
+        let mut last = Some(Instant::now());
+        assert!(
+            !ui.handle_terminal_key(
+                event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut terminal,
+                &mut last
+            )
+            .unwrap()
+        );
+        assert!(last.is_none());
+        assert!(ui.model_picker.is_none());
+        assert_eq!(ui.textarea.lines(), ["preserve draft"]);
     }
 }

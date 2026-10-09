@@ -186,6 +186,7 @@ pub struct TuiApp {
     pub log_heights: Vec<usize>, // Cache for wrapped line counts of log entries
     pub log_width: usize,        // Rendered log column width for cache invalidation
     pub main_content_height: usize, // Height of the main content area (log panel)
+    pub(crate) model_picker: Option<crate::features::model_selection::ModelPicker>,
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
     pub(crate) inbox_tx: Option<Sender<String>>,
@@ -349,6 +350,7 @@ impl TuiApp {
             "/session".to_string(),
             "/rebuild-repomap".to_string(),
             "/tokens".to_string(),
+            "/models".to_string(),
             "/cancel".to_string(),
             "/jobs".to_string(),
             "/compact".to_string(),
@@ -490,6 +492,7 @@ impl TuiApp {
             log_heights: Vec::new(),
             log_width: 0,
             main_content_height: 0,
+            model_picker: None,
             handler: None,
             inbox_rx: Some(rx),
             inbox_tx: Some(tx),

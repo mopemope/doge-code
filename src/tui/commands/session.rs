@@ -85,6 +85,7 @@ impl TuiExecutor {
                 let id = args[1];
                 match self.switch_to_session(id) {
                     Ok(session_after_switch) => {
+                        self.sync_selection_ui(ui);
                         self.reset_session_input(ui);
                         ui.clear_log();
                         ui.push_log(format!(
