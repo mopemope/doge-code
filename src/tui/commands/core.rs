@@ -13,8 +13,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
-const PLAN_CREATION_GUIDANCE: &str = "Plan requirements:\n- Produce at least three ordered steps with stable unique ids (e.g., step-1)\n- Default each status to \"pending\" and update via plan_write mode=\"merge\"\n- Keep only one item in_progress at a time\n- Describe expected outputs (files, tests) so implementation stays concrete\n";
-
 pub trait CommandHandler {
     fn handle(&mut self, line: &str, ui: &mut TuiApp);
     fn foreground_job_id(&self) -> Option<crate::jobs::JobId> {
@@ -174,48 +172,21 @@ impl TuiExecutor {
         }
     }
 
-    fn push_plan_creation_directive(
-        &self,
-        msgs: &mut Vec<ChatMessage>,
-        instruction: &str,
-        ui: Option<&mut TuiApp>,
-        reason: &str,
-    ) {
-        if let Some(ui) = ui {
-            ui.push_log(
-                "[plan] 計画が未作成のため plan_write (mode=\"replace\") で作成して下さい。",
-            );
-        }
-        let directive = format!(
-            "{}\n{}\nBefore acting on the new instruction, call plan_write with mode=\"replace\" to create the plan. After saving it, resume work on: {}",
-            reason, PLAN_CREATION_GUIDANCE, instruction
-        );
-        msgs.push(ChatMessage {
-            provider_state: None,
-            role: "system".into(),
-            content: Some(directive),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-        self.send_plan_items_to_ui(&[]);
-    }
-
-    pub fn enforce_plan_context(
-        &self,
-        msgs: &mut Vec<ChatMessage>,
-        instruction: &str,
-        ui: Option<&mut TuiApp>,
-    ) {
+    /// Project saved work context without imposing a plan on every turn.
+    /// The shared system prompt owns when planning is required.
+    pub fn append_plan_context(&self, msgs: &mut Vec<ChatMessage>, ui: Option<&mut TuiApp>) {
         match self.tools.plan_read() {
-            Ok(plan_list) if !plan_list.items.is_empty() => {
+            Ok(plan_list)
+                if plan_list
+                    .items
+                    .iter()
+                    .any(|item| item.status != "completed") =>
+            {
                 if let Some(summary) = plan::format_plan_summary(&plan_list.items) {
                     let plan_msg = format!(
-                        "現在の実行計画（`plan_write mode=\"merge\"` でステータスを同期させ、必要に応じて `plan_read` を参照してください）：\n{}\n\n計画作成済みです。実装に進むことが許可されています。",
+                        "Saved execution plan for this session:\n{}\n\nReconcile this plan with the current user request before continuing. A saved plan is work context, not permission to perform new work. Preserve relevant steps and stable ids; update with plan_write only when scope or status changes. Do not mark unperformed work completed. Use plan_read only if more canonical detail is needed.",
                         summary
                     );
-                    if let Some(ui) = ui {
-                        ui.push_log("[plan] 計画は作成済みです。実装を進めてください。");
-                    }
                     msgs.push(ChatMessage {
                         provider_state: None,
                         role: "system".into(),
@@ -226,25 +197,157 @@ impl TuiExecutor {
                 }
                 self.send_plan_items_to_ui(&plan_list.items);
             }
-            Ok(plan_list) => {
-                // Plan file exists but has no steps
-                self.send_plan_items_to_ui(&plan_list.items);
-                self.push_plan_creation_directive(
-                    msgs,
-                    instruction,
-                    ui,
-                    "Plan storage exists but contains no steps.",
-                );
+            Ok(_) => {
+                // Empty/completed plans do not gate a new instruction. Retain
+                // completed plans on disk for /plan show and explicit reads.
+                self.send_plan_items_to_ui(&[]);
             }
             Err(e) => {
-                tracing::warn!(?e, "Failed to read plan; requesting plan creation");
-                self.push_plan_creation_directive(
-                    msgs,
-                    instruction,
-                    ui,
-                    "No execution plan available for the current session.",
-                );
+                tracing::warn!(?e, "Failed to read saved plan; preserving storage");
+                if let Some(ui) = ui {
+                    ui.push_log(
+                        "[plan] 保存済み計画を読み込めません。上書きせず確認してください。",
+                    );
+                }
+                msgs.push(ChatMessage {
+                    provider_state: None,
+                    role: "system".into(),
+                    content: Some("The saved execution plan could not be read. This does not mean no plan exists. Do not overwrite it with plan_write mode=\"replace\" to bypass this error. Report the read failure and inspect or recover the stored plan before work that depends on it; an unrelated small task may proceed without a plan.".into()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_context_tests {
+    use super::*;
+
+    fn fixture() -> (
+        TuiExecutor,
+        tempfile::TempDir,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            no_repomap: true,
+            api_key: Some("fixture".into()),
+            base_url: "http://127.0.0.1:1".into(),
+            ..Default::default()
+        };
+        let map = Arc::new(RwLock::new(None));
+        let tools = FsTools::new(map.clone(), Arc::new(cfg.clone()));
+        let manager = Arc::new(Mutex::new(SessionManager::with_store(
+            crate::session::SessionStore::new(dir.path().join("sessions")).expect("store"),
+        )));
+        let mut executor = TuiExecutor::construct_with_session_manager(cfg, map, tools, manager)
+            .expect("executor");
+        let (tx, rx) = std::sync::mpsc::channel();
+        executor.ui_tx = Some(tx);
+        (executor, dir, rx)
+    }
+
+    fn save_plan(executor: &TuiExecutor, status: &str) -> std::path::PathBuf {
+        executor
+            .tools
+            .plan_write(
+                vec![plan::PlanItem {
+                    id: "stable-step".into(),
+                    parent_id: None,
+                    content: "Saved task".into(),
+                    status: status.into(),
+                    requirement_ids: vec![],
+                    verification_obligations: vec![],
+                }],
+                plan::PlanWriteMode::Replace,
+            )
+            .expect("save");
+        let id = executor
+            .session_manager
+            .lock()
+            .expect("manager")
+            .get_current_session_id()
+            .expect("session");
+        executor
+            .cfg
+            .project_root
+            .join(".doge/plans")
+            .join(format!("{id}.json"))
+    }
+
+    #[tokio::test]
+    async fn missing_plan_does_not_force_creation_for_a_new_turn() {
+        let (executor, _dir, rx) = fixture();
+        let mut messages = Vec::new();
+        executor.append_plan_context(&mut messages, None);
+        assert!(
+            messages.is_empty(),
+            "shared scope policy decides when to plan"
+        );
+        assert!(executor.tools.plan_read().expect("read").items.is_empty());
+        assert!(!executor.cfg.project_root.join(".doge/plans").exists());
+        assert_eq!(
+            rx.try_recv().expect("UI clear"),
+            "::plan_list:{\"items\":[]}"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_plan_is_request_context_without_authorizing_new_work() {
+        let (executor, _dir, rx) = fixture();
+        let path = save_plan(&executor, "in_progress");
+        let before = std::fs::read(&path).expect("plan bytes");
+        let mut messages = Vec::new();
+        executor.append_plan_context(&mut messages, None);
+        assert_eq!(messages.len(), 1);
+        let text = messages[0].content.as_deref().expect("context");
+        assert!(text.contains("stable-step") && text.contains("Saved task"));
+        assert!(text.contains("Reconcile") && text.contains("not permission"));
+        assert_eq!(std::fs::read(&path).expect("plan retained"), before);
+        assert!(crate::llm::durable_conversation_messages(messages).is_empty());
+        assert!(rx.try_recv().expect("UI plan").contains("stable-step"));
+    }
+
+    #[tokio::test]
+    async fn completed_plan_is_retained_without_reappearing_on_a_new_turn() {
+        let (executor, _dir, rx) = fixture();
+        let path = save_plan(&executor, "completed");
+        let before = std::fs::read(&path).expect("plan bytes");
+        let mut messages = Vec::new();
+        executor.append_plan_context(&mut messages, None);
+        assert!(messages.is_empty());
+        assert_eq!(
+            rx.try_recv().expect("UI clear"),
+            "::plan_list:{\"items\":[]}"
+        );
+        assert_eq!(std::fs::read(&path).expect("plan retained"), before);
+        assert_eq!(
+            executor.tools.plan_read().expect("explicit read").items[0].status,
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_plan_is_preserved_and_never_treated_as_missing() {
+        let (executor, _dir, rx) = fixture();
+        let path = save_plan(&executor, "pending");
+        let corrupt = b"{incomplete saved plan";
+        std::fs::write(&path, corrupt).expect("corrupt fixture");
+        let mut messages = Vec::new();
+        executor.append_plan_context(&mut messages, None);
+        let text = messages[0].content.as_deref().expect("warning context");
+        assert!(text.contains("could not be read") && text.contains("Do not overwrite"));
+        assert!(!text.contains("create the plan"));
+        assert_eq!(
+            std::fs::read(&path).expect("corrupt bytes retained"),
+            corrupt
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "do not clear an unreadable UI projection as missing"
+        );
     }
 }
