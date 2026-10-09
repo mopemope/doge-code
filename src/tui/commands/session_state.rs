@@ -140,29 +140,39 @@ impl TuiExecutor {
         self.ensure_session_transition_idle()?;
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
-        let (new_id, outcome) = {
+        let (new_id, previous_outcome, new_outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let outcome = if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+            let opencode = crate::features::opencode::default_base(self.cfg.provider).is_some();
+            let previous_outcome = if opencode {
                 sm.flush_before_model_transition()?
             } else {
                 sm.flush_before_transition()?
             };
-            if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+            let (new_id, new_outcome) = if opencode {
                 sm.create_session_with_model(
                     initial_prompt,
                     crate::session::data::SessionModelSelection {
                         provider: self.cfg.provider,
                         model: self.cfg.model.clone(),
                     },
-                )?;
+                )?
             } else {
-                sm.create_session(initial_prompt)?;
-            }
-            (sm.get_current_session_id()?, outcome)
+                sm.create_session_with_outcome(initial_prompt)?
+            };
+            (new_id, previous_outcome, new_outcome)
         };
         history.clear();
         drop(history);
-        self.report_session_save_outcome(&outcome);
+        for (context, outcome) in [
+            ("previous session", previous_outcome),
+            ("new session", new_outcome),
+        ] {
+            if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } =
+                outcome
+            {
+                ui.push_log(format!("Warning: {context}: {message}"));
+            }
+        }
         self.reset_session_input(ui);
         if let Some(client) = self.client.as_mut() {
             client.opencode_session = new_id.clone();
@@ -315,6 +325,63 @@ mod tests {
         )
         .expect("executor");
         (executor, dir)
+    }
+
+    #[test]
+    fn session_operation_new_reports_new_checkpoint_durability_warning() {
+        use crate::features::openai_subscription::ProviderKind;
+        for provider in [ProviderKind::OpenaiCompatible, ProviderKind::OpencodeGo] {
+            for dirty in [false, true] {
+                let (mut executor, _dir) = test_executor();
+                if provider == ProviderKind::OpencodeGo {
+                    executor.cfg.provider = provider;
+                    executor.cfg.base_url = crate::features::opencode::GO_BASE.into();
+                    executor.cfg.model = "gpt-6-luna".into();
+                }
+                let old = current_session_id(&executor);
+                {
+                    let mut sm = executor.session_manager.lock().unwrap();
+                    sm.store.fail_directory_sync = true;
+                    if dirty {
+                        sm.current_session.as_mut().unwrap().meta.title =
+                            "old unsaved title".into();
+                        sm.save_state = crate::session::manager::SessionSaveState::Unsaved {
+                            session_id: old.clone(),
+                        };
+                    }
+                }
+                let mut ui = TuiApp::new_for_test("sessions", None, "default");
+                let new = executor.start_new_session(&mut ui, None).unwrap();
+                assert_ne!(new, old);
+                let sm = executor.session_manager.lock().unwrap();
+                assert!(sm.store.load(&new).is_ok());
+                assert!(sm.checkpoint_warning().is_some());
+                let warnings: Vec<_> = ui
+                    .log
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        crate::tui::state::LogEntry::Plain(text) if text.contains("Warning:") => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    warnings.iter().any(|text| text.contains("new session")
+                        && text.contains("directory sync failed")),
+                    "{provider:?}: {warnings:?}"
+                );
+                assert_eq!(
+                    warnings
+                        .iter()
+                        .any(|text| text.contains("previous session")),
+                    dirty
+                );
+                if dirty {
+                    assert_eq!(sm.store.load(&old).unwrap().meta.title, "old unsaved title");
+                }
+            }
+        }
     }
 
     #[test]
