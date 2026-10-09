@@ -171,7 +171,7 @@ pub fn format_detail(data: &SessionData) -> String {
             selection.model
         )
     } else {
-        detail
+        format!("{detail}\n  Model selection: legacy (startup selection not recorded)")
     }
 }
 
