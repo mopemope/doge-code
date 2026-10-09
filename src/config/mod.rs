@@ -34,3 +34,5 @@ mod test;
 
 pub mod subagent;
 pub use subagent::*;
+
+mod inference_diagnostics;

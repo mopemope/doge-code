@@ -8,6 +8,9 @@ use crate::tui::view::TuiApp;
 /// Persisted session usage is the source of truth for session totals;
 /// current-process client totals and last-request telemetry are separate.
 pub fn handle_tokens(executor: &mut TuiExecutor, ui: &mut TuiApp) {
+    for line in executor.cfg.inference_diagnostics() {
+        ui.push_log(line);
+    }
     // Persisted session usage: survives resume and session switches.
     let persisted: Option<crate::session::SessionData> =
         crate::utils::safe_std_lock(&executor.session_manager, "session_manager")

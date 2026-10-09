@@ -128,24 +128,26 @@ impl TuiApp {
             " "
         };
 
-        let content = format!(
-            " DOGE-CODE | model: {} | {} | tokens: {} | {}",
-            model_name, status_str, self.tokens_prompt_used, spinner
-        );
-
-        let _para = Paragraph::new(content)
-            .style(theme.footer_style)
-            .bg(theme.background_style.bg.unwrap_or(Color::Reset)); // simple background
-
-        // Overlay status color on the status text part?
-        // For simplicity, just color the whole line or parts of it.
-        // Let's make the status word colored.
-
         let display_status_str = if let Some(detailed) = &self.detailed_status {
             detailed.as_str()
         } else {
             status_str
         };
+
+        // Keep provider/model visible when queue counts or detailed status would
+        // consume the whole footer. Full diagnostics remain available via /tokens.
+        if area.width < 80 && self.inference_label.is_some() {
+            let compact_status = if status_str == "THINKING" {
+                "THINK"
+            } else {
+                status_str
+            };
+            let compact_model = model_name.replace(" / ", "/");
+            let label = format!("[{compact_status}] {compact_model}");
+            let clipped = clip_status_label(&label, usize::from(area.width));
+            f.render_widget(Paragraph::new(clipped).style(theme.footer_style), area);
+            return;
+        }
 
         let mut spans = Vec::new();
         if !self.pending_instructions.is_empty() {
@@ -1331,6 +1333,25 @@ fn search_query_line(query: &str, width: usize) -> Line<'_> {
         Span::raw(visible),
         Span::raw("_"),
     ])
+}
+
+fn clip_status_label(label: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    if label.width() <= width {
+        return label.into();
+    }
+    let mut output = String::new();
+    for grapheme in label.graphemes(true) {
+        if output.width() + grapheme.width() + 1 > width {
+            break;
+        }
+        output.push_str(grapheme);
+    }
+    if width > 0 {
+        output.push('…');
+    }
+    output
 }
 
 #[cfg(test)]
