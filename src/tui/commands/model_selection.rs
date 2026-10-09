@@ -24,16 +24,8 @@ impl TuiExecutor {
         &self,
         session: &SessionData,
     ) -> Result<(AppConfig, Option<OpenAIClient>)> {
-        let mut cfg = self.cfg.clone();
-        cfg.model = self.initial_model.clone();
-        if let Some(selection) = &session.model_selection {
-            anyhow::ensure!(
-                selection.provider == cfg.provider,
-                "Session uses another provider; restart with its original provider (no billing route change)"
-            );
-            cfg.model = opencode::model_id(selection.provider, &selection.model)?.into();
-            opencode::api(selection.provider, &cfg.model)?;
-        }
+        let cfg =
+            crate::session::selection::config_for_session(session, &self.cfg, &self.initial_model)?;
         let client = if opencode::default_base(cfg.provider).is_some() {
             // Validate/build before committing; keep process usage shared by existing clones.
             let ready = OpenAIClient::from_config(&cfg)?;
@@ -41,26 +33,7 @@ impl TuiExecutor {
         } else {
             self.client.clone()
         };
-        let expected_binding = if opencode::default_base(cfg.provider).is_some() {
-            Some(format!(
-                "{:?}:{}:{:?}:{}",
-                cfg.provider,
-                cfg.base_url.trim_end_matches('/'),
-                opencode::api(cfg.provider, &cfg.model)?,
-                cfg.model
-            ))
-        } else {
-            client
-                .as_ref()
-                .map(|client| client.inference_binding(&cfg.model))
-                .transpose()?
-        };
-        if let (Some(binding), Some(expected)) = (&session.inference_binding, expected_binding) {
-            anyhow::ensure!(
-                binding == &expected,
-                "Session belongs to another inference account/provider/model; restore its original selection"
-            );
-        }
+        crate::session::selection::validate_binding(session, &cfg, client.as_ref())?;
         Ok((cfg, client))
     }
     pub(crate) fn apply_session_selection(
