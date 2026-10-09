@@ -1036,12 +1036,21 @@ preserves the live conversation, observations and unseen results. After replacem
 a directory-sync warning adopts the cleared checkpoint in memory and reports the
 unconfirmed durability.
 
+New OpenCode sessions created by TUI or `exec` record their selected provider and
+model, including `exec --resume` when the store is empty. The selection is saved
+with the initial checkpoint; a failed save cannot publish a partial selection.
 Both TUI and `exec --resume` restore a session's recorded OpenCode model before
 continuing inference. The session's provider must match the startup
 provider; resume never changes the billing route. Provider/model binding
 mismatches and unsupported selections fail before the session becomes active.
 Legacy sessions without a recorded selection keep the startup model and must
 still match any recorded inference binding.
+Selection-related resume errors show the recorded provider/model and how to
+inspect the checkpoint with `dgc session show <id>`, then restart using the
+original `--provider` and `--model`. Legacy checkpoints explicitly say the
+selection was not recorded; no model is guessed from their inference binding.
+If the original account/selection is unavailable or unsupported, start a new
+session without `--resume` rather than changing the old checkpoint's binding.
 
 While a foreground job owns the session, TUI session creation, switching, deletion,
 resume and clearing wait for the job to release it, including its final checkpoint.

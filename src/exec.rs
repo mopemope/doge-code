@@ -178,8 +178,24 @@ impl Executor {
             None => {
                 let client = OpenAIClient::from_config(&cfg)?;
                 let mut manager = crate::utils::safe_std_lock(&session_manager, "session_manager")?;
-                manager.create_session(None)?;
-                let id = manager.get_current_session_id()?;
+                let (id, outcome) =
+                    if crate::features::opencode::default_base(cfg.provider).is_some() {
+                        manager.create_session_with_model(
+                            None,
+                            crate::session::data::SessionModelSelection {
+                                provider: cfg.provider,
+                                model: cfg.model.clone(),
+                            },
+                        )?
+                    } else {
+                        manager.create_session_with_outcome(None)?
+                    };
+                if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed {
+                    message,
+                } = outcome
+                {
+                    eprintln!("Warning: new session: {message}");
+                }
                 let client = client
                     .map(|client| client.for_conversation(&id))
                     .transpose()?;
