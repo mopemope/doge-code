@@ -59,7 +59,15 @@ pub fn handle_edit_symbol(executor: &mut TuiExecutor, ui: &mut TuiApp) {
 
     let project_root = executor.cfg.project_root.clone();
     let model = executor.cfg.model.clone();
-    let client = executor.client.clone();
+    let client = match executor.conversation_client() {
+        Ok(client) => client,
+        Err(error) => {
+            ui.push_log(format!(
+                "[ERROR] Cannot bind semantic edit session: {error}"
+            ));
+            return;
+        }
+    };
     let tools = executor.tools.clone();
     let repomap = executor.repomap.clone();
     let file_input = PathBuf::from(&file);

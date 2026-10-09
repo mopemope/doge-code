@@ -37,6 +37,7 @@ fn registry() -> Registry {
 }
 fn user(text: &str) -> ChatMessage {
     ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "user".into(),
         content: Some(text.into()),
@@ -249,6 +250,7 @@ fn raw_output_roundtrips_without_projection_duplication() {
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     let restored: ChatMessage =
@@ -258,6 +260,7 @@ fn raw_output_roundtrips_without_projection_duplication() {
         content: Some("{}".into()),
         tool_calls: vec![],
         tool_call_id: Some("call_test".into()),
+        reasoning: Default::default(),
         provider_state: None,
     };
     let request = serde_json::to_value(
@@ -284,6 +287,7 @@ fn history_rejects_account_switch_and_orphan_results() {
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     assert!(responses::build("m", "b", &[assistant], &[], None, None).is_err());
@@ -1129,6 +1133,7 @@ async fn compaction_keeps_unseen_output_block_exact_and_offloads_only_seen_resul
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     let mut messages = vec![];
@@ -1139,6 +1144,7 @@ async fn compaction_keeps_unseen_output_block_exact_and_offloads_only_seen_resul
             content: Some("old reasoning ".repeat(500)),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning: Default::default(),
             provider_state: None,
         });
     }
@@ -1404,6 +1410,7 @@ async fn interrupted_batch_checkpoint_retains_output_and_marks_unknown_calls() -
         &tools(),
     )?;
     let assistant = ChatMessage {
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
         role: "assistant".into(),
         content: reply.content,
@@ -1450,6 +1457,7 @@ fn completed_rejects_unfinished_items_and_non_assistant_messages() {
         content: None,
         tool_calls: vec![],
         tool_call_id: None,
+        reasoning: Default::default(),
         provider_state: Some(ProviderState {
             version: 1,
             account: "a".into(),
@@ -1738,6 +1746,7 @@ fn native_round_trip_request_replays_compaction_byte_identical() {
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     // Byte-equivalent session persistence.
@@ -1756,6 +1765,7 @@ fn native_round_trip_request_replays_compaction_byte_identical() {
         content: Some("{}".into()),
         tool_calls: vec![],
         tool_call_id: Some("call_test".into()),
+        reasoning: Default::default(),
         provider_state: None,
     };
     let next = ChatMessage {
@@ -1763,6 +1773,7 @@ fn native_round_trip_request_replays_compaction_byte_identical() {
         content: Some("next instruction".into()),
         tool_calls: vec![],
         tool_call_id: None,
+        reasoning: Default::default(),
         provider_state: None,
     };
     let request = serde_json::to_value(
@@ -1815,6 +1826,7 @@ fn native_compacted_session_resume_replays_only_compact_state() {
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     let followup = user("continue from compact state");
@@ -2196,6 +2208,7 @@ async fn native_compaction_with_tools_keeps_batch_pairing() -> Result<()> {
         content: reply.content,
         tool_calls: reply.tool_calls,
         tool_call_id: None,
+        reasoning: reply.reasoning.clone(),
         provider_state: reply.provider_state,
     };
     let result = ChatMessage {
@@ -2203,6 +2216,7 @@ async fn native_compaction_with_tools_keeps_batch_pairing() -> Result<()> {
         content: Some("{}".into()),
         tool_calls: vec![],
         tool_call_id: Some("call_test".into()),
+        reasoning: Default::default(),
         provider_state: None,
     };
     let request = serde_json::to_value(
@@ -2358,6 +2372,7 @@ fn append_only_active_with(names: &[&str]) -> Vec<ToolDef> {
 
 fn tool_search_call(id: &str) -> ChatMessage {
     ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "assistant".into(),
         content: None,
@@ -2375,6 +2390,7 @@ fn tool_search_call(id: &str) -> ChatMessage {
 
 fn tool_result(id: &str, content: &str) -> ChatMessage {
     ChatMessage {
+        reasoning: Default::default(),
         provider_state: None,
         role: "tool".into(),
         content: Some(content.into()),
@@ -2390,6 +2406,7 @@ fn activation_marker(names: Vec<&str>) -> ChatMessage {
         v
     };
     ChatMessage {
+        reasoning: Default::default(),
         provider_state: Some(ProviderState::activation("a".into(), "m".into(), sorted)),
         role: "developer".into(),
         content: None,
@@ -2589,6 +2606,7 @@ fn append_only_legacy_repair_inserts_before_first_use() {
         tool_search_call("c1"),
         tool_result("c1", "{}"),
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,

@@ -188,6 +188,13 @@ impl Executor {
             }
         }
 
+        let client = client
+            .map(|client| {
+                let id = crate::utils::safe_std_lock(&session_manager, "session_manager")?
+                    .get_current_session_id()?;
+                client.for_conversation(&id)
+            })
+            .transpose()?;
         Ok(Self {
             cfg,
             tools,
@@ -213,6 +220,7 @@ impl Executor {
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
         let mut msgs = Vec::with_capacity(snapshot.len() + 2);
         msgs.push(llm::types::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some(sys_prompt),
@@ -221,6 +229,7 @@ impl Executor {
         });
         msgs.extend(snapshot);
         msgs.push(llm::types::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(instruction.to_string()),
@@ -410,6 +419,7 @@ impl Executor {
 
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "assistant".into(),
                     content: Some(final_msg.content.clone()),
@@ -530,7 +540,7 @@ impl Executor {
             if json {
                 let output = serde_json::json!({
                     "success": false,
-                    "error": "OPENAI_API_KEY not set; cannot call LLM.",
+                    "error": crate::features::opencode::missing_auth_message(self.cfg.provider),
                     "tokens_used": 0
                 });
                 println!(
@@ -540,7 +550,10 @@ impl Executor {
                     })
                 );
             } else {
-                eprintln!("OPENAI_API_KEY not set; cannot call LLM.");
+                eprintln!(
+                    "{}",
+                    crate::features::opencode::missing_auth_message(self.cfg.provider)
+                );
             }
             return Ok(());
         }
@@ -560,6 +573,7 @@ impl Executor {
         let mut msgs = Vec::new();
         let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
         msgs.push(llm::types::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "system".into(),
             content: Some(sys_prompt),
@@ -568,6 +582,7 @@ impl Executor {
         });
 
         msgs.push(llm::types::ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(request.clone()),
@@ -618,6 +633,7 @@ impl Executor {
                 let tools_called = collect_tools_called(&updated_messages);
                 // Execute hooks after the agent loop completes
                 let final_assistant_msg = crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
                     provider_state: None,
                     role: "assistant".into(),
                     content: Some(final_msg.content.clone()),
@@ -797,7 +813,9 @@ impl Executor {
     /// Does NOT print to stdout.
     pub async fn ask(&mut self, instruction: &str) -> Result<String> {
         if self.client.is_none() {
-            return Err(anyhow::anyhow!("OPENAI_API_KEY not set"));
+            return Err(anyhow::anyhow!(
+                crate::features::opencode::missing_auth_message(self.cfg.provider)
+            ));
         }
 
         // Request from the durable snapshot; the outer history is untouched
@@ -1149,6 +1167,7 @@ mod tests {
     fn test_collect_tools_called_preserves_order_and_duplicates() {
         let messages = vec![
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".to_string(),
                 content: None,
@@ -1163,6 +1182,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "assistant".to_string(),
                 content: None,
@@ -1187,6 +1207,7 @@ mod tests {
                 tool_call_id: None,
             },
             ChatMessage {
+                reasoning: Default::default(),
                 provider_state: None,
                 role: "tool".to_string(),
                 content: Some("ok".to_string()),
@@ -1412,6 +1433,7 @@ mod tests {
 
     fn exec_msg(role: &str, content: Option<&str>) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: role.to_string(),
             content: content.map(str::to_string),
@@ -1497,6 +1519,7 @@ mod tests {
 
     fn tool_invocation_msg(id: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: None,
@@ -1514,6 +1537,7 @@ mod tests {
 
     fn tool_result_msg(id: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "tool".into(),
             content: Some(content.to_string()),

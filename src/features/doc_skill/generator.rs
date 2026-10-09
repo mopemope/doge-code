@@ -179,6 +179,7 @@ Do not include the code itself in the output—only the doc comment text.",
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<String> {
         let messages = vec![ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(prompt),

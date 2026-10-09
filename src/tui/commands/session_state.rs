@@ -12,6 +12,15 @@ pub enum ResumeOutcome {
 }
 
 impl TuiExecutor {
+    pub(crate) fn conversation_client(&self) -> Result<Option<crate::llm::OpenAIClient>> {
+        let Some(client) = &self.client else {
+            return Ok(None);
+        };
+        let manager = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
+        let id = manager.get_current_session_id()?;
+        Ok(Some(client.for_conversation(&id)?))
+    }
+
     pub(crate) fn ensure_session_idle(&self) -> Result<()> {
         anyhow::ensure!(
             self.jobs.foreground_id().is_none(),
@@ -207,6 +216,7 @@ mod tests {
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "user".into(),
             content: Some(content.to_string()),
@@ -217,6 +227,7 @@ mod tests {
 
     fn assistant_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some(content.to_string()),
@@ -246,6 +257,49 @@ mod tests {
         )
         .expect("executor");
         (executor, dir)
+    }
+
+    #[test]
+    fn opencode_conversation_client_tracks_new_switch_and_resume_without_mutating_old_jobs() {
+        let (mut executor, _dir) = test_executor();
+        executor.client.as_mut().expect("client").provider =
+            crate::features::openai_subscription::ProviderKind::OpencodeGo;
+        let first_id = current_session_id(&executor);
+        let first_job = executor
+            .conversation_client()
+            .expect("snapshot")
+            .expect("client");
+        assert_eq!(first_job.opencode_session, first_id);
+        let mut ui = TuiApp::new("test", None, "dark").expect("ui");
+        let second_id = executor
+            .start_new_session(&mut ui, None)
+            .expect("new session");
+        let second_job = executor
+            .conversation_client()
+            .expect("snapshot")
+            .expect("client");
+        assert_ne!(first_id, second_id);
+        assert_eq!(second_job.opencode_session, second_id);
+        assert_eq!(first_job.opencode_session, first_id);
+        executor.switch_to_session(&first_id).expect("switch");
+        assert_eq!(
+            executor
+                .conversation_client()
+                .expect("snapshot")
+                .expect("client")
+                .opencode_session,
+            first_id
+        );
+        executor.resume_session(&second_id).expect("resume");
+        assert_eq!(
+            executor
+                .conversation_client()
+                .expect("snapshot")
+                .expect("client")
+                .opencode_session,
+            second_id
+        );
+        assert_eq!(first_job.opencode_session, first_id);
     }
 
     fn runtime_messages(executor: &TuiExecutor) -> Vec<ChatMessage> {

@@ -13,6 +13,7 @@ pub mod workflow;
 pub mod worktree_manager;
 
 pub mod openai_subscription;
+pub mod opencode;
 
 pub mod human_review;
 

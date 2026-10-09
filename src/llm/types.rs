@@ -34,8 +34,24 @@ pub struct ToolCall {
     pub function: ToolCallFunction,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ReasoningPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for ReasoningPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReasoningPayload([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    #[serde(default, flatten)]
+    pub reasoning: ReasoningPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_state: Option<crate::features::openai_subscription::ProviderState>,
     pub role: String,

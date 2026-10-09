@@ -18,7 +18,9 @@ pub async fn run_agent_streaming_once(
     cancel: Option<CancellationToken>,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
-    if client.is_subscription() {
+    if client.is_subscription()
+        || crate::features::opencode::default_base(client.provider).is_some()
+    {
         return crate::llm::run_agent_loop(
             client,
             model,
@@ -105,6 +107,7 @@ pub async fn run_agent_streaming_once(
                                 let exec = execute_tool_call(&runtime, idx, &buf).await;
                                 if let Ok(val) = exec {
                                     messages.push(ChatMessage {
+                                        reasoning: Default::default(),
                                         provider_state: None,
                                         role: "tool".into(),
                                         content: Some(
@@ -141,6 +144,7 @@ pub async fn run_agent_streaming_once(
     // If we have accumulated content and no tool call executed, return it as assistant message
     if !acc_text.is_empty() {
         messages.push(ChatMessage {
+            reasoning: Default::default(),
             provider_state: None,
             role: "assistant".into(),
             content: Some(acc_text.clone()),
