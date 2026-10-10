@@ -8,7 +8,7 @@ Doge-Code is an interactive AI coding agent that provides advanced code analysis
 - **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction (10+ languages including Rust, JavaScript/TypeScript, Python, Go, Java, C/C++, C#, Markdown)
 - **Interactive Terminal UI**: Full-featured TUI with syntax highlighting, diff review, and real-time LLM interaction
 - **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
-- **Persistent Sessions**: SQLite-based session storage to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
+- **Persistent Sessions**: JSON session checkpoints saved through atomic replacement of `session.json` to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
 - **Multi-Mode Interaction**: Support for both interactive TUI mode and command-line execution
 
 ### Supported Languages
@@ -1022,8 +1022,11 @@ keeps the old file intact; a directory-sync failure after replacement is reporte
 as such. IDs must be single path components, stored IDs must match their directory,
 and session/metadata symlinks are rejected. Malformed sessions are preserved and
 reported rather than silently skipped during listing or latest-session selection.
-The retention limit is 100 sessions and excludes the checkpoint being saved. If
-safe retention inventory fails, the checkpoint succeeds with a warning and no
+Automatic retention cleanup targets a limit of 100 sessions and protects the
+checkpoint being saved. Saves with a persisted model selection do not trigger
+cleanup, so the store can exceed that limit. A later legacy save without a model
+selection can trigger cleanup, which can also remove older model-aware sessions.
+If safe retention inventory fails, the checkpoint succeeds with a warning and no
 sessions are removed. Keep the store in a trusted directory: session leases do not
 guarantee protection against concurrent adversarial directory replacement.
 
@@ -1975,7 +1978,7 @@ template = "Execute the following task: {args}"
 - **`src/tools/`**: File system and code manipulation tools
 - **`src/tui/`**: ratatui-based terminal user interface
 - **`src/llm/`**: OpenAI-compatible LLM client and tool execution
-- **`src/session/`**: SQLite-based session persistence
+- **`src/session/`**: JSON session persistence with atomic `session.json` replacement
 - **`src/mcp/`**: Model Context Protocol server implementation
 - **`src/config/`**: Configuration management and TOML parsing
 - **`src/features/`**: Additional feature modules (verification, worktree)
