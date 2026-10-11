@@ -526,12 +526,13 @@ mod tests {
             let interpreter = root.path().join(".venv/bin/python");
             std::fs::write(
                 &interpreter,
-                r#"#!/usr/bin/python3
-import os, pathlib, shlex
-fixture = pathlib.Path('fixture.xml')
-if fixture.exists():
-    path = shlex.split(os.environ['PYTEST_ADDOPTS'])[0].split('=', 1)[1]
-    pathlib.Path(path).write_bytes(fixture.read_bytes())
+                r#"#!/bin/sh
+# No system interpreter/venv lookup: this stand-in verifies runner plumbing.
+if [ -f fixture.xml ]; then
+    report_path="${PYTEST_ADDOPTS#--junitxml=\'}"
+    report_path="${report_path%\'}"
+    cp fixture.xml "$report_path"
+fi
 "#,
             )
             .expect("interpreter");
@@ -550,8 +551,8 @@ if fixture.exists():
             )
             .await;
             assert!(matches!(outcome, JobRunOutcome::Completed));
-            assert_eq!(deferred.len(), 0);
             let messages = rx.try_iter().collect::<Vec<_>>().join("\n");
+            assert_eq!(deferred.len(), 0, "{messages}");
             assert!(!messages.contains("All tests passed"), "{messages}");
             assert!(
                 messages.contains(if report.is_some() {
