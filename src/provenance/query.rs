@@ -1118,6 +1118,7 @@ mod tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_identity: None,
                 execution_context: None,
                 execution_workspace: None,
                 plan_item_id: Some("step-2".to_string()),
@@ -1160,6 +1161,7 @@ mod tests {
         let store = ProvenanceStore::new(sess_dir.path().join("s"));
         let change = commit_for(&store, "s", "src/lib.rs", &sym_id, &fp);
         let event = VerificationObservedEvent {
+            execution_identity: None,
             structured_test_result: None,
             execution_context: None,
             execution_workspace: None,

@@ -233,6 +233,7 @@ fn verification(f: &Fixture, success: bool, timeout: bool) {
         .append(
             &f.session.meta.id,
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_identity: None,
                 structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
@@ -1170,6 +1171,7 @@ async fn execution_snapshot_detects_later_test_change_without_rewriting_coverage
         stderr: "",
         capture_truncated: false,
         context: VerificationContext {
+            execution_identity: None,
             execution_workspace: Some(workspace),
             observed_change_ids: vec![f.change.clone()],
             plan_item_id: Some("step-1".into()),
@@ -1667,10 +1669,10 @@ async fn human_review_payload_edits_unknown_versions_and_busy_storage_fail_close
     let (first, _) = hr::record(f.dir.path(), &f.session.meta.id, K::Accept, &target.token)
         .await
         .unwrap();
-    let events = f
-        .store
-        .session_dir(&f.session.meta.id)
-        .join("provenance/v7/events");
+    let events = f.store.session_dir(&f.session.meta.id).join(format!(
+        "provenance/v{}/events",
+        crate::provenance::PROVENANCE_SCHEMA_VERSION
+    ));
     let p = events.join(format!("{}.json", f.change));
     let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
     event["event"]["lines_added"] = serde_json::json!(12);
@@ -1821,10 +1823,11 @@ async fn human_review_staging_and_repeat_workspace_edits_change_the_snapshot() {
 #[tokio::test]
 async fn human_review_noncanonical_legacy_event_id_cannot_issue_an_unreadable_decision() {
     let f = fixture(true);
-    let p = f
-        .store
-        .session_dir(&f.session.meta.id)
-        .join(format!("provenance/v7/events/{}.json", f.change));
+    let p = f.store.session_dir(&f.session.meta.id).join(format!(
+        "provenance/v{}/events/{}.json",
+        crate::provenance::PROVENANCE_SCHEMA_VERSION,
+        f.change
+    ));
     let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
     event["event_id"] = serde_json::json!("legacy-event-id");
     fs::write(&p, serde_json::to_vec(&event).unwrap()).unwrap();

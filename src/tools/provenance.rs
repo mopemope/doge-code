@@ -1661,6 +1661,7 @@ mod tests {
     fn test_verification_context_race_snapshot() {
         // Change A captured; Change B lands before completion; observed keeps A only.
         let ctx_a = crate::provenance::VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             plan_item_id: Some("step-1".into()),
@@ -2241,6 +2242,7 @@ mod provenance_extra_tests {
                 stderr: "",
                 capture_truncated: false,
                 context: crate::provenance::VerificationContext {
+                    execution_identity: None,
                     execution_context: None,
                     execution_workspace: None,
                     plan_item_id: Some("step-1".into()),
@@ -2654,6 +2656,7 @@ mod review_fix_tests {
         // Verification observing the change with correct binding.
         let binding = crate::provenance::obligations::obligation_binding_hash("step-1", &[], &ob);
         let ctx = crate::provenance::VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             directive_id: None,
@@ -3092,6 +3095,7 @@ mod review_fix_tests {
             false,
         );
         let context = crate::provenance::VerificationContext {
+            execution_identity: None,
             observed_change_ids: vec!["frozen-change".into()],
             matched_obligations: vec![crate::provenance::VerificationObligationRef {
                 id: "frozen-obligation".into(),

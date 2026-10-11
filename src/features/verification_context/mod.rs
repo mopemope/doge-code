@@ -1,5 +1,6 @@
 //! Frozen, minimal metadata collected before a verification starts.
 //! No arbitrary output, environment values or executable paths are durable.
+pub mod identity;
 use crate::config::AppConfig;
 use crate::execution::{
     ExecutionPolicy, ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions,
