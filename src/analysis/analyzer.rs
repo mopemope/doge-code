@@ -408,6 +408,87 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn unchanged_sources_rebuild_missing_or_stale_analysis_revision() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        for revision in [None, Some("old-grammar")] {
+            let project = tempfile::tempdir().expect("cache project");
+            let root = project.path();
+            let source = root.join("App.tsx");
+            std::fs::write(&source, "function App() { return <div>Hello</div>; }")
+                .expect("React source");
+            let durable = root.join(".doge/sessions/retained/session.json");
+            std::fs::create_dir_all(durable.parent().expect("parent")).expect("session directory");
+            std::fs::write(&durable, "retained durable state").expect("session state");
+            let mut analyzer = Analyzer::new(root).await.expect("analyzer");
+            let hashes = calculate_file_hashes(std::slice::from_ref(&source)).await;
+            // Matching source hashes with an obsolete empty symbol map.
+            analyzer
+                .cache_store
+                .save(&RepomapCache::new(
+                    root.to_path_buf(),
+                    RepoMap::default(),
+                    hashes.clone(),
+                ))
+                .await
+                .expect("seed cache");
+            let connection = analyzer.cache_store.get_db_connection();
+            match revision {
+                None => connection
+                    .execute_unprepared("DELETE FROM repomap_metadata")
+                    .await
+                    .expect("unversioned cache"),
+                Some(revision) => connection
+                    .execute_raw(Statement::from_sql_and_values(
+                        DbBackend::Sqlite,
+                        "UPDATE repomap_metadata SET analysis_revision = ?",
+                        [revision.into()],
+                    ))
+                    .await
+                    .expect("stale cache"),
+            };
+            assert!(
+                !analyzer
+                    .cache_store
+                    .is_cache_valid(&hashes)
+                    .await
+                    .expect("validity")
+            );
+            let map = analyzer.build().await.expect("rebuild unchanged source");
+            assert!(map.symbols.iter().any(|symbol| symbol.name == "App"));
+            assert!(
+                analyzer
+                    .cache_store
+                    .is_cache_valid(&hashes)
+                    .await
+                    .expect("new validity")
+            );
+            assert_eq!(
+                std::fs::read_to_string(&durable).expect("retained session"),
+                "retained durable state"
+            );
+
+            // A current revision still reuses a cache when source hashes match.
+            analyzer
+                .cache_store
+                .save(&RepomapCache::new(
+                    root.to_path_buf(),
+                    RepoMap::default(),
+                    hashes,
+                ))
+                .await
+                .expect("current empty cache");
+            assert!(
+                analyzer
+                    .build()
+                    .await
+                    .expect("reuse current cache")
+                    .symbols
+                    .is_empty()
+            );
+        }
+    }
+
     #[test]
     fn test_find_target_files_with_gitignore() {
         // Create a temporary directory for testing

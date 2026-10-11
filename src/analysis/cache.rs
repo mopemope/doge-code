@@ -15,6 +15,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Bump whenever grammars, extension routing, collectors, or the persisted
+/// analysis format change. Unversioned caches are rebuilt on first use.
+pub(crate) const REPOMAP_ANALYSIS_REVISION: &str = "1";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepomapMetadata {
     pub version: String,
@@ -140,6 +144,11 @@ impl RepomapStore {
     pub async fn load(&self) -> Result<Option<RepomapCache>> {
         info!("Loading repomap cache from database");
 
+        if !RepomapDAO::has_current_analysis_revision(&self.db_conn, &self.project_root).await? {
+            debug!("Repomap analysis revision is missing or stale; rebuilding cache");
+            return Ok(None);
+        }
+
         // Load repomap from cache
         let loaded: Option<(RepoMap, HashMap<PathBuf, String>)> =
             RepomapDAO::load_repomap(&self.db_conn, &self.project_root).await?;
@@ -205,10 +214,7 @@ impl RepomapStore {
         &self,
         current_file_hashes: &HashMap<PathBuf, String>,
     ) -> Result<bool> {
-        // Check if the version has changed
-        // TODO: Need logic to save version information in the database and compare
-
-        // Check if the file hash has changed
+        // The DAO checks both the analysis revision and source file hashes.
         let is_valid: bool =
             RepomapDAO::is_repomap_valid(&self.db_conn, &self.project_root, current_file_hashes)
                 .await?;
@@ -266,6 +272,45 @@ mod tests {
     use super::*;
     use crate::analysis::symbol::{SymbolInfo, SymbolKind};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn revision_save_failure_rolls_back_replaced_cache() {
+        use sea_orm::ConnectionTrait;
+        let project = tempfile::tempdir().expect("cache project");
+        let root = project.path().to_path_buf();
+        let store = RepomapStore::new(root.clone()).await.expect("store");
+        let source = root.join("lib.rs");
+        let original_hashes = HashMap::from([(source.clone(), "original".to_owned())]);
+        store
+            .save(&RepomapCache::new(
+                root.clone(),
+                RepoMap::default(),
+                original_hashes.clone(),
+            ))
+            .await
+            .expect("original cache");
+        store.get_db_connection().execute_unprepared(
+            "CREATE TRIGGER reject_revision BEFORE INSERT ON repomap_metadata BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END",
+        ).await.expect("failure fixture");
+        let candidate = RepomapCache::new(
+            root,
+            RepoMap::default(),
+            HashMap::from([(source, "changed".to_owned())]),
+        );
+        assert!(store.save(&candidate).await.is_err());
+        let retained = store
+            .load()
+            .await
+            .expect("load retained cache")
+            .expect("current revision retained");
+        assert_eq!(retained.file_hashes, original_hashes);
+        assert!(
+            store
+                .is_cache_valid(&original_hashes)
+                .await
+                .expect("retained validity")
+        );
+    }
 
     #[tokio::test]
     async fn test_repomap_store_new_with_corrupt_db() {
