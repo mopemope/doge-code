@@ -83,11 +83,15 @@ pub struct Entry {
 #[derive(Default)]
 pub struct VerificationQueue {
     pub session_id: Option<String>,
+    generation: String,
     pub planned: Option<Snapshot>,
     pub entries: Vec<Entry>,
     pub paths: Option<Vec<String>>,
 }
 impl VerificationQueue {
+    pub fn invalidate_selection(&mut self) {
+        self.generation = uuid::Uuid::new_v4().simple().to_string();
+    }
     pub fn refresh(
         &mut self,
         session_id: Option<String>,
@@ -95,6 +99,7 @@ impl VerificationQueue {
         recommendations: Vec<VerificationRecommendation>,
         paths: Option<Vec<String>>,
     ) {
+        self.invalidate_selection();
         let old = if self.session_id == session_id {
             std::mem::take(&mut self.entries)
         } else {
@@ -127,16 +132,32 @@ impl VerificationQueue {
         self.planned = Some(planned);
         self.paths = paths;
     }
+    /// Opaque selection authority, valid only for this displayed queue generation.
+    /// Keep the row index as a discriminator so duplicate commands retain all
+    /// reasons/scopes, rather than collapsing one recommendation into another.
+    pub fn selection_id(&self, index: usize) -> Option<String> {
+        let recommendation = &self.entries.get(index)?.recommendation;
+        let bytes = serde_json::to_vec(recommendation).ok()?;
+        let digest = blake3::hash(&bytes).to_hex();
+        Some(format!(
+            "q{}-{}-{}",
+            self.generation,
+            index + 1,
+            &digest[..16]
+        ))
+    }
     pub fn selection(
         &self,
-        index: usize,
+        id: &str,
         session_id: &Option<String>,
         current: &Snapshot,
-    ) -> anyhow::Result<Entry> {
+    ) -> anyhow::Result<(usize, Entry)> {
         anyhow::ensure!(
             &self.session_id == session_id,
             "Session changed; use /verify refresh."
         );
+        let index = (0..self.entries.len()).find(|&i| self.selection_id(i).as_deref() == Some(id))
+            .ok_or_else(|| anyhow::anyhow!("Stale or unknown selection ID; use /verify and copy the displayed /verify run command."))?;
         let planned = self
             .planned
             .as_ref()
@@ -145,13 +166,10 @@ impl VerificationQueue {
             matches_current(planned, current),
             "Workspace changed or snapshot is incomplete; use /verify refresh before selecting a command."
         );
-        self.entries
-            .get(index)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Unknown candidate; use /verify to list numbers."))
+        Ok((index, self.entries[index].clone()))
     }
     pub fn lines(&self, current: &Snapshot) -> Vec<String> {
-        let mut lines = vec!["[verify] Suggestions are not verification. Select one with /verify run <number>; /verify refresh [relative paths...] rebuilds suggestions.".into()];
+        let mut lines = vec!["[verify] Suggestions are not verification. Select one with /verify run <id>; /verify refresh [relative paths...] rebuilds suggestions.".into()];
         if self.entries.is_empty() {
             lines.push("[verify] No candidates (no active changes or supported test configuration); nothing was executed.".into());
         }
@@ -202,6 +220,9 @@ impl VerificationQueue {
                 r.confidence,
                 r.reason
             ));
+            if let Some(id) = self.selection_id(i) {
+                lines.push(format!("[verify] Select: /verify run {id}"));
+            }
             if let Some(counts) = entry.test_counts {
                 lines.push(format!("[verify] reported tests: passed={} failed={} skipped={} (only the selected command's scope)", counts.passed, counts.failed, counts.skipped));
             } else {
