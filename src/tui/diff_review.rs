@@ -2,6 +2,7 @@ use crate::diff_review::{DiffFileEvidence, DiffReviewPayload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffReviewState {
+    pub evidence_detail: Option<EvidenceDetailState>,
     pub source: DiffReviewPayload,
     pub session_id: Option<String>,
     pub review_id: Option<String>,
@@ -94,6 +95,7 @@ impl DiffReviewState {
         }
 
         Self {
+            evidence_detail: None,
             source,
             session_id: payload.session_id,
             review_id: payload.review_id,
@@ -447,5 +449,45 @@ mod tests {
         let mut tiny = state;
         tiny.selected = 10; // out of bounds
         assert!(tiny.current_file().is_none());
+    }
+}
+
+/// Ephemeral request binding; closed/replaced views reject late read results.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceDetailRequest {
+    pub request_id: String,
+    pub session_id: String,
+    pub path: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceDetailState {
+    pub request: EvidenceDetailRequest,
+    pub lines: Vec<String>,
+    pub scroll: u16,
+    pub job_id: Option<crate::jobs::JobId>,
+    pub loading: bool,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceDetailResponse {
+    pub request: EvidenceDetailRequest,
+    pub lines: Vec<String>,
+}
+impl DiffReviewState {
+    pub fn apply_evidence_detail(&mut self, response: EvidenceDetailResponse) -> bool {
+        if let Some(detail) = self.evidence_detail.as_mut()
+            && detail.request == response.request
+            && self.session_id.as_deref() == Some(response.request.session_id.as_str())
+            && self
+                .files
+                .get(self.selected)
+                .is_some_and(|f| f.path == response.request.path)
+        {
+            detail.lines = response.lines;
+            detail.loading = false;
+            detail.scroll = 0;
+            true
+        } else {
+            false
+        }
     }
 }

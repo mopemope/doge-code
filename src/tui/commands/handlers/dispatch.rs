@@ -155,6 +155,12 @@ impl CommandHandler for TuiExecutor {
             );
             return;
         }
+        if let Some(json) = line.strip_prefix("::diff_evidence_request:") {
+            crate::tui::commands::handlers::slash_commands::evidence::handle_file_evidence(
+                self, ui, json,
+            );
+            return;
+        }
         if line.split_whitespace().next() == Some("/evidence") {
             crate::tui::commands::handlers::slash_commands::evidence::handle_evidence(
                 self,

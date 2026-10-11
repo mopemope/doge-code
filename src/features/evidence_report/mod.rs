@@ -1,5 +1,7 @@
 //! Read-only, session-scoped evidence exports. No LLM or provenance writes.
 mod collect;
+mod detail;
+pub use detail::file_detail;
 mod handoff;
 mod model;
 mod render;
