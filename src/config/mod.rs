@@ -36,3 +36,6 @@ pub mod subagent;
 pub use subagent::*;
 
 mod inference_diagnostics;
+
+mod trust;
+pub use trust::ConfigOrigin;
