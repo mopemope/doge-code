@@ -5,6 +5,39 @@ mod analysis_tests {
     use std::io::Write;
 
     #[tokio::test]
+    async fn parse_react_components_in_tsx_and_jsx() {
+        let project = tempfile::tempdir().expect("React project");
+        for extension in ["tsx", "jsx"] {
+            let path = project.path().join(format!("App.{extension}"));
+            let source =
+                "export function App() { return <section><span>Hello</span></section>; }\n";
+            std::fs::write(&path, source).expect("React source");
+            let analysis = crate::analysis::parser::analyze_source(&path, source)
+                .expect("analyze React source")
+                .expect("registered extension");
+            assert!(!analysis.has_syntax_error, "{extension}");
+            assert!(
+                analysis
+                    .repomap
+                    .symbols
+                    .iter()
+                    .any(|symbol| { symbol.name == "App" && symbol.kind == SymbolKind::Function })
+            );
+        }
+        let mut analyzer = Analyzer::new(project.path()).await.expect("analyzer");
+        let map = analyzer.build().await.expect("build React RepoMap");
+        for extension in ["tsx", "jsx"] {
+            assert!(
+                map.symbols.iter().any(|symbol| {
+                    symbol.name == "App"
+                        && symbol.file == project.path().join(format!("App.{extension}"))
+                }),
+                "{extension} file is included in project analysis"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn parse_ts_symbols_with_comments() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a.ts");
