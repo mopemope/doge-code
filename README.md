@@ -416,8 +416,10 @@ identifies selected files **at export time**, using exact-byte BLAKE3 hashes whe
 available. A before/after check retries once if saved evidence or workspace files
 change, then fails if they keep changing. This is an optimistic check, not an
 atomic snapshot, execution-time environment record, signature, or proof of
-correctness. Test counts and historical execution environments are `null` because
-existing events do not record them. No tests are re-executed by export.
+correctness. Test counts are populated for supported structured observations (Go JSON and
+trusted default pytest JUnit); unsupported or legacy observations retain `null`.
+Historical execution environments remain `null` when not recorded. No tests are
+re-executed by export.
 
 New verification observations from structured `execute_process`, `/test`, and
 classified `/lint` commands record project workspace endpoints before and after
