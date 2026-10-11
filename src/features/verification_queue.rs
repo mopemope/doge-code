@@ -1,0 +1,247 @@
+//! Session-local suggestions and observed outcomes. Never marks a plan complete.
+use crate::features::{
+    change_impact::VerificationRecommendation,
+    structured_test_results::ResultObservation,
+    testing::TestResult,
+    verification_snapshot::{self, CurrentState, ExecutionWorkspace, RunState, Snapshot},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Unexecuted,
+    Running,
+    Passed,
+    Failed,
+    ZeroTests,
+    Skipped,
+    Incomplete,
+    Unknown,
+    TimedOut,
+    Cancelled,
+    SpawnFailed,
+}
+impl Outcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unexecuted => "unexecuted",
+            Self::Running => "running",
+            Self::Passed => "reported tests passed",
+            Self::Failed => "failed",
+            Self::ZeroTests => "zero tests",
+            Self::Skipped => "all reported tests skipped",
+            Self::Incomplete => "incomplete",
+            Self::Unknown => "test counts unknown",
+            Self::TimedOut => "timed out",
+            Self::Cancelled => "cancelled",
+            Self::SpawnFailed => "could not start",
+        }
+    }
+}
+pub fn classify(result: &TestResult) -> Outcome {
+    if result.cancelled {
+        return Outcome::Cancelled;
+    }
+    if result.timed_out {
+        return Outcome::TimedOut;
+    }
+    if !result.execution_observed {
+        return Outcome::SpawnFailed;
+    }
+    if !result.success {
+        return Outcome::Failed;
+    }
+    if result.output_truncated || !result.warnings.is_empty() {
+        return Outcome::Incomplete;
+    }
+    match result
+        .structured_test_result
+        .as_ref()
+        .map(|s| &s.observation)
+    {
+        Some(ResultObservation::Complete { test_events, .. }) if test_events.failed > 0 => {
+            Outcome::Failed
+        }
+        Some(ResultObservation::Complete { test_events, .. }) if test_events.total() == 0 => {
+            Outcome::ZeroTests
+        }
+        Some(ResultObservation::Complete { test_events, .. }) if test_events.passed == 0 => {
+            Outcome::Skipped
+        }
+        Some(ResultObservation::Complete { .. }) => Outcome::Passed,
+        Some(ResultObservation::Unknown { .. }) => Outcome::Incomplete,
+        None => Outcome::Unknown,
+    }
+}
+#[derive(Clone)]
+pub struct Entry {
+    pub recommendation: VerificationRecommendation,
+    pub outcome: Outcome,
+    pub workspace: Option<ExecutionWorkspace>,
+    pub test_counts: Option<crate::features::structured_test_results::Counts>,
+    pub exit_code: Option<i32>,
+}
+#[derive(Default)]
+pub struct VerificationQueue {
+    pub session_id: Option<String>,
+    pub planned: Option<Snapshot>,
+    pub entries: Vec<Entry>,
+    pub paths: Option<Vec<String>>,
+}
+impl VerificationQueue {
+    pub fn refresh(
+        &mut self,
+        session_id: Option<String>,
+        planned: Snapshot,
+        recommendations: Vec<VerificationRecommendation>,
+        paths: Option<Vec<String>>,
+    ) {
+        let old = if self.session_id == session_id {
+            std::mem::take(&mut self.entries)
+        } else {
+            vec![]
+        };
+        self.entries = recommendations
+            .into_iter()
+            .map(|recommendation| {
+                let previous = old.iter().find(|e| {
+                    e.recommendation.program == recommendation.program
+                        && e.recommendation.args == recommendation.args
+                        && e.recommendation.cwd == recommendation.cwd
+                });
+                match previous {
+                    Some(e) => Entry {
+                        recommendation,
+                        ..e.clone()
+                    },
+                    None => Entry {
+                        recommendation,
+                        outcome: Outcome::Unexecuted,
+                        workspace: None,
+                        test_counts: None,
+                        exit_code: None,
+                    },
+                }
+            })
+            .collect();
+        self.session_id = session_id;
+        self.planned = Some(planned);
+        self.paths = paths;
+    }
+    pub fn selection(
+        &self,
+        index: usize,
+        session_id: &Option<String>,
+        current: &Snapshot,
+    ) -> anyhow::Result<Entry> {
+        anyhow::ensure!(
+            &self.session_id == session_id,
+            "Session changed; use /verify refresh."
+        );
+        let planned = self
+            .planned
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Use /verify first."))?;
+        anyhow::ensure!(
+            matches_current(planned, current),
+            "Workspace changed or snapshot is incomplete; use /verify refresh before selecting a command."
+        );
+        self.entries
+            .get(index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown candidate; use /verify to list numbers."))
+    }
+    pub fn lines(&self, current: &Snapshot) -> Vec<String> {
+        let mut lines = vec!["[verify] Suggestions are not verification. Select one with /verify run <number>; /verify refresh [relative paths...] rebuilds suggestions.".into()];
+        if self.entries.is_empty() {
+            lines.push("[verify] No candidates (no active changes or supported test configuration); nothing was executed.".into());
+        }
+        for (i, entry) in self.entries.iter().enumerate() {
+            let correspondence = match entry.workspace.as_ref() {
+                Some(record) if record.run_state == RunState::ChangedBetweenEndpoints => {
+                    "changed during run; stale"
+                }
+                Some(record) if record.run_state != RunState::StableEndpoints => {
+                    "snapshot correspondence unknown"
+                }
+                Some(record) => {
+                    match verification_snapshot::compare_current(Some(record), Some(current)).state
+                    {
+                        CurrentState::MatchesStart if record.start.same_observation(current) => {
+                            "pre/post observations match current files"
+                        }
+                        CurrentState::MatchesStart => "stale for current changes",
+                        CurrentState::DiffersFromStart => "stale for current changes",
+                        _ => "snapshot correspondence unknown",
+                    }
+                }
+                None if self.planned.as_ref().is_some_and(|s| {
+                    s.status != verification_snapshot::CaptureStatus::Complete
+                }) =>
+                {
+                    "candidate snapshot unknown; refresh required"
+                }
+                None if self
+                    .planned
+                    .as_ref()
+                    .is_some_and(|s| !matches_current(s, current)) =>
+                {
+                    "candidate snapshot stale; refresh required"
+                }
+                None => "no execution evidence",
+            };
+            let r = &entry.recommendation;
+            lines.push(format!(
+                "[verify] {}. {} {:?} cwd={:?} | {} | {} | scope={} confidence={}; {}",
+                i + 1,
+                r.program,
+                r.args,
+                r.cwd.as_deref().unwrap_or("."),
+                entry.outcome.label(),
+                correspondence,
+                r.coverage_scope,
+                r.confidence,
+                r.reason
+            ));
+            if let Some(counts) = entry.test_counts {
+                lines.push(format!("[verify] reported tests: passed={} failed={} skipped={} (only the selected command's scope)", counts.passed, counts.failed, counts.skipped));
+            } else {
+                lines.push(format!("[verify] test counts unknown; process exit={:?}. A local command does not establish whole-project correctness.", entry.exit_code));
+            }
+        }
+        lines
+    }
+}
+/// A complete end observation must never upgrade unknown planning into authority.
+pub fn bind_planning_snapshot(before: &Snapshot, mut after: Snapshot) -> anyhow::Result<Snapshot> {
+    use verification_snapshot::CaptureStatus;
+    if before.status == CaptureStatus::Complete && after.status == CaptureStatus::Complete {
+        anyhow::ensure!(
+            !verification_snapshot::differences(before, &after).differs()
+                && before.same_observation(&after),
+            "Workspace changed while planning; no candidates published. Retry /verify refresh."
+        );
+    }
+    if !matches_current(before, &after) {
+        after.status = CaptureStatus::Partial;
+        after
+            .diagnostics
+            .push(verification_snapshot::Diagnostic::FileUnavailable);
+    }
+    Ok(after)
+}
+
+pub fn matches_current(planned: &Snapshot, current: &Snapshot) -> bool {
+    let record = ExecutionWorkspace {
+        version: 1,
+        start: planned.clone(),
+        end: None,
+        run_state: RunState::Indeterminate,
+        differences: Default::default(),
+    };
+    verification_snapshot::compare_current(Some(&record), Some(current)).state
+        == CurrentState::MatchesStart
+        && planned.same_observation(current)
+}
+
+#[cfg(test)]
+mod tests;

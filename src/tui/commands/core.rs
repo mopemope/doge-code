@@ -95,6 +95,8 @@ pub struct TuiExecutor {
     pub(crate) client: Option<OpenAIClient>,
     pub(crate) ui_tx: Option<std::sync::mpsc::Sender<String>>,
     pub(crate) jobs: JobManager,
+    pub(crate) verification_queue:
+        Arc<Mutex<crate::features::verification_queue::VerificationQueue>>,
     pub(crate) last_user_prompt: Option<String>,
     pub(crate) feedback_submissions: std::collections::HashSet<(String, u64)>,
     /// Consume-once store for post-terminal Test/Lint follow-up payloads,
