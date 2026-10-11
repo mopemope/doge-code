@@ -1045,6 +1045,7 @@ mod finalize_integration_tests {
         assert_eq!(active.len(), 2);
         // A verification snapshot captures the whole chain.
         let ctx = crate::provenance::VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             plan_item_id: None,

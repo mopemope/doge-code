@@ -177,7 +177,12 @@ async fn run_action(
             Some(token.child_token()),
         )
         .await;
-        let impact = crate::tools::impact::impact_analyze(
+        let history = verification_queue::history::load(&tools);
+        let impact_history = match &history {
+            Ok(loaded) => Ok(loaded.clone()),
+            Err(_) => Err(anyhow::anyhow!("bounded history unavailable")),
+        };
+        let impact = crate::tools::impact::impact_analyze_with_history(
             &tools,
             crate::tools::impact::ImpactAnalyzeArgs {
                 paths: paths.clone(),
@@ -185,6 +190,7 @@ async fn run_action(
                 ..Default::default()
             },
             Some(token.child_token()),
+            Some(impact_history),
         )
         .await?;
         let references = before
@@ -206,6 +212,17 @@ async fn run_action(
             let _ = tx.send(format!("[verify] {warning}"));
         }
         lock(&queue)?.refresh(session_id.clone(), after, impact.verification, paths);
+        match history {
+            Ok(Some(history)) => lock(&queue)?.restore_history(&history, root),
+            Ok(None) => {}
+            Err(_) => {
+                for entry in &mut lock(&queue)?.entries {
+                    entry.history = None;
+                }
+                lock(&queue)?.history_warning =
+                    Some("Recorded history unavailable; no historical results restored.".into())
+            }
+        }
     }
     let references = lock(&queue)?
         .planned
@@ -258,6 +275,8 @@ async fn run_action(
             )
             .await,
         );
+        context.execution_identity =
+            crate::features::verification_context::identity::capture(root, &cwd, &r.program);
         let references = current.files.iter().map(|f| f.path.clone()).collect();
         let workspace =
             verification_snapshot::begin(root, references, Some(token.child_token())).await;
@@ -268,6 +287,7 @@ async fn run_action(
         context.execution_workspace = Some(workspace.clone());
         {
             let mut q = lock(&queue)?;
+            q.entries[index].history = None;
             q.entries[index].outcome = Outcome::Running;
             q.entries[index].workspace = Some(workspace);
             q.entries[index].test_counts = None;
@@ -305,6 +325,11 @@ async fn run_action(
         .await;
         if token.is_cancelled() {
             return Ok(JobRunOutcome::Cancelled);
+        }
+        if context.execution_identity
+            != crate::features::verification_context::identity::capture(root, &cwd, &r.program)
+        {
+            context.execution_identity = None;
         }
         pending = Some((index, r, result, context));
     }
