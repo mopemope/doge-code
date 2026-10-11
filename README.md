@@ -348,9 +348,17 @@ In the TUI, `/evidence [session-id]` compares saved evidence with current select
 files and shows a bounded summary plus the export command in the log. Without an
 ID it selects the current session at command invocation; explicit prefixes use
 the existing unambiguous resolver and the summary displays the full resolved ID.
-Diff Review's `e` key inspects its captured session, even if another session is
-now current. Legacy reviews without an ID require explicit selection. The key
-works with empty input and does not accept, reject or dismiss the diff.
+With Diff Review focused (`F6`), `e` opens a selected-file evidence screen for
+its captured session, even if another session is now current. It shows exact
+recorded change/verification IDs, program, argv, cwd, process outcome, supported
+test counts and execution/current snapshot correspondence. Missing links, legacy
+records, unknown counts and stale success stay explicitly unconfirmed; filename
+similarity never establishes a link. This is endpoint evidence, not runtime
+coverage or correctness proof. `Esc`/`q` returns to the diff; arrows and PageUp/
+PageDown scroll the screen. Close and reopen after edits for a fresh comparison.
+Legacy reviews without a captured session ID show unavailable correspondence;
+use `/evidence <id>` explicitly after closing the screen. Opening the screen does
+not execute verification, export, accept/reject, or write review history.
 
 Evidence inspection is a foreground read job: `/cancel` cancels it; session
 transitions and conflicting operations wait for completion. Cancelling, accepting,

@@ -1914,3 +1914,96 @@ async fn pytest_report_survives_provenance_replay_with_python_count_unit() {
     assert!(!json.contains("test_sample"));
     assert!(!json.contains("test_skip"));
 }
+
+#[tokio::test]
+async fn file_detail_uses_explicit_links_and_preserves_unknown_legacy_results() {
+    let f = fixture(true);
+    let report = inspect(f.dir.path(), &f.session.meta.id)
+        .await
+        .expect("report");
+    let lines = detail::from_report(&report, "code.rs")
+        .expect("detail")
+        .join("\n");
+    assert!(lines.contains(&f.change));
+    assert!(lines.contains(&report.verifications[0].id));
+    assert!(lines.contains("Program: \"cargo\""));
+    assert!(lines.contains("Argv: [\"test\",\"target\"]"));
+    assert!(lines.contains("Test count: unknown"));
+    assert!(lines.contains("Execution snapshots: NotRecorded"));
+    assert!(lines.contains("Current success unconfirmed"));
+    assert!(!lines.contains("STDOUT-PRIVATE"));
+    let mut unlinked = report;
+    unlinked.verifications[0].observed_change_ids.clear();
+    let lines = detail::from_report(&unlinked, "code.rs")
+        .expect("detail")
+        .join("\n");
+    assert!(lines.contains("No explicitly linked verification"));
+    assert!(!lines.contains(&unlinked.verifications[0].id));
+    for path in ["code.rs.bak", " code.rs", "code.rs "] {
+        let lines = detail::from_report(&unlinked, path)
+            .expect("detail")
+            .join("\n");
+        assert!(lines.contains("No recorded change IDs for this exact file"));
+        assert!(!lines.contains(&f.change));
+    }
+}
+
+#[tokio::test]
+async fn file_detail_reopens_fresh_after_external_edit_without_history_writes() {
+    let f = fixture(true);
+    let session_path = f.store.session_dir(&f.session.meta.id);
+    let before =
+        collect::input_identity(f.dir.path(), &f.store, &f.session.meta.id).expect("before");
+    let first = file_detail(f.dir.path(), &f.session.meta.id, "code.rs")
+        .await
+        .expect("detail")
+        .join("\n");
+    assert!(first.contains("current file Matched"));
+    fs::write(f.dir.path().join("code.rs"), "external edit").expect("edit");
+    let second = file_detail(f.dir.path(), &f.session.meta.id, "code.rs")
+        .await
+        .expect("fresh detail")
+        .join("\n");
+    assert!(second.contains("current file Different"));
+    assert!(second.contains("Current success unconfirmed"));
+    assert_eq!(
+        before,
+        collect::input_identity(f.dir.path(), &f.store, &f.session.meta.id).expect("after")
+    );
+    assert!(session_path.exists());
+}
+
+#[tokio::test]
+async fn file_detail_bounds_and_escapes_fields_and_retains_structured_counts() {
+    use crate::features::structured_test_results::{
+        Counts, ResultFormat, ResultObservation, StructuredTestResult,
+    };
+    let f = fixture(true);
+    let mut report = inspect(f.dir.path(), &f.session.meta.id)
+        .await
+        .expect("report");
+    let v = &mut report.verifications[0];
+    v.program = format!("\x1b[31m{}", "x".repeat(2000));
+    v.test_count = Some(3);
+    v.test_count_unit = Some("go_test_terminal_events_including_subtests");
+    v.structured_test_result = Some(Box::new(StructuredTestResult {
+        format_version: 1,
+        format: ResultFormat::GoTestJson,
+        observation: ResultObservation::Complete {
+            test_events: Counts {
+                passed: 2,
+                failed: 1,
+                skipped: 0,
+            },
+            packages: Counts::default(),
+        },
+    }));
+    let lines = detail::from_report(&report, "code.rs").expect("detail");
+    let text = lines.join("\n");
+    assert!(!text.contains('\x1b'));
+    assert!(text.contains("field truncated"));
+    assert!(text.contains("Test count: 3"));
+    assert!(text.contains("\"passed\":2,\"failed\":1"));
+    assert!(lines.len() <= 256);
+    assert!(lines.iter().all(|l| l.len() < 12000));
+}
