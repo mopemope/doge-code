@@ -653,3 +653,220 @@ cp fixture.xml "$report_path"
         Some(crate::features::structured_test_results::pytest::Outcome::AllSkipped)
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn history_restart_resume_rebuild_is_read_only_and_preserves_latest_and_stale_observations() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, tools, old_queue, tx, _rx) = fixture("exit 0");
+    std::fs::write(
+        root.path().join(".gitignore"),
+        ".doge/\n.venv/\nfixture.xml\nspawned\n",
+    )
+    .expect("ignore");
+    std::fs::write(
+        root.path().join("test_example.py"),
+        "def test_example(): pass\n",
+    )
+    .expect("source");
+    std::fs::create_dir_all(root.path().join(".venv/bin")).expect("venv");
+    std::fs::write(root.path().join(".venv/pyvenv.cfg"), "home = fixture\n").expect("venv config");
+    std::fs::write(
+        root.path().join("fixture.xml"),
+        include_str!("../../../../../features/structured_test_results/fixtures/pytest/skipped.xml"),
+    )
+    .expect("report");
+    let python = root.path().join(".venv/bin/python");
+    std::fs::write(
+        &python,
+        r#"#!/bin/sh
+report_path="${PYTEST_ADDOPTS#--junitxml=\'}"
+report_path="${report_path%\'}"
+printf x >> spawned
+cp fixture.xml "$report_path"
+"#,
+    )
+    .expect("runner");
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    tools
+        .fs_write(
+            root.path().join("test_example.py").to_str().expect("path"),
+            "def test_example(): assert True\n",
+        )
+        .await
+        .expect("tracked change");
+    tools
+        .get_session_manager_wrapper()
+        .get_session_manager()
+        .as_ref()
+        .expect("manager")
+        .lock()
+        .expect("manager lock")
+        .flush_current_session()
+        .expect("checkpoint");
+    run_action(
+        tools.clone(),
+        old_queue.clone(),
+        Action::List,
+        10000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("list");
+    let index = old_queue
+        .lock()
+        .expect("queue")
+        .entries
+        .iter()
+        .position(|e| e.recommendation.program == python.to_string_lossy())
+        .expect("Python candidate");
+    let old_id = old_queue
+        .lock()
+        .expect("queue")
+        .selection_id(index)
+        .expect("ID");
+    run_action(
+        tools.clone(),
+        old_queue.clone(),
+        Action::Run(old_id.clone()),
+        10000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("run");
+    assert_eq!(
+        old_queue.lock().expect("queue").entries[index].outcome,
+        Outcome::Skipped
+    );
+    let session = tools.get_current_session().expect("session").meta.id;
+    drop(tools);
+    drop(old_queue);
+    let mut manager = crate::session::SessionManager::with_store(
+        crate::session::SessionStore::new(root.path().join(".doge/sessions")).expect("store"),
+    );
+    manager
+        .load_session(&session)
+        .expect("resume after previous owner dropped");
+    let tools =
+        super::tests::tools(root.path()).with_session_manager(Arc::new(Mutex::new(manager)));
+    let queue: Arc<Mutex<VerificationQueue>> = Default::default();
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::List,
+        10000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("restored list");
+    let index = queue
+        .lock()
+        .expect("queue")
+        .entries
+        .iter()
+        .position(|e| e.recommendation.program == python.to_string_lossy())
+        .expect("Python candidate");
+    {
+        let q = queue.lock().expect("queue");
+        let entry = &q.entries[index];
+        let h = entry.history.as_ref().expect("historical result");
+        assert_eq!(entry.outcome, Outcome::Unexecuted);
+        assert_eq!(h.outcome, Outcome::Skipped);
+        assert_eq!(h.counts.expect("counts").skipped, 1);
+        assert_eq!(h.inputs, verification_queue::history::InputMatch::Matches);
+        assert_ne!(q.selection_id(index).as_deref(), Some(old_id.as_str()));
+    }
+    assert_eq!(
+        std::fs::read(root.path().join("spawned")).expect("marker"),
+        b"x"
+    );
+    assert!(
+        run_action(
+            tools.clone(),
+            queue.clone(),
+            Action::Run(old_id),
+            10000,
+            tx.clone(),
+            CancellationToken::new(),
+            None
+        )
+        .await
+        .is_err()
+    );
+    let loaded = crate::tools::provenance::load_current_events(&tools)
+        .expect("load")
+        .expect("session");
+    let mut failed = loaded
+        .events
+        .into_iter()
+        .rev()
+        .find_map(|e| match e.event {
+            crate::provenance::ProvenanceEvent::VerificationObserved(v) => Some(v),
+            _ => None,
+        })
+        .expect("recorded");
+    failed.outcome.success = false;
+    failed.outcome.exit_code = Some(1);
+    failed.structured_test_result = None;
+    let context = tools.current_session_storage_context().expect("context");
+    let store = crate::provenance::ProvenanceStore::new(context.session_dir);
+    store
+        .append(
+            &session,
+            crate::provenance::ProvenanceEvent::VerificationObserved(failed),
+        )
+        .expect("later failure");
+    std::fs::write(
+        root.path().join("test_example.py"),
+        "def test_changed(): pass\n",
+    )
+    .expect("external edit");
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::Refresh(None),
+        10000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("refresh history");
+    let snapshot = verification_snapshot::capture(root.path(), Default::default(), None).await;
+    {
+        let q = queue.lock().expect("queue");
+        let h = q.entries[index].history.as_ref().expect("newest history");
+        assert_eq!(h.outcome, Outcome::Failed);
+        assert!(
+            h.lines(&snapshot)
+                .join("\n")
+                .contains("stale for current files")
+        );
+    }
+    let corrupt = store.events_dir().join("corrupt.json");
+    std::fs::write(&corrupt, "broken later history").expect("corrupt");
+    run_action(
+        tools,
+        queue.clone(),
+        Action::Refresh(None),
+        10000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("history warning");
+    let q = queue.lock().expect("queue");
+    assert!(q.history_warning.is_some());
+    assert!(q.entries.iter().all(|e| e.history.is_none()));
+    assert_eq!(
+        std::fs::read(root.path().join("spawned")).expect("no rerun"),
+        b"x"
+    );
+}

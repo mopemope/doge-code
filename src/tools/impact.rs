@@ -78,6 +78,15 @@ pub async fn impact_analyze(
     args: ImpactAnalyzeArgs,
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> anyhow::Result<crate::features::change_impact::ImpactAnalysisResponse> {
+    impact_analyze_with_history(fs_tools, args, cancel, None).await
+}
+
+pub(crate) async fn impact_analyze_with_history(
+    fs_tools: &crate::tools::FsTools,
+    args: ImpactAnalyzeArgs,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    history: Option<anyhow::Result<Option<crate::provenance::ProvenanceLoadResult>>>,
+) -> anyhow::Result<crate::features::change_impact::ImpactAnalysisResponse> {
     if cancel
         .as_ref()
         .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -120,7 +129,8 @@ pub async fn impact_analyze(
         }
     } else {
         // Session active tracked changes (read-only provenance query).
-        let (events, session_files) = match crate::tools::provenance::load_current_events(fs_tools)
+        let (events, session_files) = match history
+            .unwrap_or_else(|| crate::tools::provenance::load_current_events(fs_tools))
         {
             Ok(Some(loaded)) => {
                 if !loaded.warnings.is_empty() {

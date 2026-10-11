@@ -6,7 +6,8 @@ use super::wire::v3 as wire_v3;
 use super::wire::v4 as wire_v4;
 
 /// Current on-disk schema version for newly written provenance events.
-pub const PROVENANCE_SCHEMA_VERSION: u32 = 7;
+pub const PROVENANCE_SCHEMA_VERSION: u32 = 8;
+pub const V7_PROVENANCE_SCHEMA_VERSION: u32 = 7;
 pub const V6_PROVENANCE_SCHEMA_VERSION: u32 = 6;
 pub const V5_PROVENANCE_SCHEMA_VERSION: u32 = 5;
 pub const V4_PROVENANCE_SCHEMA_VERSION: u32 = 4;
@@ -434,6 +435,9 @@ pub fn file_content_hash(content: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationObservedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity:
+        Option<crate::features::verification_context::identity::ExecutionIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_test_result:
         Option<Box<crate::features::structured_test_results::StructuredTestResult>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -514,6 +518,8 @@ pub struct VerificationOutcome {
 /// attribution at the same pre-execution instant.
 #[derive(Debug, Clone, Default)]
 pub struct VerificationContext {
+    pub execution_identity:
+        Option<crate::features::verification_context::identity::ExecutionIdentity>,
     pub execution_context: Option<crate::features::verification_context::ExecutionContext>,
     pub execution_workspace: Option<crate::features::verification_snapshot::ExecutionWorkspace>,
     pub directive_id: Option<String>,
@@ -586,6 +592,7 @@ pub fn from_v1_wire(env: wire_v1::V1Envelope) -> ProvenanceEventEnvelope {
         }
         wire_v1::V1Event::VerificationObserved(v) => {
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_identity: None,
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
@@ -707,6 +714,7 @@ pub fn from_v2_wire(env: wire_v2::V2Envelope) -> ProvenanceEventEnvelope {
         }
         wire_v2::V2Event::VerificationObserved(v) => {
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_identity: None,
                 directive_id: None,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: Vec::new(),
@@ -875,6 +883,7 @@ pub fn from_v3_wire(env: wire_v3::V3Envelope) -> ProvenanceEventEnvelope {
         }
         wire_v3::V3Event::VerificationObserved(v) => {
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_identity: None,
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
@@ -1236,6 +1245,7 @@ pub fn from_v4_wire(env: wire_v4::V4Envelope) -> ProvenanceEventEnvelope {
         }
         wire_v4::V4Event::VerificationObserved(v) => {
             ProvenanceEvent::VerificationObserved(VerificationObservedEvent {
+                execution_identity: None,
                 directive_id: v.directive_id,
                 plan_item_id: v.plan_item_id,
                 requirement_ids: v.requirement_ids,
@@ -1634,6 +1644,58 @@ pub fn to_v7_wire(env: &ProvenanceEventEnvelope) -> super::wire::v7::V7Envelope 
         }
     };
     v7::V7Envelope {
+        schema_version: V7_PROVENANCE_SCHEMA_VERSION,
+        event_id: previous.event_id,
+        session_id: previous.session_id,
+        timestamp: previous.timestamp,
+        event,
+    }
+}
+
+/// v8 composes the frozen v7 adapter; old formats never acquire host metadata.
+pub fn from_v8_wire(env: super::wire::v8::V8Envelope) -> ProvenanceEventEnvelope {
+    use super::wire::{v7, v8};
+    let (event, context) = match env.event {
+        v8::V8Event::DirectiveObserved(v) => (v7::V7Event::DirectiveObserved(v), None),
+        v8::V8Event::RequirementChanged(v) => (v7::V7Event::RequirementChanged(v), None),
+        v8::V8Event::PlanChanged(v) => (v7::V7Event::PlanChanged(v), None),
+        v8::V8Event::ChangeCommitted(v) => (v7::V7Event::ChangeCommitted(v), None),
+        v8::V8Event::VerificationObserved(v) => (
+            v7::V7Event::VerificationObserved(v.observation),
+            v.execution_identity,
+        ),
+    };
+    let mut canonical = from_v7_wire(v7::V7Envelope {
+        schema_version: V7_PROVENANCE_SCHEMA_VERSION,
+        event_id: env.event_id,
+        session_id: env.session_id,
+        timestamp: env.timestamp,
+        event,
+    });
+    if let ProvenanceEvent::VerificationObserved(v) = &mut canonical.event {
+        v.execution_identity = context;
+    }
+    canonical
+}
+pub fn to_v8_wire(env: &ProvenanceEventEnvelope) -> super::wire::v8::V8Envelope {
+    use super::wire::{v7, v8};
+    let previous = to_v7_wire(env);
+    let event = match previous.event {
+        v7::V7Event::DirectiveObserved(v) => v8::V8Event::DirectiveObserved(v),
+        v7::V7Event::RequirementChanged(v) => v8::V8Event::RequirementChanged(v),
+        v7::V7Event::PlanChanged(v) => v8::V8Event::PlanChanged(v),
+        v7::V7Event::ChangeCommitted(v) => v8::V8Event::ChangeCommitted(v),
+        v7::V7Event::VerificationObserved(v) => {
+            v8::V8Event::VerificationObserved(v8::V8VerificationObserved {
+                observation: v,
+                execution_identity: match &env.event {
+                    ProvenanceEvent::VerificationObserved(c) => c.execution_identity.clone(),
+                    _ => None,
+                },
+            })
+        }
+    };
+    v8::V8Envelope {
         schema_version: PROVENANCE_SCHEMA_VERSION,
         event_id: previous.event_id,
         session_id: previous.session_id,

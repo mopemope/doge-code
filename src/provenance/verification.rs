@@ -277,6 +277,7 @@ pub fn capture_verification_context_full(
         requirement_ids.dedup();
     }
     VerificationContext {
+        execution_identity: None,
         execution_context: None,
         execution_workspace: None,
         directive_id,
@@ -347,6 +348,7 @@ pub fn build_verification_event(input: VerificationRecordInput<'_>) -> Verificat
         )
     });
     VerificationObservedEvent {
+        execution_identity: input.context.execution_identity.clone(),
         structured_test_result,
         execution_context: input.context.execution_context.clone().map(Box::new),
         execution_workspace: input.context.execution_workspace.clone().map(Box::new),
@@ -609,6 +611,7 @@ mod tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_identity: None,
                 execution_context: None,
                 execution_workspace: None,
                 plan_item_id: Some("step-1".to_string()),
