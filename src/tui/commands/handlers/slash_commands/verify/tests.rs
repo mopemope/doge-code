@@ -585,3 +585,56 @@ async fn stale_displayed_selection_is_rejected_before_spawn_after_refresh() {
     .expect("fresh explicit selection");
     assert!(root.path().join("spawned").exists());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pytest_report_verify_saves_skipped_counts_without_pass_claim() {
+    let (root, tools, queue, tx, _rx) = fixture("exit 0");
+    let program = root.path().join("python3");
+    std::fs::write(&program, r#"#!/usr/bin/python3
+import os, pathlib, shlex, sys
+assert sys.argv[1:] == ['-m', 'pytest', '-v']
+path = shlex.split(os.environ['PYTEST_ADDOPTS'])[0].split('=', 1)[1]
+pathlib.Path(path).write_text("<testsuites><testsuite tests='1' failures='0' errors='0' skipped='1'><testcase classname='p' name='a'><skipped/></testcase></testsuite></testsuites>")
+"#).expect("python fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    seed(&tools, &queue).await;
+    {
+        let mut queue = queue.lock().expect("queue");
+        let recommendation = &mut queue.entries[0].recommendation;
+        recommendation.program = program.to_string_lossy().into();
+        recommendation.args = vec!["-m".into(), "pytest".into(), "-v".into()];
+    }
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::Run(selected_id(&queue)),
+        5000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("run");
+    let queue = queue.lock().expect("queue");
+    assert_eq!(queue.entries[0].outcome, Outcome::Skipped);
+    assert_eq!(queue.entries[0].test_counts.expect("counts").skipped, 1);
+    let events = crate::tools::provenance::load_current_events(&tools)
+        .expect("load")
+        .expect("session");
+    let result = events
+        .events
+        .iter()
+        .find_map(|e| match &e.event {
+            crate::provenance::ProvenanceEvent::VerificationObserved(v) => {
+                v.structured_test_result.as_deref()
+            }
+            _ => None,
+        })
+        .expect("stored report");
+    assert_eq!(
+        crate::features::structured_test_results::pytest::outcome(result),
+        Some(crate::features::structured_test_results::pytest::Outcome::AllSkipped)
+    );
+}

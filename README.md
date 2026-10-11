@@ -1440,6 +1440,35 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 - Projects with multiple languages can be checked all at once.
 - Linter commands are trusted internal commands and use the shared managed process lifecycle, but do not inherit the LLM execution allowlist.
 
+### Python test counts
+
+The trusted default Python command (`python[3] -m pytest -v`, including a
+selected project virtual environment) observes pytest's built-in JUnit XML
+without installing plugins. With `PYTEST_ADDOPTS` unset or empty, dgc supplies
+an execution-only `PYTEST_ADDOPTS` report option pointing to a fresh private
+temporary directory outside the project. Program, argv, cwd, project settings,
+and the user's persistent environment remain unchanged. Nonempty
+`PYTEST_ADDOPTS`, standalone `pytest`, wrappers and customized argv are outside
+this initial observer; they keep unknown test counts. An existing interpreter
+without pytest retains its process failure and incomplete/unknown test report;
+dgc installs nothing.
+
+The bounded XML observer rejects DTDs/entities, special files/symlinks, malformed
+or incomplete documents, multiple suites, duplicate testcase identities, and
+inconsistent suite counts. It cross-checks each testcase against suite totals
+and the process exit code. Only a complete report with actual passing cases and
+consistent exit 0 is labelled reported Python tests passed. Failures, zero tests
+(exit 5), all skipped, collection errors, interruptions, runner errors,
+incomplete reports and unknown outcomes remain separate. Exit 0 alone never
+proves Python test success. Missing, empty, oversized or partial reports, output
+capture failure/truncation and timeouts cannot yield passing counts; cancelled
+runs produce no verification success evidence. Reports are deleted after the
+run; durable provenance stores bounded counts/status only, with
+`pytest_junit_testcases` as the count unit. Counts reflect the cases pytest
+reported, not proof that every intended test was collected or the whole project
+is correct. Tests and installed plugins remain arbitrary code executed through
+the existing trusted managed runner; XML reports are observations, not a sandbox.
+
 ## Verification queue /verify
 
 `/verify` inspects the current session's tracked changes and reuses

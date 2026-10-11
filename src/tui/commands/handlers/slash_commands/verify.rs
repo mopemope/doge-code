@@ -333,6 +333,7 @@ async fn run_action(
                             test_events,
                             ..
                         } => Some(test_events),
+                        crate::features::structured_test_results::ResultObservation::Pytest { test_events, .. } => test_events,
                         _ => None,
                     }
                         });

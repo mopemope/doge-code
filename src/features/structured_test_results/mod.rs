@@ -1,5 +1,6 @@
 //! Bounded interpretation of reported test events, separate from process outcome.
 //! No commands or artifact reads; names/output are never part of the durable shape.
+pub mod pytest;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
@@ -21,10 +22,15 @@ pub struct StructuredTestResult {
 #[serde(rename_all = "snake_case")]
 pub enum ResultFormat {
     GoTestJson,
+    PytestJunit,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ResultObservation {
+    Pytest {
+        outcome: pytest::Outcome,
+        test_events: Option<Counts>,
+    },
     Complete {
         test_events: Counts,
         packages: Counts,
@@ -73,10 +79,18 @@ fn read_format_version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D:
     }
 }
 impl StructuredTestResult {
+    pub fn test_count_unit(&self) -> Option<&'static str> {
+        self.test_count()?;
+        Some(match self.format {
+            ResultFormat::GoTestJson => "go_test_terminal_events_including_subtests",
+            ResultFormat::PytestJunit => "pytest_junit_testcases",
+        })
+    }
     pub fn test_count(&self) -> Option<u64> {
         match self.observation {
             ResultObservation::Complete { test_events, .. } => Some(test_events.total()),
             ResultObservation::Unknown { .. } => None,
+            ResultObservation::Pytest { test_events, .. } => test_events.map(Counts::total),
         }
     }
 }
