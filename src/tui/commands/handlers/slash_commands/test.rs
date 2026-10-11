@@ -105,7 +105,7 @@ async fn run_test_job(
     let mut all_failed_tests = Vec::new();
     let mut all_command_outputs = Vec::new();
     let mut has_any_failures = false;
-    let mut has_unverified_python = false;
+    let mut summary = crate::features::test_summary::TestRunSummary::default();
 
     let test_configs = testing::get_test_configs(&project_root);
 
@@ -119,6 +119,7 @@ async fn run_test_job(
         ui_tx.send_logged(format!("::shell_output:\n--- Running {} tests ---", lang));
 
         let Some(config) = test_configs.get(&lang) else {
+            summary.missing_commands();
             ui_tx.send_logged(format!(
                 "::shell_output:No test configuration found for language: {}",
                 lang
@@ -126,6 +127,7 @@ async fn run_test_job(
             continue;
         };
         if config.commands.is_empty() {
+            summary.missing_commands();
             ui_tx.send_logged(format!(
                 "::shell_output:No test commands configured for language '{}'.",
                 lang
@@ -259,7 +261,8 @@ async fn run_test_job(
                 has_any_failures = true;
             }
 
-            // Send output to UI
+            // Process success is not a known test success. Share /verify classification.
+            let observed = summary.observe(&result);
             let python_outcome = result
                 .structured_test_result
                 .as_deref()
@@ -269,29 +272,19 @@ async fn run_test_job(
                     &test_cmd.command,
                     &test_cmd.args,
                 );
-            if python_invocation {
-                use crate::features::structured_test_results::pytest::Outcome;
-                let outcome = python_outcome.unwrap_or(Outcome::Unknown);
-                has_unverified_python |= outcome != Outcome::Passed;
-                ui_tx.send_logged(format!(
-                    "::shell_output:{}: {} {}",
-                    outcome.label(),
-                    test_cmd.command,
-                    test_cmd.args.join(" ")
-                ));
-            } else if result.success {
-                ui_tx.send_logged(format!(
-                    "::shell_output:✓ All tests passed: {} {}",
-                    test_cmd.command,
-                    test_cmd.args.join(" ")
-                ));
+            let label = if python_invocation && result.execution_observed && !result.timed_out {
+                python_outcome
+                    .map(|o| o.label())
+                    .unwrap_or("Python test outcome unknown")
             } else {
-                ui_tx.send_logged(format!(
-                    "::shell_output:✗ Tests failed: {} {}",
-                    test_cmd.command,
-                    test_cmd.args.join(" ")
-                ));
-            }
+                observed.label()
+            };
+            ui_tx.send_logged(format!(
+                "::shell_output:{label}: {} {} (process exit={:?})",
+                test_cmd.command,
+                test_cmd.args.join(" "),
+                result.exit_code
+            ));
 
             if !result.stdout.is_empty() {
                 ui_tx.send_logged(format!(
@@ -352,13 +345,7 @@ async fn run_test_job(
             prompt,
         });
     } else {
-        if has_unverified_python {
-            ui_tx.send_logged(
-                "::shell_output:\nCommands completed; Python test success was not confirmed.",
-            );
-        } else {
-            ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
-        }
+        ui_tx.send_logged(format!("::shell_output:\n{}", summary.completion_message()));
     }
 
     // Close the stage-then-cancel race: a cancellation landing between the
@@ -562,7 +549,63 @@ fi
                 }),
                 "{messages}"
             );
-            assert!(messages.contains("Python test success was not confirmed"));
+            assert!(messages.contains("test success was not confirmed"));
         }
+    }
+    #[tokio::test]
+    async fn test_summary_unobserved_rust_zero_does_not_claim_all_tests_passed() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("Cargo.toml"),
+            "[package]\nname = 'unobserved_tests_fixture'\nversion = '0.0.0'\nedition = '2024'\n[workspace]\n")
+            .expect("manifest");
+        std::fs::write(
+            root.path().join("src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .expect("source");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
+        let outcome = run_test_job(
+            crate::jobs::JobId(1),
+            deferred.clone(),
+            root.path().into(),
+            test_tools_for(root.path()),
+            tx,
+            30000,
+            CancellationToken::new(),
+        )
+        .await;
+        let messages = rx.try_iter().collect::<Vec<_>>().join("\n");
+        assert!(matches!(outcome, JobRunOutcome::Completed), "{messages}");
+        assert_eq!(deferred.len(), 0, "{messages}");
+        assert!(messages.contains("running 0 tests"), "{messages}");
+        assert!(!messages.contains("All tests passed"), "{messages}");
+        assert!(
+            messages.contains("test success was not confirmed"),
+            "{messages}"
+        );
+    }
+    #[tokio::test]
+    async fn test_summary_no_configured_commands_does_not_claim_all_tests_passed() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::write(root.path().join("package.json"), r#"{"scripts":{}}"#).expect("manifest");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
+        let outcome = run_test_job(
+            crate::jobs::JobId(1),
+            deferred.clone(),
+            root.path().into(),
+            test_tools_for(root.path()),
+            tx,
+            30000,
+            CancellationToken::new(),
+        )
+        .await;
+        let messages = rx.try_iter().collect::<Vec<_>>().join("\n");
+        assert!(matches!(outcome, JobRunOutcome::Completed));
+        assert_eq!(deferred.len(), 0);
+        assert!(!messages.contains("All tests passed"), "{messages}");
+        assert!(messages.contains("No test commands ran"), "{messages}");
     }
 }
