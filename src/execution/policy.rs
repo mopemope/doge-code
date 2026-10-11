@@ -120,7 +120,16 @@ impl ExecutionPolicy {
             return Err(PolicyDenial::GlobalDeny);
         }
         validate_program_syntax(&req.program)?;
-        self.check_program_allowed(&req.program)?;
+        if self.uses_legacy_fallback() {
+            if !self.legacy_command_allowed(&req.program, &req.args) {
+                return Err(PolicyDenial::LegacyCommandNotAllowed {
+                    // Do not expose structured argument values in diagnostics.
+                    command: req.program.clone(),
+                });
+            }
+        } else {
+            self.check_program_allowed(&req.program)?;
+        }
         self.check_cwd(&req.cwd)?;
         self.check_env(&req.env)?;
         Ok(())
@@ -128,29 +137,14 @@ impl ExecutionPolicy {
 
     fn effective_mode(&self) -> ExecutionMode {
         if self.uses_legacy_fallback() {
-            // Legacy non-empty allowlist behaves like allowlist mode for
-            // structured requests: only explicitly migrated programs run.
-            // (Legacy entries with arg prefixes are handled at the shell layer;
-            // structured requests require an exact program allow.)
+            // Legacy non-empty rules constrain program and argument prefixes
+            // for both structured requests and simple shell commands.
             return ExecutionMode::Allowlist;
         }
         self.config.execution.mode
     }
 
     fn check_program_allowed(&self, program: &str) -> Result<(), PolicyDenial> {
-        // Legacy fallback: allow when the program matches a migrated legacy entry.
-        if self.uses_legacy_fallback() {
-            for entry in &self.config.allowed_commands {
-                if let Some((prog, _)) = parse_simple_command(entry)
-                    && prog == program
-                {
-                    return Ok(());
-                }
-            }
-            return Err(PolicyDenial::ProgramNotAllowed {
-                program: program.to_string(),
-            });
-        }
         match self.config.execution.mode {
             ExecutionMode::Unrestricted => Ok(()),
             ExecutionMode::Deny => Err(PolicyDenial::GlobalDeny),
@@ -164,6 +158,15 @@ impl ExecutionPolicy {
                 }
             }
         }
+    }
+
+    /// Shared legacy matcher. Only rules are parsed; request argv stays literal.
+    fn legacy_command_allowed(&self, program: &str, args: &[String]) -> bool {
+        self.config.allowed_commands.iter().any(|entry| {
+            parse_simple_command(entry).is_some_and(|(allowed_program, allowed_args)| {
+                allowed_program == program && args.starts_with(&allowed_args)
+            })
+        })
     }
 
     // -- shell checks ------------------------------------------------------
@@ -213,21 +216,14 @@ impl ExecutionPolicy {
                 parse_simple_command(command).ok_or_else(|| PolicyDenial::UnsafeShellSyntax {
                     reason: "command could not be parsed as a simple command".to_string(),
                 })?;
-            // Match against legacy entries (program + arg-prefix match).
-            for entry in &self.config.allowed_commands {
-                if let Some((allowed_prog, allowed_args)) = parse_simple_command(entry)
-                    && allowed_prog == prog
-                    && args.len() >= allowed_args.len()
-                    && args[..allowed_args.len()] == allowed_args[..]
-                {
-                    return Ok(Some(ProcessRequest {
-                        program: prog,
-                        args,
-                        cwd: None,
-                        env: BTreeMap::new(),
-                        timeout_ms: None,
-                    }));
-                }
+            if self.legacy_command_allowed(&prog, &args) {
+                return Ok(Some(ProcessRequest {
+                    program: prog,
+                    args,
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    timeout_ms: None,
+                }));
             }
             return Err(PolicyDenial::LegacyCommandNotAllowed {
                 command: command.to_string(),
@@ -862,6 +858,156 @@ mod tests {
                 .is_ok()
         );
         assert!(policy.check_legacy_shell_command("git commit").is_err());
+        assert!(policy.check_process(&req("git", &["status"])).is_ok());
+        assert!(
+            policy
+                .check_process(&req("git", &["status", "--short"]))
+                .is_ok()
+        );
+        assert!(policy.check_process(&req("git", &["commit"])).is_err());
+        assert!(policy.check_process(&req("git", &[])).is_err());
+    }
+
+    #[test]
+    fn test_legacy_rules_match_structured_arguments_and_shell_literals() {
+        let dir = TempDir::new().expect("tempdir");
+        // The same parsed rule must constrain both entry points. Structured
+        // arguments are literals, so never parse or expand them as shell text.
+        type LegacyCase<'a> = (&'a [&'a str], &'a str, &'a [&'a str], &'a str, bool);
+        let cases: &[LegacyCase<'_>] = &[
+            (&["git"], "git", &[], "git", true),
+            (&["git"], "git", &["commit"], "git commit", true),
+            (&["git"], "git-other", &[], "git-other", false),
+            (
+                &["git status"],
+                "git",
+                &["status-other"],
+                "git status-other",
+                false,
+            ),
+            (
+                &["echo 'hello world'"],
+                "echo",
+                &["hello world", "tail"],
+                "echo 'hello world' tail",
+                true,
+            ),
+            (
+                &["echo 'hello world'"],
+                "echo",
+                &["hello", "world"],
+                "echo hello world",
+                false,
+            ),
+            (&["echo \"\""], "echo", &["", "tail"], "echo '' tail", true),
+            (&["echo ''"], "echo", &[], "echo", false),
+            (&["echo ''"], "echo", &["tail"], "echo tail", false),
+            (
+                &["echo '; $(literal) `literal`'"],
+                "echo",
+                &["; $(literal) `literal`"],
+                "echo '; $(literal) `literal`'",
+                true,
+            ),
+            (
+                &["git status", "git diff --stat"],
+                "git",
+                &["diff", "--stat", "HEAD"],
+                "git diff --stat HEAD",
+                true,
+            ),
+            (
+                &["git status", "git diff --stat"],
+                "git",
+                &["diff"],
+                "git diff",
+                false,
+            ),
+            (
+                &["git status", "git diff --stat"],
+                "git",
+                &["commit"],
+                "git commit",
+                false,
+            ),
+            (
+                &["git status; echo unsafe", "git '"],
+                "git",
+                &["status"],
+                "git status",
+                false,
+            ),
+        ];
+        for &(rules, program, args, shell, allowed) in cases {
+            let policy = ExecutionPolicy::new(Arc::new(AppConfig {
+                project_root: dir.path().to_path_buf(),
+                allowed_commands: rules.iter().map(|rule| (*rule).to_string()).collect(),
+                ..Default::default()
+            }));
+            assert_eq!(
+                policy.check_process(&req(program, args)).is_ok(),
+                allowed,
+                "structured {rules:?} {args:?}"
+            );
+            assert_eq!(
+                policy.check_legacy_shell_command(shell).is_ok(),
+                allowed,
+                "shell {rules:?} {shell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explicit_execution_keeps_program_only_rules_over_legacy_prefixes() {
+        let dir = TempDir::new().expect("tempdir");
+        for mode in [
+            ExecutionMode::Allowlist,
+            ExecutionMode::Unrestricted,
+            ExecutionMode::Deny,
+        ] {
+            let policy = ExecutionPolicy::new(Arc::new(AppConfig {
+                project_root: dir.path().to_path_buf(),
+                allowed_commands: vec!["git status".into()],
+                execution_configured: true,
+                execution: ExecutionConfig {
+                    mode,
+                    allowed_programs: vec!["git".into()],
+                    allow_shell: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }));
+            assert_eq!(
+                policy.check_process(&req("git", &["commit"])).is_ok(),
+                mode != ExecutionMode::Deny
+            );
+            assert_eq!(
+                policy.check_process(&req("other", &[])).is_ok(),
+                mode == ExecutionMode::Unrestricted
+            );
+            assert_eq!(
+                policy.check_legacy_shell_command("git commit").is_ok(),
+                mode != ExecutionMode::Deny
+            );
+        }
+    }
+
+    #[test]
+    fn test_legacy_structured_denial_omits_argument_values() {
+        let dir = TempDir::new().expect("tempdir");
+        let policy = ExecutionPolicy::new(Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            allowed_commands: vec!["git status".into()],
+            ..Default::default()
+        }));
+        let denial = policy
+            .check_process(&req("git", &["commit", "sensitive-sentinel"]))
+            .expect_err("argument prefix must be denied");
+        assert!(matches!(
+            denial,
+            PolicyDenial::LegacyCommandNotAllowed { .. }
+        ));
+        assert!(!denial.message().contains("sensitive-sentinel"));
     }
 
     #[test]
