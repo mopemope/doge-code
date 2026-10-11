@@ -1565,6 +1565,13 @@ matching endpoints are observations, not proof that no transient edit occurred.
   or malformed summary metadata may be omitted; raw diagnostics and the failing
   command outcome are still passed to analysis. These summaries are not recorded
   test counts or correctness judgments.
+- `/test` distinguishes command completion from observed test success. Go JSON and
+  supported pytest JUnit reports can confirm reported passes, zero tests or skips;
+  incomplete reports retain their separate outcome. Rust and unsupported runners
+  keep test counts/outcomes unknown even after exit 0 or success-like stdout.
+  The aggregate confirms only reported passes for every executed command, and never
+  when a detected language has no configured command or no commands ran. Passing
+  observations cover their recorded invocation, not whole-project correctness.
 - `/test` uses the configured `command_timeout_ms` (where `0` means unlimited) and the same managed process lifecycle as finite LLM commands, without applying the LLM execution allowlist.
 
 ## 🔄 Advanced Features
