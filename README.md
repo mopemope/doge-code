@@ -1732,7 +1732,7 @@ ai_comment_pattern = "// AI!:"
 [[mcp_servers]]
 # Structured stdio: command is executed directly (never through a shell).
 name = "filesystem"
-enabled = true
+enabled = false
 transport = "stdio"
 command = "/usr/local/bin/mcp-filesystem"
 args = ["--root", "/workspace"]
@@ -1748,7 +1748,7 @@ call_timeout_ms = 30000
 [[mcp_servers]]
 # Streamable HTTP uses address as its URL.
 name = "remote"
-enabled = true
+enabled = false
 transport = "http"
 address = "https://example.com/mcp"
 connect_timeout_ms = 30000
@@ -1762,6 +1762,51 @@ errors, as are invalid enum/policy values (for example `[tool_routing]`,
 `[tool_routing] search_result_limit` values outside `1..=10`. The config
 loader is read-only: invalid files are never auto-repaired or rewritten,
 and typos never silently fall back to defaults.
+
+Repository `.env` files are no longer loaded automatically. Export variables
+explicitly in the calling shell or use your global/user TOML configuration;
+this prevents a repository from injecting an endpoint or `DOGE_CODE_CONFIG`
+and disguising it as trusted caller configuration. For example, set the values
+in your calling shell (replace the placeholders with your intended settings):
+
+```bash
+export OPENAI_BASE_URL="https://your-provider.example/v1"
+export OPENAI_API_KEY="<your-api-key>"
+dgc exec "Explain this project"
+```
+
+OpenCode uses `OPENCODE_API_KEY` and its pinned Go/Zen endpoint; use
+`DOGE_CODE_CONFIG=/path/to/user-config.toml dgc ...` for an explicitly selected
+global config. dgc does not rewrite existing `.env` or user configuration files.
+
+Project configuration is untrusted at startup. For compatible API routes, a
+project `base_url` may repeat the global/default endpoint, but cannot select a
+new destination, even with a project API key. Startup fails before requests or
+credential resolution. Explicit `--base-url`, `OPENAI_BASE_URL`, or a global
+`base_url` authorizes the destination; `--api-key` alone does not authorize a
+project endpoint. Put a custom endpoint in your user config, or explicitly select
+an outside-repository config with `DOGE_CODE_CONFIG=/path/to/user-config.toml`.
+CLI/environment endpoint precedence, Go/Zen pinned URLs, and the official
+ChatGPT OAuth route are retained. `dgc diagnostics` shows provider, endpoint,
+and API-key source labels without credential values or URL paths.
+
+Project settings also cannot relax global `execution.mode = "deny"`,
+`allow_shell = false`, program/env allowlists, or legacy `allowed_commands`.
+Project lists may remove existing rules; an empty legacy list is rejected when
+it would make execution unrestricted. Switching a global legacy allowlist to
+`[execution]` is rejected unless the project selects `mode = "deny"`.
+Allowed paths can only be removed or repeated; project roots must resolve to
+the same canonical trusted root so relative path rules cannot be redirected.
+Configure additional roots and capabilities in the global/user config.
+
+Enable MCP servers in the global/user config. A project may disable a known
+server or change its timeouts, but cannot enable a new/disabled connection,
+change an enabled server's destination/transport/command/args/environment, or
+enable/rebind the local listener. The examples above keep project MCP servers
+disabled; use their enabled forms in global configuration. Denials explain the
+blocked setting without echoing secret values. These guards do not add a
+persistent trust store, approval UI, or OS isolation; existing defaults still
+permit process/shell execution when no global restriction is configured.
 
 When using `gpt-6-luna` with the OpenAI Chat Completions endpoint,
 function calling requires `reasoning_effort = "none"`. dgc explicitly sends
@@ -1828,7 +1873,8 @@ args = ["--root", "/workspace"]
   `RemoteToolManager`/`McpClient`. They never start a local listener.
 - Structured stdio `command` and `args` are passed as an executable/argv pair;
   no shell parser or `bash -c` is involved. `env` values are literal and are
-  merged per key with project values taking precedence over global values.
+  merged per key internally; startup rejects project changes to an enabled
+  global server's environment. Set new values in global/user configuration.
 - Do not specify both structured `command` and legacy `address`; ambiguous
   stdio configuration is rejected. HTTP endpoints reject stdio-only fields.
   Enabled server names must be unique.

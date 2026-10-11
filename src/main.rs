@@ -35,7 +35,6 @@ use crate::tui::state::TuiApp;
 use crate::watch::run_watch_mode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dotenvy::dotenv;
 
 #[derive(Parser, Clone)]
 #[command(
@@ -223,7 +222,8 @@ async fn run_cli() -> Result<()> {
         tokio::pin!(operation);
         return tokio::select! { result = &mut operation => result, _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await } };
     }
-    dotenv().ok();
+    // Repository dotenv files are untrusted; only the caller's existing
+    // environment may select global configuration or inference destinations.
     logging::init_logging()?;
 
     let cfg = AppConfig::from_cli(cli.clone())?;
