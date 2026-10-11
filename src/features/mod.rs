@@ -20,3 +20,5 @@ pub mod human_review;
 pub mod review_feedback;
 
 pub mod model_selection;
+
+pub mod verification_queue;

@@ -508,6 +508,19 @@ pub fn record_tui_lint_verification(
     append_verification_event(fs_tools, event, context.observed_change_ids.len())
 }
 
+/// Selected TUI test workflow, sharing the existing TuiTest evidence wire shape.
+pub(crate) fn record_selected_test_verification(
+    fs_tools: &FsTools,
+    input: crate::provenance::VerificationRecordInput<'_>,
+) -> bool {
+    let count = input.context.observed_change_ids.len();
+    append_verification_event(
+        fs_tools,
+        crate::provenance::build_verification_event(input),
+        count,
+    )
+}
+
 fn append_verification_event(
     fs_tools: &FsTools,
     event: crate::provenance::VerificationObservedEvent,

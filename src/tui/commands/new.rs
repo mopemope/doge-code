@@ -132,6 +132,7 @@ impl TuiExecutor {
             client,
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
+            verification_queue: Default::default(),
             last_user_prompt: None,
             feedback_submissions: Default::default(),
             deferred_followups: crate::tui::followup::DeferredFollowupStore::default(),

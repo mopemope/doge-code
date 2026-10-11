@@ -147,6 +147,14 @@ impl CommandHandler for TuiExecutor {
             return;
         }
 
+        if line.split_whitespace().next() == Some("/verify") {
+            crate::tui::commands::handlers::slash_commands::verify::handle_verify(
+                self,
+                ui,
+                line.strip_prefix("/verify").unwrap_or("").trim(),
+            );
+            return;
+        }
         if line.split_whitespace().next() == Some("/evidence") {
             crate::tui::commands::handlers::slash_commands::evidence::handle_evidence(
                 self,
@@ -308,7 +316,8 @@ impl CommandHandler for TuiExecutor {
                 }
             }
         }
-        if !self.handle_evidence_completed(producer, ui)
+        if !self.handle_verify_completed(producer, ui)
+            && !self.handle_evidence_completed(producer, ui)
             && !self.handle_compact_completed(producer, ui)
         {
             if let Some(id) = crate::jobs::JobId::parse_arg(producer)
