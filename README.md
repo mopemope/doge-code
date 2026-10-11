@@ -5,7 +5,7 @@ Doge-Code is an interactive AI coding agent that provides advanced code analysis
 ## 🚀 Key Features
 
 ### Core Capabilities
-- **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction (10+ languages including Rust, JavaScript/TypeScript, Python, Go, Java, C/C++, C#, Markdown)
+- **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction for Rust, JavaScript/TypeScript (including JSX/TSX), Python, Go, C/C++, C#, and Markdown
 - **Interactive Terminal UI**: Full-featured TUI with syntax highlighting, diff review, and real-time LLM interaction
 - **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
 - **Persistent Sessions**: JSON session checkpoints saved through atomic replacement of `session.json` to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
@@ -13,10 +13,9 @@ Doge-Code is an interactive AI coding agent that provides advanced code analysis
 
 ### Supported Languages
 - **Rust** (tree-sitter-rust 0.24.0)
-- **JavaScript/TypeScript** (tree-sitter-javascript/typescript 0.25.0/0.23.2)
+- **JavaScript/TypeScript, JSX/TSX** (tree-sitter-javascript/typescript 0.25.0/0.23.2; TSX uses its dedicated grammar)
 - **Python** (tree-sitter-python 0.25.0)
 - **Go** (tree-sitter-go 0.25.0)
-- **Java** (tree-sitter-java 0.23.5)
 - **C/C++** (tree-sitter-c/c++ 0.24.1/0.23.4)
 - **C#** (tree-sitter-c-sharp 0.23.1)
 - **Markdown** (tree-sitter-md 0.5.1)
@@ -1477,6 +1476,11 @@ Doge-Code builds a comprehensive symbol map of the project:
 - Symbol extraction (functions, structs, classes, etc.)
 - Cross-reference analysis
 - Incremental updates on file changes
+
+RepoMap caches record an analysis revision alongside symbols and file hashes in
+the same SQLite transaction. Unversioned or incompatible caches are rebuilt on
+the next analysis, even when source files are unchanged. Session checkpoints and
+provenance are stored separately and are not part of this cache rebuild.
 
 ### Smart Editing
 - **Symbol-aware editing**: Edit entire functions, classes, modules

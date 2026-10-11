@@ -24,12 +24,17 @@ pub fn language_configs() -> &'static [LanguageConfig] {
             LanguageConfig {
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 collector: Box::new(TypeScriptExtractor),
-                extensions: &["ts", "tsx"],
+                extensions: &["ts"],
+            },
+            LanguageConfig {
+                language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+                collector: Box::new(TypeScriptExtractor),
+                extensions: &["tsx"],
             },
             LanguageConfig {
                 language: tree_sitter_javascript::LANGUAGE.into(),
                 collector: Box::new(JavaScriptExtractor),
-                extensions: &["js", "mjs", "cjs"],
+                extensions: &["js", "jsx", "mjs", "cjs"],
             },
             LanguageConfig {
                 language: tree_sitter_python::LANGUAGE.into(),
@@ -83,16 +88,19 @@ mod runtime_compatibility_tests {
     use super::*;
     #[test]
     fn every_registered_grammar_parses_with_current_runtime() {
-        for config in language_configs() {
-            let source = match config.extensions[0] {
+        for (&extension, config) in extension_map() {
+            let source = match extension {
                 "rs" => "fn main() {}",
                 "ts" => "const value: number = 1;",
-                "js" => "function main() {}",
+                "tsx" => "export function App() { return <div>Hello</div>; }",
+                "js" | "mjs" | "cjs" => "function main() {}",
+                "jsx" => "export function App() { return <div>Hello</div>; }",
                 "py" => "def main():\n    pass\n",
                 "go" => "package main\nfunc main() {}",
                 "cs" => "class Main {}",
                 "c" => "int main(void) { return 0; }",
-                "cpp" => "int main() { return 0; }",
+                "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => "int main() { return 0; }",
+                "h" => "int main(void);",
                 "md" => "# Heading\n\nBody.\n",
                 extension => panic!("uncovered grammar: {extension}"),
             };
@@ -101,7 +109,7 @@ mod runtime_compatibility_tests {
                 .set_language(&config.language)
                 .expect("compatible grammar ABI");
             let tree = parser.parse(source, None).expect("parsed source");
-            assert!(!tree.root_node().has_error(), "{}", config.extensions[0]);
+            assert!(!tree.root_node().has_error(), "{extension}");
         }
     }
 }

@@ -4,12 +4,14 @@ pub mod m20230101_000002_add_keywords_to_symbol_info;
 
 pub mod m20251230_000001_create_action_log_table;
 pub mod m20260113_000001_create_symbol_relation_table;
+pub mod m20261011_000001_create_repomap_metadata;
 
 use crate::analysis::database::migration::m20230101_000001_create_tables::Migration as CreateTablesMigration;
 use crate::analysis::database::migration::m20230101_000002_add_keywords_to_symbol_info::Migration as AddKeywordsMigration;
 
 use crate::analysis::database::migration::m20251230_000001_create_action_log_table::Migration as CreateActionLogTableMigration;
 use crate::analysis::database::migration::m20260113_000001_create_symbol_relation_table::Migration as CreateSymbolRelationTableMigration;
+use crate::analysis::database::migration::m20261011_000001_create_repomap_metadata::Migration as CreateRepomapMetadataMigration;
 use sea_orm::{DatabaseConnection, DbErr};
 use sea_orm_migration::MigratorTrait;
 
@@ -24,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddKeywordsMigration),
             Box::new(CreateActionLogTableMigration),
             Box::new(CreateSymbolRelationTableMigration),
+            Box::new(CreateRepomapMetadataMigration),
         ]
     }
 }

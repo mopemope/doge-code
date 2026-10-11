@@ -33,7 +33,7 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
 | `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
 | `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
-| `src/session/` | SQLite session persistence (SeaORM) |
+| `src/session/` | JSON session checkpoints with atomic replacement, exclusive ownership and recovery export |
 | `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
 | `src/mcp/` | MCP protocol/transport boundary (rmcp 3.x) |
 | `src/mcp/client.rs` | Outbound MCP transport, negotiated connection lifecycle, timeouts, cancellation, and SDK response handling |
@@ -77,6 +77,12 @@ for trust boundaries, discovery, and limitations.
 ### RepoMap / analysis changes
 
 Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
+
+Bump `cache::REPOMAP_ANALYSIS_REVISION` when grammar dependencies, extension
+routing, collectors, or the persisted analysis format change. The revision is
+saved transactionally in `repomap_metadata`; missing or mismatched revisions
+force a full rebuild rather than reuse or incremental update. This table belongs
+only to rebuildable analysis state.
 
 ### Inline review feedback
 
