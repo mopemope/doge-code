@@ -1,4 +1,6 @@
-use crate::analysis::database::entities::{FileHashEntity, SymbolInfoEntity, SymbolRelationEntity};
+use crate::analysis::database::entities::{
+    FileHashEntity, RepomapMetadataEntity, SymbolInfoEntity, SymbolRelationEntity,
+};
 use crate::analysis::{
     RelationType as AnalysisRelationType, RepoMap, SymbolInfo as AnalysisSymbolInfo, SymbolRelation,
 };
@@ -12,6 +14,22 @@ use tracing::{debug, info};
 pub struct RepomapDAO;
 
 impl RepomapDAO {
+    pub(crate) async fn has_current_analysis_revision(
+        conn: &DatabaseConnection,
+        project_root: &Path,
+    ) -> Result<bool> {
+        let project_root_str = project_root
+            .to_str()
+            .context("Project root path is not valid UTF-8")?;
+        let metadata = RepomapMetadataEntity::find_by_id(project_root_str)
+            .one(conn)
+            .await
+            .context("Failed to load Repomap analysis revision")?;
+        Ok(metadata.is_some_and(|metadata| {
+            metadata.analysis_revision == crate::analysis::cache::REPOMAP_ANALYSIS_REVISION
+        }))
+    }
+
     async fn load_file_hashes_only(
         conn: &DatabaseConnection,
         project_root_str: &str,
@@ -187,6 +205,18 @@ impl RepomapDAO {
             }
         }
 
+        RepomapMetadataEntity::insert(
+            crate::analysis::database::entities::repomap_metadata::ActiveModel {
+                project_root: sea_orm::Set(project_root_str.to_owned()),
+                analysis_revision: sea_orm::Set(
+                    crate::analysis::cache::REPOMAP_ANALYSIS_REVISION.to_owned(),
+                ),
+            },
+        )
+        .exec(&txn)
+        .await
+        .context("Failed to save Repomap analysis revision")?;
+
         txn.commit()
             .await
             .context("Failed to commit database transaction")?;
@@ -344,6 +374,11 @@ impl RepomapDAO {
             project_root_str
         );
 
+        RepomapMetadataEntity::delete_by_id(project_root_str)
+            .exec(conn)
+            .await
+            .context("Failed to delete Repomap analysis revision")?;
+
         // Delete file hashes
         let _deleted_hashes = FileHashEntity::delete_many()
             .filter(
@@ -393,6 +428,9 @@ impl RepomapDAO {
         project_root: &Path,
         current_hashes: &HashMap<PathBuf, String>,
     ) -> Result<bool> {
+        if !Self::has_current_analysis_revision(conn, project_root).await? {
+            return Ok(false);
+        }
         let project_root_str = project_root
             .to_str()
             .context("Project root path is not valid UTF-8")?;
@@ -557,7 +595,7 @@ mod tests {
             migrations
                 .try_get::<i64>("", "total")
                 .expect("migration count"),
-            4
+            5
         );
         assert_eq!(
             crate::analysis::database::entities::symbol_info::Entity::find()

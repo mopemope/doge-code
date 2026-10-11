@@ -507,6 +507,40 @@ mod tests {
         prepare_edit(dir, &file, line).unwrap()
     }
 
+    #[tokio::test]
+    async fn react_component_edit_preserves_neighbors_and_rejects_invalid_jsx() {
+        for extension in ["tsx", "jsx"] {
+            let rel = format!("src/App.{extension}");
+            let source = "function App() { return <div>Hello</div>; }\nfunction Other() { return <span>Keep</span>; }\n";
+            let project = write_temp_project(&[(&rel, source)]);
+            let root = project.path();
+            let prepared = prepare_for(root, &rel, 1);
+            assert!(!prepared.had_syntax_error, "{extension}");
+            let replacement = "function App() { return <section>Updated</section>; }";
+            let (_, map, before) = apply_edit(&prepared, replacement, root)
+                .await
+                .expect("commit React component edit");
+            assert_eq!(before, source);
+            let current = std::fs::read_to_string(root.join(&rel)).expect("edited file");
+            assert!(current.contains(replacement));
+            assert!(current.contains("function Other() { return <span>Keep</span>; }"));
+            assert!(map.symbols.iter().any(|symbol| symbol.name == "App"));
+
+            let prepared = prepare_for(root, &rel, 1);
+            let error = apply_edit(&prepared, "function App() { return <div>{</div>; }", root)
+                .await
+                .expect_err("invalid JSX is rejected");
+            assert!(matches!(
+                error,
+                SemanticEditError::IntroducedSyntaxError | SemanticEditError::IdentityChanged
+            ));
+            assert_eq!(
+                std::fs::read_to_string(root.join(&rel)).expect("unchanged file"),
+                current
+            );
+        }
+    }
+
     #[test]
     fn test_normal_success() {
         let dir = write_temp_project(&[("src/lib.rs", "fn foo() {\n    1;\n}\nfn bar() {}\n")]);
