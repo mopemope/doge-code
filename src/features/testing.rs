@@ -419,7 +419,15 @@ mod python_environment_tests {
             Some("tests/test_local.py")
         );
         assert_eq!(failures[0].message, "AssertionError: local detail");
-        assert!(result.structured_test_result.is_none());
+        assert_eq!(
+            crate::features::structured_test_results::pytest::outcome(
+                result
+                    .structured_test_result
+                    .as_deref()
+                    .expect("incomplete report")
+            ),
+            Some(crate::features::structured_test_results::pytest::Outcome::Incomplete)
+        );
         assert!(result.diagnostic_stdout.is_none());
         // Retain standard interpreter symlinks instead of turning them into
         // system interpreter invocations that bypass the environment.
@@ -455,7 +463,15 @@ mod python_environment_tests {
         assert_eq!(module.exit_code, Some(1));
         assert!(module.stderr.contains("No module named pytest"));
         assert!(parse_test_output(&module, "python").is_empty());
-        assert!(module.structured_test_result.is_none());
+        assert_eq!(
+            crate::features::structured_test_results::pytest::outcome(
+                module
+                    .structured_test_result
+                    .as_deref()
+                    .expect("missing report")
+            ),
+            Some(crate::features::structured_test_results::pytest::Outcome::Incomplete)
+        );
     }
 
     #[test]
@@ -511,11 +527,25 @@ pub async fn run_test_command_with_cancel(
         timeout_ms = timeout_ms,
         "running trusted internal test command"
     );
+    let addopts = std::env::var_os("PYTEST_ADDOPTS");
+    let python_report = crate::features::structured_test_results::pytest::observer_eligible(
+        cmd,
+        args,
+        addopts.as_deref(),
+    )
+    .then(crate::features::structured_test_results::pytest::Report::prepare)
+    .transpose()
+    .ok()
+    .flatten();
+    let env = python_report
+        .as_ref()
+        .map(|report| BTreeMap::from([("PYTEST_ADDOPTS".into(), report.addopts())]))
+        .unwrap_or_default();
     let spec = ManagedProcessSpec {
         program: cmd.to_string(),
         args: args.to_vec(),
         cwd: project_root.to_path_buf(),
-        env: BTreeMap::new(),
+        env,
     };
     let timeout = (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms));
     let options = ManagedRunOptions {
@@ -550,25 +580,29 @@ pub async fn run_test_command_with_cancel(
         ManagedProcessTermination::TimedOut => (true, false, false),
         ManagedProcessTermination::Cancelled => (false, true, false),
     };
+    let capture_state = if timed_out {
+        crate::features::structured_test_results::CaptureState::TimedOut
+    } else if managed.capture_truncated || !managed.warnings.is_empty() {
+        crate::features::structured_test_results::CaptureState::Incomplete
+    } else {
+        crate::features::structured_test_results::CaptureState::Complete
+    };
     let structured_test_result = if cancelled {
         None
+    } else if let Some(report) = python_report.as_ref() {
+        Some(report.observe(managed.exit_code, capture_state))
     } else {
         crate::features::structured_test_results::observe(
             cmd,
             args,
             &managed.stdout,
-            if timed_out {
-                crate::features::structured_test_results::CaptureState::TimedOut
-            } else if managed.capture_truncated || !managed.warnings.is_empty() {
-                crate::features::structured_test_results::CaptureState::Incomplete
-            } else {
-                crate::features::structured_test_results::CaptureState::Complete
-            },
+            capture_state,
             success,
         )
     };
     let diagnostic_stdout = structured_test_result
         .as_ref()
+        .filter(|r| r.format == crate::features::structured_test_results::ResultFormat::GoTestJson)
         .map(|_| go_json::diagnostics(&managed.stdout));
     let mut warnings = managed.warnings;
     if managed.capture_truncated {
@@ -1232,5 +1266,118 @@ mod go_workflow_tests {
         let failure = parse_test_output(&result, "go");
         assert_eq!(failure[0].name, "TestLegacy");
         assert_eq!(failure[0].message, "old detail");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pytest_report_integration_tests {
+    use super::*;
+    use crate::features::structured_test_results::{ResultFormat, pytest};
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(report: Option<&str>, exit: i32, sleep: bool) -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().expect("root");
+        if let Some(report) = report {
+            std::fs::write(root.path().join("fixture.xml"), report).expect("fixture");
+        }
+        // Isolated subprocess stand-in validates the actual runner's argv/env/cwd.
+        let script = format!(
+            r#"#!/usr/bin/python3
+import os, pathlib, shlex, sys, time
+assert sys.argv[1:] == ['-m', 'pytest', '-v'], sys.argv
+path = shlex.split(os.environ['PYTEST_ADDOPTS'])[0].split('=', 1)[1]
+pathlib.Path('observed_path').write_text(path)
+fixture = pathlib.Path('fixture.xml')
+if fixture.exists(): pathlib.Path(path).write_bytes(fixture.read_bytes())
+if {sleep}: time.sleep(10)
+raise SystemExit({exit})
+"#,
+            sleep = if sleep { "True" } else { "False" }
+        );
+        let program = root.path().join("python3");
+        std::fs::write(&program, script).expect("program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let path = program.to_string_lossy().into_owned();
+        (root, path)
+    }
+    const PASS: &str = "<testsuites><testsuite tests='1' failures='0' errors='0' skipped='0'><testcase classname='p' name='test_a'/></testsuite></testsuites>";
+    #[tokio::test]
+    async fn pytest_report_runner_preserves_literal_invocation_and_cleans_fresh_report() {
+        let (root, program) = fixture(Some(PASS), 0, false);
+        let args = vec!["-m".into(), "pytest".into(), "-v".into()];
+        let result = run_test_command(root.path(), &program, &args, 5000).await;
+        assert!(result.success, "{}", result.stderr);
+        assert_eq!(
+            pytest::outcome(result.structured_test_result.as_deref().expect("report")),
+            Some(pytest::Outcome::Passed)
+        );
+        assert_eq!(
+            result
+                .structured_test_result
+                .as_ref()
+                .expect("report")
+                .test_count(),
+            Some(1)
+        );
+        assert_eq!(
+            result
+                .structured_test_result
+                .as_ref()
+                .expect("report")
+                .format,
+            ResultFormat::PytestJunit
+        );
+        assert!(result.diagnostic_stdout.is_none());
+        assert_eq!(
+            crate::features::verification_queue::classify(&result),
+            crate::features::verification_queue::Outcome::Passed
+        );
+        let old = std::fs::read_to_string(root.path().join("observed_path")).expect("path");
+        assert!(!Path::new(&old).starts_with(root.path()));
+        assert!(!Path::new(&old).exists());
+        std::fs::remove_file(root.path().join("fixture.xml")).expect("remove fixture");
+        let result = run_test_command(root.path(), &program, &args, 5000).await;
+        assert!(result.success); // process exit remains distinct from test evidence
+        assert_eq!(
+            pytest::outcome(
+                result
+                    .structured_test_result
+                    .as_deref()
+                    .expect("missing observation")
+            ),
+            Some(pytest::Outcome::Incomplete)
+        );
+        assert_eq!(
+            crate::features::verification_queue::classify(&result),
+            crate::features::verification_queue::Outcome::Incomplete
+        );
+        assert_ne!(
+            std::fs::read_to_string(root.path().join("observed_path")).expect("new path"),
+            old
+        );
+    }
+    #[tokio::test]
+    async fn pytest_report_timeout_and_cancel_never_authorize_a_finished_report() {
+        let args = vec!["-m".into(), "pytest".into(), "-v".into()];
+        let (root, program) = fixture(Some(PASS), 0, true);
+        let result = run_test_command(root.path(), &program, &args, 100).await;
+        assert!(result.timed_out);
+        assert_eq!(
+            result
+                .structured_test_result
+                .as_ref()
+                .expect("timed out")
+                .test_count(),
+            None
+        );
+        assert_eq!(
+            pytest::outcome(result.structured_test_result.as_deref().expect("report")),
+            Some(pytest::Outcome::Incomplete)
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        let result =
+            run_test_command_with_cancel(root.path(), &program, &args, 5000, Some(token)).await;
+        assert!(result.cancelled);
+        assert!(result.structured_test_result.is_none());
     }
 }

@@ -19,6 +19,9 @@ pub enum Outcome {
     TimedOut,
     Cancelled,
     SpawnFailed,
+    CollectionError,
+    Interrupted,
+    RunnerError,
 }
 impl Outcome {
     pub fn label(self) -> &'static str {
@@ -34,6 +37,9 @@ impl Outcome {
             Self::TimedOut => "timed out",
             Self::Cancelled => "cancelled",
             Self::SpawnFailed => "could not start",
+            Self::CollectionError => "collection error",
+            Self::Interrupted => "interrupted",
+            Self::RunnerError => "test runner error",
         }
     }
 }
@@ -46,6 +52,24 @@ pub fn classify(result: &TestResult) -> Outcome {
     }
     if !result.execution_observed {
         return Outcome::SpawnFailed;
+    }
+    if let Some(outcome) = result
+        .structured_test_result
+        .as_deref()
+        .and_then(crate::features::structured_test_results::pytest::outcome)
+    {
+        use crate::features::structured_test_results::pytest::Outcome as Python;
+        return match outcome {
+            Python::Passed => Outcome::Passed,
+            Python::Failed => Outcome::Failed,
+            Python::ZeroTests => Outcome::ZeroTests,
+            Python::AllSkipped => Outcome::Skipped,
+            Python::CollectionError => Outcome::CollectionError,
+            Python::Interrupted => Outcome::Interrupted,
+            Python::RunnerError => Outcome::RunnerError,
+            Python::Incomplete => Outcome::Incomplete,
+            Python::Unknown => Outcome::Unknown,
+        };
     }
     if !result.success {
         return Outcome::Failed;
@@ -69,7 +93,7 @@ pub fn classify(result: &TestResult) -> Outcome {
         }
         Some(ResultObservation::Complete { .. }) => Outcome::Passed,
         Some(ResultObservation::Unknown { .. }) => Outcome::Incomplete,
-        None => Outcome::Unknown,
+        Some(ResultObservation::Pytest { .. }) | None => Outcome::Unknown,
     }
 }
 #[derive(Clone)]

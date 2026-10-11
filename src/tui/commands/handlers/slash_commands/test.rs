@@ -105,6 +105,7 @@ async fn run_test_job(
     let mut all_failed_tests = Vec::new();
     let mut all_command_outputs = Vec::new();
     let mut has_any_failures = false;
+    let mut has_unverified_python = false;
 
     let test_configs = testing::get_test_configs(&project_root);
 
@@ -259,7 +260,26 @@ async fn run_test_job(
             }
 
             // Send output to UI
-            if result.success {
+            let python_outcome = result
+                .structured_test_result
+                .as_deref()
+                .and_then(crate::features::structured_test_results::pytest::outcome);
+            let python_invocation =
+                crate::features::structured_test_results::pytest::default_invocation(
+                    &test_cmd.command,
+                    &test_cmd.args,
+                );
+            if python_invocation {
+                use crate::features::structured_test_results::pytest::Outcome;
+                let outcome = python_outcome.unwrap_or(Outcome::Unknown);
+                has_unverified_python |= outcome != Outcome::Passed;
+                ui_tx.send_logged(format!(
+                    "::shell_output:{}: {} {}",
+                    outcome.label(),
+                    test_cmd.command,
+                    test_cmd.args.join(" ")
+                ));
+            } else if result.success {
                 ui_tx.send_logged(format!(
                     "::shell_output:✓ All tests passed: {} {}",
                     test_cmd.command,
@@ -332,7 +352,13 @@ async fn run_test_job(
             prompt,
         });
     } else {
-        ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
+        if has_unverified_python {
+            ui_tx.send_logged(
+                "::shell_output:\nCommands completed; Python test success was not confirmed.",
+            );
+        } else {
+            ui_tx.send_logged("::shell_output:\n✓ All tests passed!");
+        }
     }
 
     // Close the stage-then-cancel race: a cancellation landing between the
@@ -474,5 +500,69 @@ mod tests {
         assert!(second.is_err());
         assert!(rx.try_recv().is_err());
         manager.cancel(blocker);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pytest_report_tui_does_not_claim_pass_for_all_skipped_or_missing_report() {
+        use std::os::unix::fs::PermissionsExt;
+        for report in [
+            Some(include_str!(
+                "../../../../features/structured_test_results/fixtures/pytest/skipped.xml"
+            )),
+            None,
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            std::fs::write(
+                root.path().join("test_example.py"),
+                "def test_example(): pass\n",
+            )
+            .expect("source");
+            std::fs::create_dir_all(root.path().join(".venv/bin")).expect("venv");
+            std::fs::write(root.path().join(".venv/pyvenv.cfg"), "home = fixture\n")
+                .expect("venv config");
+            if let Some(report) = report {
+                std::fs::write(root.path().join("fixture.xml"), report).expect("report fixture");
+            }
+            let interpreter = root.path().join(".venv/bin/python");
+            std::fs::write(
+                &interpreter,
+                r#"#!/bin/sh
+# No system interpreter/venv lookup: this stand-in verifies runner plumbing.
+if [ -f fixture.xml ]; then
+    report_path="${PYTEST_ADDOPTS#--junitxml=\'}"
+    report_path="${report_path%\'}"
+    cp fixture.xml "$report_path"
+fi
+"#,
+            )
+            .expect("interpreter");
+            std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755))
+                .expect("mode");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let deferred = crate::tui::followup::DeferredFollowupStore::default();
+            let outcome = run_test_job(
+                crate::jobs::JobId(1),
+                deferred.clone(),
+                root.path().into(),
+                test_tools_for(root.path()),
+                tx,
+                5000,
+                CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(outcome, JobRunOutcome::Completed));
+            let messages = rx.try_iter().collect::<Vec<_>>().join("\n");
+            assert_eq!(deferred.len(), 0, "{messages}");
+            assert!(!messages.contains("All tests passed"), "{messages}");
+            assert!(
+                messages.contains(if report.is_some() {
+                    "all reported Python tests skipped"
+                } else {
+                    "Python report incomplete"
+                }),
+                "{messages}"
+            );
+            assert!(messages.contains("Python test success was not confirmed"));
+        }
     }
 }

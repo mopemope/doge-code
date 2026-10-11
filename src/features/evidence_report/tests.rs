@@ -1860,3 +1860,54 @@ async fn human_review_valid_but_changed_target_metadata_cannot_be_an_idempotent_
     assert_eq!(r.review_decisions.len(), 2);
     assert_eq!(r.review_decisions[1].status, S::Current);
 }
+
+#[tokio::test]
+async fn pytest_report_survives_provenance_replay_with_python_count_unit() {
+    use crate::features::structured_test_results::{CaptureState, pytest};
+    let f = fixture(true);
+    let observed = pytest::observe(
+        Some(include_str!(
+            "../structured_test_results/fixtures/pytest/skipped.xml"
+        )),
+        Some(0),
+        CaptureState::Complete,
+    );
+    let event = build_verification_event(VerificationRecordInput {
+        structured_test_result: Some(observed),
+        kind: VerificationKind::Test,
+        source: VerificationSource::TuiTest,
+        program: "python3",
+        args: &["-m".into(), "pytest".into(), "-v".into()],
+        cwd_relative: None,
+        success: true,
+        status: "completed",
+        exit_code: Some(0),
+        timed_out: false,
+        stdout: "",
+        stderr: "",
+        capture_truncated: false,
+        context: VerificationContext::default(),
+        extra_warnings: vec![],
+    });
+    f.provenance
+        .append(
+            &f.session.meta.id,
+            ProvenanceEvent::VerificationObserved(event),
+        )
+        .expect("persist");
+    let observed = report(&f, false).await;
+    let verification = observed.verifications.last().expect("verification");
+    assert_eq!(verification.test_count, Some(1));
+    assert_eq!(verification.test_count_unit, Some("pytest_junit_testcases"));
+    let structured = verification
+        .structured_test_result
+        .as_deref()
+        .expect("structured");
+    assert_eq!(
+        pytest::outcome(structured),
+        Some(pytest::Outcome::AllSkipped)
+    );
+    let json = serde_json::to_string(structured).expect("wire");
+    assert!(!json.contains("test_sample"));
+    assert!(!json.contains("test_skip"));
+}

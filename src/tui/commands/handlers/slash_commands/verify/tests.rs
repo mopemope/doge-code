@@ -585,3 +585,71 @@ async fn stale_displayed_selection_is_rejected_before_spawn_after_refresh() {
     .expect("fresh explicit selection");
     assert!(root.path().join("spawned").exists());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pytest_report_verify_saves_skipped_counts_without_pass_claim() {
+    let (root, tools, queue, tx, _rx) = fixture("exit 0");
+    let program = root.path().join("python3");
+    std::fs::write(
+        root.path().join("fixture.xml"),
+        include_str!("../../../../../features/structured_test_results/fixtures/pytest/skipped.xml"),
+    )
+    .expect("report fixture");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+[ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "pytest" ] && [ "$3" = "-v" ] || exit 1
+report_path="${PYTEST_ADDOPTS#--junitxml=\'}"
+report_path="${report_path%\'}"
+cp fixture.xml "$report_path"
+"#,
+    )
+    .expect("python fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    seed(&tools, &queue).await;
+    {
+        let mut queue = queue.lock().expect("queue");
+        let recommendation = &mut queue.entries[0].recommendation;
+        recommendation.program = program.to_string_lossy().into();
+        recommendation.args = vec!["-m".into(), "pytest".into(), "-v".into()];
+    }
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::Run(selected_id(&queue)),
+        5000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("run");
+    let queue = queue.lock().expect("queue");
+    assert_eq!(
+        queue.entries[0].outcome,
+        Outcome::Skipped,
+        "exit_code={:?}, counts={:?}",
+        queue.entries[0].exit_code,
+        queue.entries[0].test_counts
+    );
+    assert_eq!(queue.entries[0].test_counts.expect("counts").skipped, 1);
+    let events = crate::tools::provenance::load_current_events(&tools)
+        .expect("load")
+        .expect("session");
+    let result = events
+        .events
+        .iter()
+        .find_map(|e| match &e.event {
+            crate::provenance::ProvenanceEvent::VerificationObserved(v) => {
+                v.structured_test_result.as_deref()
+            }
+            _ => None,
+        })
+        .expect("stored report");
+    assert_eq!(
+        crate::features::structured_test_results::pytest::outcome(result),
+        Some(crate::features::structured_test_results::pytest::Outcome::AllSkipped)
+    );
+}
