@@ -1909,8 +1909,15 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
 - Legacy `allowed_commands` (deprecated) is used only when `[execution]` is
   absent (a bare `[execution]` table with no fields does not count as
   configured). Empty means unrestricted-legacy (with a one-time warning);
-  non-empty entries are parsed as simple `program + arg-prefix` commands —
-  shell operators (`;`, `&&`, `||`, `|`, `>`, `$()`, backticks, newlines, …)
+  non-empty entries are parsed as simple `program + arg-prefix` commands.
+  Both `execute_process` and legacy shell tools enforce the same exact program
+  and argument-prefix match: `allowed_commands = ["git status"]` permits
+  `git status` and `git status --short`, but denies `git commit` before spawn
+  (`execute_process` returns `policy_denied`; legacy shell tools retain their
+  existing failure output). A rule containing only `git` permits any git arguments.
+  Quoted literals and empty arguments in rules retain their argv boundaries;
+  structured arguments remain literal and are never evaluated as shell text.
+  Shell operators (`;`, `&&`, `||`, `|`, `>`, `$()`, backticks, newlines, …)
   are denied for both `execute_bash` and `execute_shell`. Safe simple
   `execute_bash` commands run shell-free via the new runner; safe simple
   `execute_shell` commands still run in the persistent session (so
