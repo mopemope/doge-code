@@ -61,6 +61,64 @@ pub fn handle_evidence(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) 
         ),
     }
 }
+/// Internal UI request; the exact captured view must still own this request.
+pub fn handle_file_evidence(executor: &mut TuiExecutor, ui: &mut TuiApp, json: &str) {
+    use crate::tui::diff_review::{EvidenceDetailRequest, EvidenceDetailResponse};
+    let Ok(request) = serde_json::from_str::<EvidenceDetailRequest>(json) else {
+        return;
+    };
+    let Some(detail) = ui
+        .diff_review
+        .as_mut()
+        .and_then(|r| r.evidence_detail.as_mut())
+    else {
+        return;
+    };
+    if detail.request != request || uuid::Uuid::parse_str(&request.session_id).is_err() {
+        return;
+    }
+    if executor.ensure_session_idle().is_err() {
+        detail.lines = vec!["Evidence unavailable while another job is active. Close and reopen after completion or /cancel.".into()];
+        detail.loading = false;
+        return;
+    }
+    let Some(tx) = executor.ui_tx.clone() else {
+        detail.lines = vec!["Evidence UI channel unavailable.".into()];
+        detail.loading = false;
+        return;
+    };
+    let root = executor.cfg.project_root.clone();
+    match executor.jobs.spawn(JobSpec::new(JobKind::Evidence, JobScope::Foreground, WorkspaceAccess::ReadOnly, "Inspect selected-file evidence"), move |ctx| async move {
+        let (tx, _forwarder) = crate::tui::job_messages::scoped_sender(Some(tx), ctx.id);
+        let Some(tx) = tx else { return JobRunOutcome::Failed { message: "Evidence UI channel unavailable.".into() }; };
+        let token = ctx.cancellation_token();
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => return JobRunOutcome::Cancelled,
+            result = crate::features::evidence_report::file_detail(&root, &request.session_id, &request.path) => result,
+        };
+        if token.is_cancelled() { return JobRunOutcome::Cancelled; }
+        let lines = match result {
+            Ok(lines) => lines,
+            Err(_) => vec!["Saved evidence unavailable; current correspondence unconfirmed. Check the explicit session ID with /evidence or CLI diagnostics.".into()],
+        };
+        match serde_json::to_string(&EvidenceDetailResponse { request, lines }) {
+            Ok(json) => { let _ = tx.send(format!("::diff_evidence_result:{json}")); JobRunOutcome::Completed }
+            Err(_) => JobRunOutcome::Failed { message: "Evidence detail serialization failed.".into() },
+        }
+    }) {
+        Ok(id) => {
+            detail.job_id = Some(id);
+            ui.latest_agent_job_id = Some(id);
+            ui.status = Status::Running;
+        }
+        Err(_) => {
+            detail.lines = vec!["Evidence job could not start. Close and reopen after jobs finish.".into()];
+            detail.loading = false;
+        }
+    }
+}
+
 async fn run_evidence_job(
     root: PathBuf,
     id: String,
@@ -107,6 +165,17 @@ impl TuiExecutor {
         };
         if job.kind != JobKind::Evidence || !job.status.is_terminal() {
             return false;
+        }
+        if job.status != crate::jobs::JobStatus::Completed
+            && let Some(detail) = ui
+                .diff_review
+                .as_mut()
+                .and_then(|r| r.evidence_detail.as_mut())
+            && detail.job_id == Some(id)
+            && detail.loading
+        {
+            detail.loading = false;
+            detail.lines = vec!["Evidence read cancelled or failed; correspondence unconfirmed. Close and reopen to retry.".into()];
         }
         if let Some(error) = job.error {
             ui.push_log(format!("[evidence] {error}"));
@@ -224,6 +293,70 @@ mod tests {
             ui.push_log(line);
         }
         assert!(ui.log.len() > 3);
+        // The selected-file route uses the same managed read ownership and
+        // publishes a typed, bound response without changing saved records.
+        let session = executor
+            .session_manager
+            .lock()
+            .expect("manager")
+            .current_session_id()
+            .expect("session");
+        let session_path = dir
+            .path()
+            .join(".doge/sessions")
+            .join(&session)
+            .join("session.json");
+        let saved = std::fs::read(&session_path).expect("saved session");
+        let request = crate::tui::diff_review::EvidenceDetailRequest {
+            request_id: uuid::Uuid::now_v7().to_string(),
+            session_id: session.clone(),
+            path: "missing.rs".into(),
+        };
+        ui.diff_review = Some(crate::tui::diff_review::DiffReviewState::from_payload(
+            serde_json::from_value(
+                serde_json::json!({"session_id":session,"diff":"+change","files":["missing.rs"]}),
+            )
+            .expect("payload"),
+        ));
+        ui.diff_review.as_mut().expect("review").evidence_detail =
+            Some(crate::tui::diff_review::EvidenceDetailState {
+                request: request.clone(),
+                lines: vec![],
+                scroll: 0,
+                job_id: None,
+                loading: true,
+            });
+        handle_file_evidence(
+            &mut executor,
+            &mut ui,
+            &serde_json::to_string(&request).expect("request"),
+        );
+        let id = executor.jobs.foreground_id().expect("detail job");
+        assert_eq!(terminal(&executor.jobs, id).await, JobStatus::Completed);
+        let prefix = format!("::job_message:{id}:::diff_evidence_result:");
+        let result = rx
+            .try_iter()
+            .find_map(|m| m.strip_prefix(&prefix).map(str::to_owned))
+            .expect("typed response");
+        let response: crate::tui::diff_review::EvidenceDetailResponse =
+            serde_json::from_str(&result).expect("response");
+        assert_eq!(response.request, request);
+        assert!(
+            response
+                .lines
+                .iter()
+                .any(|l| l.contains("No recorded change IDs"))
+        );
+        assert!(
+            ui.diff_review
+                .as_mut()
+                .expect("review")
+                .apply_evidence_detail(response)
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("unchanged session"),
+            saved
+        );
     }
     #[tokio::test]
     async fn unavailable_evidence_fails_without_raw_error_content() {
