@@ -20,16 +20,16 @@ pub struct CollectedChanges {
 /// Returns `None` for outside-root / invalid spellings (caller records a
 /// warning and skips the path rather than guessing).
 fn normalize_input_path(project_root: &Path, raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    // Whitespace inside a path is filename data, including at either end.
+    if raw.is_empty() {
         return None;
     }
     // Reject NUL and other control-implied issues early; JSON strings are
     // UTF-8 so non-UTF-8 filesystem names cannot be expressed here.
-    if trimmed.contains('\0') {
+    if raw.contains('\0') {
         return None;
     }
-    let input_path = Path::new(trimmed);
+    let input_path = Path::new(raw);
     // Candidate absolute path: join relative spellings onto the root so
     // `..` and symlink components resolve against the real filesystem.
     let candidate_abs: PathBuf = if input_path.is_absolute() {
@@ -84,7 +84,7 @@ fn normalize_input_path(project_root: &Path, raw: &str) -> Option<String> {
         .ok()
         .or_else(|| {
             // Last resort: clean the raw relative spelling directly.
-            let rel = Path::new(trimmed);
+            let rel = Path::new(raw);
             if rel.is_absolute() {
                 return None;
             }
