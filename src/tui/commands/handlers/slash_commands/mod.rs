@@ -23,3 +23,5 @@ pub mod tools;
 pub mod evidence;
 
 pub mod models;
+
+pub mod verify;

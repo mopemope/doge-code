@@ -18,6 +18,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /jobs - List running and recent jobs");
     ui.push_log("  /reset - Force reset TUI state to Idle (emergency use)");
     ui.push_log("  /lint - Run linting tools for Go, Rust, and TypeScript");
+    ui.push_log("  /verify [refresh [paths...] | run <number>] - Inspect snapshot-bound suggestions or run one selected check");
     ui.push_log("  /test - Run tests for the project");
     ui.push_log("  /fix <instruction> - Attempt to fix code based on instruction");
     ui.push_log("  /plan <instruction> - Creates an implementation plan based on the instruction");
