@@ -37,6 +37,10 @@ pub struct AppConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// Resolution provenance, retained independently of the credential value.
+    pub api_key_origin: Option<super::ConfigOrigin>,
+    pub base_url_origin: super::ConfigOrigin,
+    pub provider_origin: super::ConfigOrigin,
     pub project_root: PathBuf,
     pub git_root: Option<PathBuf>,
     pub llm: LlmConfig,
@@ -85,6 +89,9 @@ impl Default for AppConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o-mini".to_string(),
             api_key: None,
+            api_key_origin: None,
+            base_url_origin: super::ConfigOrigin::Default,
+            provider_origin: super::ConfigOrigin::Default,
             project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             git_root: None,
             llm: LlmConfig::default(),
@@ -159,9 +166,23 @@ impl AppConfig {
             load_project_config(&project_root).context("load project configuration")?;
         let file_cfg = load_file_config().context("load user configuration")?;
 
+        super::trust::check_project_policy(&file_cfg, &project_cfg, &project_root)?;
+        use super::ConfigOrigin;
+        let provider_environment = std::env::var("DGC_PROVIDER").ok();
+        let provider_origin = if cli.provider.is_some() {
+            ConfigOrigin::Cli
+        } else if provider_environment.is_some() {
+            ConfigOrigin::Environment
+        } else if project_cfg.provider.is_some() {
+            ConfigOrigin::Project
+        } else if file_cfg.provider.is_some() {
+            ConfigOrigin::Global
+        } else {
+            ConfigOrigin::Default
+        };
         let provider = resolve_provider(
             cli.provider,
-            std::env::var("DGC_PROVIDER").ok().as_deref(),
+            provider_environment.as_deref(),
             project_cfg.provider,
             file_cfg.provider,
         )?;
@@ -179,51 +200,92 @@ impl AppConfig {
             anyhow::bail!("Select a ChatGPT model with --model. Run dgc models --provider openai.");
         }
         let opencode_base = crate::features::opencode::default_base(provider);
-        let api_key = cli
-            .api_key
-            .or_else(|| {
-                std::env::var(if opencode_base.is_some() {
-                    "OPENCODE_API_KEY"
-                } else {
-                    "OPENAI_API_KEY"
-                })
-                .ok()
-            })
-            .or(crate::features::opencode::config_value(
-                provider,
-                project_cfg.provider,
-                project_cfg.api_key,
-            ))
-            .or(crate::features::opencode::config_value(
-                provider,
-                file_cfg.provider,
-                file_cfg.api_key,
-            ));
-        let base_url = if cli.base_url.is_empty() {
-            std::env::var(if opencode_base.is_some() {
-                "OPENCODE_BASE_URL"
-            } else {
-                "OPENAI_BASE_URL"
-            })
-            .ok()
-            .or(crate::features::opencode::config_value(
-                provider,
-                project_cfg.provider,
-                project_cfg.base_url,
-            ))
-            .or(crate::features::opencode::config_value(
-                provider,
-                file_cfg.provider,
-                file_cfg.base_url,
-            ))
-            .unwrap_or_else(|| {
-                opencode_base
-                    .unwrap_or("https://api.openai.com/v1")
-                    .to_string()
-            })
+        let sourced = |value: Option<String>, origin| value.map(|value| (value, origin));
+        let global_base = crate::features::opencode::config_value(
+            provider,
+            file_cfg.provider,
+            file_cfg.base_url.clone(),
+        );
+        let trusted_base = global_base.clone().unwrap_or_else(|| {
+            opencode_base
+                .unwrap_or("https://api.openai.com/v1")
+                .to_owned()
+        });
+        let (base_url, base_url_origin) = if !cli.base_url.is_empty() {
+            (cli.base_url, ConfigOrigin::Cli)
         } else {
-            cli.base_url
+            sourced(
+                std::env::var(if opencode_base.is_some() {
+                    "OPENCODE_BASE_URL"
+                } else {
+                    "OPENAI_BASE_URL"
+                })
+                .ok(),
+                ConfigOrigin::Environment,
+            )
+            .or_else(|| {
+                sourced(
+                    crate::features::opencode::config_value(
+                        provider,
+                        project_cfg.provider,
+                        project_cfg.base_url.clone(),
+                    ),
+                    ConfigOrigin::Project,
+                )
+            })
+            .or_else(|| sourced(global_base, ConfigOrigin::Global))
+            .unwrap_or_else(|| (trusted_base.clone(), ConfigOrigin::Default))
         };
+        // OAuth never uses this URL, and Go/Zen validate their pinned URL below.
+        // Compatible routes must not pair inherited credentials with a new
+        // project-selected destination. Reject even without a key, so keyless
+        // startup cannot later acquire a credential for the same destination.
+        if provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+            && base_url_origin == ConfigOrigin::Project
+            && base_url.trim_end_matches('/') != trusted_base.trim_end_matches('/')
+        {
+            return Err(super::trust::project_denied(
+                "base_url (inherited credentials are not authorized for a project-selected endpoint)",
+            ));
+        }
+        let key = if provider == crate::features::openai_subscription::ProviderKind::Openai {
+            None
+        } else {
+            sourced(cli.api_key, ConfigOrigin::Cli)
+                .or_else(|| {
+                    sourced(
+                        std::env::var(if opencode_base.is_some() {
+                            "OPENCODE_API_KEY"
+                        } else {
+                            "OPENAI_API_KEY"
+                        })
+                        .ok(),
+                        ConfigOrigin::Environment,
+                    )
+                })
+                .or_else(|| {
+                    sourced(
+                        crate::features::opencode::config_value(
+                            provider,
+                            project_cfg.provider,
+                            project_cfg.api_key.clone(),
+                        ),
+                        ConfigOrigin::Project,
+                    )
+                })
+                .or_else(|| {
+                    sourced(
+                        crate::features::opencode::config_value(
+                            provider,
+                            file_cfg.provider,
+                            file_cfg.api_key.clone(),
+                        ),
+                        ConfigOrigin::Global,
+                    )
+                })
+        };
+        let api_key_origin = key.as_ref().map(|(_, origin)| *origin);
+        let api_key = key.map(|(key, _)| key);
         let model = if cli.model.is_empty() {
             std::env::var(if opencode_base.is_some() {
                 "OPENCODE_MODEL"
@@ -371,6 +433,15 @@ impl AppConfig {
             base_url,
             model,
             api_key,
+            api_key_origin,
+            base_url_origin: if provider
+                == crate::features::openai_subscription::ProviderKind::Openai
+            {
+                ConfigOrigin::Default
+            } else {
+                base_url_origin
+            },
+            provider_origin,
             project_root,
             git_root,
             llm,

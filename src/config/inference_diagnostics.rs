@@ -55,6 +55,14 @@ impl AppConfig {
                 None => "unknown/unsupported",
             }
         )];
+        lines.push(format!(
+            "Configuration sources: provider={:?}, endpoint={:?}, API key={}",
+            self.provider_origin,
+            self.base_url_origin,
+            self.api_key_origin
+                .map(|origin| format!("{origin:?}"))
+                .unwrap_or_else(|| "none".into())
+        ));
         if self.provider != ProviderKind::Openai
             && self
                 .api_key

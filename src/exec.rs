@@ -1018,6 +1018,9 @@ mod tests {
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
+            api_key_origin: None,
+            base_url_origin: Default::default(),
+            provider_origin: Default::default(),
             project_root: project_root.clone(),
             git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
@@ -1065,6 +1068,9 @@ mod tests {
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
+            api_key_origin: None,
+            base_url_origin: Default::default(),
+            provider_origin: Default::default(),
             project_root: project_root.clone(),
             git_root: Some(project_root.clone()),
             llm: crate::config::LlmConfig::default(), // Add default LlmConfig
