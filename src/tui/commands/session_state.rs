@@ -138,6 +138,8 @@ impl TuiExecutor {
         initial_prompt: Option<String>,
     ) -> Result<String> {
         self.ensure_session_transition_idle()?;
+        let mut verification_queue =
+            crate::utils::safe_std_lock(&self.verification_queue, "verification_queue")?;
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (new_id, previous_outcome, new_outcome) = {
@@ -161,6 +163,8 @@ impl TuiExecutor {
             };
             (new_id, previous_outcome, new_outcome)
         };
+        verification_queue.invalidate_selection();
+        drop(verification_queue);
         history.clear();
         drop(history);
         for (context, outcome) in [
@@ -204,6 +208,8 @@ impl TuiExecutor {
     /// switches always replace, never merge.
     pub fn switch_to_session(&mut self, id: &str) -> Result<SessionData> {
         self.ensure_session_transition_idle()?;
+        let mut verification_queue =
+            crate::utils::safe_std_lock(&self.verification_queue, "verification_queue")?;
         // Match agent checkpoint lock order and acquire fallible locks before committing.
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
@@ -219,6 +225,8 @@ impl TuiExecutor {
             })?;
             (session, messages, prepared, outcome)
         };
+        verification_queue.invalidate_selection();
+        drop(verification_queue);
         history.replace(messages);
         drop(history);
         self.report_session_save_outcome(&outcome);
@@ -230,6 +238,8 @@ impl TuiExecutor {
     /// Unknown and malformed targets leave existing sessions untouched.
     pub fn resume_session(&mut self, resume_id: &str) -> Result<ResumeOutcome> {
         self.ensure_session_transition_idle()?;
+        let mut verification_queue =
+            crate::utils::safe_std_lock(&self.verification_queue, "verification_queue")?;
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let loaded = {
@@ -263,6 +273,8 @@ impl TuiExecutor {
                 None
             }
         };
+        verification_queue.invalidate_selection();
+        drop(verification_queue);
         match loaded {
             Some((session, messages, prepared)) => {
                 history.replace(messages);
@@ -1468,6 +1480,97 @@ mod tests {
                 .content
                 .as_deref(),
             Some("pending exit")
+        );
+    }
+    #[tokio::test]
+    async fn verification_selection_expires_on_real_session_transitions() {
+        use crate::features::change_impact::VerificationRecommendation;
+        use crate::features::{verification_queue::VerificationQueue, verification_snapshot};
+        let (mut executor, root) = test_executor();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+        std::fs::write(root.path().join("source.rs"), "fn a() {}\n").expect("source");
+        let snapshot = verification_snapshot::capture(root.path(), Default::default(), None).await;
+        let mut ui = TuiApp::new_for_test("verify", None, "default");
+        let first = executor.start_new_session(&mut ui, None).expect("first");
+        let second = executor.start_new_session(&mut ui, None).expect("second");
+        executor.switch_to_session(&first).expect("A");
+        let seed = |queue: &mut VerificationQueue| {
+            queue.refresh(
+                Some(first.clone()),
+                snapshot.clone(),
+                vec![VerificationRecommendation {
+                    kind: "test".into(),
+                    program: "printf".into(),
+                    args: vec!["ok".into()],
+                    cwd: None,
+                    reason: "session check".into(),
+                    confidence: "unknown".into(),
+                    coverage_scope: "file".into(),
+                }],
+                None,
+            );
+            let id = queue.selection_id(0).expect("ID");
+            assert!(
+                queue
+                    .selection(&id, &Some(first.clone()), &snapshot)
+                    .is_ok()
+            );
+            id
+        };
+        let old = seed(&mut executor.verification_queue.lock().expect("queue"));
+        executor
+            .switch_to_session(&second)
+            .expect("B without verify");
+        executor
+            .switch_to_session(&first)
+            .expect("back to A without verify");
+        assert_ne!(
+            executor
+                .verification_queue
+                .lock()
+                .expect("queue")
+                .selection_id(0)
+                .expect("ID"),
+            old
+        );
+        assert!(
+            executor
+                .verification_queue
+                .lock()
+                .expect("queue")
+                .selection(&old, &Some(first.clone()), &snapshot)
+                .is_err()
+        );
+        let old = seed(&mut executor.verification_queue.lock().expect("queue"));
+        executor.resume_session(&second).expect("resume B");
+        executor.resume_session(&first).expect("resume A");
+        assert!(
+            executor
+                .verification_queue
+                .lock()
+                .expect("queue")
+                .selection(&old, &Some(first.clone()), &snapshot)
+                .is_err()
+        );
+        let old = seed(&mut executor.verification_queue.lock().expect("queue"));
+        executor
+            .start_new_session(&mut ui, None)
+            .expect("new session");
+        executor.switch_to_session(&first).expect("back to A");
+        assert!(
+            executor
+                .verification_queue
+                .lock()
+                .expect("queue")
+                .selection(&old, &Some(first), &snapshot)
+                .is_err()
         );
     }
 }
