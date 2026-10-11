@@ -6,7 +6,12 @@ fn verify_requires_explicit_single_selection() {
         parse("refresh a.rs b.rs").expect("paths"),
         Action::Refresh(Some(vec!["a.rs".into(), "b.rs".into()]))
     );
-    assert_eq!(parse("run 2").expect("select"), Action::Run(1));
+    assert!(parse("run 2").is_err());
+    let id = "q0123456789abcdef0123456789abcdef-2-0123456789abcdef";
+    assert_eq!(
+        parse(&format!("run {id}")).expect("select"),
+        Action::Run(id.into())
+    );
     for input in ["run", "run 0", "run -1", "run all", "run 1 2", "whatever"] {
         assert!(parse(input).is_err(), "{input}");
     }
@@ -31,7 +36,7 @@ async fn precancelled_verify_does_not_run_or_publish() {
         run_action(
             tools(root.path()),
             Default::default(),
-            Action::Run(0),
+            Action::Run("stale".into()),
             1000,
             tx,
             token,
@@ -96,7 +101,7 @@ async fn listing_never_executes_and_selection_runs_only_one_command() {
     run_action(
         tools(root.path()),
         queue.clone(),
-        Action::Run(0),
+        Action::Run(selected_id(&queue)),
         1000,
         tx,
         CancellationToken::new(),
@@ -189,7 +194,7 @@ printf '%s\n' '{"Action":"start","Package":"p"}' '{"Action":"run","Package":"p",
     run_action(
         tools.clone(),
         queue.clone(),
-        Action::Run(0),
+        Action::Run(selected_id(&queue)),
         1000,
         tx,
         CancellationToken::new(),
@@ -269,7 +274,7 @@ async fn timeout_and_failure_are_observed_but_cancelled_execution_is_not_success
         run_action(
             tools.clone(),
             queue.clone(),
-            Action::Run(0),
+            Action::Run(selected_id(&queue)),
             timeout,
             tx,
             token,
@@ -401,8 +406,8 @@ async fn selected_cwd_and_literal_argv_are_preserved_in_execution_and_evidence()
     }
     run_action(
         tools.clone(),
-        queue,
-        Action::Run(0),
+        queue.clone(),
+        Action::Run(selected_id(&queue)),
         1000,
         tx,
         CancellationToken::new(),
@@ -530,4 +535,53 @@ async fn dispatch_and_busy_job_preserve_ownership_and_log_before_completion() {
     assert!(executor.handle_verify_completed(&id.to_string(), &mut ui));
     assert_eq!(ui.status, Status::Ready);
     assert_eq!(executor.deferred_followups.len(), 0);
+}
+
+fn selected_id(queue: &Arc<Mutex<VerificationQueue>>) -> String {
+    queue.lock().expect("queue").selection_id(0).expect("ID")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_displayed_selection_is_rejected_before_spawn_after_refresh() {
+    let (root, tools, queue, tx, _rx) = fixture("touch spawned; exit 0");
+    seed(&tools, &queue).await;
+    let queued_action = Action::Run(selected_id(&queue));
+    {
+        let mut queue = queue.lock().expect("queue");
+        let mut replacement = queue.entries[0].recommendation.clone();
+        replacement.args = vec!["replacement".into()];
+        let planned = queue.planned.clone().expect("planned");
+        let session = queue.session_id.clone();
+        queue.refresh(session, planned, vec![replacement], None);
+    }
+    let error = run_action(
+        tools.clone(),
+        queue.clone(),
+        queued_action,
+        5000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect_err("old display must not authorize replacement");
+    assert!(error.to_string().contains("Stale or unknown selection ID"));
+    assert!(!root.path().join("spawned").exists());
+    assert_eq!(
+        queue.lock().expect("queue").entries[0].outcome,
+        Outcome::Unexecuted
+    );
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::Run(selected_id(&queue)),
+        5000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("fresh explicit selection");
+    assert!(root.path().join("spawned").exists());
 }

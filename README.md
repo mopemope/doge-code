@@ -1167,7 +1167,7 @@ The TUI provides various slash commands for quick operations:
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
 | `/test` | Run tests for the project |
-| `/verify [refresh [paths...] \| run <number>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
+| `/verify [refresh [paths...] \| run <id>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
 | `/map` | Display RepoMap |
 | `/rebuild-repomap` | Rebuild the RepoMap |
 | `/open` | Open a file |
@@ -1446,7 +1446,7 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 `impact_analyze` recommendations. It shows each command's literal program/argv,
 working directory, reason, confidence, and declared file/package/project scope.
 Listing never runs tests or fulfills a verification obligation. Use
-`/verify run <number>` to execute exactly one selected candidate. Use
+`/verify run <id>` to execute exactly one selected candidate. Use
 `/verify refresh [project-relative paths...]` to rebuild suggestions after edits;
 explicit paths also include edits made outside the session. With no paths,
 refresh retains the last explicit path set. Paths are whitespace-separated in
@@ -1454,8 +1454,13 @@ this initial UI; paths containing whitespace are not supported.
 
 The queue is process-local and isolated by session. Matching commands retain
 previous observations when refreshed, and results for older files remain
-labelled stale. Candidate numbers can change on refresh; inspect the new list
-before selecting. Unknown or incomplete workspace snapshots allow inspection
+labelled stale. Short row numbers are display-only; execution requires the displayed opaque ID.
+Each ID binds the queue generation, candidate row, and literal recommendation
+(including program/argv/cwd). Refresh always invalidates old IDs, even when the
+workspace or commands are unchanged. Reordering, adding/removing candidates,
+workspace edits, and session switches cannot reassign an old ID to another
+command. Duplicate commands retain their separate reasons and coverage scopes;
+copy the desired candidate's displayed `/verify run <id>` command. Unknown or incomplete workspace snapshots allow inspection
 but deny execution. Changed files between planning and selection also require
 refresh. This initial implementation observes Git files and referenced paths;
 it does not provide an OS sandbox or an atomic workspace freeze.

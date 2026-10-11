@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 enum Action {
     List,
     Refresh(Option<Vec<String>>),
-    Run(usize),
+    Run(String),
 }
 fn parse(args: &str) -> anyhow::Result<Action> {
     let words: Vec<_> = args.split_whitespace().collect();
@@ -25,16 +25,10 @@ fn parse(args: &str) -> anyhow::Result<Action> {
         ["refresh", paths @ ..] => Ok(Action::Refresh(
             (!paths.is_empty()).then(|| paths.iter().map(|p| (*p).to_owned()).collect()),
         )),
-        ["run", number] => Ok(Action::Run(
-            number
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .ok_or_else(|| anyhow::anyhow!("Candidate number must be positive."))?,
-        )),
-        _ => anyhow::bail!(
-            "Usage: /verify | /verify refresh [relative paths...] | /verify run <number>"
-        ),
+        ["run", id] if id.starts_with('q') && id.len() > 32 => Ok(Action::Run((*id).to_owned())),
+        _ => {
+            anyhow::bail!("Usage: /verify | /verify refresh [relative paths...] | /verify run <id>")
+        }
     }
 }
 pub fn handle_verify(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) {
@@ -224,8 +218,8 @@ async fn run_action(
     }
     let mut pending = None;
     let mut _running_guard = None;
-    if let Action::Run(index) = action {
-        let entry = lock(&queue)?.selection(index, &session_id, &current)?;
+    if let Action::Run(id) = action {
+        let (index, entry) = lock(&queue)?.selection(&id, &session_id, &current)?;
         let r = entry.recommendation;
         anyhow::ensure!(
             r.kind == "test",
@@ -267,7 +261,7 @@ async fn run_action(
         let references = current.files.iter().map(|f| f.path.clone()).collect();
         let workspace =
             verification_snapshot::begin(root, references, Some(token.child_token())).await;
-        lock(&queue)?.selection(index, &session_id, &workspace.start)?;
+        lock(&queue)?.selection(&id, &session_id, &workspace.start)?;
         if token.is_cancelled() {
             return Ok(JobRunOutcome::Cancelled);
         }
