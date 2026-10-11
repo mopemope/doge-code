@@ -591,12 +591,21 @@ async fn stale_displayed_selection_is_rejected_before_spawn_after_refresh() {
 async fn pytest_report_verify_saves_skipped_counts_without_pass_claim() {
     let (root, tools, queue, tx, _rx) = fixture("exit 0");
     let program = root.path().join("python3");
-    std::fs::write(&program, r#"#!/usr/bin/python3
-import os, pathlib, shlex, sys
-assert sys.argv[1:] == ['-m', 'pytest', '-v']
-path = shlex.split(os.environ['PYTEST_ADDOPTS'])[0].split('=', 1)[1]
-pathlib.Path(path).write_text("<testsuites><testsuite tests='1' failures='0' errors='0' skipped='1'><testcase classname='p' name='a'><skipped/></testcase></testsuite></testsuites>")
-"#).expect("python fixture");
+    std::fs::write(
+        root.path().join("fixture.xml"),
+        include_str!("../../../../../features/structured_test_results/fixtures/pytest/skipped.xml"),
+    )
+    .expect("report fixture");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+[ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "pytest" ] && [ "$3" = "-v" ] || exit 1
+report_path="${PYTEST_ADDOPTS#--junitxml=\'}"
+report_path="${report_path%\'}"
+cp fixture.xml "$report_path"
+"#,
+    )
+    .expect("python fixture");
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
     seed(&tools, &queue).await;
@@ -618,7 +627,13 @@ pathlib.Path(path).write_text("<testsuites><testsuite tests='1' failures='0' err
     .await
     .expect("run");
     let queue = queue.lock().expect("queue");
-    assert_eq!(queue.entries[0].outcome, Outcome::Skipped);
+    assert_eq!(
+        queue.entries[0].outcome,
+        Outcome::Skipped,
+        "exit_code={:?}, counts={:?}",
+        queue.entries[0].exit_code,
+        queue.entries[0].test_counts
+    );
     assert_eq!(queue.entries[0].test_counts.expect("counts").skipped, 1);
     let events = crate::tools::provenance::load_current_events(&tools)
         .expect("load")
