@@ -149,6 +149,17 @@ impl TuiApp {
                         }
                         continue;
                     }
+                    if let Some(json) = msg.strip_prefix("::diff_evidence_result:") {
+                        if let Ok(response) = serde_json::from_str::<
+                            crate::tui::diff_review::EvidenceDetailResponse,
+                        >(json)
+                            && let Some(review) = &mut self.diff_review
+                        {
+                            review.apply_evidence_detail(response);
+                        }
+                        self.dirty = true;
+                        continue;
+                    }
                     // Diff review handling
                     if let Some(payload) = msg.strip_prefix("::diff_review:") {
                         if let Ok(payload) = serde_json::from_str::<DiffReviewPayload>(payload) {
@@ -671,6 +682,15 @@ impl TuiApp {
         {
             return Ok(false);
         }
+        if self
+            .diff_review
+            .as_ref()
+            .is_some_and(|r| r.evidence_detail.is_some())
+        {
+            // The detail view owns keys even if input focus changed during cancellation.
+            self.process_diff_review_key(key)?;
+            return Ok(false);
+        }
         if self.model_picker.is_some() {
             crate::tui::event_handlers::handle_model_picker_key(self, key)?;
             return Ok(false);
@@ -745,6 +765,26 @@ impl TuiApp {
 
         use crossterm::event::KeyCode;
 
+        if let Some(review) = &mut self.diff_review
+            && let Some(detail) = &mut review.evidence_detail
+        {
+            if key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') if key.kind == event::KeyEventKind::Press => {
+                        review.evidence_detail = None;
+                        self.diff_review_focus = DiffReviewFocus::Review;
+                    }
+                    KeyCode::Up => detail.scroll = detail.scroll.saturating_sub(1),
+                    KeyCode::Down => detail.scroll = detail.scroll.saturating_add(1),
+                    KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
+                    KeyCode::PageDown => detail.scroll = detail.scroll.saturating_add(10),
+                    KeyCode::Home => detail.scroll = 0,
+                    _ => {}
+                }
+            }
+            self.dirty = true;
+            return Ok(true);
+        }
         match key.code {
             KeyCode::Char('m') if key.kind == event::KeyEventKind::Press => {
                 self.open_comment_list();
@@ -798,23 +838,33 @@ impl TuiApp {
                 self.dismiss_diff_review();
                 Ok(true)
             }
-            KeyCode::Char('e') => {
-                let Some(review) = self.diff_review.as_ref() else {
+            KeyCode::Char('e') if key.kind == event::KeyEventKind::Press => {
+                let Some(review) = self.diff_review.as_mut() else {
                     return Ok(false);
                 };
                 if review.rejecting {
                     self.push_log(
                         "[evidence] Rollback is running; wait before inspecting evidence.",
                     );
-                } else if let Some(id) = review
-                    .session_id
-                    .clone()
-                    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-                {
-                    self.dispatch(&format!("/evidence {id}"));
-                } else {
-                    self.push_log("[evidence] This review has no captured session ID. Select a saved session explicitly with /evidence <id>.");
+                    return Ok(true);
                 }
+                let request = crate::tui::diff_review::EvidenceDetailRequest {
+                    request_id: uuid::Uuid::now_v7().to_string(),
+                    session_id: review.session_id.clone().unwrap_or_default(),
+                    path: review
+                        .current_file()
+                        .map_or_else(String::new, |f| f.path.clone()),
+                };
+                let valid = uuid::Uuid::parse_str(&request.session_id).is_ok();
+                review.evidence_detail = Some(crate::tui::diff_review::EvidenceDetailState {
+                    request: request.clone(), scroll: 0, job_id: None, loading: valid,
+                    lines: vec![if valid { "Comparing saved evidence with current files…" } else { "No captured session ID; verification correspondence unavailable. Use /evidence <id> explicitly after closing this view." }.into()],
+                });
+                if valid {
+                    let json = serde_json::to_string(&request)?;
+                    self.dispatch(&format!("::diff_evidence_request:{json}"));
+                }
+                self.dirty = true;
                 Ok(true)
             }
             KeyCode::Char('a') => {
@@ -1847,7 +1897,19 @@ mod tests {
             KeyModifiers::NONE,
         );
         assert!(ui.process_diff_review_key(key).expect("key"));
-        assert_eq!(*calls.lock().expect("calls"), [format!("/evidence {id}")]);
+        let call = calls.lock().expect("calls")[0].clone();
+        let request: crate::tui::diff_review::EvidenceDetailRequest = serde_json::from_str(
+            call.strip_prefix("::diff_evidence_request:")
+                .expect("internal request"),
+        )
+        .expect("request");
+        assert_eq!(request.session_id, id);
+        assert_eq!(request.path, "a");
+        ui.process_diff_review_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))
+        .expect("close");
         assert!(ui.diff_review.is_some());
         calls.lock().expect("calls").clear();
         ui.diff_review.as_mut().expect("review").rejecting = true;
@@ -1858,6 +1920,21 @@ mod tests {
         review.session_id = None;
         ui.process_diff_review_key(key).expect("legacy key");
         assert!(calls.lock().expect("calls").is_empty());
+        assert!(
+            ui.diff_review
+                .as_ref()
+                .expect("review")
+                .evidence_detail
+                .as_ref()
+                .expect("legacy detail")
+                .lines[0]
+                .contains("No captured session ID")
+        );
+        ui.process_diff_review_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))
+        .expect("close legacy");
         for code in [
             crossterm::event::KeyCode::Char('a'),
             crossterm::event::KeyCode::Char('q'),
@@ -2086,5 +2163,87 @@ mod model_picker_interrupt_tests {
         assert!(last.is_none());
         assert!(ui.model_picker.is_none());
         assert_eq!(ui.textarea.lines(), ["preserve draft"]);
+    }
+}
+
+#[cfg(test)]
+mod evidence_detail_tests {
+    use super::*;
+    use crate::tui::diff_review::EvidenceDetailResponse;
+    #[test]
+    fn detail_is_modal_repeated_open_rejects_late_response_and_small_render_works() {
+        let mut ui = TuiApp::new_for_test("evidence", None, "default");
+        let id = uuid::Uuid::now_v7().to_string();
+        ui.diff_review = Some(DiffReviewState::from_payload(
+            serde_json::from_value(
+                serde_json::json!({"session_id":id,"diff":"+change","files":["a","b"]}),
+            )
+            .expect("payload"),
+        ));
+        let key = |code| crossterm::event::KeyEvent::new(code, KeyModifiers::NONE);
+        ui.process_diff_review_key(key(KeyCode::Char('e')))
+            .expect("open");
+        let old = ui
+            .diff_review
+            .as_ref()
+            .expect("review")
+            .evidence_detail
+            .as_ref()
+            .expect("detail")
+            .request
+            .clone();
+        for code in [
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('h'),
+            KeyCode::Right,
+            KeyCode::F(6),
+        ] {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12))
+                .expect("terminal");
+            ui.handle_ui_key(key(code), &mut terminal)
+                .expect("modal key");
+            assert_eq!(ui.diff_review.as_ref().expect("review").selected, 0);
+            assert!(!ui.diff_review.as_ref().expect("review").rejecting);
+        }
+        ui.process_diff_review_key(key(KeyCode::Esc))
+            .expect("close");
+        assert!(ui.diff_review.is_some());
+        assert!(
+            ui.diff_review
+                .as_ref()
+                .expect("review")
+                .evidence_detail
+                .is_none()
+        );
+        ui.process_diff_review_key(key(KeyCode::Char('e')))
+            .expect("reopen");
+        let review = ui.diff_review.as_mut().expect("review");
+        assert!(!review.apply_evidence_detail(EvidenceDetailResponse {
+            request: old,
+            lines: vec!["late success".into()]
+        }));
+        let request = review
+            .evidence_detail
+            .as_ref()
+            .expect("detail")
+            .request
+            .clone();
+        assert!(review.apply_evidence_detail(EvidenceDetailResponse {
+            request,
+            lines: vec![
+                "Test count: unknown".into(),
+                "Current success unconfirmed".into()
+            ]
+        }));
+        for (width, height) in [(40, 12), (120, 35), (2, 2)] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                    .expect("terminal");
+            terminal.draw(|f| ui.view(f, None)).expect("render");
+        }
+        ui.process_diff_review_key(key(KeyCode::Char('q')))
+            .expect("close");
+        assert!(ui.diff_review.is_some());
     }
 }

@@ -42,6 +42,22 @@ impl TuiApp {
             ])
             .split(size);
 
+        if let Some(detail) = self
+            .diff_review
+            .as_mut()
+            .and_then(|r| r.evidence_detail.as_mut())
+        {
+            let width = usize::from(chunks[1].width.saturating_sub(2).max(1));
+            let rows: usize = detail
+                .lines
+                .iter()
+                .map(|line| crate::tui::review_feedback::wrap_cells(line, width).len())
+                .sum();
+            let max_scroll = rows
+                .saturating_sub(usize::from(chunks[1].height.saturating_sub(2)))
+                .min(usize::from(u16::MAX)) as u16;
+            detail.scroll = detail.scroll.min(max_scroll);
+        }
         let main_content_height = chunks[1].height;
         self.main_content_height = main_content_height as usize;
 
@@ -265,6 +281,14 @@ impl TuiApp {
     fn render_main_content(&self, f: &mut Frame, area: Rect, plan: &RenderPlan, theme: &Theme) {
         f.render_widget(Clear, area);
 
+        if self
+            .diff_review
+            .as_ref()
+            .is_some_and(|r| r.evidence_detail.is_some())
+        {
+            self.render_diff_review(f, area, theme);
+            return;
+        }
         if self.diff_review.is_some() && self.input_mode == crate::tui::state::InputMode::Normal {
             let columns = Self::diff_review_columns(area);
 
@@ -419,6 +443,33 @@ impl TuiApp {
         let Some(review) = &self.diff_review else {
             return;
         };
+
+        if let Some(detail) = &review.evidence_detail {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Selected-file evidence · Esc/q back · ↑/↓ scroll · reopen to refresh");
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let rows = detail
+                .lines
+                .iter()
+                .flat_map(|line| {
+                    crate::tui::review_feedback::wrap_cells(line, usize::from(inner.width.max(1)))
+                })
+                .map(Line::from)
+                .collect::<Vec<_>>();
+            let max_scroll = rows
+                .len()
+                .saturating_sub(usize::from(inner.height))
+                .min(usize::from(u16::MAX)) as u16;
+            f.render_widget(
+                Paragraph::new(rows)
+                    .style(theme.log_style)
+                    .scroll((detail.scroll.min(max_scroll), 0)),
+                inner,
+            );
+            return;
+        }
 
         // Small-terminal fallback: omit evidence pane when height is tight so
         // the diff stays visible. Compact summary goes into the diff title.

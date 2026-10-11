@@ -570,6 +570,13 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if self
+            .diff_review
+            .as_ref()
+            .is_some_and(|r| r.evidence_detail.is_some())
+        {
+            return;
+        }
         if let Some(picker) = self.model_picker.as_mut() {
             picker
                 .query
