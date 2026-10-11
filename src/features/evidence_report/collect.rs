@@ -462,8 +462,7 @@ pub(super) fn build(
                 test_count_unit: v
                     .structured_test_result
                     .as_ref()
-                    .and_then(|r| r.test_count())
-                    .map(|_| "go_test_terminal_events_including_subtests"),
+                    .and_then(|r| r.test_count_unit()),
                 execution_environment: None,
                 warnings: v.warnings.clone(),
                 stdout_excerpt: include_content.then(|| v.stdout_excerpt.clone()),

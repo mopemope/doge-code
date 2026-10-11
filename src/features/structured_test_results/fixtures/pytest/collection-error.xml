@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="1" time="0.000" timestamp="2026-10-11T00:00:00Z" hostname="fixture"><testcase classname="" name="test_example" time="0.000"><error message="collection failure">fixture diagnostic</error></testcase></testsuite></testsuites>
