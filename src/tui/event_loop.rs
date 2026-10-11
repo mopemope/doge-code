@@ -682,6 +682,23 @@ impl TuiApp {
         {
             return Ok(false);
         }
+        if let Some(view) = &mut self.context_usage_view {
+            if key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') if key.kind == event::KeyEventKind::Press => {
+                        self.context_usage_view = None
+                    }
+                    KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
+                    KeyCode::Down => view.scroll = view.scroll.saturating_add(1),
+                    KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(10),
+                    KeyCode::PageDown => view.scroll = view.scroll.saturating_add(10),
+                    KeyCode::Home => view.scroll = 0,
+                    _ => {}
+                }
+            }
+            self.dirty = true;
+            return Ok(false);
+        }
         if self
             .diff_review
             .as_ref()
@@ -2245,5 +2262,56 @@ mod evidence_detail_tests {
         ui.process_diff_review_key(key(KeyCode::Char('q')))
             .expect("close");
         assert!(ui.diff_review.is_some());
+    }
+}
+
+#[cfg(test)]
+mod context_usage_tests {
+    use super::*;
+    #[test]
+    fn context_view_owns_keys_paste_and_back_preserves_input_and_review() {
+        let mut ui = TuiApp::new_for_test("context", None, "default");
+        ui.textarea.insert_str("preserved draft");
+        let payload: DiffReviewPayload =
+            serde_json::from_value(serde_json::json!({"diff":"+change","files":["a"]}))
+                .expect("payload");
+        ui.diff_review = Some(DiffReviewState::from_payload(payload));
+        let review = ui.diff_review.clone();
+        let draft = ui.textarea.lines().to_vec();
+        for close in [KeyCode::Esc, KeyCode::Char('q')] {
+            ui.context_usage_view = Some(crate::features::context_usage::View::new(None));
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12))
+                .expect("terminal");
+            for code in [
+                KeyCode::Char('a'),
+                KeyCode::Char('r'),
+                KeyCode::F(6),
+                KeyCode::Enter,
+                KeyCode::PageDown,
+            ] {
+                ui.handle_ui_key(
+                    event::KeyEvent::new(code, KeyModifiers::NONE),
+                    &mut terminal,
+                )
+                .expect("key");
+            }
+            ui.handle_paste("/compact");
+            assert_eq!(ui.textarea.lines(), draft);
+            assert_eq!(ui.diff_review, review);
+            assert!(ui.pending_instructions.is_empty());
+            for (w, h) in [(40, 12), (2, 2), (120, 30)] {
+                let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h))
+                    .expect("terminal");
+                terminal.draw(|f| ui.view(f, None)).expect("render");
+            }
+            ui.handle_ui_key(
+                event::KeyEvent::new(close, KeyModifiers::NONE),
+                &mut terminal,
+            )
+            .expect("close");
+            assert!(ui.context_usage_view.is_none());
+            assert_eq!(ui.textarea.lines(), draft);
+            assert_eq!(ui.diff_review, review);
+        }
     }
 }

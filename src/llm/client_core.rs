@@ -52,6 +52,7 @@ pub struct OpenAIClient {
     /// Process-lifetime ledger shared by clones, independent of UI resets.
     pub(crate) usage_ledger: Arc<std::sync::Mutex<crate::llm::usage_ledger::UsageLedger>>,
     request_attempt_policy: Option<Arc<dyn RequestAttemptPolicy>>,
+    last_context_preflight: Arc<std::sync::Mutex<Option<crate::features::context_usage::Snapshot>>>,
     /// Cumulative prompt tokens across the whole session.
     pub total_prompt_tokens_used: Arc<AtomicU64>,
     /// Last request's reasoning tokens (from `completion_tokens_details`).
@@ -78,6 +79,22 @@ impl std::fmt::Debug for OpenAIClient {
 }
 
 impl OpenAIClient {
+    pub(crate) fn record_context_preflight(
+        &self,
+        snapshot: Option<crate::features::context_usage::Snapshot>,
+    ) {
+        *self
+            .last_context_preflight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = snapshot;
+    }
+    pub(crate) fn context_preflight(&self) -> Option<crate::features::context_usage::Snapshot> {
+        self.last_context_preflight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     pub fn from_config(cfg: &crate::config::AppConfig) -> Result<Option<Self>> {
         use crate::features::openai_subscription::{
             ProviderKind, auth::AuthHandle, credentials::CredentialStore,
@@ -227,6 +244,7 @@ impl OpenAIClient {
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
             prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
+            last_context_preflight: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -594,6 +612,31 @@ mod tests {
     use crate::llm::types::ChatMessage;
     use httptest::{Expectation, matchers::*, responders::*};
 
+    #[test]
+    fn context_usage_is_shared_by_clones_but_not_fresh_clients() {
+        use crate::features::context_usage::Snapshot;
+        use crate::llm::context_budget::{RequestFootprint, TokenEstimate, TokenEstimateSource};
+        let client = OpenAIClient::new("https://example.invalid/v1", "fixture").expect("client");
+        let clone = client.clone();
+        let snapshot = Snapshot::capture(
+            "test",
+            RequestFootprint::new(100, 20, 3),
+            TokenEstimate {
+                prompt_tokens: 50,
+                source: TokenEstimateSource::Heuristic,
+            },
+            1000,
+            None,
+        );
+        client.record_context_preflight(Some(snapshot.clone()));
+        assert_eq!(clone.context_preflight(), Some(snapshot));
+        let fresh = OpenAIClient::new("https://example.invalid/v1", "fixture").expect("fresh");
+        assert_eq!(fresh.context_preflight(), None);
+        clone.record_context_preflight(None);
+        assert_eq!(client.context_preflight(), None);
+        assert_eq!(client.usage_totals_snapshot().record_count, 0);
+    }
+
     #[tokio::test]
     async fn chat_once_happy_path() {
         let server = crate::test_support::HTTP_SERVER_POOL.get_server();
@@ -676,6 +719,7 @@ mod tests {
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
             prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
+            last_context_preflight: Arc::new(std::sync::Mutex::new(None)),
         };
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
@@ -698,6 +742,7 @@ mod tests {
             total_reasoning_tokens_used: Arc::new(AtomicU64::new(0)),
             reasoning_usage_seen: Arc::new(AtomicBool::new(false)),
             prompt_cache_counters: Arc::new(PromptCacheCounters::default()),
+            last_context_preflight: Arc::new(std::sync::Mutex::new(None)),
         };
         assert_eq!(c2.endpoint(), "https://api.example.com/v1/chat/completions");
     }

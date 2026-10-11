@@ -16,7 +16,9 @@ type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
 /// Only control commands bypass the ordinary instruction queue.
 fn is_immediate_control_command(line: &str) -> bool {
     let line = line.trim();
-    line == "/jobs" || matches!(line.split_whitespace().next(), Some("/cancel" | "/models"))
+    line == "/jobs"
+        || line.split_whitespace().collect::<Vec<_>>() == ["/tokens", "context"]
+        || matches!(line.split_whitespace().next(), Some("/cancel" | "/models"))
 }
 
 fn queued_input_preview(input: &str) -> String {
@@ -743,6 +745,17 @@ mod tests {
         ] {
             let id = spawn();
             app.status = status;
+            app.textarea = TextArea::from(vec!["/tokens context".to_string()]);
+            app.input_history.push("/tokens context".into());
+            handle_normal_mode_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut terminal,
+            )?;
+            assert!(app.context_usage_view.is_some());
+            assert!(app.pending_instructions.is_empty());
+            assert_eq!(jobs.foreground_id(), Some(id));
+            app.context_usage_view = None;
             for line in [
                 " /jobs ",
                 "/cancel bad-id",
