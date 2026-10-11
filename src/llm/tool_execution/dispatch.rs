@@ -644,6 +644,82 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn test_execute_process_legacy_prefix_denies_before_spawn() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir()?;
+        let program = dir.path().join("fixture");
+        let marker = dir.path().join("spawned");
+        // A harmless local stand-in proves spawn behavior without real git
+        // mutations, user configuration, PATH overrides, or external services.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'ran\\n' >> spawned\nprintf '%s\\n' \"$@\"\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+        let config = Arc::new(AppConfig {
+            project_root: dir.path().to_path_buf(),
+            allowed_commands: vec![format!("{} status", program.display())],
+            ..AppConfig::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        activate_test_tools(&runtime, &["execute_bash"]).await;
+        for name in ["execute_process", "execute_bash"] {
+            for args in [vec!["commit"], vec![], vec!["status-other"]] {
+                let arguments = if name == "execute_process" {
+                    json!({"program": program, "args": args})
+                } else {
+                    json!({"command": format!("{} {}", program.display(), args.join(" "))})
+                };
+                let call = ToolCall {
+                    id: Some("legacy_deny".into()),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: name.into(),
+                        arguments: arguments.to_string(),
+                    },
+                };
+                let output = dispatch_tool_call(&runtime, &call).await?;
+                assert!(!output.is_success, "{name} {args:?}: {:?}", output.value);
+                assert_eq!(output.value["ok"], false);
+                if name == "execute_process" {
+                    assert_eq!(output.value["status"], "policy_denied");
+                } else {
+                    assert!(
+                        output.value["stderr"]
+                            .as_str()
+                            .is_some_and(|s| s.contains("is not allowed"))
+                    );
+                }
+                assert!(output.value["exit_code"].is_null());
+                assert!(!marker.exists(), "denied {name} must not spawn fixture");
+            }
+        }
+        for name in ["execute_process", "execute_bash"] {
+            for args in [vec!["status"], vec!["status", "--short"]] {
+                let arguments = if name == "execute_process" {
+                    json!({"program": program, "args": args})
+                } else {
+                    json!({"command": format!("{} {}", program.display(), args.join(" "))})
+                };
+                let call = ToolCall {
+                    id: Some("legacy_allow".into()),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: name.into(),
+                        arguments: arguments.to_string(),
+                    },
+                };
+                let output = dispatch_tool_call(&runtime, &call).await?;
+                assert!(output.is_success, "{name} {args:?}: {:?}", output.value);
+            }
+        }
+        assert_eq!(std::fs::read_to_string(marker)?, "ran\n".repeat(4));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_execute_bash_ok_mirrors_success() -> Result<()> {
         let dir = tempdir()?;
         let config = Arc::new(AppConfig {
