@@ -1167,6 +1167,7 @@ The TUI provides various slash commands for quick operations:
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
 | `/test` | Run tests for the project |
+| `/verify [refresh [paths...] \| run <number>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
 | `/map` | Display RepoMap |
 | `/rebuild-repomap` | Rebuild the RepoMap |
 | `/open` | Open a file |
@@ -1438,6 +1439,44 @@ Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 - Attempts auto-fix (`--fix`) for detected issues, and for complex issues that can't be resolved, delegates analysis to LLM to propose fixes.
 - Projects with multiple languages can be checked all at once.
 - Linter commands are trusted internal commands and use the shared managed process lifecycle, but do not inherit the LLM execution allowlist.
+
+## Verification queue /verify
+
+`/verify` inspects the current session's tracked changes and reuses
+`impact_analyze` recommendations. It shows each command's literal program/argv,
+working directory, reason, confidence, and declared file/package/project scope.
+Listing never runs tests or fulfills a verification obligation. Use
+`/verify run <number>` to execute exactly one selected candidate. Use
+`/verify refresh [project-relative paths...]` to rebuild suggestions after edits;
+explicit paths also include edits made outside the session. With no paths,
+refresh retains the last explicit path set. Paths are whitespace-separated in
+this initial UI; paths containing whitespace are not supported.
+
+The queue is process-local and isolated by session. Matching commands retain
+previous observations when refreshed, and results for older files remain
+labelled stale. Candidate numbers can change on refresh; inspect the new list
+before selecting. Unknown or incomplete workspace snapshots allow inspection
+but deny execution. Changed files between planning and selection also require
+refresh. This initial implementation observes Git files and referenced paths;
+it does not provide an OS sandbox or an atomic workspace freeze.
+
+Selected commands use the same trusted managed test execution as `/test`,
+with `command_timeout_ms`, bounded output, `/jobs`, and `/cancel`. They are
+independent of the LLM execution allowlist. They never initiate automatic
+analysis or repair. Process outcomes and frozen pre/post workspace observations
+use the existing TUI test provenance shape (`source: tui_test`), with a warning
+identifying `/verify` and its declared scope; `/evidence` can inspect saved
+observations. A persistence warning means evidence is incomplete. Cancelled
+commands are not saved as successful verification observations.
+
+The log distinguishes unexecuted, failed, could-not-start, timed-out, cancelled,
+zero tests, all reported tests skipped, incomplete capture, and unknown test
+counts. Exit zero alone is shown as a process outcome with unknown test counts,
+not as known test success. Numeric passed/failed/skipped counts are available
+only for the already-supported explicit Go JSON invocation. A selected local
+check does not establish whole-project correctness. Results with changed
+pre/post files or uncertain correspondence cannot verify the current changes;
+matching endpoints are observations, not proof that no transient edit occurred.
 
 ## 🧪 Testing /test
 
