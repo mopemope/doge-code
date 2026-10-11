@@ -9,12 +9,12 @@ use super::types::{
     LEGACY_PROVENANCE_SCHEMA_VERSION, PROVENANCE_SCHEMA_VERSION, PlanChangedEvent, ProvenanceEvent,
     ProvenanceEventEnvelope, V2_PROVENANCE_SCHEMA_VERSION, V3_PROVENANCE_SCHEMA_VERSION,
     V4_PROVENANCE_SCHEMA_VERSION, V5_PROVENANCE_SCHEMA_VERSION, V6_PROVENANCE_SCHEMA_VERSION,
-    from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire, from_v5_wire, from_v6_wire,
-    from_v7_wire, to_v7_wire,
+    V7_PROVENANCE_SCHEMA_VERSION, from_v1_wire, from_v2_wire, from_v3_wire, from_v4_wire,
+    from_v5_wire, from_v6_wire, from_v7_wire, from_v8_wire, to_v8_wire,
 };
 use super::wire::{
     EventHeader, v1 as wire_v1, v2 as wire_v2, v3 as wire_v3, v4 as wire_v4, v5 as wire_v5,
-    v6 as wire_v6, v7 as wire_v7,
+    v6 as wire_v6, v7 as wire_v7, v8 as wire_v8,
 };
 
 /// Durable provenance store for one session.
@@ -26,11 +26,12 @@ use super::wire::{
 /// - legacy v4 (read-only): `<session_dir>/provenance/v4/events/<event-id>.json`
 /// - legacy v5 (read-only): `<session_dir>/provenance/v5/events/<event-id>.json`
 /// - legacy v6 (read-only): `<session_dir>/provenance/v6/events/<event-id>.json`
-/// - current v7 (read + write): `<session_dir>/provenance/v7/events/<event-id>.json`
+/// - legacy v7 (read-only): `<session_dir>/provenance/v7/events/<event-id>.json`
+/// - current v8 (read + write): `<session_dir>/provenance/v8/events/<event-id>.json`
 ///
 /// v1/v2/v3/v4/v5/v6 files are never copied, rewritten, or migrated on disk; they are
 /// converted into the canonical representation on read. New events are
-/// always written as v7.
+/// always written as v8.
 #[derive(Debug, Clone)]
 pub struct ProvenanceStore {
     provenance_root: PathBuf,
@@ -40,7 +41,7 @@ pub struct ProvenanceStore {
 impl ProvenanceStore {
     pub fn new(session_dir: PathBuf) -> Self {
         let provenance_root = session_dir.join("provenance");
-        let current_dir = provenance_root.join("v7").join("events");
+        let current_dir = provenance_root.join("v8").join("events");
         Self {
             provenance_root,
             current_dir,
@@ -88,7 +89,7 @@ impl ProvenanceStore {
         self.current_dir.clone()
     }
 
-    /// Current v7 write directory.
+    /// Current v8 write directory.
     ///
     /// This is the only directory new events are written to. Reads cover
     /// v1/v2/v3/v4/v5/v6 (legacy) and v7; see [`ProvenanceStore::load_all`].
@@ -118,7 +119,7 @@ impl ProvenanceStore {
 
     /// Atomically persist one event and return its envelope.
     ///
-    /// The payload is written to a sibling temp file in the v7 events
+    /// The payload is written to a sibling temp file in the v8 events
     /// directory and persisted with `persist_noclobber` (fail if the
     /// destination already exists). Never check-then-write.
     pub fn append(
@@ -152,7 +153,7 @@ impl ProvenanceStore {
             timestamp: Utc::now().to_rfc3339(),
             event,
         };
-        let wire = to_v7_wire(&canonical);
+        let wire = to_v8_wire(&canonical);
         let payload =
             serde_json::to_string_pretty(&wire).context("failed to serialize provenance event")?;
         let dest = current_dir.join(format!("{event_id}.json"));
@@ -184,15 +185,25 @@ impl ProvenanceStore {
         Ok(canonical)
     }
 
-    /// Load all events from v1 + v2 + v3 + v4 + v5 + v6 (legacy) and v7 (current), merged and
+    /// Load all events from v1 + v2 + v3 + v4 + v5 + v6 (legacy) and v7 (legacy) and v8 (current), merged and
     /// sorted by `(timestamp, event_id)`.
     ///
     /// One corrupt or future-schema file never fails the whole query; it is
     /// skipped with a warning entry. When the same event id exists in
     /// multiple versions (manual copy/migration mistake, not expected UUID
-    /// collision), the highest version wins deterministically (v7 > v6 > v5 > v4 > v3 > v2 > v1)
+    /// collision), the highest version wins deterministically (v8 > v7 > v6 > v5 > v4 > v3 > v2 > v1)
     /// and a warning explains why.
     pub fn load_all(&self) -> Result<ProvenanceLoadResult> {
+        self.load_all_inner(None)
+    }
+    /// Bounded regular-file reader for display-only queue restoration.
+    pub fn load_for_history(&self) -> Result<ProvenanceLoadResult> {
+        self.load_all_inner(Some(HistoryReadBounds::default()))
+    }
+    fn load_all_inner(
+        &self,
+        mut bounds: Option<HistoryReadBounds>,
+    ) -> Result<ProvenanceLoadResult> {
         let mut warnings = Vec::new();
         // event_id -> (envelope, version_rank)
         let mut by_id: HashMap<String, (ProvenanceEventEnvelope, u32)> = HashMap::new();
@@ -206,9 +217,10 @@ impl ProvenanceStore {
             (self.v4_events_dir(), 4u32, "v4"),
             (self.provenance_root.join("v5/events"), 5u32, "v5"),
             (self.provenance_root.join("v6/events"), 6u32, "v6"),
-            (self.current_events_dir(), 7u32, "v7"),
+            (self.provenance_root.join("v7/events"), 7u32, "v7"),
+            (self.current_events_dir(), 8u32, "v8"),
         ] {
-            let loaded = load_events_dir(&dir, &mut warnings);
+            let loaded = load_events_dir_with_bounds(&dir, &mut warnings, bounds.as_mut());
             for env in loaded {
                 let id = env.event_id.clone();
                 match by_id.get(&id) {
@@ -281,9 +293,34 @@ impl ProvenanceStore {
     }
 }
 
-fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEventEnvelope> {
+#[derive(Default)]
+struct HistoryReadBounds {
+    files: usize,
+    bytes: usize,
+}
+fn load_events_dir_with_bounds(
+    dir: &Path,
+    warnings: &mut Vec<String>,
+    mut bounds: Option<&mut HistoryReadBounds>,
+) -> Vec<ProvenanceEventEnvelope> {
     let mut events = Vec::new();
-    if !dir.exists() {
+    if bounds.is_some() {
+        match dir.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return events,
+            Err(_) => {
+                warnings.push("History directory unavailable".into());
+                return events;
+            }
+            Ok(_) => {}
+        }
+        if dir.ancestors().take(3).any(|p| {
+            !p.symlink_metadata()
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        }) {
+            warnings.push("History directory unavailable or symlinked".into());
+            return events;
+        }
+    } else if !dir.exists() {
         return events;
     }
     let read_dir = match std::fs::read_dir(dir) {
@@ -318,7 +355,43 @@ fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEven
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let raw = match std::fs::read_to_string(&path) {
+        let raw_result = if let Some(bounds) = bounds.as_deref_mut() {
+            use std::io::Read;
+            bounds.files += 1;
+            if bounds.files > 4096 || bounds.bytes >= 8 * 1024 * 1024 {
+                warnings.push("History input limit exceeded".into());
+                break;
+            }
+            (|| -> std::io::Result<String> {
+                let metadata = path.symlink_metadata()?;
+                if !metadata.is_file() {
+                    return Err(std::io::Error::other("history input is not a regular file"));
+                }
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                }
+                let file = options.open(&path)?;
+                if !file.metadata()?.is_file() {
+                    return Err(std::io::Error::other("history input is not a regular file"));
+                }
+                let limit = (256 * 1024).min(8 * 1024 * 1024 - bounds.bytes);
+                let mut bytes = Vec::new();
+                file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+                bounds.bytes = bounds.bytes.saturating_add(bytes.len());
+                if bytes.len() > limit {
+                    return Err(std::io::Error::other("history input limit exceeded"));
+                }
+                String::from_utf8(bytes)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })()
+        } else {
+            std::fs::read_to_string(&path)
+        };
+        let raw = match raw_result {
             Ok(raw) => raw,
             Err(e) => {
                 warnings.push(format!(
@@ -387,9 +460,17 @@ fn load_events_dir(dir: &Path, warnings: &mut Vec<String>) -> Vec<ProvenanceEven
                     path.display()
                 )),
             }
-        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+        } else if header.schema_version == V7_PROVENANCE_SCHEMA_VERSION {
             match serde_json::from_str::<wire_v7::V7Envelope>(&raw) {
                 Ok(env) => events.push(from_v7_wire(env)),
+                Err(e) => warnings.push(format!(
+                    "Skipping malformed provenance event {}: {e}",
+                    path.display()
+                )),
+            }
+        } else if header.schema_version == PROVENANCE_SCHEMA_VERSION {
+            match serde_json::from_str::<wire_v8::V8Envelope>(&raw) {
+                Ok(env) => events.push(from_v8_wire(env)),
                 Err(e) => warnings.push(format!(
                     "Skipping malformed provenance event {}: {e}",
                     path.display()
@@ -503,7 +584,7 @@ mod tests {
             store
                 .events_dir()
                 .to_string_lossy()
-                .ends_with("provenance/v7/events")
+                .ends_with("provenance/v8/events")
         );
     }
 
@@ -1041,9 +1122,9 @@ mod tests {
         }
         // Raw file is under v4.
         let v4_dir = store.current_events_path();
-        assert!(v4_dir.to_string_lossy().ends_with("provenance/v7/events"));
+        assert!(v4_dir.to_string_lossy().ends_with("provenance/v8/events"));
         let raw = std::fs::read_to_string(v4_dir.join(format!("{}.json", env.event_id))).unwrap();
-        assert!(raw.contains("\"schema_version\": 7") || raw.contains("\"schema_version\":7"));
+        assert!(raw.contains("\"schema_version\": 8") || raw.contains("\"schema_version\":8"));
     }
 
     #[test]
@@ -1053,6 +1134,7 @@ mod tests {
         let store = ProvenanceStore::new(dir.path().join("s"));
         let event = ProvenanceEvent::VerificationObserved(
             crate::provenance::types::VerificationObservedEvent {
+                execution_identity: None,
                 structured_test_result: None,
                 execution_context: None,
                 execution_workspace: None,
@@ -1167,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_writes_only_under_v7() {
+    fn test_store_writes_only_under_v8() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s");
         let store = ProvenanceStore::new(session_dir.clone());
@@ -1178,7 +1260,7 @@ mod tests {
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(true)
         );
-        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v7/events"))
+        let v4_files: Vec<_> = std::fs::read_dir(session_dir.join("provenance/v8/events"))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -1406,6 +1488,7 @@ mod execution_snapshot_tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_identity: None,
                 execution_context: Some(crate::features::verification_context::ExecutionContext {
                     format_version: 1,
                     os_family: crate::features::verification_context::OsFamily::Linux,
@@ -1454,7 +1537,7 @@ mod execution_snapshot_tests {
         std::fs::write(&legacy_file, &v4_bytes).expect("v4 fixture");
         let both = store.load_all().expect("mixed versions");
         assert_eq!(both.events.len(), 1);
-        assert!(both.warnings.iter().any(|w| w.contains("v7 wins")));
+        assert!(both.warnings.iter().any(|w| w.contains("v8 wins")));
         assert_eq!(std::fs::read(&v6_file).expect("unchanged v6"), v6_before);
         std::fs::remove_file(v6_file).expect("remove test v6");
         let previous = store.load_all().expect("v5 only");
@@ -1514,6 +1597,7 @@ mod structured_result_tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_identity: None,
                 observed_change_ids: vec!["change-frozen".into()],
                 ..Default::default()
             },
@@ -1534,7 +1618,7 @@ mod structured_result_tests {
         std::fs::write(&old_file, &previous).expect("legacy fixture");
         let loaded = store.load_all().expect("load");
         assert_eq!(loaded.events.len(), 1);
-        assert!(loaded.warnings.iter().any(|w| w.contains("v7 wins")));
+        assert!(loaded.warnings.iter().any(|w| w.contains("v8 wins")));
         match &loaded.events[0].event {
             ProvenanceEvent::VerificationObserved(v) => {
                 assert_eq!(
@@ -1560,5 +1644,102 @@ mod structured_result_tests {
             _ => panic!("verification"),
         }
         assert_eq!(std::fs::read(old_file).expect("legacy unchanged"), previous);
+    }
+}
+
+#[cfg(test)]
+mod resume_identity_tests {
+    use super::*;
+    #[test]
+    fn history_v8_identity_roundtrip_preserves_frozen_v7_unknown_and_bytes() {
+        use crate::provenance::{
+            VerificationContext, VerificationKind, VerificationRecordInput, VerificationSource,
+        };
+        let root = tempfile::tempdir().expect("root");
+        let store = ProvenanceStore::new(root.path().join("session"));
+        let observation =
+            crate::provenance::verification::build_verification_event(VerificationRecordInput {
+                kind: VerificationKind::Test,
+                source: VerificationSource::TuiTest,
+                program: "cargo",
+                args: &["test".into()],
+                cwd_relative: None,
+                success: true,
+                status: "completed",
+                exit_code: Some(0),
+                timed_out: false,
+                stdout: "",
+                stderr: "",
+                capture_truncated: false,
+                structured_test_result: None,
+                extra_warnings: vec![],
+                context: VerificationContext {
+                    execution_identity: Some(
+                        crate::features::verification_context::identity::ExecutionIdentity {
+                            version: 1,
+                            digest: "a".repeat(64),
+                        },
+                    ),
+                    ..Default::default()
+                },
+            });
+        let envelope = store
+            .append("s", ProvenanceEvent::VerificationObserved(observation))
+            .expect("v8");
+        let loaded = store.load_all().expect("load");
+        let ProvenanceEvent::VerificationObserved(v) = &loaded.events[0].event else {
+            panic!("verification")
+        };
+        assert!(v.execution_identity.is_some());
+        let old = crate::provenance::types::to_v7_wire(&envelope);
+        assert_eq!(old.schema_version, 7);
+        let bytes = serde_json::to_vec(&old).expect("wire");
+        assert!(!String::from_utf8_lossy(&bytes).contains("execution_identity"));
+        let old_dir = root.path().join("session/provenance/v7/events");
+        std::fs::create_dir_all(&old_dir).expect("legacy dir");
+        let path = old_dir.join(format!("{}.json", envelope.event_id));
+        std::fs::write(&path, &bytes).expect("old fixture");
+        std::fs::remove_file(
+            store
+                .events_dir()
+                .join(format!("{}.json", envelope.event_id)),
+        )
+        .expect("remove new fixture");
+        let loaded = store.load_all().expect("legacy load");
+        assert!(loaded.warnings.is_empty());
+        let ProvenanceEvent::VerificationObserved(v) = &loaded.events[0].event else {
+            panic!("verification")
+        };
+        assert!(v.execution_identity.is_none());
+        assert_eq!(std::fs::read(path).expect("legacy unchanged"), bytes);
+    }
+    #[test]
+    fn history_reader_rejects_oversized_and_special_files() {
+        let root = tempfile::tempdir().expect("root");
+        let store = ProvenanceStore::new(root.path().join("session"));
+        let dir = store.events_dir();
+        std::fs::create_dir_all(dir).expect("dir");
+        let file = dir.join("bad.json");
+        std::fs::write(&file, vec![b' '; 256 * 1024 + 1]).expect("large file");
+        let loaded = store.load_for_history().expect("bounded");
+        assert!(loaded.events.is_empty());
+        assert!(!loaded.warnings.is_empty());
+        std::fs::remove_file(&file).expect("remove");
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::os::unix::fs::symlink(root.path().join("missing"), &file).expect("symlink");
+            assert!(
+                !store
+                    .load_for_history()
+                    .expect("symlink")
+                    .warnings
+                    .is_empty()
+            );
+            std::fs::remove_file(&file).expect("remove");
+            let path = std::ffi::CString::new(file.as_os_str().as_bytes()).expect("path");
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            assert!(!store.load_for_history().expect("FIFO").warnings.is_empty());
+        }
     }
 }

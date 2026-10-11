@@ -464,8 +464,31 @@ change the verification outcome. Old v1–5 events stay unchanged with context
 unknown; export reads saved context without probing the current machine.
 Matching context never establishes correctness or reproducibility.
 
+After restart/resume, the first `/verify` rebuilds current suggestions and displays
+matching **historical observations** from that session. Matching uses literal
+program/argv and normalized project-relative cwd, never row numbers or names.
+Rows remain unexecuted in the new queue; historical counts/status do not become a
+new verification. Later failed, interrupted or incomplete records supersede earlier
+success by saved timestamp. Invalid timestamps, tied latest timestamps, duplicates,
+corrupt or unsupported files retain unknown history; wall-clock order cannot prove
+execution order or that a later unsaved/cancelled run is absent. Fresh selection IDs
+are generated and old IDs are rejected. Nothing is automatically rerun.
+
+New `/verify` observations add a version-one bounded input identity in provenance
+v8: canonical project/cwd, resolved executable bytes (at most 16 MiB), OS/architecture
+and sorted inherited environment (at most 1024 entries/128 KiB), stored as one
+length-framed BLAKE3 digest. Values and executable paths are not stored in this
+identity. Capture is read-only and starts no probe. Start/end identities must match;
+unresolved/large executables or changed inputs remain unknown. Resume displays
+whether these bounded inputs match, differ or were not recorded; v1–v7 identity is
+unknown. This omits external dependencies, ignored files, tool delegation and
+runtime state and is neither reproducibility proof nor an authentication boundary.
+Existing workspace endpoint comparison still marks old results stale/unknown.
+History restoration is bounded to 4096 files/events, 256 KiB per file and 8 MiB total;
+unavailable history never silently revives an earlier passing result.
+
 Explicit `execute_process` requests for `go test -json` now record bounded
-structured results in provenance v7. The [Go event format](https://pkg.go.dev/cmd/test2json)
+structured results in current provenance (v7 introduced structured results). The [Go event format](https://pkg.go.dev/cmd/test2json)
 is parsed from existing stdout capture before the LLM presentation budget. This
 adds no commands, result-file reads or automatic `-json` flags. Ordinary `/test`
 Go commands still use their existing arguments and have no structured result.
@@ -884,7 +907,7 @@ Verification:
 - `ChangeCommitted` freezes `directive_id` / `plan_item_id` / `requirement_ids` at commit time; later plan remaps never rewrite history. Unplanned mutations still carry the turn directive when one exists.
 - `VerificationObserved` freezes `directive_id` / `requirement_ids` (union of active change ids, falling back to current plan links) at capture time; later changes never leak into a running verification. It also freezes `matched_obligations` (id + binding hash) for structured runs.
 - Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
-- Storage: `.doge/sessions/<id>/provenance/v7/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
+- Storage: `.doge/sessions/<id>/provenance/v8/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` and `provenance/v7/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
 ## Provenance & Evidence
 
@@ -906,11 +929,11 @@ step-2
 
 - A verification observation records only that a command was started and finished against a workspace snapshot; it never claims the implementation is proven or guaranteed correct.
 - A `ChangeCommitted` event is a workspace mutation Doge-Code actually committed (observed `before -> after` transaction), not an LLM self-report.
-- Tracked mutations (v7 writes, legacy v1–v6 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
+- Tracked mutations (v8 writes, legacy v1–v7 reads): `fs_write`, `edit`, `apply_patch`, transactional `/edit-symbol`, `undo`.
 - Automatically tracked verification: `execute_process` classified commands, `/test`, `/lint`.
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
-- Storage: `.doge/sessions/<id>/provenance/v7/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Storage: `.doge/sessions/<id>/provenance/v8/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` and `provenance/v7/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
 - Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
 
 ## Verification Obligations

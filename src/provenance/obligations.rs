@@ -871,6 +871,7 @@ mod tests {
             stderr: "",
             capture_truncated: false,
             context: VerificationContext {
+                execution_identity: None,
                 execution_context: None,
                 execution_workspace: None,
                 plan_item_id: Some("step-1".to_string()),

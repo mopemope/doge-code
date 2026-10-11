@@ -557,6 +557,7 @@ mod traceability_tests {
     #[test]
     fn test_verification_race_keeps_capture_only() {
         let ctx_a = VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             directive_id: Some("d1".to_string()),
@@ -628,6 +629,7 @@ mod traceability_tests {
             )
             .unwrap();
         let failed = VerificationObservedEvent {
+            execution_identity: None,
             structured_test_result: None,
             execution_context: None,
             execution_workspace: None,
@@ -751,6 +753,7 @@ mod traceability_tests {
             )
             .unwrap();
         let ctx = VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             directive_id: Some("d1".to_string()),
@@ -931,6 +934,7 @@ mod traceability_tests {
             .unwrap();
         // Verify only C1.
         let ctx = VerificationContext {
+            execution_identity: None,
             execution_context: None,
             execution_workspace: None,
             directive_id: Some("d1".to_string()),

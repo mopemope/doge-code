@@ -1,4 +1,5 @@
 //! Session-local suggestions and observed outcomes. Never marks a plan complete.
+pub mod history;
 use crate::features::{
     change_impact::VerificationRecommendation,
     structured_test_results::ResultObservation,
@@ -98,6 +99,7 @@ pub fn classify(result: &TestResult) -> Outcome {
 }
 #[derive(Clone)]
 pub struct Entry {
+    pub history: Option<history::HistoricalObservation>,
     pub recommendation: VerificationRecommendation,
     pub outcome: Outcome,
     pub workspace: Option<ExecutionWorkspace>,
@@ -106,6 +108,7 @@ pub struct Entry {
 }
 #[derive(Default)]
 pub struct VerificationQueue {
+    pub history_warning: Option<String>,
     pub session_id: Option<String>,
     generation: String,
     pub planned: Option<Snapshot>,
@@ -124,6 +127,7 @@ impl VerificationQueue {
         paths: Option<Vec<String>>,
     ) {
         self.invalidate_selection();
+        self.history_warning = None;
         let old = if self.session_id == session_id {
             std::mem::take(&mut self.entries)
         } else {
@@ -143,6 +147,7 @@ impl VerificationQueue {
                         ..e.clone()
                     },
                     None => Entry {
+                        history: None,
                         recommendation,
                         outcome: Outcome::Unexecuted,
                         workspace: None,
@@ -194,6 +199,9 @@ impl VerificationQueue {
     }
     pub fn lines(&self, current: &Snapshot) -> Vec<String> {
         let mut lines = vec!["[verify] Suggestions are not verification. Select one with /verify run <id>; /verify refresh [relative paths...] rebuilds suggestions.".into()];
+        if let Some(warning) = &self.history_warning {
+            lines.push(format!("[verify] {warning}"));
+        }
         if self.entries.is_empty() {
             lines.push("[verify] No candidates (no active changes or supported test configuration); nothing was executed.".into());
         }
@@ -231,6 +239,9 @@ impl VerificationQueue {
                 }
                 None => "no execution evidence",
             };
+            if let Some(history) = &entry.history {
+                lines.extend(history.lines(current));
+            }
             let r = &entry.recommendation;
             lines.push(format!(
                 "[verify] {}. {} {:?} cwd={:?} | {} | {} | scope={} confidence={}; {}",
