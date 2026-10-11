@@ -33,6 +33,40 @@ common = load_module("agent_eval_common", "agent_eval_common.py")
 runner = load_module("run_agent_evals", "run-agent-evals.py")
 evals = load_module("evals_compare", "compare-agent-evals.py")
 
+
+@contextmanager
+def readers_scheduled_after_join_budget():
+    """Real readers/OS pipes, but deterministically expire their join budget first."""
+    import threading
+    from unittest.mock import patch
+    real_thread = threading.Thread
+    readers = []
+
+    class DelayedReader(real_thread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.release = threading.Event()
+            readers.append(self)
+
+        def run(self):
+            self.release.wait()
+            super().run()
+
+        def join(self, timeout=None):
+            if timeout is not None:
+                # Simulate a reader unscheduled throughout the finite grace.
+                return
+            self.release.set()
+            return super().join()
+
+    try:
+        with patch.object(runner.threading, "Thread", DelayedReader):
+            yield readers
+    finally:
+        for reader in readers:
+            reader.release.set()
+            real_thread.join(reader)
+
 NEEDS_GIT = shutil.which("git") is None
 
 FAKE_AGENT = r"""#!/usr/bin/env python3
@@ -548,6 +582,96 @@ class RunnerTests(HarnessCase):
                     os.killpg(int(pidfile.read_text()), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def test_delayed_reader_observes_buffered_eof_without_false_capture_error(self):
+        import threading
+        before = set(threading.enumerate())
+        stdout, stderr = self.root / "stdout", self.root / "stderr"
+        with readers_scheduled_after_join_budget() as readers:
+            result = runner.stream_child(
+                [sys.executable, "-c", "print('complete stdout'); import sys; print('complete stderr', file=sys.stderr)"],
+                self.root, dict(os.environ), 5, 0.1, stdout, stderr,
+            )
+            self.assertTrue(all(not reader.is_alive() for reader in readers))
+        self.assertEqual(result[0], 0)
+        self.assertIsNone(result[3])
+        self.assertEqual(stdout.read_text(), "complete stdout\n")
+        self.assertEqual(stderr.read_text(), "complete stderr\n")
+        self.assertEqual(set(threading.enumerate()), before)
+
+    def test_acceptance_after_timeout_with_delayed_readers_records_actual_check(self):
+        repo, fake = self.make_repo(), self.make_fake()
+        check = {"name": "oracle", "argv": [sys.executable, "-c", "print('independent check')"]}
+        manifest, cases = self.load_harness(self.write_manifest(
+            fake, self.write_cases([self.base_case(post_checks=[check])]),
+            timeout_seconds=0.1, termination_grace_seconds=0.1,
+        ))
+        from unittest.mock import patch
+        original = runner.stream_child
+
+        def delay_acceptance(argv, *args, **kwargs):
+            if argv == check["argv"]:
+                with readers_scheduled_after_join_budget():
+                    return original(argv, *args, **kwargs)
+            return original(argv, *args, **kwargs)
+
+        with fake_env(FAKE_SLEEP_SECONDS="10"), patch.object(runner, "stream_child", side_effect=delay_acceptance):
+            measurement, _ = self.run_trial(repo, manifest, cases[0])
+        self.assertEqual(measurement["run_status"], "timed_out")
+        self.assertEqual(measurement["verification_status"], "passed", measurement["post_checks"])
+        self.assertTrue(measurement["required_checks_passed"])
+        self.assertIsNone(measurement["accepted"])
+        result = measurement["post_checks"][0]
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIsNone(result["reason"])
+        artifact = self.root / "out/baseline/runs/fake-case/trial-001/checks/oracle.stdout.txt"
+        self.assertEqual(artifact.read_text(), "independent check\n")
+
+    def test_final_drain_preserves_truncation_when_eof_is_observed(self):
+        from unittest.mock import patch
+        stdout, stderr = self.root / "stdout", self.root / "stderr"
+        with readers_scheduled_after_join_budget(), patch.object(runner, "MAX_STREAM_BYTES", 4):
+            result = runner.stream_child(
+                [sys.executable, "-c", "print('0123456789')"], self.root,
+                dict(os.environ), 5, 0.1, stdout, stderr,
+            )
+        self.assertEqual(result[0], 0)
+        self.assertIsNone(result[3])
+        self.assertTrue(result[4])
+        self.assertEqual(stdout.read_bytes(), b"0123")
+
+    def test_final_drain_limits_consumed_bytes_even_when_sink_is_full(self):
+        from unittest.mock import patch
+        stdout, stderr = self.root / "stdout", self.root / "stderr"
+        with readers_scheduled_after_join_budget(), patch.object(runner, "MAX_STREAM_BYTES", 0), patch.object(runner, "MAX_FINAL_DRAIN_BYTES", 8):
+            result = runner.stream_child(
+                [sys.executable, "-c", "print('0123456789')"], self.root,
+                dict(os.environ), 5, 0.1, stdout, stderr,
+            )
+        self.assertEqual(result[0], 0)
+        self.assertIn("final drain byte limit reached before EOF", result[3])
+        self.assertTrue(result[4])
+        self.assertEqual(stdout.read_bytes(), b"")
+
+    def test_final_drain_capture_io_error_is_not_a_pass_and_leaves_no_readers(self):
+        import threading
+        from unittest.mock import patch
+        stdout, stderr = self.root / "stdout", self.root / "stderr"
+        before = set(threading.enumerate())
+        real_open = open
+
+        def fail_stdout(path, *args, **kwargs):
+            if path == stdout:
+                raise OSError("injected sink failure")
+            return real_open(path, *args, **kwargs)
+
+        with readers_scheduled_after_join_budget(), patch.object(runner, "open", side_effect=fail_stdout, create=True):
+            result = runner.stream_child(
+                [sys.executable, "-c", "print('complete output')"], self.root,
+                dict(os.environ), 5, 0.1, stdout, stderr,
+            )
+        self.assertIn("output_capture_failed: injected sink failure", result[3])
+        self.assertEqual(set(threading.enumerate()), before)
 
     def test_stream_output_is_bounded_while_child_runs(self):
         from unittest.mock import patch
