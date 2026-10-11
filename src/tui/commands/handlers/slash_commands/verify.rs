@@ -22,9 +22,14 @@ fn parse(args: &str) -> anyhow::Result<Action> {
     let words: Vec<_> = args.split_whitespace().collect();
     match words.as_slice() {
         [] => Ok(Action::List),
-        ["refresh", paths @ ..] => Ok(Action::Refresh(
-            (!paths.is_empty()).then(|| paths.iter().map(|p| (*p).to_owned()).collect()),
-        )),
+        ["refresh", ..] => {
+            let paths = crate::features::verification_paths::parse(
+                args.trim_start()
+                    .strip_prefix("refresh")
+                    .unwrap_or_default(),
+            )?;
+            Ok(Action::Refresh((!paths.is_empty()).then_some(paths)))
+        }
         ["run", id] if id.starts_with('q') && id.len() > 32 => Ok(Action::Run((*id).to_owned())),
         _ => {
             anyhow::bail!("Usage: /verify | /verify refresh [relative paths...] | /verify run <id>")
