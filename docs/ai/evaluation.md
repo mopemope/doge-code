@@ -200,6 +200,15 @@ when checks are absent or incomplete without an observed failure. The aggregate
 `verification_status` prioritizes invalidated/error/failed/timed_out/not_run;
 inspect per-check records for all outcomes.
 
+Output completion is determined by an observed pipe EOF, not whether a reader
+thread finished within the termination grace. After that grace, a delayed reader
+performs a nonblocking final drain of at most 1 MiB of additional reads per stream
+(including discarded bytes after the capture limit). An open pipe that would block,
+a final drain exhausted before EOF, or a capture I/O failure remains an explicit
+capture error; no command is retried. Output truncation remains separate from
+capture completeness. Both readers stop before artifacts or check results return;
+detached descendants are outside the process-group cleanup boundary.
+
 Each run retains `case.json` (normalized original prompt, acceptance criteria,
 commands and protected paths), its `case_sha256`, the pinned base commit,
 `agent.patch`, and check outputs. These link the original task to the candidate

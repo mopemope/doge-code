@@ -27,6 +27,7 @@ from agent_eval_api_budget import ApiBudgetGuard
 
 MAX_PARSE_BYTES = 5 * 1024 * 1024
 MAX_STREAM_BYTES = 200 * 1024 * 1024
+MAX_FINAL_DRAIN_BYTES = 1024 * 1024
 EVIDENCE_TIMEOUT_SECONDS = 60
 VERSION_PROBE_TIMEOUT_SECONDS = 15
 
@@ -188,10 +189,17 @@ def stream_child(argv, cwd, env, timeout_seconds, grace_seconds,
             with pipe, open(path, "wb") as handle:
                 os.set_blocking(pipe.fileno(), False)
                 remaining = MAX_STREAM_BYTES
-                while not stop_readers.is_set():
+                final_remaining = None
+                while True:
+                    if stop_readers.is_set() and final_remaining is None:
+                        final_remaining = MAX_FINAL_DRAIN_BYTES
                     try:
-                        chunk = os.read(pipe.fileno(), 64 * 1024)
+                        read_size = 64 * 1024 if final_remaining is None else min(64 * 1024, final_remaining)
+                        chunk = os.read(pipe.fileno(), read_size)
                     except BlockingIOError:
+                        if stop_readers.is_set():
+                            reader_errors.append("output_capture_incomplete: output pipe still open at final drain")
+                            break
                         stop_readers.wait(0.01)
                         continue
                     if not chunk:
@@ -201,6 +209,12 @@ def stream_child(argv, cwd, env, timeout_seconds, grace_seconds,
                     remaining -= len(kept)
                     if len(kept) != len(chunk):
                         truncated[index] = True
+                    if final_remaining is not None:
+                        # Count consumed bytes even after the capture sink is full.
+                        final_remaining -= len(chunk)
+                        if final_remaining == 0:
+                            reader_errors.append("output_capture_incomplete: final drain byte limit reached before EOF")
+                            break
         except OSError as error:
             reader_errors.append(f"output_capture_failed: {error}")
 
@@ -266,7 +280,8 @@ def stream_child(argv, cwd, env, timeout_seconds, grace_seconds,
         for reader in readers:
             reader.join(timeout=grace_seconds)
         if any(reader.is_alive() for reader in readers):
-            reader_errors.append("output_capture_incomplete: descendant retained output pipe")
+            # A live reader can merely be unscheduled. Let it distinguish real
+            # EOF from an open pipe using a bounded, nonblocking final drain.
             stop_readers.set()
             for reader in readers:
                 reader.join()
