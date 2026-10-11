@@ -1504,8 +1504,12 @@ Listing never runs tests or fulfills a verification obligation. Use
 `/verify run <id>` to execute exactly one selected candidate. Use
 `/verify refresh [project-relative paths...]` to rebuild suggestions after edits;
 explicit paths also include edits made outside the session. With no paths,
-refresh retains the last explicit path set. Paths are whitespace-separated in
-this initial UI; paths containing whitespace are not supported.
+refresh retains the last explicit path set. Separate paths with whitespace; enclose a complete path containing whitespace
+in single or double quotes, for example `/verify refresh "src/my file.rs"`.
+Quotes are delimiters only at the start of a path; a closing quote must be followed
+by whitespace or the end of input. Use the other quote style for a literal quote
+in a filename. Backslashes, `$`, glob patterns and shell operators remain literal;
+there is no escaping or shell expansion. Empty paths and unclosed quotes are rejected.
 
 The queue is process-local and isolated by session. Matching commands retain
 previous observations when refreshed, and results for older files remain

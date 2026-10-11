@@ -870,3 +870,99 @@ cp fixture.xml "$report_path"
         b"x"
     );
 }
+
+#[test]
+fn verify_path_quotes_keep_each_literal_path_together() {
+    assert_eq!(
+        parse(r#"refresh "src/my file.rs" 'tests/a b.rs' plain.rs"#).expect("paths"),
+        Action::Refresh(Some(vec![
+            "src/my file.rs".into(),
+            "tests/a b.rs".into(),
+            "plain.rs".into()
+        ]))
+    );
+}
+#[test]
+fn verify_path_invalid_quotes_fail_before_planning() {
+    for input in [
+        "refresh \"unfinished",
+        "refresh 'unfinished",
+        "refresh \"\"",
+        "refresh ''",
+        "refresh \"a.rs\"suffix",
+    ] {
+        assert!(parse(input).is_err(), "{input}");
+    }
+}
+
+#[tokio::test]
+async fn verify_path_refresh_snapshots_exact_quoted_names_without_execution() {
+    let root = tempfile::tempdir().expect("root");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .expect("git")
+            .success()
+    );
+    for path in ["my file.rs", " edge.rs ", "a'b.rs"] {
+        std::fs::write(root.path().join(path), "fn a() {}\n").expect("source");
+    }
+    // A trimmed alias must not replace the literal file in impact analysis.
+    std::fs::write(root.path().join("edge.rs"), "fn wrong() {}\n").expect("alias");
+    let collected = crate::features::change_impact::changes::collect_explicit_changes(
+        root.path(),
+        &["my file.rs".into(), " edge.rs ".into(), "a'b.rs".into()],
+        None,
+    );
+    assert_eq!(
+        collected
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![" edge.rs ", "a'b.rs", "my file.rs"]
+    );
+    assert!(
+        collected
+            .files
+            .iter()
+            .all(|f| f.change_kind != crate::features::change_impact::ChangeKind::Deleted)
+    );
+    let queue = Arc::new(Mutex::new(VerificationQueue::default()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    run_action(
+        tools(root.path()),
+        queue.clone(),
+        parse(r#"refresh "my file.rs" " edge.rs " "a'b.rs""#).expect("quoted refresh"),
+        1000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("refresh");
+    let q = queue.lock().expect("queue");
+    assert_eq!(
+        q.paths.as_deref(),
+        Some(["my file.rs".into(), " edge.rs ".into(), "a'b.rs".into()].as_slice())
+    );
+    assert_eq!(
+        q.planned.as_ref().expect("snapshot").status,
+        verification_snapshot::CaptureStatus::Complete
+    );
+    assert!(
+        q.planned
+            .as_ref()
+            .expect("snapshot")
+            .files
+            .iter()
+            .all(|f| f.exists == Some(true))
+    );
+    assert!(!q.entries.is_empty());
+    assert!(q.entries.iter().all(|e| e.outcome == Outcome::Unexecuted));
+    let output = rx.try_iter().collect::<Vec<_>>().join("\n");
+    assert!(!output.contains("edge.rs could not"), "{output}");
+    assert!(!root.path().join("marker").exists());
+}
