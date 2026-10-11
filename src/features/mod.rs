@@ -7,6 +7,7 @@ pub mod verification_snapshot;
 pub mod change_impact;
 pub mod semantic_edit;
 pub mod test_gen;
+pub mod test_summary;
 pub mod testing;
 
 pub mod workflow;
