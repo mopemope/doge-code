@@ -1455,7 +1455,8 @@ this initial observer; they keep unknown test counts. An existing interpreter
 without pytest retains its process failure and incomplete/unknown test report;
 dgc installs nothing.
 
-The bounded XML observer rejects DTDs/entities, special files/symlinks, malformed
+The bounded XML observer rejects DTDs and external/custom entity declarations,
+special files/symlinks, malformed
 or incomplete documents, multiple suites, duplicate testcase identities, and
 inconsistent suite counts. It cross-checks each testcase against suite totals
 and the process exit code. Only a complete report with actual passing cases and
@@ -1465,7 +1466,7 @@ incomplete reports and unknown outcomes remain separate. Exit 0 alone never
 proves Python test success. Missing, empty, oversized or partial reports, output
 capture failure/truncation and timeouts cannot yield passing counts; cancelled
 runs produce no verification success evidence. Reports are deleted after the
-run; durable provenance stores bounded counts/status only, with
+run; the structured provenance field stores bounded counts/status only, with
 `pytest_junit_testcases` as the count unit. Counts reflect the cases pytest
 reported, not proof that every intended test was collected or the whole project
 is correct. Tests and installed plugins remain arbitrary code executed through
