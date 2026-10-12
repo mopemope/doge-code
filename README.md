@@ -1,17 +1,31 @@
 # Doge-Code
 
-Doge-Code is an interactive AI coding agent that provides advanced code analysis, editing, and project management capabilities through both a terminal UI and MCP (Model Context Protocol) server. Built with Rust, its modern architecture combines tree-sitter parsing, LLM integration, and persistent sessions to deliver a powerful coding assistant experience.
+Doge-Code is a Rust coding-agent prototype with a terminal UI, local editing and verification tools, persistent sessions, and an MCP server. Its practical readiness is evaluated through independently reviewed development tasks; feature breadth and passing internal tests are not a usability claim.
+
+## Current development focus
+
+The first practical target is a small bug fix in an existing Go or Rust
+repository with tests: produce a scoped patch that passes independent checks,
+and hand off changed files, observed verification and remaining uncertainty for
+review. Prioritize demonstrated failures and user effort in that workflow over
+adding languages, model routes or UI features. Internal safety/contract tests
+protect mechanisms; their count or CI success does not establish usefulness.
+
+We will compare this narrow workflow with existing execution foundations and
+ordinary Codex use before deciding whether to retain or replace the custom agent
+runtime. No full migration has been decided, and no comparative practical result
+is claimed. See [practical acceptance evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
 
 ## 🚀 Key Features
 
 ### Core Capabilities
-- **Intelligent Code Analysis**: tree-sitter based code parsing and symbol extraction for Rust, JavaScript/TypeScript (including JSX/TSX), Python, Go, C/C++, C#, and Markdown
-- **Interactive Terminal UI**: Full-featured TUI with syntax highlighting, diff review, and real-time LLM interaction
+- **Code Analysis**: tree-sitter based code parsing and symbol extraction for Rust, JavaScript/TypeScript (including JSX/TSX), Python, Go, C/C++, C#, and Markdown
+- **Interactive Terminal UI**: TUI with syntax highlighting, diff review, and real-time LLM interaction
 - **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
 - **Persistent Sessions**: JSON session checkpoints saved through atomic replacement of `session.json` to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
 - **Multi-Mode Interaction**: Support for both interactive TUI mode and command-line execution
 
-### Supported Languages
+### Parser Support
 - **Rust** (tree-sitter-rust 0.24.0)
 - **JavaScript/TypeScript, JSX/TSX** (tree-sitter-javascript/typescript 0.25.0/0.23.2; TSX uses its dedicated grammar)
 - **Python** (tree-sitter-python 0.25.0)
@@ -1200,7 +1214,7 @@ The TUI provides various slash commands for quick operations:
 | `/edit-symbol` | Edit symbols (functions/classes) at current diff position |
 | `/lint` | Run linters and apply auto-fixes |
 | `/test` | Run tests for the project |
-| `/verify [refresh [paths...] \| run <id>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
+| `/verify [refresh [paths...] \| run <id> \| feedback <id>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
 | `/map` | Display RepoMap |
 | `/rebuild-repomap` | Rebuild the RepoMap |
 | `/open` | Open a file |
@@ -1502,6 +1516,38 @@ run; the structured provenance field stores bounded counts/status only, with
 reported, not proof that every intended test was collected or the whole project
 is correct. Tests and installed plugins remain arbitrary code executed through
 the existing trusted managed runner; XML reports are observations, not a sandbox.
+
+### Failed verification evidence in review feedback
+
+After a selected `/verify run <id>` fails, select a hunk in its current live diff
+review and use `/verify feedback <id>`. This reads the observed failure and opens
+the existing comment editor. Enter your repair instruction; the failure data is
+kept separately from your text. Esc retains the prior comment and attachment.
+Saving makes no model request. `s` shows the comment, literal program/argv/cwd,
+observation ID, bounded diagnostics and captured workspace identity; Enter on
+that confirmation starts one existing batch repair job. One attachment per batch
+is supported; saving a newly staged attachment replaces the prior one.
+
+Only complete, process-local, nonzero failures with matching session, selection
+ID, observation ID and stable pre/post/current Git snapshots can be attached.
+Historical restored results, unknown/incomplete reports, timeout/cancellation,
+truncated raw capture and replaced/stale observations require a fresh run.
+Unsupported test counts remain unknown even for a complete process failure.
+Each diagnostic stream is a UTF-8-safe 4 KiB excerpt, explicitly labelled when
+shortened; the whole attachment is limited to 256 KiB. Ignored files, external
+dependencies and changes between observations remain outside this snapshot.
+
+Before repair, the existing review/source checks and read-only-session-store
+check run again; after the workspace write gate, all captured Git files are
+reobserved before directives or API calls. A blocked start retains comments and
+failure evidence. Failures are generated JSON data, never recorded as your
+user-authored directive or used to infer a cause line or coverage. The repair
+request asks for the same literal check after changes; model compliance is not
+guaranteed and a job finishing is not verification. Review the resulting diff
+and fresh check evidence. Old failures stay historical and no comment, plan or
+obligation is automatically resolved. `/verify refresh` and its new IDs select
+subsequent explicit checks. Attachments/drafts are process-local and not restored
+after restart. Existing permissions, budgets and rollback limits still apply.
 
 ## Verification queue /verify
 

@@ -158,6 +158,14 @@ impl TuiApp {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("No active batch."))?;
         draft.batch.comments.retain(|c| c.anchor != comment.anchor);
+        if draft
+            .batch
+            .failure
+            .as_ref()
+            .is_some_and(|f| f.target == comment.anchor)
+        {
+            draft.batch.failure = None;
+        }
         draft.batch.revision += 1;
         self.sync_comment_list();
         self.push_log("[feedback] Selected comment removed locally. Files and other comments remain unchanged; no model request.");

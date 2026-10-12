@@ -148,7 +148,7 @@ impl SessionStore {
         })
     }
 
-    pub(super) fn ensure_writable(&self) -> Result<(), SessionError> {
+    pub(crate) fn ensure_writable(&self) -> Result<(), SessionError> {
         if self.read_only {
             return Err(SessionError::WriteError(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

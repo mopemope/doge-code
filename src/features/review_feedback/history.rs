@@ -103,6 +103,7 @@ mod tests {
     fn entry(id: &str) -> ArchivedFeedback {
         ArchivedFeedback {
             batch: FeedbackBatch {
+                failure: None,
                 id: id.into(),
                 revision: 1,
                 source: crate::diff_review::DiffReviewPayload {

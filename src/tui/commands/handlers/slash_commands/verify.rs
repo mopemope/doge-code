@@ -17,6 +17,10 @@ enum Action {
     List,
     Refresh(Option<Vec<String>>),
     Run(String),
+    Feedback {
+        id: String,
+        target: Option<Box<crate::features::review_feedback::Anchor>>,
+    },
 }
 fn parse(args: &str) -> anyhow::Result<Action> {
     let words: Vec<_> = args.split_whitespace().collect();
@@ -30,20 +34,33 @@ fn parse(args: &str) -> anyhow::Result<Action> {
             )?;
             Ok(Action::Refresh((!paths.is_empty()).then_some(paths)))
         }
+        ["feedback", id] if id.starts_with('q') && id.len() > 32 => Ok(Action::Feedback {
+            id: (*id).into(),
+            target: None,
+        }),
         ["run", id] if id.starts_with('q') && id.len() > 32 => Ok(Action::Run((*id).to_owned())),
         _ => {
-            anyhow::bail!("Usage: /verify | /verify refresh [relative paths...] | /verify run <id>")
+            anyhow::bail!(
+                "Usage: /verify | /verify refresh [relative paths...] | /verify run <id> | /verify feedback <id>"
+            )
         }
     }
 }
 pub fn handle_verify(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) {
-    let action = match parse(args) {
+    let mut action = match parse(args) {
         Ok(a) => a,
         Err(e) => {
             ui.push_log(format!("[verify] {e}"));
             return;
         }
     };
+    if let Action::Feedback { target, .. } = &mut action {
+        *target = ui.feedback_anchor().map(Box::new);
+        if target.is_none() {
+            ui.push_log("[verify] Select a current live review hunk first (F6). Failure evidence cannot infer a repair target.");
+            return;
+        }
+    }
     if executor.ensure_session_idle().is_err() {
         ui.push_log("[verify] Wait for the active job or use /cancel.");
         return;
@@ -238,6 +255,28 @@ async fn run_action(
     if token.is_cancelled() {
         return Ok(JobRunOutcome::Cancelled);
     }
+    if let Action::Feedback { id, target } = &action {
+        let attachment = lock(&queue)?.failure_attachment(
+            id,
+            &session_id,
+            &current,
+            target
+                .as_deref()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("No selected review hunk."))?,
+        )?;
+        let response = crate::features::verification_failure::Response {
+            job_id: completion.as_ref().map(|(_, id)| *id),
+            attachment,
+        };
+        return Ok(commit_completion(completion, &token, || {
+            let json = serde_json::to_string(&response).map_err(|_| ()).ok();
+            if let Some(json) = json {
+                let _ = tx.send(format!("::verify_feedback:{json}"));
+            }
+            JobRunOutcome::Completed
+        }));
+    }
     let mut pending = None;
     let mut _running_guard = None;
     if let Action::Run(id) = action {
@@ -293,6 +332,7 @@ async fn run_action(
         {
             let mut q = lock(&queue)?;
             q.entries[index].history = None;
+            q.entries[index].failure = None;
             q.entries[index].outcome = Outcome::Running;
             q.entries[index].workspace = Some(workspace);
             q.entries[index].test_counts = None;
@@ -354,6 +394,8 @@ async fn run_action(
                     let mut q = lock(&queue)?;
                     let entry = &mut q.entries[index];
                     entry.outcome = verification_queue::classify(&result);
+                    entry.failure =
+                        crate::features::verification_failure::Observation::capture(&result);
                     entry.workspace = context.execution_workspace.clone();
                     entry.exit_code = result.exit_code;
                     entry.test_counts =
