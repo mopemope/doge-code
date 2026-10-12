@@ -277,6 +277,13 @@ impl FsTools {
         batch: &crate::features::review_feedback::FeedbackBatch,
     ) -> anyhow::Result<()> {
         batch.validate_structure()?;
+        if let Some(manager) = self.get_session_manager_wrapper().get_session_manager() {
+            manager
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Session storage unavailable."))?
+                .store
+                .ensure_writable()?;
+        }
         self.validate_review_feedback_source(&batch.source)
     }
     pub(crate) fn validate_review_feedback_source(

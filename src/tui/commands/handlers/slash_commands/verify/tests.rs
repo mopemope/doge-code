@@ -966,3 +966,104 @@ async fn verify_path_refresh_snapshots_exact_quoted_names_without_execution() {
     assert!(!output.contains("edge.rs could not"), "{output}");
     assert!(!root.path().join("marker").exists());
 }
+
+#[tokio::test]
+async fn verification_failure_selected_run_attaches_exact_result_without_followup() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(root.join(".gitignore"), ".doge/\n__pycache__/\n").unwrap();
+    std::fs::write(root.join("code.py"), "# changed\n").unwrap();
+    let mut manager = crate::session::SessionManager::with_store(
+        crate::session::SessionStore::new(root.join(".doge/sessions")).unwrap(),
+    );
+    manager.create_session(None).unwrap();
+    let session = manager.current_session_id();
+    let tools = tools(root).with_session_manager(Arc::new(Mutex::new(manager)));
+    let current = verification_snapshot::capture(root, Default::default(), None).await;
+    let command = crate::features::change_impact::VerificationRecommendation {
+        kind: "test".into(),
+        program: "python3".into(),
+        args: vec!["-c".into(), "raise OverflowError('huge integer')".into()],
+        cwd: None,
+        reason: "explicit local failure".into(),
+        confidence: "explicit".into(),
+        coverage_scope: "file".into(),
+    };
+    let mut q = VerificationQueue::default();
+    q.refresh(session.clone(), current, vec![command.clone()], None);
+    let id = q.selection_id(0).unwrap();
+    let queue = Arc::new(Mutex::new(q));
+    let (tx, rx) = std::sync::mpsc::channel();
+    run_action(
+        tools.clone(),
+        queue.clone(),
+        Action::Run(id.clone()),
+        1000,
+        tx.clone(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(queue.lock().unwrap().entries[0].failure.is_some());
+    let target = crate::features::review_feedback::Anchor {
+        version: 1,
+        session_id: session.unwrap(),
+        review_id: "selected review".into(),
+        review_identity: "review".into(),
+        path: "code.py".into(),
+        selection: None,
+        hunk: crate::features::review_feedback::parse_hunks(&[
+            "@@ -1 +1 @@".into(),
+            "-old".into(),
+            "+new".into(),
+        ])[0]
+            .clone(),
+    };
+    run_action(
+        tools,
+        queue.clone(),
+        Action::Feedback {
+            id,
+            target: Some(Box::new(target)),
+        },
+        1000,
+        tx,
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
+    let response = rx
+        .try_iter()
+        .find_map(|m| {
+            m.strip_prefix("::verify_feedback:").and_then(|s| {
+                serde_json::from_str::<crate::features::verification_failure::Response>(s).ok()
+            })
+        })
+        .unwrap();
+    assert_eq!(response.attachment.command, command);
+    assert!(
+        response
+            .attachment
+            .observation
+            .stderr
+            .contains("OverflowError")
+    );
+    assert_eq!(
+        queue.lock().unwrap().entries[0]
+            .failure
+            .as_ref()
+            .unwrap()
+            .id,
+        response.attachment.observation.id
+    );
+}

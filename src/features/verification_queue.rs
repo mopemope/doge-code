@@ -99,6 +99,7 @@ pub fn classify(result: &TestResult) -> Outcome {
 }
 #[derive(Clone)]
 pub struct Entry {
+    pub failure: Option<crate::features::verification_failure::Observation>,
     pub history: Option<history::HistoricalObservation>,
     pub recommendation: VerificationRecommendation,
     pub outcome: Outcome,
@@ -147,6 +148,7 @@ impl VerificationQueue {
                         ..e.clone()
                     },
                     None => Entry {
+                        failure: None,
                         history: None,
                         recommendation,
                         outcome: Outcome::Unexecuted,
@@ -257,6 +259,11 @@ impl VerificationQueue {
             ));
             if let Some(id) = self.selection_id(i) {
                 lines.push(format!("[verify] Select: /verify run {id}"));
+                if entry.failure.is_some() {
+                    lines.push(format!(
+                        "[verify] Stage failure on selected live review hunk: /verify feedback {id}"
+                    ));
+                }
             }
             if let Some(counts) = entry.test_counts {
                 lines.push(format!("[verify] reported tests: passed={} failed={} skipped={} (only the selected command's scope)", counts.passed, counts.failed, counts.skipped));
