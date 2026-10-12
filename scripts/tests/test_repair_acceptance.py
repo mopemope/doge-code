@@ -48,6 +48,106 @@ class RepairAcceptanceTests(unittest.TestCase):
     def evidence(self, accepted=True, status='completed'):
         return {'accepted':accepted,'notes':'Independent operator review, offline replay only.', 'execution':{'status':status,'elapsed_seconds':10,'review_seconds':2,'rework_seconds':3,'interventions':[{'kind':'manual_edit','note':'offline reference replay','seconds':3}], 'cost':{'estimated_usd':0,'confirmed_usd':0}}}
 
+    def test_default_selection_excludes_opt_in_history_and_other_cases(self):
+        external=copy.deepcopy(self.case)
+        external.update(case_id='external',default=False,provenance={'kind':'historical','base_commit':'f'*40})
+        (self.cases/'cases.json').write_text(json.dumps([self.case,external]))
+        output=self.root/'defaults'
+        with patch.object(repair.subprocess,'run') as git:
+            plan=repair.prepare(output,self.root,['candidate'],1)
+        git.assert_not_called()
+        self.assertEqual(plan['case_ids'],['go-test'])
+        self.assertEqual(len(plan['runs']),1)
+
+    def test_unknown_duplicate_and_empty_selection_rejected_before_output_or_git(self):
+        for ids in [['unknown'],['go-test','go-test'],[]]:
+            output=self.root/'invalid-selection'
+            with patch.object(repair.subprocess,'run') as git,self.assertRaises(ValueError):
+                repair.prepare(output,self.root,['candidate'],1,case_ids=ids)
+            git.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_selected_only_denominator_excludes_other_catalog_case(self):
+        other=copy.deepcopy(self.case);other['case_id']='other'
+        (self.cases/'cases.json').write_text(json.dumps([self.case,other]))
+        output=self.root/'selected'
+        plan=repair.prepare(output,self.root,['candidate'],1,case_ids=['go-test'])
+        self.assertEqual(plan['case_ids'],['go-test'])
+        run=output/self.run.name
+        repair.check(run);repair.review(run,self.evidence())
+        data=repair.summarize(output)['variants']['candidate']
+        self.assertEqual(data['planned'],1)
+        self.assertEqual(data['accepted_fraction_of_planned'],1)
+        self.assertFalse((output/'candidate--other--001').exists())
+
+    def test_missing_selected_history_fails_before_creating_output(self):
+        external=copy.deepcopy(self.case)
+        external.update(case_id='external',default=False,provenance={'kind':'historical','base_commit':'f'*40})
+        (self.cases/'cases.json').write_text(json.dumps([self.case,external]))
+        output=self.root/'missing-history'
+        with patch.object(repair.subprocess,'run',side_effect=subprocess.CalledProcessError(128,['git'])),self.assertRaises(subprocess.CalledProcessError):
+            repair.prepare(output,self.root,['candidate'],1,case_ids=['external'])
+        self.assertFalse(output.exists())
+
+    def test_explicit_historical_selection_exports_only_pre_fix_candidate_inputs(self):
+        repo=self.root/'external-repo';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        (repo/'block.go').write_text('before repair')
+        (repo/'block_test.go').write_text('pre-existing tests')
+        (repo/'go.mod').write_text('module example.invalid/fixture')
+        subprocess.run(['git','-C',str(repo),'add','.'],check=True)
+        env={**os.environ,'GIT_AUTHOR_NAME':'fixture','GIT_AUTHOR_EMAIL':'fixture@example.invalid','GIT_COMMITTER_NAME':'fixture','GIT_COMMITTER_EMAIL':'fixture@example.invalid','GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':os.devnull}
+        subprocess.run(['git','-C',str(repo),'-c','core.hooksPath=/dev/null','commit','-qm','before'],env=env,check=True)
+        commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+        (repo/'block.go').write_text('future solution')
+        (repo/'future_fix_test.go').write_text('future regression')
+        external=copy.deepcopy(self.case)
+        external.update(case_id='external',default=False,provenance={'kind':'historical','base_commit':commit,'reference_fix':'future-reference-sentinel'})
+        (self.cases/'cases.json').write_text(json.dumps([self.case,external]))
+        output=self.root/'external-experiment'
+        plan=repair.prepare(output,repo,['candidate'],1,case_ids=['external'])
+        self.assertEqual(len(plan['runs']),1)
+        run=output/'candidate--external--001';workspace=run/'workspace'
+        self.assertEqual((workspace/'block.go').read_text(),'before repair')
+        self.assertFalse((workspace/'.git').exists())
+        self.assertFalse((workspace/'future_fix_test.go').exists())
+        self.assertFalse((workspace/'repair_acceptance_test.go').exists())
+        self.assertNotIn('future-reference-sentinel',(workspace/'REPAIR_TASK.txt').read_text())
+        (workspace/'go.mod').write_text('changed build configuration')
+        result=repair.check(run)
+        self.assertEqual(result['scope_violations'],['go.mod'])
+        self.assertEqual(result['checks'][0]['status'],'scope_denied')
+
+    def test_vet_is_separate_and_does_not_turn_zero_reported_tests_into_pass(self):
+        self.case['checks'].append({'name':'vet','kind':'vet','argv':['go','vet','./...'],'timeout_seconds':1})
+        (self.cases/'cases.json').write_text(json.dumps([self.case]))
+        original=repair.runtime.stream_child
+        def vet_output(argv,cwd,env,timeout,grace,stdout,stderr):
+            if argv==['go','vet','./...']:
+                stdout.write_text('');stderr.write_text('')
+                return 0,False,0.01,None,False
+            return original(argv,cwd,env,timeout,grace,stdout,stderr)
+        for source,expected in [('correct',True),('zero',False)]:
+            output=self.root/('vet-'+source)
+            repair.prepare(output,self.root,['candidate'],1)
+            run=output/self.run.name;(run/'workspace/block.go').write_text(source)
+            with patch.object(repair.runtime,'stream_child',side_effect=vet_output):
+                result=repair.check(run)
+            self.assertEqual(result['machine_passed'],expected)
+            self.assertEqual(result['checks'][1]['reported_tests'],0)
+            self.assertEqual(result['checks'][1]['test_count_source'],'not_applicable')
+            self.assertTrue(result['checks'][1]['passed'])
+
+    def test_vet_kind_cannot_bypass_test_count_for_arbitrary_commands(self):
+        self.case['checks'][0].update(kind='vet',argv=['go','test','./...'])
+        (self.cases/'cases.json').write_text(json.dumps([self.case]))
+        with self.assertRaisesRegex(ValueError,'fixed go vet'):
+            repair.prepare(self.root/'bad-vet',self.root,['candidate'],1)
+        self.case['checks'][0].update(kind='test',min_tests=0)
+        (self.cases/'cases.json').write_text(json.dumps([self.case]))
+        with self.assertRaisesRegex(ValueError,'positive minimum'):
+            repair.prepare(self.root/'bad-minimum',self.root,['candidate'],1)
+
     def test_version_probe_records_observation_and_missing_tool(self):
         self.versions_patcher.stop()
         try:
