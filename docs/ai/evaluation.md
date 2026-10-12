@@ -65,6 +65,14 @@ keep, replace or stop from acceptance and user-effort evidence, then consider
 latency/cost. Broader languages, models and decorative UI work stay secondary to
 observed failures in this first job.
 
+## Offline repair acceptance foundation
+
+Use the [offline repair workflow](repair-acceptance.md) for fixed task workspaces,
+independent checks and operator-reviewed all-trial accounting without launching
+an agent. It currently contains one historical Rust policy case and one explicitly
+synthetic Go case; these fixtures and offline replays are not practical model
+acceptance results. Keep this separate from the dgc exec comparison below.
+
 ## Matched runs
 
 The [runtime harness](../../scripts/run-agent-evals.py) automates matched
