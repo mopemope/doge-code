@@ -570,6 +570,9 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if self.context_usage_view.is_some() {
+            return;
+        }
         if self
             .diff_review
             .as_ref()

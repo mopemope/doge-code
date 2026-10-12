@@ -89,6 +89,32 @@ impl TuiApp {
         };
         let plan = build_render_plan(params);
 
+        if let Some(view) = &mut self.context_usage_view {
+            let width = usize::from(size.width.saturating_sub(2).max(1));
+            let rows: usize = view
+                .lines
+                .iter()
+                .map(|line| crate::tui::review_feedback::wrap_cells(line, width).len())
+                .sum();
+            view.scroll = view.scroll.min(
+                rows.saturating_sub(usize::from(size.height.saturating_sub(2)))
+                    .min(usize::from(u16::MAX)) as u16,
+            );
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Context estimate · Esc/q back · ↑/↓ scroll");
+            let inner = block.inner(size);
+            f.render_widget(Clear, size);
+            f.render_widget(block, size);
+            let rows = view
+                .lines
+                .iter()
+                .flat_map(|line| crate::tui::review_feedback::wrap_cells(line, width))
+                .map(Line::from)
+                .collect::<Vec<_>>();
+            f.render_widget(Paragraph::new(rows).scroll((view.scroll, 0)), inner);
+            return;
+        }
         self.render_status_line(f, chunks[0], model, &self.theme);
         self.render_main_content(f, chunks[1], &plan, &self.theme);
         self.render_input_area(f, chunks[2]);

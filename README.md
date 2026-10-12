@@ -2189,3 +2189,23 @@ This project is licensed under the MIT License.
 ---
 
 **Note**: This is an active research project. Features may change as we explore the boundaries of AI-supported development.
+
+### Context footprint inspection
+
+`/tokens context` opens a read-only breakdown of the last measured main-agent
+preflight in the current client/process. It shows projected message and active
+tool-schema bytes, fixed overhead, runtime overlay telemetry and the existing
+governor's heuristic or calibrated prompt estimate. The overlay is not added to
+the total again, and cached tokens still consume context. `/tokens` retains the
+separate persisted/provider usage and cache metrics.
+
+This is a historical preflight estimate, not the current draft, the next request
+or exact remaining capacity. Input edits do not remeasure it; close and reopen
+to read the latest captured preflight. It may span sessions and is not persisted
+or restored on resume. A fresh client, Off mode or failed measurement shows
+unavailable, never zero. Viewing makes no model request and performs no
+compaction. `Esc`/`q` returns to the previous view; arrows and PageUp/PageDown
+scroll. Opening does not cancel a running job; Ctrl+C keeps the existing cancel
+behavior. Compaction thresholds are configuration, and an unknown model context
+window stays unknown. Responses opaque state follows the existing estimator's
+exclusion and does not become a measured wire-size or token-count claim.

@@ -177,6 +177,19 @@ impl CommandHandler for TuiExecutor {
             );
             return;
         }
+        if line.split_whitespace().next() == Some("/tokens") && line != "/tokens" {
+            if line
+                .strip_prefix("/tokens")
+                .is_some_and(|args| args.trim() == "context")
+            {
+                crate::tui::commands::handlers::slash_commands::tokens::open_context_usage(
+                    self, ui,
+                );
+            } else {
+                ui.push_log("Usage: /tokens | /tokens context");
+            }
+            return;
+        }
         match line {
             "/help" => handle_help(self, ui),
             "/tools" => handle_tools(self, ui),

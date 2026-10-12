@@ -1,3 +1,10 @@
+pub fn open_context_usage(executor: &TuiExecutor, ui: &mut TuiApp) {
+    ui.context_usage_view = Some(crate::features::context_usage::View::new(
+        executor.client.as_ref().and_then(|c| c.context_preflight()),
+    ));
+    ui.dirty = true;
+}
+
 use crate::llm::client_core::OpenAIClient;
 use crate::llm::prompt_cache::format_hit_ratio_percent;
 use crate::llm::usage_ledger::UsageLedger;
@@ -426,6 +433,69 @@ mod tests {
         .unwrap();
         // Fresh process client with no usage.
         executor.client = Some(OpenAIClient::new("https://api.example.com/", "x").unwrap());
+        // Reading unavailable/captured context must neither charge a request,
+        // acquire a job nor mutate the persisted session.
+        let before = executor
+            .session_manager
+            .lock()
+            .expect("manager")
+            .current_session
+            .clone();
+        super::open_context_usage(
+            &executor,
+            &mut crate::tui::view::TuiApp::new_for_test("context", None, "default"),
+        );
+        let client = executor.client.as_ref().expect("client");
+        let snapshot = crate::features::context_usage::Snapshot::capture(
+            "fixture",
+            crate::llm::context_budget::RequestFootprint::new(100, 200, 0),
+            crate::llm::context_budget::TokenEstimate {
+                prompt_tokens: 80,
+                source: crate::llm::context_budget::TokenEstimateSource::Heuristic,
+            },
+            1000,
+            None,
+        );
+        client.record_context_preflight(Some(snapshot.clone()));
+        let mut context_ui = crate::tui::view::TuiApp::new_for_test("context", None, "default");
+        super::open_context_usage(&executor, &mut context_ui);
+        assert_eq!(
+            context_ui.context_usage_view.as_ref().expect("view").lines,
+            snapshot.lines()
+        );
+        client.record_context_preflight(None);
+        assert_eq!(
+            context_ui
+                .context_usage_view
+                .as_ref()
+                .expect("frozen view")
+                .lines,
+            snapshot.lines()
+        );
+        super::open_context_usage(&executor, &mut context_ui);
+        assert!(
+            context_ui
+                .context_usage_view
+                .as_ref()
+                .expect("reopen")
+                .lines[0]
+                .contains("unavailable")
+        );
+        assert_eq!(client.usage_snapshot().attempts, 0);
+        assert!(executor.jobs.foreground_id().is_none());
+        assert_eq!(
+            serde_json::to_value(
+                executor
+                    .session_manager
+                    .lock()
+                    .expect("manager")
+                    .current_session
+                    .clone()
+            )
+            .expect("after"),
+            serde_json::to_value(before).expect("before")
+        );
+
         let mut ui = crate::tui::view::TuiApp::new_for_test("tokens", None, "default");
         super::handle_tokens(&mut executor, &mut ui);
         let logs: String = ui

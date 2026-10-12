@@ -1789,3 +1789,34 @@ async fn blank_final_preserves_prior_mutation_and_checkpoint() {
                 .is_none_or(|calls| calls.as_array().is_none_or(Vec::is_empty))
     }));
 }
+
+#[tokio::test]
+async fn context_usage_captures_final_projection_without_provider_usage_and_off_clears_it() {
+    let (client, requests, server) = fixture(vec![(200, assistant_done("done"))]).await;
+    let cfg = test_cfg(AgentBudgetConfig::default());
+    run_with_cfg(&client, cfg.clone(), user_msg("measure"), None)
+        .await
+        .expect("run");
+    let captured = client.context_preflight().expect("preflight");
+    let body = requests.lock().expect("requests")[0].clone();
+    assert_eq!(
+        captured.footprint.message_json_bytes,
+        serde_json::to_vec(&body["messages"])
+            .expect("messages")
+            .len() as u64
+    );
+    assert_eq!(
+        captured.footprint.tool_schema_json_bytes,
+        serde_json::to_vec(&body["tools"]).expect("tools").len() as u64
+    );
+    assert_eq!(captured.model, "test-model");
+    assert_eq!(client.usage_snapshot().usage_records, 0);
+    let mut off = cfg;
+    off.context_budget.mode = crate::config::ContextBudgetMode::Off;
+    run_with_cfg(&client, off, user_msg("off"), None)
+        .await
+        .expect("off run");
+    assert!(client.context_preflight().is_none());
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    server.abort();
+}

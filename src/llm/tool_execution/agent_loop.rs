@@ -1504,6 +1504,18 @@ pub async fn run_agent_loop(
                 None
             };
 
+        // Ephemeral numeric telemetry only. Keep unavailable measurements
+        // unavailable, and never add viewing-related work to the request path.
+        client.record_context_preflight(sent_footprint.map(|fp| {
+            crate::features::context_usage::Snapshot::capture(
+                model,
+                fp,
+                budget_governor.estimate(fp),
+                effective_limit,
+                context_window,
+            )
+        }));
+
         // J. Send (best-effort; provider is the final authority).
         // First logical request carries the runtime overlay; the pending flag
         // was consumed during preflight so retries, reactive compaction, and
