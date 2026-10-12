@@ -69,9 +69,11 @@ observed failures in this first job.
 
 Use the [offline repair workflow](repair-acceptance.md) for fixed task workspaces,
 independent checks and operator-reviewed all-trial accounting without launching
-an agent. It currently contains one historical Rust policy case and one explicitly
-synthetic Go case; these fixtures and offline replays are not practical model
-acceptance results. Keep this separate from the dgc exec comparison below.
+an agent. The default remains one historical Rust policy case and one explicitly
+synthetic Go case. Explicit `--case go-humanize-ftoa-limits` adds a separate
+real-history Go experiment from an external `--source-repo`; unselected cases do
+not enter its denominator. These fixtures and offline replays are not practical
+model acceptance results. Keep this separate from the dgc exec comparison below.
 
 ## Matched runs
 

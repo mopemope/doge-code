@@ -115,7 +115,7 @@ def archive(repo, commit, destination):
     return digest(data)
 
 
-def prepare(output, repo, variants, trials, kind="offline-replay"):
+def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None):
     if not variants or len(set(variants)) != len(variants) or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", v) for v in variants):
         raise ValueError("variant names must be unique path-safe labels")
     if type(trials) is not int or not 1 <= trials <= 10:
@@ -126,6 +126,26 @@ def prepare(output, repo, variants, trials, kind="offline-replay"):
     if output.exists():
         raise ValueError("output already exists; never overwrite a prior experiment")
     cases = read(CASES / "cases.json")
+    by_id = {case["case_id"]: case for case in cases}
+    if case_ids is None:
+        cases = [case for case in cases if case.get("default", True)]
+    else:
+        if not case_ids or len(set(case_ids)) != len(case_ids):
+            raise ValueError("case selection must be nonempty and contain no duplicates")
+        unknown = [case_id for case_id in case_ids if case_id not in by_id]
+        if unknown:
+            raise ValueError("unknown case selection: " + ", ".join(unknown))
+        cases = [by_id[case_id] for case_id in case_ids]
+    if not cases:
+        raise ValueError("no cases selected")
+    for case in cases:
+        for command in case["checks"]:
+            check_kind = command.get("kind", "test")
+            if check_kind == "vet":
+                if case["language"] != "go" or command["argv"] != ["go", "vet", "./..."]:
+                    raise ValueError("vet kind is only for the fixed go vet ./... check")
+            elif check_kind != "test" or type(command.get("min_tests")) is not int or command["min_tests"] < 1:
+                raise ValueError("test checks require a positive minimum reported test count")
     # Resolve historical inputs before creating any planned workspace.
     for case in cases:
         if case["provenance"]["kind"] == "historical":
@@ -166,7 +186,7 @@ def prepare(output, repo, variants, trials, kind="offline-replay"):
                             "oracle_digest": digest(oracle), "variant": variant, "trial": trial, "kind": kind}
                 write_new(run / "criteria.json", criteria)
                 runs.append({"run": name, "criteria_digest": digest((run / "criteria.json").read_bytes())})
-    plan = {"schema_version": 1, "kind": kind, "runs": runs, "checker": checker_identity(),
+    plan = {"schema_version": 1, "kind": kind, "case_ids": [case["case_id"] for case in cases], "runs": runs, "checker": checker_identity(),
             "comparison": "unclassified; labels alone do not establish matched-model or product equivalence"}
     write_new(output / "plan.json", plan)
     return plan
@@ -238,6 +258,7 @@ def check(run):
                 versions = tool_versions(criteria["language"], env, run / "check-home")
                 for command in criteria["checks"]:
                     name = command["name"]
+                    check_kind = command.get("kind", "test")
                     stdout, stderr = run / (name + ".stdout.txt"), run / (name + ".stderr.txt")
                     code, timeout, elapsed, error, truncated = runtime.stream_child(command["argv"], verifying, env, command["timeout_seconds"], 1, stdout, stderr)
                     text = stdout.read_text(errors="replace")
@@ -247,11 +268,12 @@ def check(run):
                     else:
                         executed = len(re.findall(r"(?m)^\s*--- (?:PASS|FAIL):", text))
                     source_changed = signature(verifying) != verification_source
-                    passed = code == 0 and not timeout and not error and not truncated and executed >= command["min_tests"] and not source_changed
-                    results.append({"name": name, "argv": command["argv"], "exit_code": code,
-                                    "status": "passed" if passed else "invalidated" if source_changed else "timed_out" if timeout else "blocked" if error or (code != 0 and executed == 0) else "incomplete" if code == 0 else "failed",
+                    count_ok = check_kind == "vet" or executed >= command["min_tests"]
+                    passed = code == 0 and not timeout and not error and not truncated and count_ok and not source_changed
+                    results.append({"name": name, "kind": check_kind, "argv": command["argv"], "exit_code": code,
+                                    "status": "passed" if passed else "invalidated" if source_changed else "timed_out" if timeout else "blocked" if error or (check_kind == "test" and code != 0 and executed == 0) else "incomplete" if code == 0 else "failed",
                                     "timed_out": timeout, "elapsed_seconds": elapsed, "reported_tests": executed,
-                                    "test_count_source": "stdout_heuristic", "test_execution_attested": False,
+                                    "test_count_source": "not_applicable" if check_kind == "vet" else "stdout_heuristic", "test_execution_attested": None if check_kind == "vet" else False,
                                     "passed": passed, "error": error, "output_truncated": truncated,
                                     "verifier_source_changed": source_changed})
     if signature(workspace) != before:
@@ -395,13 +417,14 @@ def main():
     p.add_argument("--variant", action="append", required=True)
     p.add_argument("--trials", type=int, default=1)
     p.add_argument("--kind", choices=("offline-replay", "model-evaluation"), default="offline-replay")
+    p.add_argument("--case", dest="case_ids", action="append", help="explicit case ID; repeat to select multiple cases (default: original two cases)")
     p = commands.add_parser("check"); p.add_argument("--run", type=Path, required=True)
     p = commands.add_parser("review"); p.add_argument("--run", type=Path, required=True); p.add_argument("--evidence", type=Path, required=True)
     p = commands.add_parser("summary"); p.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            result = prepare(args.output, args.source_repo, args.variant, args.trials, args.kind)
+            result = prepare(args.output, args.source_repo, args.variant, args.trials, args.kind, args.case_ids)
         elif args.command == "check":
             result = check(args.run.resolve())
         elif args.command == "review":

@@ -79,5 +79,70 @@
         "timeout_seconds": 120
       }
     ]
+  },
+  {
+    "case_id": "go-humanize-ftoa-limits",
+    "default": false,
+    "language": "go",
+    "provenance": {
+      "kind": "historical",
+      "repository": "https://github.com/dustin/go-humanize",
+      "upstream_pr": "https://github.com/dustin/go-humanize/pull/158",
+      "base_commit": "e0c1e0ea6771283f4f3e4f7c0f148df4c446049d",
+      "reference_fix": "33e8a42f57a2fe71951155d9c5ff72959623b1fa",
+      "description": "Exact direct parent of the merged upstream precision-overflow repair. Existing tests succeed but extreme int digit limits panic; independent contract oracle newly authored, not upstream future tests."
+    },
+    "prompt": "Fix FtoaWithDigits so any int digit limit, including extreme positive limits, does not panic on finite signed inputs. Preserve ordinary truncation without rounding, trailing-zero removal, nonpositive limits dropping fractional digits, and signed zero behavior. Large limits must preserve the available decimal digits. Change only ftoa.go; leave existing tests, build files and other source files intact.",
+    "allowed_paths": [
+      "ftoa.go"
+    ],
+    "oracle": "oracles/go_humanize_ftoa_test.go",
+    "acceptance": [
+      "Existing upstream tests (excluding the injected oracle) execute and pass.",
+      "All twenty independent signed normal/zero/negative/extreme digit examples execute and pass without panic.",
+      "Native go vet ./... passes; cross-architecture evidence is recorded separately, not inferred.",
+      "Only ftoa.go changes; all pre-fix tests and build files remain intact.",
+      "Independent reviewer confirms scope, correctness and remaining uncertainty."
+    ],
+    "checks": [
+      {
+        "name": "existing",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "-skip",
+          "^TestRepairAcceptanceFtoaLimits$",
+          "./..."
+        ],
+        "min_tests": 1,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "regression",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "-run",
+          "^TestRepairAcceptanceFtoaLimits$",
+          "."
+        ],
+        "min_tests": 21,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ]
   }
 ]
