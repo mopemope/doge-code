@@ -140,6 +140,15 @@ impl TuiApp {
                         continue;
                     }
 
+                    if let Some(json) = msg.strip_prefix("::verify_feedback:") {
+                        if let Ok(response) = serde_json::from_str::<
+                            crate::features::verification_failure::Response,
+                        >(json)
+                        {
+                            self.pending_verification_feedback = Some(response);
+                        }
+                        continue;
+                    }
                     if let Some(json) = msg.strip_prefix("::feedback_outcome:") {
                         if let Ok(outcome) = serde_json::from_str::<
                             crate::features::review_feedback::FeedbackOutcome,
@@ -246,6 +255,14 @@ impl TuiApp {
                             let mut handler = self.handler.take().unwrap();
                             handler.handle_job_completed(producer, self);
                             self.handler = Some(handler);
+                        }
+                        if self
+                            .pending_verification_feedback
+                            .as_ref()
+                            .is_some_and(|r| r.job_id.is_some_and(|id| id.to_string() == producer))
+                            && let Some(response) = self.pending_verification_feedback.take()
+                        {
+                            self.apply_verification_failure(response.attachment);
                         }
                         self.dirty = true;
                         continue;

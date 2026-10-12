@@ -8,6 +8,63 @@ runtime. Cases specify observable acceptance criteria and expected Skills for
 reviewing selection. Existing coverage may justify no code change; reward
 evidence and task completion, not patch size.
 
+## Practical acceptance evaluation
+
+The first product job is fixing a small defect in an existing Go or Rust
+repository with tests, producing a scoped patch that passes independent
+verification and hands off changed files, actual check results and uncertainty.
+Existing internal safety/contract tests and representative agent-development
+cases above validate mechanisms or guidance; they are not evidence that dgc is
+competitive or useful for this job. The single Python timeout pilot is a workflow
+probe, not this Go/Rust product acceptance evaluation. Its original passing
+checks and later review failure remain separate observations.
+
+A proposed initial comparison uses about six historical real fixes in Go/Rust
+repositories. Select cases before running, pin each pre-fix revision and record
+its environment/dependencies. Give the agent the original issue and public
+project instructions, not the reference patch, future commit or solution.
+Freeze independent regression/full-project checks, change-scope restrictions
+and reviewer rubric before execution. Do not add an oracle after seeing the
+answer and silently rescore the same trial: version the criteria, retain the
+original result and label any supplemental review.
+
+Run two distinct comparisons, only after separate usage/budget authorization:
+
+1. **Execution-foundation comparison:** same exact supported model/provider,
+   task inputs, tool/access limits, environment and timeout, comparing dgc's
+   runtime with an alternative foundation. Verify that both actually support
+   that common configuration; model aliases or different billing routes are not
+   equivalent. If they cannot match, report the comparison unavailable.
+2. **Product comparison:** dgc versus the user's normal Codex or other workflow
+   with its usual model and settings. This measures the whole experience, not a
+   causal claim about runtimes. Record model, configuration, permissions and
+   interventions. Do not merge these results into the matched-model comparison.
+
+The current harness expects dgc's exec JSON contract. It does not already parse
+arbitrary Codex event streams; adapter work must be separately scoped before a
+claimed executable comparison. Start with the narrow job, not a full migration.
+
+Review acceptance independently from the final agent claim and CI count:
+
+- Success fraction: independently accepted trials / all planned trials, with
+  failed, partial, timed-out and blocked cases retained and identified.
+- Intervention count: record each extra instruction, manual edit, restart or
+  environment workaround; distinguish ordinary review from rescue.
+- Review/rework time: measure reviewer minutes and manual correction time;
+  include rejected attempts, not just successful ones.
+- Cost per accepted completion: all trial costs, including failed requests and
+  failed trials, divided by accepted completions. With no accepted completion,
+  report undefined, not zero. Keep provider-observed tokens, usage-priced
+  estimates, reservation ceilings and confirmed charges separate. Report human
+  effort alongside API cost rather than hiding it in an inexpensive token bill.
+
+Predeclare the trial count, limits and review method; retain raw per-case results
+before aggregates. About six cases are an exploratory comparison, not a reliable
+population claim. No comparison has been run or target reached. Decide what to
+keep, replace or stop from acceptance and user-effort evidence, then consider
+latency/cost. Broader languages, models and decorative UI work stay secondary to
+observed failures in this first job.
+
 ## Matched runs
 
 The [runtime harness](../../scripts/run-agent-evals.py) automates matched
@@ -297,3 +354,10 @@ repeat-window semantics. Missing telemetry stays null. Use it with the case's
 intent, patch, stop reason and check evidence to investigate repeated reading;
 null mutation positions are expected for legitimate read-only cases and are not
 an automatic failure criterion. This object does not change human `accepted`.
+
+## Failure-driven workflow fixture
+
+[Timeout repair pilot v2](eval-timeout-validation-v2.md) supplies a small, isolated
+fixture and a versioned independent boundary-condition oracle. It demonstrates
+why passing agent-written tests and completed execution do not determine
+acceptance, and how to retain a failed first trial separately from later changes.

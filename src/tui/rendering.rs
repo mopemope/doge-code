@@ -936,13 +936,21 @@ impl TuiApp {
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(parts[1]);
             f.render_widget(
-                Paragraph::new(editor.anchor.target_excerpt())
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Source target"),
-                    ),
+                Paragraph::new(format!(
+                    "{}{}",
+                    editor.anchor.target_excerpt(),
+                    editor
+                        .failure
+                        .as_ref()
+                        .map(|f| format!("\n\n{}", f.preview()))
+                        .unwrap_or_default()
+                ))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Source target"),
+                ),
                 body[0],
             );
             f.render_widget(&editor.textarea, body[1]);
@@ -973,6 +981,10 @@ impl TuiApp {
                     c.anchor.target_label(),
                     c.text
                 ));
+            }
+            if let Some(failure) = &draft.batch.failure {
+                text.push_str(&failure.preview());
+                text.push_str("\n\n");
             }
             if let Some(outcome) = &draft.outcome {
                 text.push_str(outcome);
@@ -1075,6 +1087,10 @@ impl TuiApp {
                         "Unsent snapshot; cannot submit from history"
                     }
                 ));
+                if let Some(failure) = &entry.batch.failure {
+                    text.push_str(&failure.preview());
+                    text.push_str("\n\n");
+                }
                 for c in &entry.batch.comments {
                     text.push_str(&format!(
                         "{} | {}\n{}\n\n",

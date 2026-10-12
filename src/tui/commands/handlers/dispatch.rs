@@ -73,6 +73,12 @@ impl CommandHandler for TuiExecutor {
             anyhow::bail!("Foreground work is running; comments retained.");
         }
         anyhow::ensure!(self.client.is_some(), "No model client; comments retained.");
+        if let Some(failure) = &batch.failure {
+            self.verification_queue
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Verification queue unavailable."))?
+                .validate_failure(failure)?;
+        }
         self.tools.validate_review_feedback(batch)
     }
     fn submit_review_feedback(
