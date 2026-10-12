@@ -247,6 +247,7 @@ pub struct TuiApp {
     pub(crate) latest_agent_job_id: Option<crate::jobs::JobId>,
     pub(crate) queued_dispatch_rejected: bool,
     pub pending_instructions: VecDeque<String>,
+    pub(crate) context_usage_view: Option<crate::features::context_usage::View>,
     // plan list
     pub plan_list: Vec<PlanItem>,
     /// If true, the plan list received from `plan_write` that contained only
@@ -536,6 +537,7 @@ impl TuiApp {
             latest_agent_job_id: None,
             queued_dispatch_rejected: false,
             pending_instructions: VecDeque::new(),
+            context_usage_view: None,
             // plan list
             plan_list: Vec::new(),
             hide_plan_on_next_instruction: false,
