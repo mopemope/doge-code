@@ -19,6 +19,16 @@ User-facing behavior belongs in `README.md`; development guidance starts here.
 - For long work, retain decisions, open issues, and completed checks in a short
   project-local work note. Do not commit `.doge/` runtime state.
 
+## Product priority
+
+The first practical job is a small bug fix in an existing tested Go/Rust
+repository, delivered as an independently verified, reviewable patch with
+remaining uncertainty. Prioritize observed workflow failures and user effort;
+do not expand languages, providers or UI breadth as a goal. Internal contract
+checks and CI are prerequisites, not product-acceptance evidence. Compare narrow
+usefulness before deciding on an external execution foundation; no full migration
+is authorized by this direction. See [evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
+
 ## Choose the relevant guidance
 
 Skill bodies are shared under `docs/ai/skills/`. Open the relevant `SKILL.md`

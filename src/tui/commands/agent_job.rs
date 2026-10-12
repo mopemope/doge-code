@@ -173,6 +173,7 @@ pub(crate) fn spawn_agent_turn(
     let fs = executor.tools.clone();
     let conversation_history = executor.conversation_history.clone();
     let session_manager = executor.session_manager.clone();
+    let verification_queue = executor.verification_queue.clone();
     let ui_tx = executor.ui_tx.clone();
 
     // Build messages (system + history + shell context + plan + user).
@@ -273,6 +274,23 @@ pub(crate) fn spawn_agent_turn(
         let ui_tx = scoped_ui_tx;
         if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance_for_job
             && let Err(error) = fs.validate_review_feedback(batch)
+        {
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send(format!("[feedback] {error}"));
+            }
+            return JobRunOutcome::Failed {
+                message: crate::jobs::types::bound_error(&error.to_string()),
+            };
+        }
+        if let AgentTurnProvenance::ReviewFeedback { batch } = &provenance_for_job
+            && let Some(failure) = &batch.failure
+            && let Err(error) = crate::features::verification_failure::validate_at_write_start(
+                &fs,
+                &verification_queue,
+                failure,
+                ctx.cancellation_token(),
+            )
+            .await
         {
             if let Some(tx) = &ui_tx {
                 let _ = tx.send(format!("[feedback] {error}"));

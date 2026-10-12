@@ -21,6 +21,7 @@ impl FeedbackDraft {
     pub(crate) fn empty(source: crate::tui::diff_review::DiffReviewState) -> Self {
         Self {
             batch: FeedbackBatch {
+                failure: None,
                 id: uuid::Uuid::now_v7().to_string(),
                 revision: 0,
                 source: source.source.clone(),
@@ -62,6 +63,7 @@ pub struct LineSelector {
 }
 
 pub struct CommentEditor {
+    pub failure: Option<crate::features::verification_failure::Attachment>,
     pub anchor: Anchor,
     pub textarea: TextArea<'static>,
 }
@@ -118,8 +120,36 @@ impl TuiApp {
             .map(|c| c.text.clone())
             .unwrap_or_default();
         let textarea = TextArea::from(text.split('\n').map(str::to_owned).collect::<Vec<_>>());
-        self.comment_editor = Some(CommentEditor { anchor, textarea });
+        let failure = self
+            .review_feedback
+            .as_ref()
+            .and_then(|d| d.batch.failure.as_ref())
+            .filter(|f| f.target == anchor)
+            .cloned();
+        self.comment_editor = Some(CommentEditor {
+            anchor,
+            textarea,
+            failure,
+        });
         self.dirty = true;
+    }
+
+    pub(crate) fn apply_verification_failure(
+        &mut self,
+        attachment: crate::features::verification_failure::Attachment,
+    ) {
+        if self.foreground_busy()
+            || self.feedback_anchor().as_ref() != Some(&attachment.target)
+            || self.comment_editor.is_some()
+        {
+            self.push_log("[verify] Review target changed or editor is open; failure not attached. Select the current hunk and try again.");
+            return;
+        }
+        self.start_comment_at(attachment.target.clone());
+        if let Some(editor) = &mut self.comment_editor {
+            editor.failure = Some(attachment);
+            self.push_log("[verify] Failure data staged separately. Enter a repair instruction; Esc keeps prior comments. Saving makes no request; s inspects evidence before one repair.");
+        }
     }
 
     pub(crate) fn start_line_selection(&mut self) {
@@ -228,6 +258,23 @@ impl TuiApp {
                 text,
             });
         }
+        if let Some(failure) = editor.failure
+            && draft
+                .batch
+                .comments
+                .iter()
+                .any(|c| c.anchor == failure.target)
+        {
+            draft.batch.failure = Some(failure);
+        }
+        if draft
+            .batch
+            .failure
+            .as_ref()
+            .is_some_and(|f| !draft.batch.comments.iter().any(|c| c.anchor == f.target))
+        {
+            draft.batch.failure = None;
+        }
         draft.batch.revision += 1;
         self.sync_comment_list();
         self.push_log("[feedback] Comment saved locally. No model request was made.");
@@ -239,6 +286,14 @@ impl TuiApp {
             && let Some(draft) = self.review_feedback.as_mut()
         {
             draft.batch.comments.retain(|c| c.anchor != anchor);
+            if draft
+                .batch
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.target == anchor)
+            {
+                draft.batch.failure = None;
+            }
             draft.batch.revision += 1;
             self.dirty = true;
         }
