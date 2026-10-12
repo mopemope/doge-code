@@ -1,0 +1,83 @@
+[
+  {
+    "case_id": "rust-legacy-prefix",
+    "language": "rust",
+    "provenance": {
+      "kind": "historical",
+      "repository": "https://github.com/mopemope/doge-code",
+      "base_commit": "168db022d32cea702c8ebaee210207860c6f6ce8",
+      "reference_fix": "a78ff91a5ce7c22fb1d66ecf25654e3ccc176085",
+      "description": "Structured legacy allowed_commands drops argument prefixes; original code and existing tests archived from exact pre-fix commit. New operator regression tests independently restate the contract."
+    },
+    "prompt": "Fix execution policy: when [execution] is absent and allowed_commands contains git status, structured and simple shell execution must allow status and status --short but reject commit and no-argument git before spawning. Preserve argumentless legacy rules, quoted/empty literal arguments, multiple rules, shell injection rejection, and explicit execution program-only precedence. Keep implementation changes in src/execution/policy.rs and preserve its existing inline tests.",
+    "allowed_paths": [
+      "src/execution/policy.rs"
+    ],
+    "oracle": "oracles/rust_legacy_policy.rs",
+    "acceptance": [
+      "All six independent policy tests execute and pass.",
+      "Existing execution policy tests execute and pass.",
+      "Only the declared policy implementation changes; existing inline tests preserved.",
+      "Independent reviewer confirms scope, correctness and residual uncertainty."
+    ],
+    "checks": [
+      {
+        "name": "regression",
+        "argv": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "repair_acceptance::"
+        ],
+        "min_tests": 6,
+        "timeout_seconds": 600
+      },
+      {
+        "name": "existing",
+        "argv": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "execution::policy::tests::"
+        ],
+        "min_tests": 1,
+        "timeout_seconds": 600
+      }
+    ]
+  },
+  {
+    "case_id": "go-block-rounding",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored overflow rounding task; no historical repository/issue/reference patch claim."
+    },
+    "fixture": "go-block-rounding/workspace",
+    "prompt": "Fix Blocks to return ceil(bytes / block) for all nonnegative int64 bytes and positive int64 block sizes without overflow. Preserve invalid input errors and existing tests; change only block.go.",
+    "allowed_paths": [
+      "block.go"
+    ],
+    "oracle": "oracles/go_block_rounding_test.go",
+    "acceptance": [
+      "The ordinary test and all ten independent boundary/invalid cases execute and pass.",
+      "Only block.go changes; existing tests and build files remain intact.",
+      "Independent reviewer confirms scope, correctness and residual uncertainty."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 12,
+        "timeout_seconds": 120
+      }
+    ]
+  }
+]
