@@ -144,7 +144,7 @@ pub enum Commands {
         workflow: String,
     },
 
-    /// Manage sessions (list, show, delete, evidence)
+    /// Manage sessions (list, show, recovery, delete, evidence)
     #[command()]
     Session {
         #[command(subcommand)]
@@ -172,12 +172,13 @@ async fn main() -> std::process::ExitCode {
 
 async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
-    // Evidence export uses current-directory storage without loading user
+    // Read-only recovery/evidence uses current-directory storage without loading user
     // credentials, creating default config/project logs, or starting services.
     if let Some(Commands::Session {
         command:
             command @ (session::cli::SessionCommands::Evidence { .. }
-            | session::cli::SessionCommands::Review { .. }),
+            | session::cli::SessionCommands::Review { .. }
+            | session::cli::SessionCommands::Recovery { .. }),
     }) = &cli.command
     {
         tracing_subscriber::fmt()

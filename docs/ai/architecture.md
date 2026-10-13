@@ -45,6 +45,7 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/config/` | AppConfig, `.doge/config.toml` loading |
 | `src/features/evidence_report/` | Read-only session evidence collection, Git/workspace snapshots, typed schema v2, Markdown/JSON export |
 | `src/features/verification_snapshot/` | Bounded project code-state endpoint acquisition and comparison for verification records; no coverage inference |
+| `src/features/session_recovery.rs` | Read-only saved/live recovery diagnosis and operator guidance; transitions, retention and export stay session-owned |
 | `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
 | `src/watch.rs` | File watch mode (`dgc watch`) |
 | `src/error_recovery/` | Autonomous error recovery hints |
@@ -146,6 +147,27 @@ change persisted records. Job completion order, mutation receipts, frozen wire
 versions and conservative evidence classification remain separate contracts with
 existing regression coverage. Add an abstraction only when it owns a real
 responsibility or supports another consumer, never as a pass-through layer.
+
+### Failure recovery milestone
+
+`features/session_recovery` reads saved checkpoints through `SessionStore::open_existing`
+or receives an idle live checkpoint; it reports static bounded status categories,
+never conversation content, tool arguments, provider bindings, API calls or raw parse
+errors. `session::cli` and TUI route diagnosis to it. Session formatting presents
+recorded flags only; a false flag is not a completeness claim. Full IDs can be read
+without replaying unrelated corrupt checkpoints; prefix resolution remains bounded.
+
+Actual Go/Rust local fixtures cover failed tests, committed edits, failed responses,
+explicit same-session resume and write-gap refusal. All endpoint responses are fixed
+loopback scripts, so this is tool/transport/recovery validation, not live model
+performance or human acceptance. New check outcomes never heal old history.
+
+Fresh recovery uses existing explicit new-session transitions, including idle,
+old-flush, capacity/save refusal, history reset and verification-ID invalidation.
+It adds no automatic fork, migration, retry or flag clear. Preserve raw old records
+outside managed retention before transition; checkpoint exports and evidence
+projections have their existing, distinct meanings. No atomic-store redesign or
+speculative filesystem deadline engine is part of this milestone.
 
 ## Common Change Patterns
 

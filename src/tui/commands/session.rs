@@ -22,13 +22,15 @@ impl TuiExecutor {
     pub(crate) fn handle_session_command(&mut self, args: &str, ui: &mut TuiApp) -> Result<()> {
         let args: Vec<&str> = args.split_whitespace().collect();
         if args.is_empty() {
-            ui.push_log("Usage: /session <new|list|show|switch|save|export|delete|current|clear>");
+            ui.push_log(
+                "Usage: /session <new|list|show|switch|save|export|recovery|delete|current|clear>",
+            );
             return Ok(());
         }
 
         if matches!(
             args[0],
-            "new" | "switch" | "delete" | "clear" | "save" | "export"
+            "new" | "switch" | "delete" | "clear" | "save" | "export" | "recovery"
         ) {
             self.ensure_session_idle()?;
         }
@@ -158,6 +160,34 @@ impl TuiExecutor {
                     }
                 }
             }
+            "recovery" => {
+                self.ensure_session_transition_idle()?;
+                if args.len() != 1 {
+                    ui.push_log("Usage: /session recovery (no arguments)");
+                } else {
+                    let snapshot = {
+                        let manager = self.session_manager.lock().unwrap();
+                        manager.current_session.as_ref().map(|data| {
+                            (
+                                data.clone(),
+                                manager.store.session_dir(&data.meta.id),
+                                manager.has_unsaved_current_session(),
+                            )
+                        })
+                    };
+                    if let Some((data, dir, unsaved)) = snapshot {
+                        let report = crate::features::session_recovery::diagnose(
+                            &data,
+                            &dir,
+                            unsaved,
+                            "live_checkpoint",
+                        );
+                        ui.push_log(crate::features::session_recovery::render(&report));
+                    } else {
+                        ui.push_log("No session loaded; nothing to diagnose.");
+                    }
+                }
+            }
             "current" => {
                 if let Some(info) = self.session_manager.lock().unwrap().current_session_info() {
                     ui.push_log(info);
@@ -179,7 +209,7 @@ impl TuiExecutor {
                 Err(e) => ui.push_log(format!("Failed to clear session conversation: {}", e)),
             },
             _ => {
-                ui.push_log("Unknown session command. Usage: /session <new|list|show|switch|save|export|delete|current|clear>");
+                ui.push_log("Unknown session command. Usage: /session <new|list|show|switch|save|export|recovery|delete|current|clear>");
             }
         }
         Ok(())
