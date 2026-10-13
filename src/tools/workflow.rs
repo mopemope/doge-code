@@ -31,6 +31,30 @@ pub struct WorkflowStep {
     pub timeout_ms: Option<u64>,
 }
 
+enum StepCommand<'a> {
+    Shell(&'a str),
+    Process(&'a str),
+}
+
+impl WorkflowStep {
+    /// Shared by whole-file preflight and execution; never interprets argv or policy.
+    fn command(&self) -> Result<StepCommand<'_>> {
+        let name = crate::tools::budget::safe_take_chars(&self.name, 128);
+        match (&self.run, &self.program) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "Workflow step '{}' specifies both `run` and `program`; use exactly one",
+                name
+            ),
+            (None, None) => anyhow::bail!(
+                "Workflow step '{}' specifies neither `run` nor `program`",
+                name
+            ),
+            (Some(run), None) => Ok(StepCommand::Shell(run)),
+            (None, Some(program)) => Ok(StepCommand::Process(program)),
+        }
+    }
+}
+
 pub async fn run_workflow(
     workflow_name: &str,
     project_root: &Path,
@@ -86,73 +110,81 @@ pub async fn run_workflow_with_cancel(
     let workflow: Workflow =
         serde_saphyr::from_str(&content).context("Failed to parse workflow YAML")?;
 
+    // A malformed later step must not be discovered after earlier side effects.
+    // Runtime policy, cwd/env validation and process failures still belong to
+    // each execution; this preflight checks only the static command shape.
+    for (index, step) in workflow.steps.iter().enumerate() {
+        if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+        }
+        step.command().map_err(|error| {
+            let message = format!(
+                "Workflow configuration rejected at step {} before any command ran: {error}",
+                index + 1
+            );
+            error.context(message)
+        })?;
+    }
+
     let mut output = format!("Running workflow: {}\n", workflow.name);
     for (index, step) in workflow.steps.into_iter().enumerate() {
         if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
             return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
         }
-        let (success, stdout, stderr, status, exit_code, truncated, warnings, error) =
-            match (&step.run, &step.program) {
-                (Some(_), Some(_)) => anyhow::bail!(
-                    "Workflow step '{}' specifies both `run` and `program`; use exactly one",
-                    step.name
-                ),
-                (None, None) => anyhow::bail!(
-                    "Workflow step '{}' specifies neither `run` nor `program`",
-                    step.name
-                ),
-                (Some(run), None) => {
-                    info!("Running workflow step: {} ({})", step.name, run);
-                    let result = fs_tools
-                        .execute_bash_with_cancel(run, cancel.clone())
-                        .await?;
-                    let r: crate::tools::execute::ExecuteBashResult =
-                        serde_json::from_str(&result)?;
-                    // The legacy adapter has no policy/spawn status. Do not infer one.
-                    let status = if r.timed_out { "timed_out" } else { "failed" };
-                    (
-                        r.success,
-                        r.stdout,
-                        r.stderr,
-                        status.to_string(),
-                        r.exit_code,
-                        r.output_truncated,
-                        r.warnings,
-                        None,
-                    )
-                }
-                (None, Some(program)) => {
-                    info!(
-                        "Running workflow step: {} ({} {:?})",
-                        step.name, program, step.args
-                    );
-                    let params = crate::execution::ExecuteProcessParams {
-                        program: program.clone(),
-                        args: step.args.clone(),
-                        cwd: step.cwd.clone(),
-                        env: step.env.clone(),
-                        timeout_ms: step.timeout_ms,
-                    };
-                    let result = fs_tools.execute_process(params, cancel.clone()).await?;
-                    let r: crate::execution::ProcessResult = serde_json::from_str(&result)?;
-                    let status = match r.status {
-                        crate::execution::ProcessStatus::Completed => "completed",
-                        crate::execution::ProcessStatus::TimedOut => "timed_out",
-                        crate::execution::ProcessStatus::PolicyDenied => "policy_denied",
-                        crate::execution::ProcessStatus::SpawnFailed => "spawn_failed",
-                    };
-                    (
-                        r.success,
-                        r.stdout,
-                        r.stderr,
-                        status.to_string(),
-                        r.exit_code,
-                        r.output_truncated,
-                        r.warnings,
-                        r.error,
-                    )
-                }
-            };
+        let (success, stdout, stderr, status, exit_code, truncated, warnings, error) = match step
+            .command()?
+        {
+            StepCommand::Shell(run) => {
+                info!("Running workflow step: {} ({})", step.name, run);
+                let result = fs_tools
+                    .execute_bash_with_cancel(run, cancel.clone())
+                    .await?;
+                let r: crate::tools::execute::ExecuteBashResult = serde_json::from_str(&result)?;
+                // The legacy adapter has no policy/spawn status. Do not infer one.
+                let status = if r.timed_out { "timed_out" } else { "failed" };
+                (
+                    r.success,
+                    r.stdout,
+                    r.stderr,
+                    status.to_string(),
+                    r.exit_code,
+                    r.output_truncated,
+                    r.warnings,
+                    None,
+                )
+            }
+            StepCommand::Process(program) => {
+                info!(
+                    "Running workflow step: {} ({} {:?})",
+                    step.name, program, step.args
+                );
+                let params = crate::execution::ExecuteProcessParams {
+                    program: program.to_owned(),
+                    args: step.args.clone(),
+                    cwd: step.cwd.clone(),
+                    env: step.env.clone(),
+                    timeout_ms: step.timeout_ms,
+                };
+                let result = fs_tools.execute_process(params, cancel.clone()).await?;
+                let r: crate::execution::ProcessResult = serde_json::from_str(&result)?;
+                let status = match r.status {
+                    crate::execution::ProcessStatus::Completed => "completed",
+                    crate::execution::ProcessStatus::TimedOut => "timed_out",
+                    crate::execution::ProcessStatus::PolicyDenied => "policy_denied",
+                    crate::execution::ProcessStatus::SpawnFailed => "spawn_failed",
+                };
+                (
+                    r.success,
+                    r.stdout,
+                    r.stderr,
+                    status.to_string(),
+                    r.exit_code,
+                    r.output_truncated,
+                    r.warnings,
+                    r.error,
+                )
+            }
+        };
         if !success {
             return Err(WorkflowFailure {
                 workflow: workflow.name,
@@ -783,3 +815,6 @@ steps:
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod preflight_tests;
