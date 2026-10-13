@@ -767,7 +767,7 @@ impl SessionManager {
                 else if let SessionSaveState::DurabilityUnconfirmed { session_id, message } = &self.save_state {
                     if session_id == &session.meta.id { format!("replaced; durability unconfirmed: {message}") } else { "saved".into() }
                 } else { "saved".into() };
-            format!(
+            let info = format!(
                 "Current Session:\n  Checkpoint: {}\n  ID: {}\n  Title: {}\n  Created: {}\n  Updated: {}\n  Conversation entries: {}\n  Token count: {}\n  Requests: {}\n  Tool calls: {}\n  Changed files count: {}",
                 checkpoint,
                 session.meta.id,
@@ -779,7 +779,8 @@ impl SessionManager {
                 session.requests,
                 session.tool_calls,
                 session.changed_files.len()
-            )
+            );
+            format!("{info}\n  {}", crate::session::format::provenance_status(session))
         })
     }
 

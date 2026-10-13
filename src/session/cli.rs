@@ -34,6 +34,12 @@ pub enum SessionCommands {
         #[arg(long)]
         snapshot: String,
     },
+    /// Diagnose recovery without changing saved state or calling a provider
+    Recovery {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete a session
     Delete {
         id: String,
@@ -85,6 +91,15 @@ fn stdin_is_tty() -> bool {
 
 /// Entry point for the `dgc session` subcommands.
 pub async fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
+    if let SessionCommands::Recovery { id, json } = &command {
+        let report = crate::features::session_recovery::inspect(&cfg.project_root, id)?;
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{}", crate::features::session_recovery::render(&report));
+        }
+        return Ok(());
+    }
     if let SessionCommands::Evidence {
         id,
         format,
@@ -168,7 +183,9 @@ pub async fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
     }
     let store = session_store(&cfg)?;
     match command {
-        SessionCommands::Evidence { .. } | SessionCommands::Review { .. } => {
+        SessionCommands::Evidence { .. }
+        | SessionCommands::Review { .. }
+        | SessionCommands::Recovery { .. } => {
             return Err(anyhow!(
                 "evidence command was not routed to its read-only handler"
             ));
