@@ -30,6 +30,72 @@ mod completion_scope_tests {
     use super::*;
     use httptest::{Expectation, matchers::*, responders::*};
 
+    struct CountingHook(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::hooks::InstructionHook for CountingHook {
+        fn name(&self) -> &str {
+            "count"
+        }
+        async fn execute(
+            &self,
+            _: &[crate::llm::types::ChatMessage],
+            _: &crate::llm::types::ChatMessage,
+            _: &AppConfig,
+            _: &FsTools,
+            _: &Arc<RwLock<Option<RepoMap>>>,
+        ) -> Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_turn_checkpoints_and_accounts_before_legacy_hooks() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        server.expect(Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+            .times(2).respond_with(json_encoded(serde_json::json!({
+                "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],
+                "usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}
+            }))));
+        let root = tempfile::tempdir().expect("root");
+        let mut executor = Executor::new(AppConfig {
+            project_root: root.path().into(),
+            no_repomap: true,
+            api_key: Some("fixture".into()),
+            base_url: server.url_str("/v1"),
+            model: "fixture".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("executor");
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        executor.add_hook(Box::new(CountingHook(count.clone())));
+        let turn = executor
+            .run_typed_with_cancel("first", None)
+            .await
+            .expect("typed turn");
+        assert_eq!(turn.usage["total_tokens"], 9);
+        let link = turn.review_link.expect("canonical session link");
+        assert!(!link.session_id.is_empty());
+        let run = turn.result.expect("agent");
+        assert_eq!(
+            run.status,
+            crate::llm::tool_execution::AgentRunStatus::Completed
+        );
+        assert!(
+            executor
+                .conversation_history
+                .lock()
+                .await
+                .snapshot()
+                .iter()
+                .any(|m| m.content.as_deref() == Some("first"))
+        );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        executor.run("second", true).await.expect("legacy run");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn completion_scope_after_native_failure_reports_response_only() {
         let server = crate::test_support::HTTP_SERVER_POOL.get_server();
@@ -165,6 +231,16 @@ pub fn notifications_enabled_for_value(var: Option<&str>) -> bool {
 
 pub(crate) fn notifications_enabled() -> bool {
     notifications_enabled_for_value(std::env::var("DGC_DISABLE_NOTIFICATIONS").ok().as_deref())
+}
+
+/// Canonically saved turn, before presentation or hooks. An agent error retains
+/// its usage so controllers cannot silently refund failed requests.
+#[derive(Debug)]
+pub(crate) struct ExecutorTurn {
+    pub result: Result<crate::llm::tool_execution::AgentRunResult>,
+    pub usage: serde_json::Value,
+    pub tokens_used: u64,
+    pub review_link: Option<crate::features::evidence_report::ReviewLink>,
 }
 
 /// Executor for the `exec` subcommand.
@@ -403,78 +479,13 @@ impl Executor {
         json: bool,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<ExecOutcome> {
-        // Build this turn's request from the durable snapshot. The outer
-        // history stays untouched until the canonical result commits.
-        let msgs = self.build_request_messages(instruction).await;
-        crate::llm::validate_tool_blocks(&msgs, false)?;
-
-        // Missing client means the agent never starts: record no directive
-        // (matches TUI busy/missing-key semantics).
-        let client_ref = match self.client.as_ref() {
-            Some(client) => client,
-            None => anyhow::bail!("OpenAI client not initialized"),
-        };
-
-        // Record the observed user directive (exec run). A recording failure
-        // never aborts the turn: mark provenance_incomplete and continue
-        // with directive_id = None.
-        let attribution = match crate::tools::provenance::record_directive_observed(
-            &self.tools,
-            crate::provenance::DirectiveOrigin::ExecRun,
-            instruction,
-            instruction,
-        ) {
-            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
-            Err(e) => {
-                tracing::warn!(error = %e, "provenance.directive_record_failed");
-                let _ = self.tools.mark_current_session_provenance_failure();
-                crate::provenance::ProvenanceAttribution::none()
-            }
-        };
-
-        let usage_before = client_ref.usage_snapshot();
-        // Call run_agent_loop
-        let res = llm::run_agent_loop(
-            client_ref,
-            &self.cfg.model,
-            &self.tools,
-            msgs,
-            None,
-            cancel,
-            &self.cfg,
-            attribution,
-        )
-        .await;
-
-        let usage = client_ref
-            .usage_snapshot()
-            .difference(&usage_before)
-            .report();
-        // Get token usage after the agent loop completes
-        let tokens_used = self
-            .client
-            .as_ref()
-            .map(|c| c.get_total_prompt_tokens_used())
-            .unwrap_or(0);
-
-        let res = match res {
-            Ok(run) => match self.commit_canonical_history(&run.messages).await {
-                Ok(()) => Ok(run),
-                Err(error) => Err(error.context("failed to persist exec conversation history")),
-            },
-            Err(error) => Err(error),
-        };
-
-        match res {
+        let turn = self.run_typed_with_cancel(instruction, cancel).await?;
+        let tokens_used = turn.tokens_used;
+        let usage = turn.usage;
+        match turn.result {
             Ok(run) => {
                 let outcome = ExecOutcome::from(&run);
-                // Freeze navigation immediately after the canonical save, before hooks.
-                let review_link = self.tools.get_current_session().and_then(|s| {
-                    crate::features::evidence_report::ReviewLink::new(
-                        &self.cfg.project_root,
-                        &s.meta.id,
-                    )
-                });
+                let review_link = turn.review_link;
                 let updated_messages = run.messages;
                 let final_msg = run.final_message;
                 let status_str = match run.status {
@@ -568,9 +579,6 @@ impl Executor {
                 Ok(outcome)
             }
             Err(e) => {
-                if let Err(recovery_error) = self.restore_history_after_failure().await {
-                    tracing::error!(%recovery_error, "could not restore canonical checkpoint");
-                }
                 tracing::error!("LLM execution failed: {}", e);
                 if json {
                     let output = serde_json::json!({
@@ -605,6 +613,96 @@ impl Executor {
                 Err(e)
             }
         }
+    }
+
+    /// Execute and checkpoint one bounded turn without hooks, stdout, or
+    /// desktop notifications. Legacy `run_with_cancel` owns presentation.
+    pub(crate) async fn run_typed_with_cancel(
+        &mut self,
+        instruction: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<ExecutorTurn> {
+        // Build this turn's request from the durable snapshot. The outer
+        // history stays untouched until the canonical result commits.
+        let msgs = self.build_request_messages(instruction).await;
+        crate::llm::validate_tool_blocks(&msgs, false)?;
+
+        // Missing client means the agent never starts: record no directive
+        // (matches TUI busy/missing-key semantics).
+        let client_ref = match self.client.as_ref() {
+            Some(client) => client,
+            None => anyhow::bail!("OpenAI client not initialized"),
+        };
+
+        // Record the observed user directive (exec run). A recording failure
+        // never aborts the turn: mark provenance_incomplete and continue
+        // with directive_id = None.
+        let attribution = match crate::tools::provenance::record_directive_observed(
+            &self.tools,
+            crate::provenance::DirectiveOrigin::ExecRun,
+            instruction,
+            instruction,
+        ) {
+            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
+            Err(e) => {
+                tracing::warn!(error = %e, "provenance.directive_record_failed");
+                let _ = self.tools.mark_current_session_provenance_failure();
+                crate::provenance::ProvenanceAttribution::none()
+            }
+        };
+
+        let usage_before = client_ref.usage_snapshot();
+        // Call run_agent_loop
+        let res = llm::run_agent_loop(
+            client_ref,
+            &self.cfg.model,
+            &self.tools,
+            msgs,
+            None,
+            cancel,
+            &self.cfg,
+            attribution,
+        )
+        .await;
+
+        let usage = client_ref
+            .usage_snapshot()
+            .difference(&usage_before)
+            .report();
+        // Get token usage after the agent loop completes
+        let tokens_used = self
+            .client
+            .as_ref()
+            .map(|c| c.get_total_prompt_tokens_used())
+            .unwrap_or(0);
+
+        let res = match res {
+            Ok(run) => match self.commit_canonical_history(&run.messages).await {
+                Ok(()) => Ok(run),
+                Err(error) => Err(error.context("failed to persist exec conversation history")),
+            },
+            Err(error) => Err(error),
+        };
+
+        if res.is_err()
+            && let Err(recovery_error) = self.restore_history_after_failure().await
+        {
+            tracing::error!(%recovery_error, "could not restore canonical checkpoint");
+        }
+        let review_link = res.as_ref().ok().and_then(|_| {
+            self.tools.get_current_session().and_then(|session| {
+                crate::features::evidence_report::ReviewLink::new(
+                    &self.cfg.project_root,
+                    &session.meta.id,
+                )
+            })
+        });
+        Ok(ExecutorTurn {
+            result: res,
+            usage,
+            tokens_used,
+            review_link,
+        })
     }
 
     /// Runs the executor in rewrite mode, returning the rewritten snippet.
