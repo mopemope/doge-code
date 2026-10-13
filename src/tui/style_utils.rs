@@ -27,15 +27,7 @@ impl StyledLine {
         Self { spans: Vec::new() }
     }
 
-    pub fn from_span(content: impl Into<String>, style: Style) -> Self {
-        Self {
-            spans: vec![StyledSpan {
-                content: content.into(),
-                style,
-            }],
-        }
-    }
-
+    #[cfg(test)]
     pub fn text(&self) -> String {
         self.spans
             .iter()

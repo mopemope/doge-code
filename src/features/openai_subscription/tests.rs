@@ -975,7 +975,6 @@ async fn completed_multiple_tools_persist_and_resume_with_raw_reasoning() -> Res
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await?;
@@ -1067,7 +1066,6 @@ async fn failed_stream_cannot_mutate_workspace_in_either_agent_path() -> Result<
                     None,
                     None,
                     &cfg,
-                    None,
                     crate::provenance::ProvenanceAttribution::none()
                 )
                 .await
@@ -1356,7 +1354,6 @@ async fn failed_followup_preserves_unseen_tool_results_in_durable_session() -> R
             None,
             None,
             &cfg,
-            None,
             crate::provenance::ProvenanceAttribution::none()
         )
         .await
@@ -2315,7 +2312,6 @@ async fn native_overflow_does_not_fallback_to_local_compactor() -> Result<()> {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await

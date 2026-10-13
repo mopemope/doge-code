@@ -1,5 +1,4 @@
 use crate::analysis::RepoMap;
-use crate::hooks::HookManager;
 use crate::jobs::JobManager;
 use crate::llm::OpenAIClient;
 
@@ -69,6 +68,7 @@ pub trait CommandHandler {
     fn handle_job_completed(&mut self, _producer: &str, _ui: &mut TuiApp) {}
     /// Synthetic follow-up with no user directive (test/lint analysis).
     /// Default is a no-op so mocks stay source-compatible.
+    #[cfg(test)]
     fn handle_internal_followup(&mut self, _content: &str, _ui: &mut TuiApp) {}
     /// Replay of an already observed user turn. `display` is the raw typed
     /// bytes for the log; `content` is the effective instruction to hand the
@@ -110,9 +110,7 @@ pub struct TuiExecutor {
 
     // Custom commands
     pub(crate) custom_commands: HashMap<String, CustomCommand>,
-
     // Hook manager for executing custom processing after each instruction
-    pub(crate) hook_manager: HookManager,
 }
 
 impl TuiExecutor {
@@ -149,16 +147,6 @@ impl TuiExecutor {
                 });
             self.jobs.set_completion_hook(hook);
         }
-    }
-
-    /// Add a hook to be executed after each instruction
-    pub fn add_hook(&mut self, hook: Box<dyn crate::hooks::InstructionHook>) {
-        self.hook_manager.add_hook(hook);
-    }
-
-    /// Get access to the hook manager
-    pub fn hook_manager(&mut self) -> &mut crate::hooks::HookManager {
-        &mut self.hook_manager
     }
 
     /// Publish the persisted plan (if any) for the current session to the UI.

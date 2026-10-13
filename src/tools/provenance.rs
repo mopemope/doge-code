@@ -140,10 +140,20 @@ pub fn record_committed_mutation_with_attribution(
     };
     // Predecessor: latest tracked event for this file whose `after` equals
     // this receipt's `before`. Broken chains stay unlinked (never guessed).
-    let predecessor_change_id = match ProvenanceStore::new(ctx.session_dir.clone()).load_all() {
+    let mut predecessor_incomplete = false;
+    let history = if fs_tools
+        .get_current_session()
+        .is_some_and(|s| s.provenance_incomplete)
+    {
+        Err(anyhow::anyhow!("Session has missing provenance writes"))
+    } else {
+        ProvenanceStore::new(ctx.session_dir.clone()).load_complete(&ctx.session_id)
+    };
+    let predecessor_change_id = match history {
         Ok(loaded) => ProvenanceStore::find_predecessor(&loaded.events, &file, &before),
         Err(e) => {
             tracing::debug!(error = %e, "provenance predecessor lookup failed");
+            predecessor_incomplete = true;
             None
         }
     };
@@ -174,6 +184,9 @@ pub fn record_committed_mutation_with_attribution(
     });
     let store = ProvenanceStore::new(ctx.session_dir);
     let envelope = store.append(&ctx.session_id, event)?;
+    if predecessor_incomplete {
+        let _ = fs_tools.mark_current_session_provenance_failure();
+    }
     Ok(Some(envelope))
 }
 
@@ -225,8 +238,21 @@ pub fn load_current_events(
     let Some(ctx) = fs_tools.current_session_storage_context() else {
         return Ok(None);
     };
+    anyhow::ensure!(
+        !fs_tools
+            .get_current_session()
+            .is_some_and(|s| s.provenance_incomplete),
+        "Complete provenance history unavailable: session has missing event writes"
+    );
     let store = ProvenanceStore::new(ctx.session_dir);
-    Ok(Some(store.load_all()?))
+    let loaded = store.load_complete(&ctx.session_id)?;
+    let requirements = crate::provenance::requirements::current_requirements(&loaded.events);
+    anyhow::ensure!(
+        requirements.warnings.is_empty(),
+        "Current requirements unavailable: {}",
+        requirements.warnings.join("; ")
+    );
+    Ok(Some(loaded))
 }
 
 /// Capture the pre-execution verification context: current plan item plus the
@@ -271,7 +297,13 @@ pub fn capture_verification_context_for_fs_with_attribution(
             }
             (active, per_change)
         }
-        _ => (Vec::new(), Vec::new()),
+        Err(_) => {
+            return crate::provenance::VerificationContext {
+                directive_id: attribution.directive_id.clone(),
+                ..Default::default()
+            };
+        }
+        Ok(None) => (Vec::new(), Vec::new()),
     };
     let plan_links: std::collections::HashMap<String, Vec<String>> = plan_items
         .iter()
@@ -327,7 +359,13 @@ pub fn capture_verification_context_for_invocation(
             }
             (active, per_change, plan_ids)
         }
-        _ => (Vec::new(), Vec::new(), Vec::new()),
+        Err(_) => {
+            return crate::provenance::VerificationContext {
+                directive_id: attribution.directive_id.clone(),
+                ..Default::default()
+            };
+        }
+        Ok(None) => (Vec::new(), Vec::new(), Vec::new()),
     };
     let plan_links: std::collections::HashMap<String, Vec<String>> = plan_items
         .iter()
@@ -727,7 +765,12 @@ pub fn plan_completion_warnings(
     }
     let loaded = match load_current_events(fs_tools) {
         Ok(Some(loaded)) => loaded,
-        _ => return Vec::new(),
+        Err(_) => {
+            return vec![
+                "Plan completion evidence unavailable: incomplete provenance history".into(),
+            ];
+        }
+        Ok(None) => return Vec::new(),
     };
     let resolved =
         crate::provenance::resolve_active_states(&fs_tools.config.project_root, &loaded.events);
@@ -1082,7 +1125,15 @@ pub async fn provenance_read(
         });
     };
     let store = ProvenanceStore::new(ctx.session_dir);
-    let loaded = store.load_all()?;
+    let mut loaded = store.load_all()?;
+    if loaded.events.iter().any(|e| e.session_id != ctx.session_id) {
+        loaded
+            .warnings
+            .push("Foreign-session provenance events omitted".into());
+        loaded.events.retain(|e| e.session_id == ctx.session_id);
+    }
+    let requirement_state = crate::provenance::requirements::current_requirements(&loaded.events);
+    loaded.warnings.extend(requirement_state.warnings);
     let mut warnings = loaded.warnings.clone();
 
     // Filter by type + plan/directive/requirement/obligation, preserving (timestamp, event_id) order.
@@ -1129,13 +1180,23 @@ pub async fn provenance_read(
         .as_ref()
         .map(|s| s.changed_files.clone())
         .unwrap_or_default();
-    let incomplete = session.as_ref().is_some_and(|s| s.provenance_incomplete);
-    let mut coverage = crate::provenance::compute_coverage(
-        &fs_tools.config.project_root,
-        &loaded.events,
-        &changed_files,
-        incomplete,
-    );
+    let incomplete = session.as_ref().is_some_and(|s| s.provenance_incomplete)
+        || !loaded.warnings.is_empty()
+        || loaded.events.iter().any(|e| e.session_id != ctx.session_id);
+    let mut coverage = if incomplete {
+        warnings.push("Current coverage unavailable: incomplete provenance; returned events are historical observations only".into());
+        crate::provenance::ProvenanceCoverage {
+            provenance_incomplete: true,
+            ..Default::default()
+        }
+    } else {
+        crate::provenance::compute_coverage(
+            &fs_tools.config.project_root,
+            &loaded.events,
+            &changed_files,
+            false,
+        )
+    };
     budget_coverage(&mut coverage, budget / 2, &mut warnings);
 
     let total = filtered.len();
@@ -1149,20 +1210,23 @@ pub async fn provenance_read(
         .unwrap_or(0)
         + 256;
     // Lifecycle states for change summaries (computed once over all events).
-    let states: std::collections::HashMap<String, String> =
+    let states: std::collections::HashMap<String, String> = (if incomplete {
+        Vec::new()
+    } else {
         crate::provenance::resolve_active_states(&fs_tools.config.project_root, &loaded.events)
-            .into_iter()
-            .map(|r| {
-                let s = match r.state {
-                    crate::provenance::ActiveChangeState::Active => "active",
-                    crate::provenance::ActiveChangeState::Superseded => "superseded",
-                    crate::provenance::ActiveChangeState::Diverged => "diverged",
-                    crate::provenance::ActiveChangeState::Missing => "missing",
-                    crate::provenance::ActiveChangeState::Reverted => "reverted",
-                };
-                (r.change_id, s.to_string())
-            })
-            .collect();
+    })
+    .into_iter()
+    .map(|r| {
+        let s = match r.state {
+            crate::provenance::ActiveChangeState::Active => "active",
+            crate::provenance::ActiveChangeState::Superseded => "superseded",
+            crate::provenance::ActiveChangeState::Diverged => "diverged",
+            crate::provenance::ActiveChangeState::Missing => "missing",
+            crate::provenance::ActiveChangeState::Reverted => "reverted",
+        };
+        (r.change_id, s.to_string())
+    })
+    .collect();
     let snapshot_records: Vec<_> = filtered[start..end]
         .iter()
         .filter_map(|env| match &env.event {
@@ -2281,7 +2345,7 @@ mod provenance_extra_tests {
     }
 
     #[test]
-    fn test_provenance_incomplete_warning_on_completion() {
+    fn test_missing_event_write_denies_plan_completion_without_mutating_plan() {
         let (_proj, fs, _sid) = setup_project_with_session();
         fs.plan_write(
             vec![crate::tools::plan::PlanItem {
@@ -2296,7 +2360,8 @@ mod provenance_extra_tests {
         )
         .unwrap();
         fs.mark_current_session_provenance_failure().unwrap();
-        let res = fs
+        let before = fs.plan_read().unwrap();
+        let error = fs
             .plan_write(
                 vec![crate::tools::plan::PlanItem {
                     id: "step-1".into(),
@@ -2308,8 +2373,207 @@ mod provenance_extra_tests {
                 }],
                 crate::tools::plan::PlanWriteMode::Replace,
             )
+            .unwrap_err();
+        assert!(error.to_string().contains("missing event writes"));
+        assert_eq!(fs.plan_read().unwrap().items, before.items);
+    }
+
+    #[tokio::test]
+    async fn incomplete_history_blocks_authority_and_plan_fallbacks_without_writes() {
+        let (_proj, fs, sid) = setup_project_with_session();
+        let ctx = fs.current_session_storage_context().unwrap();
+        let store = ProvenanceStore::new(ctx.session_dir);
+        let item = crate::tools::plan::PlanItem {
+            id: "P1".into(),
+            parent_id: None,
+            content: "Focused work".into(),
+            status: "in_progress".into(),
+            requirement_ids: vec!["R1".into()],
+            verification_obligations: vec![],
+        };
+        crate::tools::plan::plan_write(
+            vec![item.clone()],
+            crate::tools::plan::PlanWriteMode::Replace,
+            &sid,
+            &fs.config,
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(store.events_dir()).unwrap();
+        let bad = store.events_dir().join("missing-withdrawal.json");
+        std::fs::write(&bad, b"{broken transition").unwrap();
+        let attribution = ProvenanceAttribution::with_directive("observed-directive");
+        let before_plan = fs.plan_read().unwrap();
+        let before_files: Vec<_> = std::fs::read_dir(store.events_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(load_current_events(&fs).is_err());
+        assert!(crate::tools::requirements::requirements_read(&fs, Default::default()).is_err());
+        let request = crate::tools::requirements::RequirementsWriteArgs {
+            upserts: vec![crate::tools::requirements::RequirementInput {
+                id: "R1".into(),
+                statement: "Preserve behavior".into(),
+            }],
+            withdraw_ids: vec![],
+        };
+        assert!(
+            crate::tools::requirements::requirements_write(&fs, request, &attribution).is_err()
+        );
+        assert!(
+            fs.plan_write_with_attribution(
+                vec![item],
+                crate::tools::plan::PlanWriteMode::Replace,
+                &attribution
+            )
+            .is_err()
+        );
+        assert_eq!(fs.plan_read().unwrap().items, before_plan.items);
+        assert_eq!(
+            std::fs::read_dir(store.events_dir()).unwrap().count(),
+            before_files.len()
+        );
+        for context in [
+            capture_verification_context_for_fs_with_attribution(&fs, &attribution),
+            capture_verification_context_for_invocation(
+                &fs,
+                &attribution,
+                crate::provenance::VerificationKind::Test,
+                "cargo",
+                &["test".into()],
+            ),
+        ] {
+            assert_eq!(context.directive_id.as_deref(), Some("observed-directive"));
+            assert!(context.plan_item_id.is_none());
+            assert!(context.requirement_ids.is_empty());
+            assert!(context.observed_change_ids.is_empty());
+            assert!(context.matched_obligations.is_empty());
+        }
+        std::fs::remove_file(bad).unwrap();
+        fs.mark_current_session_provenance_failure().unwrap();
+        assert!(load_current_events(&fs).is_err());
+        assert!(crate::tools::requirements::requirements_read(&fs, Default::default()).is_err());
+        let historical = provenance_read(&fs, Default::default()).await.unwrap();
+        assert!(historical.coverage.provenance_incomplete);
+    }
+
+    #[tokio::test]
+    async fn foreign_predecessor_cannot_link_committed_mutation_or_rollback_source() {
+        let (_proj, fs, _sid) = setup_project_with_session();
+        let file = fs.config.project_root.join("src/lib.rs");
+        let prepared =
+            crate::features::semantic_edit::prepare_edit(&fs.config.project_root, &file, 2)
+                .unwrap();
+        let (first, _, _) = crate::features::semantic_edit::apply_edit(
+            &prepared,
+            "fn foo() {\n    2;\n}\n",
+            &fs.config.project_root,
+        )
+        .await
+        .unwrap();
+        let previous = record_semantic_change(&fs, &first, "fn foo() {\n    1;\n}\n")
+            .unwrap()
             .unwrap();
-        assert!(res.warnings.iter().any(|w| w.contains("incomplete")));
+        let ctx = fs.current_session_storage_context().unwrap();
+        let store = ProvenanceStore::new(ctx.session_dir);
+        let path = store
+            .events_dir()
+            .join(format!("{}.json", previous.event_id));
+        let mut foreign: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        foreign["session_id"] = "another-session".into();
+        std::fs::write(&path, serde_json::to_vec(&foreign).unwrap()).unwrap();
+        let prepared =
+            crate::features::semantic_edit::prepare_edit(&fs.config.project_root, &file, 2)
+                .unwrap();
+        let (second, _, _) = crate::features::semantic_edit::apply_edit(
+            &prepared,
+            "fn foo() {\n    3;\n}\n",
+            &fs.config.project_root,
+        )
+        .await
+        .unwrap();
+        let after = std::fs::read(&file).unwrap();
+        let recorded = record_semantic_change(&fs, &second, "fn foo() {\n    2;\n}\n")
+            .unwrap()
+            .unwrap();
+        let ProvenanceEvent::ChangeCommitted(change) = recorded.event else {
+            panic!("change")
+        };
+        assert!(change.predecessor_change_id.is_none());
+        assert!(fs.get_current_session().unwrap().provenance_incomplete);
+        assert_eq!(std::fs::read(file).unwrap(), after);
+        assert_eq!(std::fs::read_dir(store.events_dir()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn semantic_requirement_transition_failure_is_not_current_authority() {
+        let (_proj, fs, _sid) = setup_project_with_session();
+        let ctx = fs.current_session_storage_context().unwrap();
+        let store = ProvenanceStore::new(ctx.session_dir);
+        store
+            .append(
+                &ctx.session_id,
+                ProvenanceEvent::RequirementChanged(crate::provenance::RequirementChangedEvent {
+                    directive_id: "literal-directive".into(),
+                    changes: vec![crate::provenance::RequirementTransition {
+                        requirement_id: "R1".into(),
+                        before: None,
+                        after: None,
+                    }],
+                }),
+            )
+            .unwrap();
+        assert!(
+            load_current_events(&fs)
+                .unwrap_err()
+                .to_string()
+                .contains("Current requirements unavailable")
+        );
+        assert!(crate::tools::requirements::requirements_read(&fs, Default::default()).is_err());
+        let request = crate::tools::requirements::RequirementsWriteArgs {
+            upserts: vec![crate::tools::requirements::RequirementInput {
+                id: "R1".into(),
+                statement: "Preserve behavior".into(),
+            }],
+            withdraw_ids: vec![],
+        };
+        let attribution = ProvenanceAttribution::with_directive("literal-directive");
+        assert!(
+            crate::tools::requirements::requirements_write(&fs, request, &attribution).is_err()
+        );
+        assert!(
+            fs.plan_write(vec![], crate::tools::plan::PlanWriteMode::Replace)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(store.events_dir()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn foreign_session_events_are_never_authority_or_current_session_history() {
+        let (_proj, fs, _sid) = setup_project_with_session();
+        let ctx = fs.current_session_storage_context().unwrap();
+        let store = ProvenanceStore::new(ctx.session_dir);
+        store
+            .append(
+                "another-session",
+                ProvenanceEvent::PlanChanged(crate::provenance::PlanChangedEvent {
+                    changes: vec![],
+                    directive_id: None,
+                }),
+            )
+            .unwrap();
+        assert!(load_current_events(&fs).is_err());
+        assert!(crate::tools::requirements::requirements_read(&fs, Default::default()).is_err());
+        let response = provenance_read(&fs, Default::default()).await.unwrap();
+        assert!(response.events.is_empty());
+        assert!(response.coverage.provenance_incomplete);
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|w| w.contains("Foreign-session"))
+        );
     }
 
     #[tokio::test]
@@ -2364,7 +2628,17 @@ mod provenance_extra_tests {
         .await
         .unwrap();
         assert!(resp.warnings.iter().any(|w| w.contains("malformed")));
-        assert!(resp.coverage.unlinked_change_ids.len() == 1);
+        assert!(resp.coverage.provenance_incomplete);
+        assert!(resp.coverage.unlinked_change_ids.is_empty());
+        assert!(resp.coverage.tracked_active_change_ids.is_empty());
+        assert!(resp.coverage.verified_active_change_ids.is_empty());
+        assert!(!resp.events.is_empty());
+        assert!(
+            resp.events
+                .iter()
+                .all(|e| e.get("state").is_none() || e["state"] == "unknown")
+        );
+        assert!(load_current_events(&fs).is_err());
         // Budget: tiny budget forces truncation warning + next_cursor.
         let resp2 = provenance_read(
             &fs,

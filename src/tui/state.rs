@@ -26,13 +26,6 @@ pub struct PlanItem {
     pub status: String, // pending, in_progress, completed
 }
 
-// Session list state for TUI
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionListState {
-    pub sessions: Vec<crate::session::SessionMeta>,
-    pub selected_index: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySearchState {
     pub query: String,
@@ -277,7 +270,6 @@ pub struct TuiApp {
     /// id from a cancelled/older turn attaching to a newer turn's raw input.
     pub last_observed_seq: u64,
     // session list state
-    pub session_list_state: Option<SessionListState>,
     // history search state
     pub history_search_state: Option<HistorySearchState>,
     // file search state
@@ -551,7 +543,6 @@ impl TuiApp {
             last_observed_effective_input: None,
             last_observed_seq: 0,
             // session list state
-            session_list_state: None,
             history_search_state: None,
             file_search_state: None,
             // repomap status
@@ -984,6 +975,7 @@ impl TuiApp {
 
     /// Synthetic follow-up with no user directive. Bypasses string routing
     /// so generated text can never be recorded as a user observation.
+    #[cfg(test)]
     pub fn dispatch_internal_followup(&mut self, content: &str) {
         self.last_llm_response_content = None;
         if self.handler.is_some() {
@@ -1025,6 +1017,7 @@ impl TuiApp {
 
     /// Real user prompt augmented with a system note. Keeps the exact typed
     /// `raw` separate from the `effective` instruction handed to the agent.
+    #[cfg(test)]
     pub fn dispatch_augmented_user_prompt(&mut self, raw: &str, effective: &str) {
         self.last_llm_response_content = None;
         if self.hide_plan_on_next_instruction {

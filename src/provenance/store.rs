@@ -185,6 +185,8 @@ impl ProvenanceStore {
         Ok(canonical)
     }
 
+    /// Bounded acquisition: 8 MiB/event, 128 MiB total, 65,536 directory entries.
+    /// Exceeding any limit returns an error, never a partial authoritative set.
     /// Load all events from v1 + v2 + v3 + v4 + v5 + v6 (legacy) and v7 (legacy) and v8 (current), merged and
     /// sorted by `(timestamp, event_id)`.
     ///
@@ -194,16 +196,27 @@ impl ProvenanceStore {
     /// collision), the highest version wins deterministically (v8 > v7 > v6 > v5 > v4 > v3 > v2 > v1)
     /// and a warning explains why.
     pub fn load_all(&self) -> Result<ProvenanceLoadResult> {
-        self.load_all_inner(None)
+        self.load_all_inner(ProvenanceReadBounds::complete())
+    }
+    /// State-authoritative reads reject missing/corrupt/ambiguous records.
+    pub fn load_complete(&self, session_id: &str) -> Result<ProvenanceLoadResult> {
+        let loaded = self.load_all()?;
+        anyhow::ensure!(
+            loaded.warnings.is_empty(),
+            "Complete provenance history unavailable: {}",
+            loaded.warnings.join("; ")
+        );
+        anyhow::ensure!(
+            loaded.events.iter().all(|e| e.session_id == session_id),
+            "Complete provenance history unavailable: foreign session event"
+        );
+        Ok(loaded)
     }
     /// Bounded regular-file reader for display-only queue restoration.
     pub fn load_for_history(&self) -> Result<ProvenanceLoadResult> {
-        self.load_all_inner(Some(HistoryReadBounds::default()))
+        self.load_all_inner(ProvenanceReadBounds::default())
     }
-    fn load_all_inner(
-        &self,
-        mut bounds: Option<HistoryReadBounds>,
-    ) -> Result<ProvenanceLoadResult> {
+    fn load_all_inner(&self, mut bounds: ProvenanceReadBounds) -> Result<ProvenanceLoadResult> {
         let mut warnings = Vec::new();
         // event_id -> (envelope, version_rank)
         let mut by_id: HashMap<String, (ProvenanceEventEnvelope, u32)> = HashMap::new();
@@ -220,7 +233,7 @@ impl ProvenanceStore {
             (self.provenance_root.join("v7/events"), 7u32, "v7"),
             (self.current_events_dir(), 8u32, "v8"),
         ] {
-            let loaded = load_events_dir_with_bounds(&dir, &mut warnings, bounds.as_mut());
+            let loaded = load_events_dir_with_bounds(&dir, &mut warnings, &mut bounds);
             for env in loaded {
                 let id = env.event_id.clone();
                 match by_id.get(&id) {
@@ -260,6 +273,9 @@ impl ProvenanceStore {
                 ord
             }
         });
+        if bounds.complete_required && bounds.limit_exceeded {
+            anyhow::bail!("Provenance input limit exceeded; complete history unavailable");
+        }
         Ok(ProvenanceLoadResult { events, warnings })
     }
 
@@ -293,34 +309,58 @@ impl ProvenanceStore {
     }
 }
 
-#[derive(Default)]
-struct HistoryReadBounds {
+struct ProvenanceReadBounds {
     files: usize,
     bytes: usize,
+    max_files: usize,
+    max_bytes: usize,
+    max_file_bytes: usize,
+    complete_required: bool,
+    limit_exceeded: bool,
+}
+impl Default for ProvenanceReadBounds {
+    fn default() -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            max_files: 4096,
+            max_bytes: 8 * 1024 * 1024,
+            max_file_bytes: 256 * 1024,
+            complete_required: false,
+            limit_exceeded: false,
+        }
+    }
+}
+impl ProvenanceReadBounds {
+    fn complete() -> Self {
+        Self {
+            max_files: 65536,
+            max_bytes: 128 * 1024 * 1024,
+            max_file_bytes: 8 * 1024 * 1024,
+            complete_required: true,
+            ..Self::default()
+        }
+    }
 }
 fn load_events_dir_with_bounds(
     dir: &Path,
     warnings: &mut Vec<String>,
-    mut bounds: Option<&mut HistoryReadBounds>,
+    bounds: &mut ProvenanceReadBounds,
 ) -> Vec<ProvenanceEventEnvelope> {
     let mut events = Vec::new();
-    if bounds.is_some() {
-        match dir.symlink_metadata() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return events,
-            Err(_) => {
-                warnings.push("History directory unavailable".into());
-                return events;
-            }
-            Ok(_) => {}
-        }
-        if dir.ancestors().take(3).any(|p| {
-            !p.symlink_metadata()
-                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
-        }) {
-            warnings.push("History directory unavailable or symlinked".into());
+    match dir.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return events,
+        Err(_) => {
+            warnings.push("History directory unavailable".into());
             return events;
         }
-    } else if !dir.exists() {
+        Ok(_) => {}
+    }
+    if dir.ancestors().take(3).any(|p| {
+        !p.symlink_metadata()
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+    }) {
+        warnings.push("History directory unavailable or symlinked".into());
         return events;
     }
     let read_dir = match std::fs::read_dir(dir) {
@@ -344,6 +384,13 @@ fn load_events_dir_with_bounds(
                 continue;
             }
         };
+        if bounds.complete_required {
+            bounds.files += 1;
+            if bounds.files > bounds.max_files {
+                bounds.limit_exceeded = true;
+                break;
+            }
+        }
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
@@ -355,41 +402,36 @@ fn load_events_dir_with_bounds(
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let raw_result = if let Some(bounds) = bounds.as_deref_mut() {
-            use std::io::Read;
-            bounds.files += 1;
-            if bounds.files > 4096 || bounds.bytes >= 8 * 1024 * 1024 {
+        let raw_result = {
+            if !bounds.complete_required {
+                bounds.files += 1;
+            }
+            if bounds.files > bounds.max_files || bounds.bytes >= bounds.max_bytes {
+                bounds.limit_exceeded = true;
                 warnings.push("History input limit exceeded".into());
                 break;
             }
             (|| -> std::io::Result<String> {
-                let metadata = path.symlink_metadata()?;
-                if !metadata.is_file() {
-                    return Err(std::io::Error::other("history input is not a regular file"));
-                }
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-                }
-                let file = options.open(&path)?;
-                if !file.metadata()?.is_file() {
-                    return Err(std::io::Error::other("history input is not a regular file"));
-                }
-                let limit = (256 * 1024).min(8 * 1024 * 1024 - bounds.bytes);
-                let mut bytes = Vec::new();
-                file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+                use crate::utils::bounded_file::{ReadError, SymlinkPolicy, read_regular_bytes};
+                let limit = bounds.max_file_bytes.min(bounds.max_bytes - bounds.bytes);
+                let bytes = match read_regular_bytes(&path, limit, SymlinkPolicy::Reject) {
+                    Ok(bytes) => bytes,
+                    Err(ReadError::LimitExceeded(_)) => {
+                        bounds.bytes = bounds.bytes.saturating_add(limit + 1);
+                        bounds.limit_exceeded = true;
+                        return Err(std::io::Error::other("history input limit exceeded"));
+                    }
+                    Err(error) => {
+                        if matches!(error, ReadError::Io(_)) {
+                            bounds.bytes = bounds.bytes.saturating_add(limit);
+                        }
+                        return Err(std::io::Error::other(format!("history {error}")));
+                    }
+                };
                 bounds.bytes = bounds.bytes.saturating_add(bytes.len());
-                if bytes.len() > limit {
-                    return Err(std::io::Error::other("history input limit exceeded"));
-                }
                 String::from_utf8(bytes)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             })()
-        } else {
-            std::fs::read_to_string(&path)
         };
         let raw = match raw_result {
             Ok(raw) => raw,
@@ -1713,6 +1755,61 @@ mod resume_identity_tests {
         assert!(v.execution_identity.is_none());
         assert_eq!(std::fs::read(path).expect("legacy unchanged"), bytes);
     }
+    #[test]
+    fn complete_reader_limits_never_return_a_partial_event_set() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(root.path().join("session"));
+        std::fs::create_dir_all(store.events_dir()).unwrap();
+        let old = store.provenance_root.join("v1/events");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("old.json"), [0xff, 0xfe]).unwrap();
+        std::fs::write(store.events_dir().join("new.json"), b"{}").unwrap();
+        for (max_file_bytes, max_bytes, max_files) in [(1, 100, 10), (100, 3, 10), (100, 100, 1)] {
+            let bounds = ProvenanceReadBounds {
+                max_file_bytes,
+                max_bytes,
+                max_files,
+                ..ProvenanceReadBounds::complete()
+            };
+            assert!(
+                store
+                    .load_all_inner(bounds)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("complete history unavailable")
+            );
+        }
+        let bounds = ProvenanceReadBounds {
+            max_file_bytes: 2,
+            max_bytes: 5,
+            max_files: 2,
+            ..ProvenanceReadBounds::complete()
+        };
+        let loaded = store.load_all_inner(bounds).unwrap();
+        assert!(loaded.events.is_empty());
+        assert_eq!(loaded.warnings.len(), 2);
+        assert!(store.load_complete("session").is_err());
+        assert_eq!(std::fs::read(old.join("old.json")).unwrap(), [0xff, 0xfe]);
+    }
+
+    #[test]
+    fn full_reader_rejects_oversized_input_before_reading_and_keeps_source() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProvenanceStore::new(root.path().join("session"));
+        std::fs::create_dir_all(store.events_dir()).unwrap();
+        let path = store.events_dir().join("large.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(8 * 1024 * 1024 + 1).unwrap();
+        assert!(
+            store
+                .load_all()
+                .unwrap_err()
+                .to_string()
+                .contains("complete history unavailable")
+        );
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 8 * 1024 * 1024 + 1);
+    }
+
     #[test]
     fn history_reader_rejects_oversized_and_special_files() {
         let root = tempfile::tempdir().expect("root");

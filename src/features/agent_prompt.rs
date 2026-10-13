@@ -21,13 +21,22 @@ pub(crate) fn find_project_instructions_file(project_root: &Path) -> Option<Path
     None
 }
 
+pub(crate) const MAX_INSTRUCTION_BYTES: usize = 1024 * 1024;
+
 /// Load project-specific instructions from a file.
 /// Checks for AGENTS.md, QWEN.md, or GEMINI.md in that order.
 fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
     // Determine which project-specific instructions file (if any) will be used,
     // then attempt to load its contents.
     if let Some(path) = get_project_instructions_file_path(cfg) {
-        match std::fs::read_to_string(&path) {
+        match crate::utils::bounded_file::read_regular_bytes(
+            &path,
+            MAX_INSTRUCTION_BYTES,
+            crate::utils::bounded_file::SymlinkPolicy::Follow,
+        )
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| Ok(String::from_utf8(bytes)?))
+        {
             Ok(content) => Some(content),
             Err(e) => {
                 error!("Failed to read {}: {}", path.display(), e);
@@ -245,6 +254,50 @@ mod tests {
         let prompt = build_system_prompt(&cfg);
         assert!(!prompt.contains("DEFAULT-NOT-FALLBACK"));
         assert!(!prompt.contains("# Project-Specific Instructions"));
+    }
+
+    #[test]
+    fn oversized_and_invalid_utf8_instructions_are_never_partially_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("CUSTOM.md");
+        std::fs::write(dir.path().join("AGENTS.md"), "NO-FALLBACK").unwrap();
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            project_instructions_file: Some(custom.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        std::fs::write(&custom, "a".repeat(MAX_INSTRUCTION_BYTES)).unwrap();
+        assert_eq!(
+            load_project_instructions(&cfg).unwrap().len(),
+            MAX_INSTRUCTION_BYTES
+        );
+        for bytes in [vec![b'a'; MAX_INSTRUCTION_BYTES + 1], vec![0xff]] {
+            std::fs::write(&custom, bytes).unwrap();
+            assert!(load_project_instructions(&cfg).is_none());
+            let prompt = build_system_prompt(&cfg);
+            assert!(!prompt.contains("# Project-Specific Instructions"));
+            assert!(!prompt.contains("NO-FALLBACK"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_instruction_symlink_remains_supported_but_fifo_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("CUSTOM.md");
+        let link = dir.path().join("AGENTS.md");
+        std::fs::write(&source, "LINKED-LITERAL").unwrap();
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert!(build_system_prompt(&cfg).ends_with("LINKED-LITERAL"));
+        std::fs::remove_file(&link).unwrap();
+        let path = std::ffi::CString::new(link.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(load_project_instructions(&cfg).is_none());
+        assert!(!build_system_prompt(&cfg).contains("# Project-Specific Instructions"));
     }
 
     #[test]

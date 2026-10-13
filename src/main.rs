@@ -5,6 +5,7 @@
 //! subcommands.
 
 pub mod a2a;
+pub mod agent_error;
 pub mod analysis;
 pub mod assets;
 pub mod config;

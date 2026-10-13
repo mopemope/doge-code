@@ -41,30 +41,5 @@ pub use compact_history::{
     compact_conversation_history_ref,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LlmErrorKind {
-    #[error("rate limited")]
-    RateLimited,
-    #[error("server error")]
-    Server,
-    #[error("network error")]
-    Network,
-    #[error("timeout")]
-    Timeout,
-    #[error("client error")]
-    Client,
-    #[error("authentication error")]
-    Authentication,
-    #[error("deserialization error")]
-    Deserialize,
-    #[error("invalid tool arguments")]
-    InvalidToolArguments,
-    #[error("request cancelled")]
-    Cancelled,
-    #[error("context length exceeded")]
-    ContextLengthExceeded,
-    #[error("incomplete model response")]
-    Incomplete,
-    #[error("unknown error")]
-    Unknown,
-}
+// Compatibility alias preserves error identity and existing downcasts.
+pub use crate::agent_error::AgentErrorKind as LlmErrorKind;

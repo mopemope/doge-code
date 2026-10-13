@@ -4,6 +4,9 @@
 //! including Git repository detection, temporary directory management, and
 //! error handling helpers.
 
+pub mod bounded_file;
+pub mod text_budget;
+
 use anyhow::{Context, Result};
 use fastrand;
 use std::path::{Path, PathBuf};

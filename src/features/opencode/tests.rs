@@ -744,7 +744,6 @@ async fn main_agent_uses_persisted_conversation_ids_and_subagent_inherits_snapsh
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -802,7 +801,6 @@ async fn main_agent_uses_persisted_conversation_ids_and_subagent_inherits_snapsh
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await

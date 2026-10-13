@@ -401,7 +401,6 @@ pub async fn run_agent_loop(
     ui_tx: Option<std::sync::mpsc::Sender<String>>,
     cancel: Option<CancellationToken>,
     cfg: &crate::config::AppConfig,
-    _tui_executor: Option<&crate::tui::commands::core::TuiExecutor>,
     attribution: crate::provenance::ProvenanceAttribution,
 ) -> Result<AgentRunResult> {
     let model = client.wire_model(model)?;
@@ -2798,7 +2797,6 @@ mod tests {
             None,
             None,
             &cfg,
-            None,
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await
