@@ -774,6 +774,25 @@ Optional arguments keep omission/default behavior with `strict: false`.
 - `list_memories`: List all available memory keys
 - `search_memory`: Search across memory files
 
+Memory reads/searches run on blocking workers and accept regular UTF-8 files
+only, up to 1 MiB per file. Regular-file symlinks remain supported; FIFOs,
+directories, unreadable/invalid inputs and oversized files return explicit
+errors without modifying the memory. A search reads at most 8 MiB total, and
+inventory scans examine at most 1,024 entries (including non-memory entries).
+Read failures never become empty content or a successful “no matches” result.
+Automatic request-scoped memory hints use the same bounded search; on failure,
+the agent continues without memory hints as before.
+
+Lists and search keys are sorted. Complete key lists must fit a 6,000-character
+serialized JSON envelope; if they do not fit, use a narrower search or read a
+known key. No partial list is presented as complete. `read_memory` uses a
+marked, UTF-8-safe content prefix within the same escaped JSON budget.
+`write_memory` rejects files exceeding 1 MiB including frontmatter before
+creating directories or overwriting an existing memory. Existing larger files
+are retained and require explicit inspection/reduction. These limits bound
+input/output work; they are not a wall-clock deadline or a filesystem sandbox,
+and a stalled filesystem call cannot be interrupted immediately.
+
 ### Advanced Tools
 - `undo`: Safe LIFO rollback of the last tracked mutation (fails closed on conflict, deletes created files, no redo yet)
 - `execute_shell`: Persistent shell session for stateful command execution (escape hatch for persistent cwd/env/builtins; disable with `[execution] allow_shell = false`)

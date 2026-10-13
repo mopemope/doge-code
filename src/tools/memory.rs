@@ -36,18 +36,18 @@ impl MemoryTools {
     }
 
     pub async fn read_memory(&self, key: &str) -> Result<String> {
-        use crate::tools::budget::DEFAULT_TOOL_BUDGET_CHARS;
-        use crate::tools::budget::head_truncate;
-
         let path = self.get_memory_path(key);
-        if !path.exists() {
-            return Ok(format!("Memory '{}' not found.", key));
-        }
-        let content = fs::read_to_string(path)
-            .await
-            .context("Failed to read memory file")?;
-        let budgeted = head_truncate(&content, DEFAULT_TOOL_BUDGET_CHARS);
-        Ok(budgeted.text)
+        let key = crate::tools::budget::safe_take_chars(key, 128).to_string();
+        tokio::task::spawn_blocking(move || {
+            match read_memory_file(&path, MAX_MEMORY_FILE_BYTES) {
+                Ok(content) => bounded_content(&content),
+                Err(error) if error.downcast_ref::<crate::utils::bounded_file::ReadError>()
+                    .is_some_and(|e| matches!(e, crate::utils::bounded_file::ReadError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)) =>
+                    bounded_content(&format!("Memory '{key}' not found.")),
+                Err(error) => Err(error),
+            }
+        }).await.context("Memory read worker failed")?
+            .map_err(crate::tools::budget::bounded_read_error)
     }
 
     pub async fn write_memory(
@@ -57,13 +57,6 @@ impl MemoryTools {
         tags: Option<Vec<String>>,
         metadata: Option<Value>,
     ) -> Result<String> {
-        let dir = self.get_memory_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)
-                .await
-                .context("Failed to create memory directory")?;
-        }
-
         let frontmatter = MemoryFrontmatter {
             tags: tags.unwrap_or_default(),
             metadata: metadata.unwrap_or(json!({})),
@@ -71,6 +64,17 @@ impl MemoryTools {
 
         let yaml = serde_saphyr::to_string(&frontmatter)?;
         let full_content = format!("---\n{}---\n{}", yaml, content);
+        anyhow::ensure!(
+            full_content.len() <= MAX_MEMORY_FILE_BYTES,
+            "Memory exceeds 1 MiB file limit; existing memory retained"
+        );
+
+        let dir = self.get_memory_dir();
+        if !dir.exists() {
+            fs::create_dir_all(&dir)
+                .await
+                .context("Failed to create memory directory")?;
+        }
 
         let path = self.get_memory_path(key);
         fs::write(&path, full_content)
@@ -82,25 +86,13 @@ impl MemoryTools {
 
     pub async fn list_memories(&self) -> Result<String> {
         let dir = self.get_memory_dir();
-        if !dir.exists() {
-            return Ok("No memories found.".to_string());
-        }
-        let mut entries = fs::read_dir(dir)
-            .await
-            .context("Failed to read memory directory")?;
-        let mut memories = Vec::new();
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(file_name) = entry.file_name().into_string()
-                && file_name.ends_with(".md")
-            {
-                memories.push(file_name.trim_end_matches(".md").to_string());
-            }
-        }
-        if memories.is_empty() {
-            Ok("No memories found.".to_string())
-        } else {
-            Ok(format!("Available memories:\n- {}", memories.join("\n- ")))
-        }
+        tokio::task::spawn_blocking(move || {
+            let keys = memory_inventory(&dir)?;
+            complete_keys("Available memories", "No memories found.", &keys)
+        })
+        .await
+        .context("Memory inventory worker failed")?
+        .map_err(crate::tools::budget::bounded_read_error)
     }
 
     pub async fn search_memory(
@@ -109,53 +101,124 @@ impl MemoryTools {
         tags: Option<Vec<String>>,
     ) -> Result<String> {
         let dir = self.get_memory_dir();
-        if !dir.exists() {
-            return Ok("No memories found.".to_string());
+        tokio::task::spawn_blocking(move || {
+            search_memories(&dir, query.as_deref(), tags.as_deref())
+        })
+        .await
+        .context("Memory search worker failed")?
+        .map_err(crate::tools::budget::bounded_read_error)
+    }
+}
+
+const MAX_MEMORY_FILE_BYTES: usize = 1024 * 1024;
+const MAX_MEMORY_SCAN_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MEMORY_ENTRIES: usize = 1024;
+const MAX_MEMORY_OUTPUT_CHARS: usize = 6000;
+
+fn read_memory_file(path: &std::path::Path, limit: usize) -> Result<String> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let name = crate::tools::budget::safe_take_chars(&name, 64);
+    let bytes = crate::utils::bounded_file::read_regular_bytes(
+        path,
+        limit,
+        crate::utils::bounded_file::SymlinkPolicy::Follow,
+    )
+    .map_err(|error| {
+        let message = format!("Memory file {name:?} unavailable: {error}");
+        anyhow::Error::new(error).context(message)
+    })?;
+    String::from_utf8(bytes).with_context(|| format!("Memory file {name:?} is not valid UTF-8"))
+}
+
+/// Complete inventory, bounded even when entries are not memory files.
+fn memory_inventory(dir: &std::path::Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).context("Memory inventory unavailable"),
+    };
+    let mut keys = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        anyhow::ensure!(
+            index < MAX_MEMORY_ENTRIES,
+            "Memory inventory exceeds 1024 entries; reduce the directory before retrying"
+        );
+        let entry = entry.context("Memory inventory entry unavailable")?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
         }
+        anyhow::ensure!(
+            path.metadata()
+                .context("Memory input unavailable")?
+                .is_file(),
+            "Memory input is not a regular file"
+        );
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("Memory key is not valid UTF-8"))?;
+        keys.push(name[..name.len() - 3].to_string());
+    }
+    keys.sort();
+    Ok(keys)
+}
 
-        let mut matched_files = Vec::new();
-        let mut entries = fs::read_dir(dir)
-            .await
-            .context("Failed to read memory dir")?;
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "md") {
-                let content = fs::read_to_string(&path).await.unwrap_or_default();
-                let key = path.file_stem().unwrap().to_string_lossy().to_string();
-
-                let (frontmatter, body) = parse_memory_file(&content);
-
-                // Filter by tags
-                if let Some(target_tags) = &tags {
-                    let file_tags = &frontmatter.tags;
-                    if !target_tags.iter().any(|t| file_tags.contains(t)) {
-                        continue;
-                    }
-                }
-
-                // Filter by query (simple string match)
-                if let Some(q) = &query {
-                    let q_lower = q.to_lowercase();
-                    if !key.to_lowercase().contains(&q_lower)
-                        && !body.to_lowercase().contains(&q_lower)
-                    {
-                        continue;
-                    }
-                }
-
-                matched_files.push(key);
-            }
+fn search_memories(
+    dir: &std::path::Path,
+    query: Option<&str>,
+    tags: Option<&[String]>,
+) -> Result<String> {
+    let keys = memory_inventory(dir)?;
+    if keys.is_empty() {
+        return Ok("No memories found.".into());
+    }
+    let query = query.map(str::to_lowercase);
+    let mut consumed = 0;
+    let mut matches = Vec::new();
+    for key in keys {
+        let limit = MAX_MEMORY_FILE_BYTES.min(MAX_MEMORY_SCAN_BYTES - consumed);
+        let content = read_memory_file(&dir.join(format!("{key}.md")), limit)?;
+        consumed += content.len();
+        let (frontmatter, body) = parse_memory_file(&content);
+        if tags.is_some_and(|wanted| !wanted.iter().any(|t| frontmatter.tags.contains(t))) {
+            continue;
         }
-
-        if matched_files.is_empty() {
-            Ok("No matching memories found.".to_string())
-        } else {
-            Ok(format!(
-                "Matching memories:\n- {}",
-                matched_files.join("\n- ")
-            ))
+        if query
+            .as_ref()
+            .is_some_and(|q| !key.to_lowercase().contains(q) && !body.to_lowercase().contains(q))
+        {
+            continue;
         }
+        matches.push(key);
+    }
+    complete_keys("Matching memories", "No matching memories found.", &matches)
+}
+
+fn fits_memory_output(text: &str) -> bool {
+    // `content` is the larger of the unchanged dispatch content/result envelopes.
+    json!({"content": text}).to_string().chars().count() <= MAX_MEMORY_OUTPUT_CHARS
+}
+fn complete_keys(label: &str, empty: &str, keys: &[String]) -> Result<String> {
+    let text = if keys.is_empty() {
+        empty.to_string()
+    } else {
+        format!("{label}:\n- {}", keys.join("\n- "))
+    };
+    anyhow::ensure!(
+        fits_memory_output(&text),
+        "Complete memory keys exceed the output limit; use search_memory with a narrower query or read_memory with a known key"
+    );
+    Ok(text)
+}
+fn bounded_content(content: &str) -> Result<String> {
+    let mut limit = MAX_MEMORY_OUTPUT_CHARS;
+    loop {
+        let bounded = crate::tools::budget::head_truncate(content, limit);
+        if fits_memory_output(&bounded.text) {
+            return Ok(bounded.text);
+        }
+        limit = (limit / 2).max(1);
     }
 }
 
@@ -288,6 +351,31 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn unreadable_memory_is_not_reported_as_a_successful_search() -> Result<()> {
+        let root = TempDir::new()?;
+        let dir = root.path().join(".doge/memory");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("broken.md"), [0xff, 0xfe])?;
+        let tools = MemoryTools::new(Arc::new(AppConfig {
+            project_root: root.path().into(),
+            ..Default::default()
+        }));
+        assert!(
+            tools.search_memory(None, None).await.is_err(),
+            "invalid UTF-8 must not become a normal matching key"
+        );
+        assert!(
+            tools
+                .search_memory(Some("anything".into()), None)
+                .await
+                .is_err(),
+            "read failure must not become no matches"
+        );
+        assert_eq!(std::fs::read(dir.join("broken.md"))?, [0xff, 0xfe]);
+        Ok(())
+    }
+
     #[test]
     fn legacy_yaml_frontmatter_preserves_metadata_and_roundtrips() {
         let legacy = "---\ntags:\n- architecture\n- 'on'\nmetadata:\n  enabled: true\n  count: 2\n  label: '001'\n  empty: null\n  note: |\n    first line\n    second line\n---\n日本語 body\n";
@@ -348,3 +436,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod bounded_tests;
