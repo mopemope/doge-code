@@ -25,6 +25,71 @@ pub enum ExecError {
     Timeout,
 }
 
+#[cfg(test)]
+mod completion_scope_tests {
+    use super::*;
+    use httptest::{Expectation, matchers::*, responders::*};
+
+    #[tokio::test]
+    async fn completion_scope_after_native_failure_reports_response_only() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let root = tempfile::tempdir().expect("root");
+        let manifest = root.path().join("Cargo.toml");
+        std::fs::write(&manifest, "[package\n").expect("invalid fixture manifest");
+        let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let requests = captured.clone();
+        let call = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"failed-check","type":"function","function":{"name":"execute_process","arguments":serde_json::json!({"program":"cargo","args":["test","--offline","--manifest-path",manifest]}).to_string()}}]}}]});
+        let stop = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"The checker failed; no verified repair is available."}}]});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(json_decoded(move |body: &serde_json::Value| {
+                    requests.lock().expect("requests").push(body.clone());
+                    true
+                }))
+            ])
+            .times(2)
+            .respond_with(cycle![json_encoded(call), json_encoded(stop)]),
+        );
+        let mut executor = Executor::new(AppConfig {
+            project_root: root.path().into(),
+            no_repomap: true,
+            allowed_commands: vec!["cargo test".into()],
+            api_key: Some("offline-placeholder".into()),
+            base_url: server.url_str("/v1"),
+            model: "test-model".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("executor");
+        let outcome = executor
+            .run("Run the local checker.", true)
+            .await
+            .expect("run");
+        outcome.require_completed().expect("response completed");
+        let requests = captured.lock().expect("requests");
+        let content = requests[1]["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("native check result")["content"]
+            .as_str()
+            .expect("content");
+        let result: serde_json::Value = serde_json::from_str(content).expect("check JSON");
+        assert_eq!(result["success"], false);
+        assert_eq!(result["exit_code"], 101);
+        assert_eq!(
+            std::fs::read_to_string(manifest).expect("manifest"),
+            "[package\n"
+        );
+        let (_, body) = outcome.notification(100, 2);
+        assert!(body.contains("Agent response completed"), "{body}");
+        assert!(body.contains("Review changes and verification"), "{body}");
+        assert!(!body.contains("Successfully"), "{body}");
+    }
+}
+
 /// Agent completion is separate from transport success and answer quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecOutcome {
@@ -58,7 +123,9 @@ impl ExecOutcome {
         if self.is_completed() {
             (
                 "Doge-Code Agent Finished",
-                format!("Execution Completed Successfully\nTokens: {tokens}\nSteps: {steps}"),
+                format!(
+                    "Agent response completed\nReview changes and verification; task acceptance is not confirmed.\nTokens: {tokens}\nSteps: {steps}"
+                ),
             )
         } else {
             (
@@ -1494,7 +1561,7 @@ mod tests {
             complete
                 .notification(100, 4)
                 .1
-                .contains("Completed Successfully")
+                .contains("Agent response completed")
         );
     }
 

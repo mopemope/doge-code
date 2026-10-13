@@ -365,7 +365,7 @@ fn partial_workflow_does_not_execute_the_next_step() {
     };
     let output = run_workflow(&server);
     assert_eq!(output.status.code(), Some(2));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Step 1 completed"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Step 1 agent response completed"));
     assert!(
         !server
             .requests
@@ -382,7 +382,12 @@ fn partial_workflow_does_not_execute_the_next_step() {
         String::from_utf8_lossy(&completed.stderr)
     );
     let stdout = String::from_utf8_lossy(&completed.stdout);
-    assert!(stdout.contains("Step 1 completed") && stdout.contains("Step 2 completed"));
+    assert!(
+        stdout.contains("Step 1 agent response completed")
+            && stdout.contains("Step 2 agent response completed")
+    );
+    assert!(stdout.contains("task acceptance is not confirmed"));
+    assert!(!stdout.contains("completed successfully"));
     assert_eq!(completed_server.requests.lock().unwrap().len(), 2);
 }
 
