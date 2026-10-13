@@ -145,10 +145,8 @@ impl WorkflowExecutor {
             );
             println!("🚀 Step {}/{}: {}", step_num, workflow.steps.len(), step);
 
-            // Execute the step using the robust Executor (which has the self-healing loop in fix mode,
-            // but for general exec we use run())
-            // Ideally, we want the workflow step to be robust.
-            // We can prefix the instruction with specific guidance.
+            // Each step is one bounded agent run. A completed response is not
+            // independent evidence that its requested repair or checks succeeded.
             let instruction = format!(
                 "Workflow Step {}/{}: {}\n\nExecute this step.",
                 step_num,
@@ -156,10 +154,6 @@ impl WorkflowExecutor {
                 step
             );
 
-            // We use the standard executor run.
-            // If the user wants specific "fix" behavior, they might need to specify it,
-            // BUT our recent change to agent_loop.rs makes it self-healing by default on verification failure!
-            // So standard `executor.run` is already robust!
             executor
                 .run(&instruction, false)
                 .await?
@@ -168,10 +162,13 @@ impl WorkflowExecutor {
                     format!("Workflow '{}' stopped at step {}", workflow.name, step_num)
                 })?;
 
-            println!("✅ Step {} completed.", step_num);
+            println!("Step {} agent response completed.", step_num);
         }
 
-        println!("🎉 Workflow '{}' completed successfully!", workflow.name);
+        println!(
+            "Workflow '{}' agent responses completed. Review changes and verification; task acceptance is not confirmed.",
+            workflow.name
+        );
         Ok(())
     }
 }

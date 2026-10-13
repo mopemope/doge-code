@@ -879,7 +879,14 @@ replacement. Partial desktop
 notifications say that execution stopped, not that it succeeded. Resume a saved
 session to continue work. Completion describes the agent loop outcome, not an
 independent guarantee that the requested change is correct or accepted. Agent
-requests reject a final assistant turn with no tool calls and missing, empty or
+completion notifications and CLI workflow messages describe response completion
+and ask for review; they do not claim that repairs or tests succeeded. A failed
+tool/check result does not force another model request after the model returns a
+final response. Explicitly resume the saved session with the failure evidence to
+continue, within a chosen round limit and the configured per-run budgets. There
+is no automatic repeat-until-pass workflow.
+
+Agent requests reject a final assistant turn with no tool calls and missing, empty or
 whitespace-only text as an incomplete response. This fails without retrying or
 reporting completion; reported usage and earlier checkpoints remain available.
 Tool-only turns may still omit text. Responses reasoning/compaction state alone
@@ -1683,6 +1690,12 @@ matching endpoints are observations, not proof that no transient edit occurred.
   detected languages and runs them in stable alphabetical order. Existing source
   scanning depth and exclusions remain in effect; this does not change `/lint`
   or apply other features' ignore settings to test detection.
+- With `go.work`, `/test` reports its existing scope: local source detection and,
+  when Go is detected, `go test -json ./...` from the project root. It does not
+  enumerate `use` modules or add external modules as separate test targets.
+  A workspace-only root may have no detected local language; a root pattern may
+  fail during setup. Neither outcome confirms workspace tests passed. Native Go
+  can still resolve workspace dependencies; this scope notice is not a sandbox.
 - A selected Python environment that cannot start or lacks pytest reports that
   failure; `/test` does not install packages or retry in another environment.
   [Python venv](https://docs.python.org/3/library/venv.html) supports invoking the
@@ -1692,6 +1705,8 @@ matching endpoints are observations, not proof that no transient edit occurred.
   `python -m pytest`; historical links stay unchanged. Interpreter selection does
   not activate the environment for subprocess PATH lookup.
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
+- An executed failure stages one analysis/repair turn. It does not automatically
+  rerun `/test` until success; inspect the result and explicitly retry when ready.
 - If test execution cannot be confirmed (including a missing checker or broken
   venv), `/test` displays the diagnostic without starting automatic code repair
   or claiming tests passed. Inspect the diagnostic and workspace; if the checker
