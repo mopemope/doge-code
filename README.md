@@ -2184,6 +2184,13 @@ steps:
     run: cargo clippy --all-targets | head -50
 ```
 
+Before starting any command, `run_workflow` checks every step has exactly one
+of `run` or `program`. If a later step has both or neither, it reports the
+1-based step position and runs no commands. Correct the workflow file before
+retrying. This checks static command shape only: policy decisions, cwd/env
+validation, spawn errors and command failures are still checked when each step
+runs. Workflows are not atomic transactions.
+
 `run_workflow` stops on the first unsuccessful step; earlier steps may already
 have changed the workspace and are never rolled back or replayed automatically.
 Its failed tool result has `ok: false` and a `result` containing the failed
