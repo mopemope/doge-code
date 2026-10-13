@@ -1137,6 +1137,47 @@ exceed the session limit. This protection requires participating binaries and a
 filesystem supporting OS locks; old binaries, external manual edits and unsupported
 network filesystems are outside this guarantee.
 
+### Diagnose a failed repair before resuming
+
+Run `dgc session recovery <id> --json` from the project root for a saved-checkpoint
+view, or `/session recovery` in an idle TUI for the live checkpoint. The CLI reads
+`.doge/sessions` without loading user/project configuration, provider credentials,
+logs or services. It writes nothing. TUI diagnosis requires all jobs to have finished.
+Session show/current also exposes the recorded provenance write-gap flag and count.
+A false flag is not a history-integrity audit; diagnosis additionally checks bounded
+history, expected session ownership, requirement replay and conversation protocol.
+
+For an ordinary interrupted/failed response, inspect actual source, tracked and
+untracked changes, and failed/unknown tool outcomes before explicitly resuming the
+same session with the original account/provider/model. Completed results remain
+saved; diagnosis never retries an edit or command. A valid conversation protocol
+or a passing check does not prove all previous tool effects completed.
+
+For missing/corrupt provenance, an unusable conversation or an unresolved pending
+tool block, use this order:
+
+1. Preserve unsaved in-memory work with `/session save`; if that fails,
+   `/session export` saves a recovery artifact. Resolve the save/capacity cause
+   before switching; an export is not resumable and does not bypass transition guards.
+2. Preserve the old session directory (checkpoint and event bytes) outside the
+   managed session store. Normal new/save retention can remove old sessions;
+   export/evidence projections alone are not a complete raw-event backup.
+3. Inspect the workspace and patch, including untracked files. Source committed
+   before a provenance failure stays committed; resume, `/session clear` and a
+   successful test do not repair the history gap.
+4. Explicitly start `/session new` or a CLI run without `--resume`, in that same
+   inspected workspace. Submit the intended task again. Do not copy old history,
+   clear flags or reuse previous verification IDs to make the new session appear verified.
+5. Use `/verify refresh <explicit-paths>` in TUI or an explicit checker in CLI,
+   then review the new patch/check evidence. A fresh session has no tracked-change
+   history, so an unqualified `/verify` may have no candidate. Retain old results
+   as old observations; do not rescore them.
+
+Diagnosis is bounded but synchronous and is not an authenticated/atomic history
+snapshot or an account-compatibility check. Original provider selection guards
+still apply at resume. A missing/oversized/unreadable checkpoint fails explicitly;
+its raw payload and inference binding are not printed or repaired.
+
 For an oversized unsaved checkpoint, `/session export` writes the complete current
 in-memory session (conversation, provider-bound state, tool calls/results,
 observations, unseen results and usage) into a version-1 JSON recovery envelope
