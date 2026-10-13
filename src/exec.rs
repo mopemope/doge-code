@@ -230,7 +230,7 @@ impl Executor {
         instruction: &str,
     ) -> Vec<crate::llm::types::ChatMessage> {
         let snapshot = self.conversation_history.lock().await.snapshot();
-        let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
+        let sys_prompt = crate::features::agent_prompt::build_system_prompt(&self.cfg);
         let mut msgs = Vec::with_capacity(snapshot.len() + 2);
         msgs.push(llm::types::ChatMessage {
             reasoning: Default::default(),
@@ -584,7 +584,7 @@ impl Executor {
         let request = build_rewrite_prompt(prompt, snippet, display_path.as_deref());
 
         let mut msgs = Vec::new();
-        let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&self.cfg);
+        let sys_prompt = crate::features::agent_prompt::build_system_prompt(&self.cfg);
         msgs.push(llm::types::ChatMessage {
             reasoning: Default::default(),
             provider_state: None,

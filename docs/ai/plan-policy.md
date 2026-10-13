@@ -8,7 +8,7 @@ runtime gate based on whether a plan file exists.
 ## Current implementation
 
 - `resources/system_prompt.md` is the authoritative runtime prompt, rendered by
-  `src/tui/commands/prompt.rs` for CLI, TUI, and the agent loop. The legacy raw
+  `src/features/agent_prompt.rs` for CLI, TUI, and the agent loop. The legacy raw
   `SYSTEM_PROMPT` export uses the same resource.
 - `ToolCatalog` exposes `plan_write` and `plan_read` through deferred discovery
   when appropriate. Being registered does not mean a tool must be invoked.

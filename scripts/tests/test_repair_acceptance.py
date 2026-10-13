@@ -48,6 +48,28 @@ class RepairAcceptanceTests(unittest.TestCase):
     def evidence(self, accepted=True, status='completed'):
         return {'accepted':accepted,'notes':'Independent operator review, offline replay only.', 'execution':{'status':status,'elapsed_seconds':10,'review_seconds':2,'rework_seconds':3,'interventions':[{'kind':'manual_edit','note':'offline reference replay','seconds':3}], 'cost':{'estimated_usd':0,'confirmed_usd':0}}}
 
+    def test_offline_import_does_not_load_live_model_entrypoint_or_budget(self):
+        # Isolated interpreter: fail immediately if the offline entrypoint asks
+        # to import the live runner's model-budget dependency.
+        code = """import builtins, runpy, sys
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name in ('agent_eval_api_budget', 'agent_eval_common'):
+        raise AssertionError('offline import crossed the model evaluation boundary')
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+runpy.run_path(sys.argv[1])
+assert not any(name in sys.modules for name in ('runtime_evals', 'agent_eval_api_budget'))
+"""
+        result = subprocess.run([sys.executable, '-c', code, str(Path(repair.__file__))], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prepared_checker_binds_process_and_review_contract_sources(self):
+        checker = repair.read(self.output/'plan.json')['checker']
+        self.assertEqual(set(checker), {'repair_acceptance.py', 'agent_eval_process.py', 'repair_acceptance_contracts.py'})
+        for name, recorded in checker.items():
+            self.assertEqual(recorded, repair.digest((Path(repair.__file__).parent/name).read_bytes()))
+
     def test_default_selection_excludes_opt_in_history_and_other_cases(self):
         external=copy.deepcopy(self.case)
         external.update(case_id='external',default=False,provenance={'kind':'historical','base_commit':'f'*40})

@@ -2,7 +2,6 @@ pub mod agent_job;
 pub mod core;
 pub mod handlers;
 pub mod new;
-pub mod prompt;
 pub mod session;
 pub mod session_state;
 

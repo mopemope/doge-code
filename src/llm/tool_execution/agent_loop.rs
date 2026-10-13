@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::ui_rendering::truncate_string_with_graphemes;
+use crate::features::agent_prompt::build_system_prompt;
 use crate::llm::message_utils::truncate_tool_output;
-use crate::tui::commands::prompt::build_system_prompt;
 
 const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
 const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
