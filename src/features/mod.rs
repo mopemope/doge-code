@@ -29,3 +29,5 @@ pub mod verification_queue;
 pub mod context_usage;
 
 pub mod verification_failure;
+
+pub mod session_recovery;

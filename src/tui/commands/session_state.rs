@@ -1020,6 +1020,57 @@ mod tests {
     }
 
     #[test]
+    fn recovery_diagnosis_reports_live_gap_without_mutating_checkpoint_or_runtime() {
+        let (mut executor, _dir) = test_executor();
+        executor
+            .tools
+            .mark_current_session_provenance_failure()
+            .unwrap();
+        let mut ui = TuiApp::new_for_test("test", None, "dark");
+        let (path, before_info) = {
+            let manager = executor.session_manager.lock().unwrap();
+            let id = manager.current_session_id().unwrap();
+            (
+                manager.store.session_dir(&id).join("session.json"),
+                manager.current_session_info().unwrap(),
+            )
+        };
+        let checkpoint = std::fs::read(&path).unwrap();
+        let history = runtime_messages(&executor);
+        assert!(before_info.contains("recorded write gap"));
+        executor
+            .handle_session_command("recovery", &mut ui)
+            .unwrap();
+        let displayed = ui
+            .log
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::tui::state::LogEntry::Plain(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(displayed.contains("live_checkpoint"));
+        assert!(displayed.contains("Current state authority is unavailable"));
+        assert!(displayed.contains("retention"));
+        assert_eq!(std::fs::read(path).unwrap(), checkpoint);
+        assert_eq!(
+            serde_json::to_value(runtime_messages(&executor)).unwrap(),
+            serde_json::to_value(history).unwrap()
+        );
+        assert!(
+            executor
+                .session_manager
+                .lock()
+                .unwrap()
+                .current_session
+                .as_ref()
+                .unwrap()
+                .provenance_incomplete
+        );
+    }
+
+    #[test]
     fn session_input_switch_drops_old_retry_and_symbol_target() {
         let (mut executor, _dir) = test_executor();
         let target = executor
@@ -1246,7 +1297,9 @@ mod tests {
         assert!(executor.switch_to_session(&id).is_err());
         assert!(executor.resume_session(&id).is_err());
         assert!(executor.clear_runtime_conversation().is_err());
-        for command in ["new", "clear", "delete", "switch", "save", "export"] {
+        for command in [
+            "new", "clear", "delete", "switch", "save", "export", "recovery",
+        ] {
             assert!(executor.handle_session_command(command, &mut ui).is_err());
         }
         crate::tui::commands::handlers::slash_commands::clear::handle_clear(&mut executor, &mut ui);

@@ -144,6 +144,18 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
     out
 }
 
+/// Recorded metadata only; it does not inspect event completeness.
+pub(crate) fn provenance_status(data: &SessionData) -> String {
+    if data.provenance_incomplete {
+        format!(
+            "Provenance: recorded write gap ({} failures). Resume does not repair it; inspect /session recovery or dgc session recovery <id>.",
+            data.provenance_record_failures
+        )
+    } else {
+        "Provenance: no recorded write gap (not an integrity audit); use /session recovery for diagnosis.".into()
+    }
+}
+
 /// Render detailed information about a single session.
 pub fn format_detail(data: &SessionData) -> String {
     let detail = format!(
@@ -164,6 +176,7 @@ pub fn format_detail(data: &SessionData) -> String {
         data.lines_edited,
         data.changed_files.len()
     );
+    let detail = format!("{detail}\n  {}", provenance_status(data));
     if let Some(selection) = &data.model_selection {
         format!(
             "{detail}\n  Model selection: {} / {:?} (session-local)",
