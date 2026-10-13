@@ -1,3 +1,6 @@
+//! Shared application prompt discovery and composition for CLI, TUI and agent runs.
+//! UI state and provider requests belong to callers.
+
 use crate::assets::Assets;
 use chrono::Local;
 use std::env;
@@ -42,7 +45,7 @@ fn load_project_instructions(cfg: &crate::config::AppConfig) -> Option<String> {
 ///    relative to the current working directory), return it.
 /// 2. If the path is not found, try resolving it relative to the configured
 ///    `project_root`.
-/// 3. Otherwise, search for priority files (AGENTS.md, QWEN.md, GEMINI.md) in the
+/// 3. When no explicit path is configured, search for priority files (AGENTS.md, QWEN.md, GEMINI.md) in the
 ///    project root and return the first match.
 pub(crate) fn get_project_instructions_file_path(
     cfg: &crate::config::AppConfig,
@@ -216,6 +219,32 @@ mod tests {
         ] {
             assert!(!prompt.contains(text), "unexpected automatic load: {text}");
         }
+    }
+
+    #[test]
+    fn explicit_relative_instruction_and_read_failure_preserve_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let relative = format!(
+            "custom-{}.md",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        std::fs::write(dir.path().join(&relative), "EXPLICIT-CUSTOM").expect("custom");
+        std::fs::write(dir.path().join("AGENTS.md"), "DEFAULT-NOT-FALLBACK").expect("default");
+        let mut cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            project_instructions_file: Some(relative),
+            ..Default::default()
+        };
+        assert!(build_system_prompt(&cfg).ends_with("EXPLICIT-CUSTOM"));
+        cfg.project_instructions_file = Some(dir.path().to_string_lossy().into_owned());
+        assert_eq!(
+            get_project_instructions_file_path(&cfg),
+            Some(dir.path().to_path_buf())
+        );
+        assert!(load_project_instructions(&cfg).is_none());
+        let prompt = build_system_prompt(&cfg);
+        assert!(!prompt.contains("DEFAULT-NOT-FALLBACK"));
+        assert!(!prompt.contains("# Project-Specific Instructions"));
     }
 
     #[test]

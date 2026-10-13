@@ -481,7 +481,7 @@ async fn run_tui(
     // owns all foreground/background job tasks via TaskTracker.
     let jobs = exec.jobs.clone();
     // Show which project instructions file (if any) was used at startup
-    if let Some(path) = crate::tui::commands::prompt::get_project_instructions_file_path(&exec.cfg)
+    if let Some(path) = crate::features::agent_prompt::get_project_instructions_file_path(&exec.cfg)
     {
         app.push_log(format!("Project instructions file: {}", path.display()));
     } else {

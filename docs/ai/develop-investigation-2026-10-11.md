@@ -168,7 +168,7 @@ MCP の annotation を権限の証明として使わないという境界は現�
 
 ### 4. パス別の指示・スキル解決
 
-現状: [prompt.rs](../../src/tui/commands/prompt.rs) は指定ファイル、またはルートの
+現状: [prompt.rs](../../src/features/agent_prompt.rs) は指定ファイル、またはルートの
 AGENTS.md / QWEN.md / GEMINI.md を選択する。
 ネストした指示とスキルは自動探索・適用されず、必要に応じて読む運用。
 これは [instruction-policy](instruction-policy.md) に明記された仕様である。
