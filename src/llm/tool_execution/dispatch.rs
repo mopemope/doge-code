@@ -166,6 +166,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_failure_dispatch_exposes_diagnostics_with_unsuccessful_outcome() -> Result<()>
+    {
+        let root = tempdir()?;
+        let dir = root.path().join(".doge/workflows");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("failed.yml"),
+            "name: Failing test\nsteps:\n- name: Check\n  program: bash\n  args: ['-c', \"printf 'assertion failed'; exit 9\"]\n- name: Never\n  program: touch\n  args: ['must-not-run']\n",
+        )?;
+        let config = Arc::new(AppConfig {
+            project_root: root.path().into(),
+            ..Default::default()
+        });
+        let tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = deferred_test_runtime(&tools);
+        activate_test_tools(&runtime, &["run_workflow"]).await;
+        let call = ToolCall {
+            id: Some("wf".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "run_workflow".into(),
+                arguments: json!({"workflow_name": "failed"}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(!output.is_success);
+        assert_eq!(output.value["ok"], false);
+        assert_eq!(output.value["result"]["stdout"], "assertion failed");
+        assert_eq!(output.value["result"]["exit_code"], 9);
+        assert_eq!(output.value["result"]["completed_steps"], 0);
+        assert!(!root.path().join("must-not-run").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn conflicting_read_positions_dispatch_returns_actionable_error() -> Result<()> {
         let dir = tempdir()?;
         let path = dir.path().join("numbered.txt");

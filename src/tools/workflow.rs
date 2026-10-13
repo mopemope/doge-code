@@ -1,6 +1,6 @@
 use crate::llm::types::{ToolDef, ToolFunctionDef};
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -86,86 +86,196 @@ pub async fn run_workflow_with_cancel(
     let workflow: Workflow =
         serde_saphyr::from_str(&content).context("Failed to parse workflow YAML")?;
 
-    let mut output = String::new();
-    output.push_str(&format!("Running workflow: {}\n", workflow.name));
-
-    for step in workflow.steps {
+    let mut output = format!("Running workflow: {}\n", workflow.name);
+    for (index, step) in workflow.steps.into_iter().enumerate() {
         if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
             return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
         }
-        output.push_str(&format!("Step: {}\n", step.name));
-        match (&step.run, &step.program) {
-            (Some(_), Some(_)) => {
-                anyhow::bail!(
+        let (success, stdout, stderr, status, exit_code, truncated, warnings, error) =
+            match (&step.run, &step.program) {
+                (Some(_), Some(_)) => anyhow::bail!(
                     "Workflow step '{}' specifies both `run` and `program`; use exactly one",
                     step.name
-                );
-            }
-            (None, None) => {
-                anyhow::bail!(
+                ),
+                (None, None) => anyhow::bail!(
                     "Workflow step '{}' specifies neither `run` nor `program`",
                     step.name
-                );
-            }
-            (Some(run), None) => {
-                info!("Running workflow step: {} ({})", step.name, run);
-                let result = fs_tools
-                    .execute_bash_with_cancel(run, cancel.clone())
-                    .await?;
-                let exec_result: crate::tools::execute::ExecuteBashResult =
-                    serde_json::from_str(&result)?;
-                if !exec_result.success {
-                    output.push_str(&format!(
-                        "  Status: FAILED\n  Error: {}\n",
-                        exec_result.stderr
-                    ));
-                    anyhow::bail!(
-                        "Workflow step '{}' failed: {}",
-                        step.name,
-                        exec_result.stderr
+                ),
+                (Some(run), None) => {
+                    info!("Running workflow step: {} ({})", step.name, run);
+                    let result = fs_tools
+                        .execute_bash_with_cancel(run, cancel.clone())
+                        .await?;
+                    let r: crate::tools::execute::ExecuteBashResult =
+                        serde_json::from_str(&result)?;
+                    // The legacy adapter has no policy/spawn status. Do not infer one.
+                    let status = if r.timed_out { "timed_out" } else { "failed" };
+                    (
+                        r.success,
+                        r.stdout,
+                        r.stderr,
+                        status.to_string(),
+                        r.exit_code,
+                        r.output_truncated,
+                        r.warnings,
+                        None,
+                    )
+                }
+                (None, Some(program)) => {
+                    info!(
+                        "Running workflow step: {} ({} {:?})",
+                        step.name, program, step.args
                     );
-                } else {
-                    output.push_str(&format!(
-                        "  Status: SUCCESS\n  Output: {}\n",
-                        exec_result.stdout.trim()
-                    ));
-                }
-            }
-            (None, Some(program)) => {
-                info!(
-                    "Running workflow step: {} ({} {:?})",
-                    step.name, program, step.args
-                );
-                let params = crate::execution::ExecuteProcessParams {
-                    program: program.clone(),
-                    args: step.args.clone(),
-                    cwd: step.cwd.clone(),
-                    env: step.env.clone(),
-                    timeout_ms: step.timeout_ms,
-                };
-                let result = fs_tools.execute_process(params, cancel.clone()).await?;
-                let exec_result: crate::execution::ProcessResult = serde_json::from_str(&result)?;
-                if !exec_result.success {
-                    let err = exec_result.error.unwrap_or_default();
-                    let detail = if exec_result.stderr.is_empty() {
-                        err.clone()
-                    } else {
-                        exec_result.stderr.clone()
+                    let params = crate::execution::ExecuteProcessParams {
+                        program: program.clone(),
+                        args: step.args.clone(),
+                        cwd: step.cwd.clone(),
+                        env: step.env.clone(),
+                        timeout_ms: step.timeout_ms,
                     };
-                    output.push_str(&format!("  Status: FAILED\n  Error: {detail}\n"));
-                    anyhow::bail!("Workflow step '{}' failed: {err}", step.name);
-                } else {
-                    output.push_str(&format!(
-                        "  Status: SUCCESS\n  Output: {}\n",
-                        exec_result.stdout.trim()
-                    ));
+                    let result = fs_tools.execute_process(params, cancel.clone()).await?;
+                    let r: crate::execution::ProcessResult = serde_json::from_str(&result)?;
+                    let status = match r.status {
+                        crate::execution::ProcessStatus::Completed => "completed",
+                        crate::execution::ProcessStatus::TimedOut => "timed_out",
+                        crate::execution::ProcessStatus::PolicyDenied => "policy_denied",
+                        crate::execution::ProcessStatus::SpawnFailed => "spawn_failed",
+                    };
+                    (
+                        r.success,
+                        r.stdout,
+                        r.stderr,
+                        status.to_string(),
+                        r.exit_code,
+                        r.output_truncated,
+                        r.warnings,
+                        r.error,
+                    )
                 }
+            };
+        if !success {
+            return Err(WorkflowFailure {
+                workflow: workflow.name,
+                step: step.name,
+                step_index: index + 1,
+                completed_steps: index,
+                status,
+                exit_code,
+                stdout,
+                stderr,
+                error,
+                output_truncated: truncated,
+                warnings,
             }
+            .bounded()?
+            .into());
+        }
+        output.push_str(&format!(
+            "Step: {}\n  Status: SUCCESS\n  Output: {}\n",
+            step.name,
+            stdout.trim()
+        ));
+        if !stderr.is_empty() {
+            output.push_str(&format!("  Stderr: {stderr}\n"));
+        }
+        if truncated || !warnings.is_empty() {
+            output.push_str("  Warning: command diagnostics may be incomplete.\n");
+        }
+        // Bound accumulation across any number of successful steps.
+        output = budget_success_output(&output)?;
+    }
+    output.push_str("Workflow completed successfully.\n");
+    budget_success_output(&output)
+}
+
+/// Full model-visible workflow envelope stays below the default 8,000-char fallback.
+const WORKFLOW_OUTPUT_MAX_CHARS: usize = 6_000;
+
+/// A terminal unsuccessful step, not an invitation to replay earlier effects.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowFailure {
+    pub workflow: String,
+    pub step: String,
+    pub step_index: usize,
+    pub completed_steps: usize,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
+    pub output_truncated: bool,
+    pub warnings: Vec<String>,
+}
+impl std::fmt::Display for WorkflowFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Workflow step '{}' failed: {}",
+            self.step,
+            self.to_json()
+        )
+    }
+}
+impl std::error::Error for WorkflowFailure {}
+impl WorkflowFailure {
+    pub fn to_json(&self) -> serde_json::Value {
+        json!({"ok": false, "result": self})
+    }
+    fn bounded(self) -> Result<Self> {
+        let mut limit = WORKFLOW_OUTPUT_MAX_CHARS;
+        loop {
+            let mut result = self.clone();
+            let mut shortened = self.warnings.len() > 4;
+            for (text, cap) in [
+                (&mut result.workflow, 128),
+                (&mut result.step, 128),
+                (&mut result.status, 32),
+                (&mut result.stdout, limit),
+                (&mut result.stderr, limit),
+            ] {
+                let bounded = crate::tools::budget::head_tail_truncate(text, limit.min(cap));
+                shortened |= bounded.truncated;
+                *text = bounded.text;
+            }
+            if let Some(error) = &mut result.error {
+                let bounded = crate::tools::budget::head_tail_truncate(error, limit.min(512));
+                shortened |= bounded.truncated;
+                *error = bounded.text;
+            }
+            result.warnings.truncate(4);
+            for warning in &mut result.warnings {
+                let bounded = crate::tools::budget::head_tail_truncate(warning, limit.min(128));
+                shortened |= bounded.truncated;
+                *warning = bounded.text;
+            }
+            if shortened {
+                result.output_truncated = true;
+                result.warnings.push("Workflow diagnostics shortened; earlier completed steps were not replayed. Inspect the workspace before retrying.".into());
+            }
+            result.warnings.push("Workflow stopped at this step. Earlier completed steps may have changed files; inspect the workspace before retrying.".into());
+            if serde_json::to_string(&result.to_json())?.chars().count()
+                <= WORKFLOW_OUTPUT_MAX_CHARS
+            {
+                return Ok(result);
+            }
+            limit = (limit / 2).max(1);
         }
     }
+}
 
-    output.push_str("Workflow completed successfully.\n");
-    Ok(output)
+fn budget_success_output(text: &str) -> Result<String> {
+    let mut limit = WORKFLOW_OUTPUT_MAX_CHARS;
+    loop {
+        let bounded = crate::tools::budget::head_tail_truncate(text, limit);
+        if serde_json::to_string(&json!({"result": bounded.text}))?
+            .chars()
+            .count()
+            <= WORKFLOW_OUTPUT_MAX_CHARS
+        {
+            return Ok(bounded.text);
+        }
+        limit = (limit / 2).max(1);
+    }
 }
 
 pub fn run_workflow_tool_def() -> ToolDef {
@@ -198,6 +308,157 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn failed_step_preserves_diagnostics_and_never_runs_following_step() -> Result<()> {
+        for structured in [false, true] {
+            let root = tempdir()?;
+            let dir = root.path().join(".doge/workflows");
+            std::fs::create_dir_all(&dir)?;
+            let command =
+                "printf 'FAILED assertion: 日本語\\n'; printf 'compiler detail\\n' >&2; exit 7";
+            let step = if structured {
+                format!(
+                    "program: bash\n    args: ['-c', {}]",
+                    serde_json::to_string(command)?
+                )
+            } else {
+                format!("run: {}", serde_json::to_string(command)?)
+            };
+            std::fs::write(
+                dir.join("failure.yml"),
+                format!(
+                    "name: Failure\nsteps:\n  - name: Prepare\n    program: echo\n    args: ['prepared']\n  - name: Check\n    {step}\n  - name: Never\n    program: touch\n    args: ['must-not-run']\n"
+                ),
+            )?;
+            let cfg = AppConfig {
+                project_root: root.path().into(),
+                ..Default::default()
+            };
+            let tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+            let error = run_workflow("failure", root.path(), &tools)
+                .await
+                .expect_err("failure");
+            assert!(
+                error.to_string().contains("FAILED assertion: 日本語"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("compiler detail"), "{error}");
+            assert!(!root.path().join("must-not-run").exists());
+            let report = error
+                .downcast_ref::<WorkflowFailure>()
+                .expect("typed failure");
+            assert_eq!(report.step_index, 2);
+            assert_eq!(report.completed_steps, 1);
+            assert_eq!(report.exit_code, Some(7));
+            assert_eq!(report.to_json()["ok"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn escaped_failure_budget_preserves_terminal_metadata_and_both_stream_ends() {
+        let content = format!("HEAD日本語{}TAILassertion", "\n\"\\\u{0001}".repeat(20_000));
+        let report = WorkflowFailure {
+            workflow: "\n\"\\".repeat(10_000),
+            step: "\n\"\\".repeat(10_000),
+            step_index: 101,
+            completed_steps: 100,
+            status: "timed_out".into(),
+            exit_code: None,
+            stdout: content.clone(),
+            stderr: content,
+            error: Some("\n\"\\".repeat(10_000)),
+            output_truncated: false,
+            warnings: vec!["\n\"\\".repeat(10_000); 100],
+        }
+        .bounded()
+        .expect("bounded");
+        let json = serde_json::to_string(&report.to_json()).unwrap();
+        assert!(json.chars().count() <= WORKFLOW_OUTPUT_MAX_CHARS);
+        assert_eq!(
+            crate::llm::truncate_tool_output(json.clone(), "run_workflow"),
+            json
+        );
+        assert_eq!(report.status, "timed_out");
+        assert_eq!(report.step_index, 101);
+        assert_eq!(report.completed_steps, 100);
+        assert!(report.output_truncated);
+        for stream in [&report.stdout, &report.stderr] {
+            assert!(stream.starts_with("HEAD日本語") && stream.ends_with("TAILassertion"));
+        }
+        assert!(report.warnings.iter().any(|s| s.contains("shortened")));
+    }
+
+    #[test]
+    fn success_accumulation_budget_accounts_for_json_escaping() {
+        let original = format!(
+            "Running workflow: long\n{}Workflow completed successfully.\n",
+            "\n\"\\\u{0001}日本語".repeat(10_000)
+        );
+        let result = budget_success_output(&original).unwrap();
+        assert!(result.starts_with("Running workflow:"));
+        assert!(result.contains("output truncated"));
+        assert!(result.ends_with("Workflow completed successfully.\n"));
+        assert!(
+            serde_json::to_string(&json!({"result": result}))
+                .unwrap()
+                .chars()
+                .count()
+                <= WORKFLOW_OUTPUT_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_terminal_status_is_not_lost_or_followed_by_more_steps() -> Result<()> {
+        use crate::config::{ExecutionConfig, ExecutionMode};
+        for (program, args, expected, denied) in [
+            ("sleep", vec!["30"], "timed_out", false),
+            (
+                "dgc-intentionally-missing-program",
+                vec![],
+                "spawn_failed",
+                false,
+            ),
+            ("touch", vec!["denied-marker"], "policy_denied", true),
+        ] {
+            let root = tempdir()?;
+            let dir = root.path().join(".doge/workflows");
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join("status.yml"),
+                format!(
+                    "name: Status\nsteps:\n- name: Check\n  program: {program}\n  args: {}\n  timeout_ms: 30\n- name: Never\n  program: touch\n  args: ['following-marker']\n",
+                    serde_json::to_string(&args)?
+                ),
+            )?;
+            let cfg = AppConfig {
+                project_root: root.path().into(),
+                execution_configured: denied,
+                execution: if denied {
+                    ExecutionConfig {
+                        mode: ExecutionMode::Allowlist,
+                        allowed_programs: vec!["echo".into()],
+                        ..Default::default()
+                    }
+                } else {
+                    ExecutionConfig::default()
+                },
+                ..Default::default()
+            };
+            let tools = FsTools::new(Arc::new(RwLock::new(None)), Arc::new(cfg));
+            let error = run_workflow("status", root.path(), &tools)
+                .await
+                .expect_err("failure");
+            assert_eq!(
+                error.downcast_ref::<WorkflowFailure>().unwrap().status,
+                expected
+            );
+            assert!(!root.path().join("following-marker").exists());
+            assert!(!root.path().join("denied-marker").exists());
+        }
+        Ok(())
+    }
 
     #[test]
     fn legacy_yaml_workflow_preserves_quoted_args_and_environment() {
