@@ -46,6 +46,7 @@ pub struct MutationFinalizeReport {
 
 #[derive(Debug, Clone)]
 pub struct FsTools {
+    pub(crate) repair_guard: Option<Arc<crate::features::repair_workflow::guard::Guard>>,
     search_repomap_tools: search_repomap::RepomapSearchTools,
     memory_tools: MemoryTools,
     repomap: Arc<RwLock<Option<RepoMap>>>,
@@ -68,8 +69,24 @@ impl Default for FsTools {
 }
 
 impl FsTools {
+    pub(crate) fn ensure_repair_checkpoint(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.get_current_session()
+                .is_some_and(|s| !s.provenance_incomplete),
+            "repair provenance checkpoint incomplete"
+        );
+        if let Some(manager) = self.get_session_manager_wrapper().get_session_manager() {
+            let manager = crate::utils::safe_std_lock(manager, "session_manager")?;
+            anyhow::ensure!(
+                !manager.has_unsaved_current_session() && manager.checkpoint_warning().is_none(),
+                "repair session durability unconfirmed"
+            );
+        }
+        Ok(())
+    }
     pub fn new(repomap: Arc<RwLock<Option<RepoMap>>>, config: Arc<AppConfig>) -> Self {
         Self {
+            repair_guard: None,
             search_repomap_tools: search_repomap::RepomapSearchTools::new(),
             memory_tools: MemoryTools::new(config.clone()),
             context_manager: Arc::new(RwLock::new(ContextManager::new(repomap.clone()))),

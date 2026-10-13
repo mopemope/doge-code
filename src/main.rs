@@ -130,6 +130,15 @@ pub enum Commands {
         resume: Option<String>,
     },
 
+    /// Explicit finite repair in a private candidate; no automatic acceptance/application.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Repair {
+        #[arg(long, required = true)]
+        plan: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        command: Option<features::repair_workflow::RepairCommand>,
+    },
+
     /// Run MCP server for tool access
     #[command()]
     McpServer {
@@ -224,6 +233,14 @@ async fn run_cli() -> Result<()> {
         tokio::pin!(operation);
         return tokio::select! { result = &mut operation => result, _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await } };
     }
+    // Evidence inspection/review is local and needs no inference configuration.
+    if let Some(Commands::Repair {
+        command: Some(command),
+        ..
+    }) = &cli.command
+    {
+        return features::repair_workflow::cli(AppConfig::default(), command).await;
+    }
     // Repository dotenv files are untrusted; only the caller's existing
     // environment may select global configuration or inference destinations.
     logging::init_logging()?;
@@ -241,6 +258,19 @@ async fn run_cli() -> Result<()> {
     // Handle `dgc session` early: no repomap, no MCP server, no LLM setup.
     if let Some(Commands::Session { command }) = &cli.command {
         return session::cli::run(cfg, command.clone()).await;
+    }
+
+    if let Some(Commands::Repair { plan, command }) = &cli.command {
+        return match command {
+            Some(command) => features::repair_workflow::cli(cfg, command).await,
+            None => {
+                features::repair_workflow::run_cli(
+                    cfg,
+                    plan.as_deref().context("repair requires --plan")?,
+                )
+                .await
+            }
+        };
     }
 
     // Initialize repomap
@@ -390,7 +420,8 @@ async fn run_cli() -> Result<()> {
         Some(Commands::Run { workflow }) => features::workflow::run_workflow(cfg, workflow).await,
         // Handled early, before repomap/MCP initialization.
         Some(
-            Commands::Auth { .. }
+            Commands::Repair { .. }
+            | Commands::Auth { .. }
             | Commands::Models { .. }
             | Commands::Session { .. }
             | Commands::Diagnostics,

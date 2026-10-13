@@ -2199,6 +2199,111 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   reused by trusted `/test` and `/lint` commands, with an internal diagnostic
   output budget rather than the LLM 6,000-character tool budget.
 
+### Explicit finite repair (CLI, Unix)
+
+`dgc repair --plan repair-plan.json` creates an owned private candidate for a
+small change in an existing Git repository. The plan is explicit caller input;
+repair is disabled for ordinary `exec`, `/test`, and Markdown workflows. V1 uses
+the selected OpenAI-compatible model throughout the run and supports an initial
+turn plus at most one restart after a completed, failing verification.
+
+```json
+{
+  "version": 1,
+  "instruction": "Fix next_value while retaining all existing tests.",
+  "editable_paths": ["src/lib.rs"],
+  "protected_suffixes": {"src/lib.rs": "#[cfg(test)]"},
+  "verifiers": [
+    {
+      "program": "cargo",
+      "args": ["test", "--locked", "--lib"],
+      "timeout_ms": 120000,
+      "test_format": "cargo",
+      "minimum_tests": 2
+    }
+  ],
+  "max_restarts": 1,
+  "per_run": {"iterations": 8, "tool_calls": 12, "tokens": 30000, "elapsed_ms": 120000},
+  "total_requests": 16,
+  "total_tokens": 60000,
+  "total_elapsed_ms": 600000,
+  "verifier_env": {
+    "CARGO_HOME": "/absolute/user/cache/cargo",
+    "RUSTUP_HOME": "/absolute/user/toolchains/rustup"
+  }
+}
+```
+
+Replace the paths, checks and positive test-count threshold with the project's
+actual contract. Editable files must already exist in the source inventory.
+All other source files are protected. A protected suffix starts at its declared
+unique literal marker and continues to EOF; use it for colocated tests that must
+remain intact. The model has only file read/list/search, declared text write/edit,
+and observation-read tools. The controller rejects the whole batch before its
+first tool if any call is outside scope, and checks each call again before
+execution. Process, delegation, MCP and workflow tools are unavailable.
+
+The controller captures current file bytes, modes and internal relative symlinks,
+including dirty tracked files and nonignored untracked work. Git-ignored files,
+`.git`, `.doge`, `target` and `__pycache__` are excluded. Capture is capped at
+10,000 files and 64 MiB; external/absolute symlinks and special files are refused.
+The live candidate and each verifier copy have their own private Git baseline;
+per-round candidates retain file snapshots. Checks
+that depend on original Git history need a different declared verification
+contract. `go.work` module selection is currently unsupported.
+
+The frozen verifier program/argv run in another copy through the managed process
+runner. Their configuration and protected source are unavailable for model
+mutation. The environment is cleared, with a private HOME/config/build cache,
+caller PATH, offline Cargo/Go, and no inherited credentials. Optional explicit
+`verifier_env` keys are limited to PATH, CARGO_HOME, RUSTUP_HOME and GOMODCACHE.
+Choose trusted native checks: repository code and declared programs retain the
+host user's permissions. This feature provides no OS sandbox.
+
+Each model turn reserves its full token allowance durably before it starts;
+request attempts share one persistent counter, including compaction. Reservations
+are never refunded on error or reset for the restart. Token limits use existing
+agent charging and provider-reported usage; an in-flight response can exceed its
+estimate, which stops further work. These limits do not implement a dollar cap.
+Unknown usage, exhausted budgets, partial agent status, timeout/cancellation,
+authentication errors, scope changes or persistence errors stop the workflow.
+Timeout cleanup uses the existing owned runner/request cancellation. Bounded
+regular-file acquisition rejects FIFO/symlink inputs; synchronous filesystem
+operations can still delay cancellation on a stalled filesystem.
+
+Baseline checks run before any model request. A baseline that already passes is
+reported as `already_verified` with task acceptance unconfirmed. Test formats
+`cargo`, `go_text` and `go_json` require a positive `minimum_tests`; reported
+counts are stdout heuristics. Without a test format, exit status is the declared
+command contract. Timeout, zero reported tests on exit zero, incomplete capture,
+spawn failure or changed verifier inputs are inconclusive and stop without a
+restart. A completed failing check can trigger the single restart in the same
+session with the previous tool results and bounded diagnostics preserved.
+
+Run artifacts remain under `.doge/repairs/<run-id>/`: frozen plan/route/ledger,
+baseline, per-round candidate/agent/usage/check outputs, and a terminal candidate.
+Storage errors may prevent a final record; the CLI returns an error with the run
+path and preserves whatever was already written. A stopped or crashed run is
+never automatically resumed. `repair inspect` reads evidence without making
+model requests.
+
+```bash
+dgc repair inspect --run /absolute/project/.doge/repairs/<run-id>
+# After an independent operator reviews the candidate and declared check scope:
+dgc repair review --run /absolute/project/.doge/repairs/<run-id> \
+  --candidate-digest <digest-from-inspect> --accept --note "Independent review findings"
+```
+
+Agent completion, declared verification and acceptance are separate. A completed
+agent with passing checks yields `verified_candidate` and pending acceptance.
+`review` records an explicit human decision bound to the plan, candidate and
+check digests, once the producer has released its lease. Omitting `--accept`
+records rejection. It does not attest an independent judgment or defend against
+same-user tampering of all local evidence. The controller never applies or rolls
+back a patch in the original checkout; review/application remain operator work.
+CLI exit zero means `verified_candidate` or `already_verified`; stopping returns
+nonzero and retained evidence. The existing exec partial exit contract is retained.
+
 ### Workflow Files
 
 `dgc run NAME` reads `.doge/workflows/NAME.md` as Markdown instructions.
