@@ -90,6 +90,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 | `find_file` | Whole serialized JSON budget (default/cap 6,000 chars), at most 200 complete paths; stable sort/dedup, 0-based `cursor` and `next_cursor`, `returned`, `total_matches`, `truncated`, `applied_budget_chars`, `warnings`; one-path budget failure is an error. MCP emits the same compact JSON. |
 | `fs_list` | budget 6,000 chars incl. per-entry JSON overhead; budget cuts resume at `cursor + entries.len()` (no skipped entries) |
 | `read_memory` | content capped at 6,000 chars |
+| `run_workflow` | complete serialized envelope capped at 6,000 chars incl. escaping; unsuccessful step returns `ok:false`, terminal status/code, both diagnostic streams and completed-step count, with truncation/warnings; success transcript accumulated within the same cap; no automatic replay |
 | `task` | summary capped at 4,000 chars; serialized output capped at 6,000 chars, preserving status/reason and marking omitted paths |
 
 Git diff review collection is fail-closed: a timed-out or capture-truncated

@@ -678,7 +678,19 @@ pub async fn run_workflow(
                 result_summary: format!("Ran workflow '{}'", workflow_name),
             })
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            if let Some(failure) = error.downcast_ref::<crate::tools::workflow::WorkflowFailure>() {
+                return Ok(ToolOutput {
+                    value: failure.to_json(),
+                    is_success: false,
+                    result_summary: format!(
+                        "Workflow failed at step {} ({})",
+                        failure.step_index, failure.status
+                    ),
+                });
+            }
+            Err(error)
+        }
     }
 }
 
