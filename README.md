@@ -1692,6 +1692,15 @@ matching endpoints are observations, not proof that no transient edit occurred.
   `python -m pytest`; historical links stay unchanged. Interpreter selection does
   not activate the environment for subprocess PATH lookup.
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
+- If test execution cannot be confirmed (including a missing checker or broken
+  venv), `/test` displays the diagnostic without starting automatic code repair
+  or claiming tests passed. Inspect the diagnostic and workspace; if the checker
+  could not start, restore the selected checker, environment or PATH, then retry.
+  Errors can also occur after a process starts, so an unconfirmed result does
+  not prove no command ran. In mixed-language runs, only confirmed executions
+  contribute to the automatic repair prompt; unconfirmed diagnostics remain
+  visible. Executed failures, compile errors and timeouts retain automatic
+  analysis, while cancellation retains its existing behavior.
 - Rust default libtest failure summaries associate panic locations, messages and
   source frames with the matching per-test failure section, including current
   thread-ID output. Separate harness runs keep repeated names distinct. Missing
