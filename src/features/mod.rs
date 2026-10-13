@@ -31,3 +31,5 @@ pub mod context_usage;
 pub mod verification_failure;
 
 pub mod session_recovery;
+
+pub mod repair_workflow;
