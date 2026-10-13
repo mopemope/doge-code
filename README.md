@@ -2165,6 +2165,24 @@ steps:
     run: cargo clippy --all-targets | head -50
 ```
 
+`run_workflow` stops on the first unsuccessful step; earlier steps may already
+have changed the workspace and are never rolled back or replayed automatically.
+Its failed tool result has `ok: false` and a `result` containing the failed
+`step`, 1-based `step_index`, `completed_steps`, process `status`, `exit_code`,
+`stdout`, `stderr`, `error`, `output_truncated` and `warnings`. Diagnostics from
+both streams are retained, including test failures printed only to stdout.
+Structured steps retain `completed`, `timed_out`, `policy_denied` or
+`spawn_failed`; legacy shell steps report `failed` or `timed_out` because their
+adapter does not distinguish policy and spawn failures. `completed` with a
+nonzero exit code is still a failure. Cancellation still aborts the agent run.
+
+The whole model-visible workflow result is capped at 6,000 characters after
+JSON escaping. Failed-step diagnostics receive the budget; prior completed
+steps are counted rather than echoed in the failure result. Successful runs
+retain a bounded head/tail transcript. Shortened or capture-limited diagnostics
+are marked; inspect actual files before deciding which step to rerun. A
+successful process exit alone does not prove tests were observed or passed.
+
 ## 🧪 Development
 
 ### Build and Test
