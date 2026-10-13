@@ -6,18 +6,20 @@ summarizes all planned trials. It never starts a model or agent, calls a provide
 configures credentials, fetches dependencies or adapts Codex event streams.
 It complements the existing dgc exec comparison runner; it does not replace it.
 
-Two cases are pinned in [cases.json](repair-cases/cases.json):
+Three cases are cataloged in [cases.json](repair-cases/cases.json). The original
+two remain the default; the external Go case is explicit opt-in:
 
 | Case | Provenance | Candidate scope | Fixed verification |
 |---|---|---|---|
 | Rust legacy argument prefix | Actual doge-code pre-fix commit `168db022d32cea702c8ebaee210207860c6f6ce8`; historical fix `a78ff91a5ce7c22fb1d66ecf25654e3ccc176085` | Policy implementation only; existing inline tests preserved | Six independent policy regressions and existing policy tests |
-| Go block rounding | Explicitly synthetic, authored for this harness; no historical issue claim | `block.go` only | Ordinary test plus ten normal/boundary/invalid subcases |
+| Go block rounding (default) | Explicitly synthetic, authored for this harness; no historical issue claim | `block.go` only | Ordinary test plus ten normal/boundary/invalid subcases |
+| Go humanize digit limit (opt-in) | [Upstream PR #158](https://github.com/dustin/go-humanize/pull/158), exact pre-fix `e0c1e0ea6771283f4f3e4f7c0f148df4c446049d`, merged reference `33e8a42f57a2fe71951155d9c5ff72959623b1fa` | `ftoa.go` only | Existing tests, twenty independent signed/digit-limit examples, native `go vet` |
 
 The Rust task is a known historical defect in this product's own repository. It
 is useful for reproduction, not a representative sample or an unbiased task for
 an agent that has already seen the fix. The independent oracle is newly authored
 from the known contract; it is not a pre-existing external evaluation. The Go
-fixture is an overflow bug with ordinary tests initially passing. Neither case
+fixture is an overflow bug with ordinary tests initially passing. No case
 establishes practical agent usefulness. Additional historical cases and an unseen
 roughly six-case cohort still need selection before a live comparison.
 
@@ -47,6 +49,52 @@ python3 scripts/repair_acceptance.py prepare \
   --output /tmp/repair-offline \
   --variant candidate --trials 1
 ```
+
+### Explicit external Go experiment
+
+Use a locally available checkout of `dustin/go-humanize` containing the pinned
+pre-fix commit. Acquisition is an operator step; this runner never clones/fetches.
+Its `go.mod` declares Go 1.21 and no dependencies; use installed Go 1.21+ binaries
+with the same offline settings. Do not point the default two-case run at this
+external repository: its history will not contain the Rust case.
+
+```bash
+python3 scripts/repair_acceptance.py prepare \
+  --source-repo /path/to/go-humanize \
+  --case go-humanize-ftoa-limits \
+  --output /path/on/disk/humanize-offline \
+  --variant original --variant reference
+```
+
+`--case` is repeatable for catalog IDs. Without it, only the original two cases
+are selected. Unknown, duplicate or empty explicit selections and unavailable
+selected historical commits fail before creating output/workspaces. Only selected
+cases appear in `plan.json.case_ids`, runs and summary denominators. Historical
+cases selected together must all exist in the single `--source-repo`; keep this
+external experiment separate. No reference patch/history or operator oracle is
+copied into the original candidate workspace. The operator may apply a reference
+implementation to the separately labeled reference workspace for offline replay.
+
+The merged upstream repair's direct parent is the baseline, not a guessed PR base
+or the current upstream branch. The oracle is newly authored from the contract,
+not copied from the upstream future regression file. It covers ordinary, zero,
+negative, very large, platform-MaxInt/near-MaxInt/MinInt digit counts and signed
+values/zero. Baseline reproduction showed existing tests passing while eight
+boundary examples panicked; changing only ftoa.go to the merged reference made
+existing tests and all twenty oracle examples pass. These are known offline
+replays, not unseen model acceptance results.
+
+The fixed existing-test command skips only `TestRepairAcceptanceFtoaLimits`; the
+separate regression command selects only that oracle. A passing oracle reports
+21 entries (parent plus 20 subtests). Native `go vet ./...` is explicitly kind
+`vet`, has no test-count requirement, and cannot mask a zero-test test check. Vet
+kind is restricted to that exact Go command; test checks always require a positive
+minimum reported count. A vet failure is not a failed assertion. No native pass
+implies 32-bit/other-platform behavior: any GOARCH=386 reproduction is separate
+operator evidence with its architecture/environment recorded, outside the native
+acceptance checks. Missing 32-bit runtime support is a block, not a pass. On the local SER7 Linux
+host, this supplementary execution stopped with `bad system call` before
+assertions; no 386 success is claimed. Native verification succeeded separately.
 
 Preparation creates one fresh workspace per variant × case × trial. The output
 path must not exist; variant labels are path-safe and trial count is 1–10. The
@@ -84,7 +132,8 @@ candidate can spoof runner output or exit early; even byte-identical successful
 output is not independent proof. Records set `test_execution_attested: false`.
 An independent reviewer must inspect the scoped implementation for such bypasses
 and confirm the oracle contract, rather than accepting an exit code/count alone.
-The Go minimum includes the ordinary test, oracle parent and ten subtests.
+The default synthetic Go minimum includes the ordinary test, oracle parent and
+ten subtests; the opt-in historical oracle has its separately declared minimum.
 Only policy tests are run for the Rust case: full repository tests, Clippy and
 other platforms are deliberately outside this task rubric.
 
