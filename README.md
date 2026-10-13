@@ -1716,6 +1716,10 @@ matching endpoints are observations, not proof that no transient edit occurred.
   contribute to the automatic repair prompt; unconfirmed diagnostics remain
   visible. Executed failures, compile errors and timeouts retain automatic
   analysis, while cancellation retains its existing behavior.
+- Successful file-edit tool results that report an actual change carry a
+  `verification_note` JSON field asking for readback and tests. The entire
+  model-bound result, including this note, stays parseable JSON within the
+  existing tool output limit; no-op and failed edits omit the note.
 - Rust default libtest failure summaries associate panic locations, messages and
   source frames with the matching per-test failure section, including current
   thread-ID output. Separate harness runs keep repeated names distinct. Missing
