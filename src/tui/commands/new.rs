@@ -1,5 +1,6 @@
-use crate::analysis::{Analyzer, RepoMap};
-use crate::hooks::{HookManager, repomap_update::RepomapUpdateHook};
+#[cfg(test)]
+use crate::analysis::Analyzer;
+use crate::analysis::RepoMap;
 use crate::jobs::JobManager;
 use crate::llm::OpenAIClient;
 use crate::session::SessionManager;
@@ -8,9 +9,12 @@ use crate::tui::commands::core::TuiExecutor;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
-use tracing::{error, info};
+#[cfg(test)]
+use tracing::error;
+use tracing::info;
 
 impl TuiExecutor {
+    #[cfg(test)]
     pub fn new(cfg: crate::config::AppConfig) -> Result<Self> {
         info!("Initializing TuiExecutor");
         let repomap: Arc<RwLock<Option<RepoMap>>> = Arc::new(RwLock::new(None));
@@ -142,11 +146,6 @@ impl TuiExecutor {
             custom_commands: crate::tui::commands::handlers::custom::load_custom_commands(
                 &cfg.project_root,
             ),
-            hook_manager: {
-                let mut hook_manager = HookManager::default();
-                hook_manager.add_hook(Box::new(RepomapUpdateHook::new()));
-                hook_manager
-            },
         })
     }
 }

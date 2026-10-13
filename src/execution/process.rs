@@ -6,13 +6,13 @@
 //! `ProcessResult` JSON contract. It never implements a second process
 //! lifecycle.
 
+use crate::agent_error::AgentErrorKind;
 use crate::config::AppConfig;
 use crate::execution::output::budget_command_output;
 use crate::execution::policy::{ExecutionPolicy, PolicyDenial, ProcessRequest};
 use crate::execution::runner::{
     ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
 };
-use crate::llm::LlmErrorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -131,7 +131,7 @@ pub async fn run_process(
     cancel: Option<CancellationToken>,
 ) -> anyhow::Result<ProcessResult> {
     if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
-        return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+        return Err(anyhow::anyhow!(AgentErrorKind::Cancelled));
     }
     let config_arc = Arc::new(config.clone());
     let policy = ExecutionPolicy::new(config_arc);
@@ -190,7 +190,7 @@ pub async fn run_process(
     );
     match managed.termination {
         ManagedProcessTermination::Cancelled => {
-            return Err(anyhow::anyhow!(LlmErrorKind::Cancelled));
+            return Err(anyhow::anyhow!(AgentErrorKind::Cancelled));
         }
         ManagedProcessTermination::TimedOut => {
             let (stdout, stderr, _budgeted, mut warnings) =
@@ -443,7 +443,7 @@ mod tests {
             token_for_timer.cancel();
         });
         let error = run_process(req, &cfg, Some(token)).await.unwrap_err();
-        assert!(error.downcast_ref::<LlmErrorKind>().is_some());
+        assert!(error.downcast_ref::<crate::llm::LlmErrorKind>().is_some());
     }
 
     #[tokio::test]

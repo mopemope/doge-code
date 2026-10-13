@@ -29,7 +29,6 @@ pub async fn run_agent_streaming_once(
             None,
             cancel,
             &fs.config,
-            None,
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await

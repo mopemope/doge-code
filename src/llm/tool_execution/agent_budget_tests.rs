@@ -197,7 +197,6 @@ async fn run_with_cfg(
         None,
         cancel,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -220,7 +219,6 @@ async fn run_with_project_root(
         None,
         cancel,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -473,7 +471,6 @@ async fn usage_calibration_missing_response_usage_does_not_reuse_previous_prompt
             None,
             None,
             &cfg,
-            None,
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await
@@ -811,7 +808,6 @@ async fn task_counts_once_and_subagent_usage_charged() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -958,7 +954,6 @@ async fn mutation_preserved_on_budget_stop() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1177,7 +1172,6 @@ async fn session_resume_starts_fresh_budget() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1192,7 +1186,6 @@ async fn session_resume_starts_fresh_budget() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1337,7 +1330,6 @@ async fn compaction_usage_is_charged_and_history_preserved() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1440,7 +1432,6 @@ async fn doc_generate_nested_usage_exhausts_token_budget_partial() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1518,7 +1509,6 @@ async fn doc_generate_session_usage_includes_both_without_double() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1587,7 +1577,6 @@ async fn normal_non_llm_tool_charges_nothing() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
@@ -1645,7 +1634,6 @@ async fn progress_read_only_completed_and_partial_are_observations_not_stalls() 
             None,
             None,
             &cfg,
-            None,
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await
@@ -1752,7 +1740,6 @@ async fn blank_final_preserves_prior_mutation_and_checkpoint() {
         None,
         None,
         &cfg,
-        None,
         crate::provenance::ProvenanceAttribution::none(),
     )
     .await
