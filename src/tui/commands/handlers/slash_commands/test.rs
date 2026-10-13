@@ -86,6 +86,10 @@ async fn run_test_job(
         return JobRunOutcome::Cancelled;
     }
 
+    if project_root.join("go.work").is_file() {
+        ui_tx.send_logged("::shell_output:Go workspace scope: source detection stays within the project root; go.work modules are not automatically selected. Any Go /test command runs from the project root with ./...; inspect its reported outcome before treating workspace modules as tested.");
+    }
+
     // Detect languages in the project
     let detected_languages = testing::detect_project_languages(&project_root);
 
@@ -387,6 +391,52 @@ mod tests {
             ..crate::config::AppConfig::default()
         });
         crate::tools::FsTools::new(std::sync::Arc::new(tokio::sync::RwLock::new(None)), config)
+    }
+
+    #[tokio::test]
+    async fn completion_scope_go_workspace_does_not_select_external_modules() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("project");
+        let external = fixture.path().join("external");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&external).expect("external");
+        std::fs::write(root.join("go.work"), "go 1.20\nuse ../external\n").expect("workspace");
+        std::fs::write(
+            external.join("go.mod"),
+            "module example/external\ngo 1.20\n",
+        )
+        .expect("module");
+        let source = b"package external\nfunc Value() int { return 1 }\n";
+        std::fs::write(external.join("value.go"), source).expect("source");
+        let (ui_tx, rx) = std::sync::mpsc::channel();
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
+        let outcome = run_test_job(
+            crate::jobs::JobId(1),
+            deferred.clone(),
+            root.clone(),
+            test_tools_for(&root),
+            ui_tx,
+            5_000,
+            CancellationToken::new(),
+        )
+        .await;
+        let messages = rx.try_iter().collect::<Vec<_>>().join("\n");
+        assert!(matches!(outcome, JobRunOutcome::Completed));
+        assert_eq!(deferred.len(), 0, "{messages}");
+        assert!(!messages.contains("--- Running go tests ---"), "{messages}");
+        assert!(
+            !messages.contains("All reported tests passed"),
+            "{messages}"
+        );
+        assert_eq!(
+            std::fs::read(external.join("value.go")).expect("source"),
+            source
+        );
+        assert!(
+            messages.contains("go.work modules are not automatically selected"),
+            "{messages}"
+        );
+        assert!(messages.contains("project root with ./..."), "{messages}");
     }
 
     #[tokio::test]
