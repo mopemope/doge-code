@@ -1692,6 +1692,13 @@ matching endpoints are observations, not proof that no transient edit occurred.
   `python -m pytest`; historical links stay unchanged. Interpreter selection does
   not activate the environment for subprocess PATH lookup.
 - Test output is captured and can be analyzed by LLM for failure diagnosis.
+- Rust default libtest failure summaries associate panic locations, messages and
+  source frames with the matching per-test failure section, including current
+  thread-ID output. Separate harness runs keep repeated names distinct. Missing
+  or duplicate sections leave metadata unknown rather than borrowing another
+  test's diagnostics. Assertion `left`/`right` labels stay in the message;
+  expected/actual operand semantics are not guessed. Raw output and the command
+  outcome are unchanged; these fields are diagnostic observations, not test counts.
 - Python failed-test summaries preserve the file and complete class/test path,
   including spaces in file names and balanced bracketed parameter IDs. Ambiguous
   or malformed summary metadata may be omitted; raw diagnostics and the failing

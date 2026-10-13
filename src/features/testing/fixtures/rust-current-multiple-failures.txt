@@ -1,0 +1,57 @@
+
+running 2 tests
+test a::alpha ... FAILED
+test b::beta ... FAILED
+
+failures:
+
+---- a::alpha stdout ----
+
+thread 'a::alpha' (12345) panicked at tests/a.rs:2:14:
+assertion `left == right` failed: ALPHA_PRIVATE_DETAIL
+  left: 2
+ right: 4
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/COMPILER/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/COMPILER/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/COMPILER/library/core/src/panicking.rs:447:23
+   3: core::panicking::assert_failed::<i32, i32>
+             at /rustc/COMPILER/library/core/src/panicking.rs:407:5
+   4: multiple::a::alpha
+             at ./tests/a.rs:2:14
+   5: multiple::a::alpha::{closure#0}
+             at ./tests/a.rs:2:11
+   6: <multiple::a::alpha::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/LOCAL-RUST-SRC/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/COMPILER/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- b::beta stdout ----
+
+thread 'b::beta' (12345) panicked at tests/b.rs:2:13:
+BETA_PRIVATE_DETAIL
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/COMPILER/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/COMPILER/library/core/src/panicking.rs:80:14
+   2: multiple::b::beta
+             at ./tests/b.rs:2:13
+   3: multiple::b::beta::{closure#0}
+             at ./tests/b.rs:2:10
+   4: <multiple::b::beta::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/LOCAL-RUST-SRC/library/core/src/ops/function.rs:250:5
+   5: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/COMPILER/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    a::alpha
+    b::beta
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

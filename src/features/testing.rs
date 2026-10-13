@@ -1,4 +1,5 @@
 mod go_json;
+mod rust_failures;
 use crate::execution::{
     ManagedProcessSpec, ManagedProcessTermination, ManagedRunOptions, run_managed_process,
 };
@@ -651,69 +652,7 @@ pub fn parse_test_output(result: &TestResult, language: &str) -> Vec<FailedTest>
 }
 
 fn parse_rust_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
-    let mut failed_tests = Vec::new();
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    // Pattern: test module::test_name ... FAILED
-    let re_failed = Regex::new(r"(?m)^test\s+(\S+)\s+\.\.\.\s+FAILED").unwrap();
-    // Pattern: thread 'test_name' panicked at file:line:col
-    let re_panic = Regex::new(r"thread '([^']+)' panicked at (.+):(\d+):(\d+)").unwrap();
-    // Pattern for assertion: assertion `left == right` failed
-    let re_assertion =
-        Regex::new(r"assertion `(.+)` failed\s*\n\s*left:\s*`([^`]+)`\s*\n\s*right:\s*`([^`]+)`")
-            .unwrap();
-
-    let mut current_test: Option<String> = None;
-    let mut current_file: Option<String> = None;
-    let mut current_line: Option<u32> = None;
-    let mut current_message = String::new();
-
-    for line in combined.lines() {
-        if let Some(captures) = re_failed.captures(line) {
-            // Save previous test if exists
-            if let Some(name) = current_test.take() {
-                failed_tests.push(FailedTest {
-                    name,
-                    file_path: current_file.take(),
-                    line_number: current_line.take(),
-                    message: current_message.clone(),
-                    expected: None,
-                    actual: None,
-                    stack_trace: None,
-                    related_files: Vec::new(),
-                });
-                current_message.clear();
-            }
-            current_test = captures.get(1).map(|m| m.as_str().to_string());
-        } else if let Some(captures) = re_panic.captures(line) {
-            current_file = captures.get(2).map(|m| m.as_str().to_string());
-            current_line = captures.get(3).and_then(|m| m.as_str().parse().ok());
-        }
-    }
-
-    // Check for assertion details
-    if let Some(captures) = re_assertion.captures(&combined) {
-        for test in &mut failed_tests {
-            test.expected = captures.get(2).map(|m| m.as_str().to_string());
-            test.actual = captures.get(3).map(|m| m.as_str().to_string());
-        }
-    }
-
-    // Add last test if exists
-    if let Some(name) = current_test {
-        failed_tests.push(FailedTest {
-            name,
-            file_path: current_file,
-            line_number: current_line,
-            message: current_message,
-            expected: None,
-            actual: None,
-            stack_trace: None,
-            related_files: Vec::new(),
-        });
-    }
-
-    failed_tests
+    rust_failures::parse(stdout, stderr)
 }
 
 fn parse_go_test_output(stdout: &str, stderr: &str) -> Vec<FailedTest> {
@@ -967,6 +906,8 @@ pub fn parse_rust_stack_trace(output: &str) -> Vec<StackFrame> {
                 && !func_name.contains("test::")
             {
                 current_func = Some(func_name);
+            } else {
+                current_func = None;
             }
         }
 
@@ -977,6 +918,7 @@ pub fn parse_rust_stack_trace(output: &str) -> Vec<StackFrame> {
             if !file_path.contains("/rustc/")
                 && !file_path.contains(".cargo/registry")
                 && !file_path.starts_with("/usr/")
+                && !file_path.contains("/lib/rustlib/src/rust/library/")
             {
                 frames.push(StackFrame {
                     function_name: current_func.take(),
@@ -1381,3 +1323,6 @@ raise SystemExit({exit})
         assert!(result.structured_test_result.is_none());
     }
 }
+
+#[cfg(test)]
+mod rust_failure_tests;
