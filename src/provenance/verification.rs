@@ -1,4 +1,4 @@
-use crate::tools::budget::head_tail_truncate;
+use crate::utils::text_budget::head_tail_truncate;
 
 use super::types::{
     CommandEvidence, VerificationContext, VerificationKind, VerificationObservedEvent,

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::llm::types::ChatMessage;
 use crate::session::SessionData;
 use crate::tui::commands::core::TuiExecutor;
@@ -39,6 +40,7 @@ impl TuiExecutor {
     }
 
     /// Replace the runtime conversation with canonical messages.
+    #[cfg(test)]
     pub fn replace_conversation_from_messages(&self, messages: Vec<ChatMessage>) {
         if let Ok(mut history) = self.conversation_history.lock() {
             history.replace(messages);

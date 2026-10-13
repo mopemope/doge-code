@@ -375,7 +375,6 @@ impl Executor {
             None,
             cancel,
             &self.cfg,
-            None, // No TuiExecutor for exec mode
             attribution,
         )
         .await;
@@ -630,7 +629,6 @@ impl Executor {
                 None,
                 None,
                 &self.cfg,
-                None,
                 attribution,
             ),
         )
@@ -857,7 +855,6 @@ impl Executor {
             None,
             None,
             &self.cfg,
-            None,
             attribution,
         )
         .await;

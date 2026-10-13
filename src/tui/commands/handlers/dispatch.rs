@@ -265,6 +265,7 @@ impl CommandHandler for TuiExecutor {
             .collect()
     }
 
+    #[cfg(test)]
     fn handle_internal_followup(&mut self, content: &str, ui: &mut TuiApp) {
         // Synthetic analysis turns bypass slash routing entirely so they can
         // never be mistaken for typed user input.

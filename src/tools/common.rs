@@ -817,10 +817,7 @@ impl FsTools {
             .unwrap_or_default();
         // Current requirement ids for validation (event history is source).
         // Single snapshot reused for validation + warnings (avoids duplicate I/O).
-        let loaded_requirements = match crate::tools::provenance::load_current_events(self) {
-            Ok(Some(loaded)) => Some(loaded),
-            _ => None,
-        };
+        let loaded_requirements = crate::tools::provenance::load_current_events(self)?;
         let (valid_requirement_ids, withdrawn_ids) = match &loaded_requirements {
             Some(loaded) => {
                 let state = crate::provenance::requirements::current_requirements(&loaded.events);

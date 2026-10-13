@@ -4,7 +4,8 @@ use std::io::{Read, Write};
 use std::sync::mpsc::Sender;
 
 pub struct ShellSession {
-    pub pty_pair: PtyPair,
+    // Retain PTY ownership until the shell session is dropped.
+    _pty_pair: PtyPair,
     pub writer: Box<dyn Write + Send>,
 }
 
@@ -44,23 +45,13 @@ impl ShellSession {
         });
 
         Ok(Self {
-            pty_pair: pair,
+            _pty_pair: pair,
             writer,
         })
     }
 
     pub fn write(&mut self, data: &str) -> Result<()> {
         write!(self.writer, "{}", data)?;
-        Ok(())
-    }
-
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        self.pty_pair.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
         Ok(())
     }
 }

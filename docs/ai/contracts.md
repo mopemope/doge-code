@@ -77,6 +77,14 @@ cache-relevant request-prefix changes.
 Never treat an inferred requirement as a verbatim user directive.
 Observed directives and interpreted requirements are distinct provenance nodes.
 
+Authoritative history acquisition uses `ProvenanceStore::load_complete` with the
+expected session ID and checks the session's missing-write flag. A warned subset
+cannot establish current requirements, completion, chain state or verification
+attribution. Historical pages can remain visible with unknown coverage/lifecycle;
+resource-limit failures return no subset. Do not rewrite legacy records to make a
+read pass. Shared regular-file acquisition owns bounds and handle checks; callers
+own decoding, symlink compatibility and complete-versus-historical failure policy.
+
 ## Main-Agent Resource Budget
 
 - Budget exhaustion is partial completion, not cancellation.
