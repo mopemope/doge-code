@@ -2177,6 +2177,15 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
 
 ### Workflow Files
 
+`dgc run NAME` reads `.doge/workflows/NAME.md` as Markdown instructions.
+Optional YAML frontmatter starts and ends with an unindented `---` line
+(trailing whitespace and CRLF are accepted). `---` inside quoted/plain
+`description` values or indented block scalars remains metadata; it does not
+create extra instructions. After frontmatter, non-empty non-header lines are
+steps, with list markers removed. Without a complete frontmatter block, the
+existing plain-instruction parsing applies. YAML parse errors still stop the
+workflow before execution.
+
 `.doge/workflows/*.yml` steps support two shapes — exactly one per step:
 
 ```yaml
