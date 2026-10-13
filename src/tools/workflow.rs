@@ -81,34 +81,7 @@ pub async fn run_workflow_with_cancel(
         );
     }
 
-    let mut workflow_path = project_root
-        .join(".doge/workflows")
-        .join(format!("{}.yml", workflow_name));
-
-    if !workflow_path.exists() {
-        let workflow_path_yaml = project_root
-            .join(".doge/workflows")
-            .join(format!("{}.yaml", workflow_name));
-        if !workflow_path_yaml.exists() {
-            anyhow::bail!(
-                "Workflow file not found: {} (checked .yml and .yaml)",
-                workflow_name
-            );
-        }
-        workflow_path = workflow_path_yaml;
-    }
-
-    // We need to read the file content.
-    // Since we are inside a tool implementation, we can use std::fs or tokio::fs directly if we are careful,
-    // or use fs_tools. But fs_tools might check permissions for arbitrary paths?
-    // Reading .doge/workflows is usually safe.
-
-    let content = tokio::fs::read_to_string(&workflow_path)
-        .await
-        .context(format!("Failed to read workflow file: {:?}", workflow_path))?;
-
-    let workflow: Workflow =
-        serde_saphyr::from_str(&content).context("Failed to parse workflow YAML")?;
+    let workflow = load_yaml_workflow(workflow_name, project_root, cancel.clone()).await?;
 
     // A malformed later step must not be discovered after earlier side effects.
     // Runtime policy, cwd/env validation and process failures still belong to
@@ -308,6 +281,72 @@ fn budget_success_output(text: &str) -> Result<String> {
         }
         limit = (limit / 2).max(1);
     }
+}
+
+const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
+
+fn ensure_workflow_active(cancel: Option<&CancellationToken>) -> Result<()> {
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow::anyhow!(crate::llm::LlmErrorKind::Cancelled));
+    }
+    Ok(())
+}
+
+/// Only a missing primary permits fallback; a present invalid primary is an error.
+fn read_yaml_workflow(
+    name: &str,
+    root: &Path,
+    cancel: Option<&CancellationToken>,
+) -> Result<String> {
+    use crate::utils::bounded_file::{ReadError, SymlinkPolicy, read_regular_bytes};
+    let label = crate::tools::budget::safe_take_chars(name, 64);
+    for extension in ["yml", "yaml"] {
+        ensure_workflow_active(cancel)?;
+        let path = root
+            .join(".doge/workflows")
+            .join(format!("{name}.{extension}"));
+        match read_regular_bytes(&path, MAX_WORKFLOW_INPUT_BYTES, SymlinkPolicy::Follow) {
+            Ok(bytes) => {
+                return String::from_utf8(bytes).with_context(|| {
+                    format!("Workflow input {label:?}.{extension} is not valid UTF-8")
+                });
+            }
+            Err(ReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                let message = format!("Workflow input {label:?}.{extension} unavailable: {error}");
+                return Err(anyhow::Error::new(error).context(message));
+            }
+        }
+    }
+    anyhow::bail!("Workflow file not found: {label:?} (checked .yml and .yaml)")
+}
+
+/// Input reading and parsing never occupy an async executor thread or run commands.
+async fn load_yaml_workflow(
+    name: &str,
+    root: &Path,
+    cancel: Option<CancellationToken>,
+) -> Result<Workflow> {
+    let name = name.to_owned();
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        ensure_workflow_active(cancel.as_ref())?;
+        let input = read_yaml_workflow(&name, &root, cancel.as_ref());
+        ensure_workflow_active(cancel.as_ref())?;
+        let input = input?;
+        let parsed = serde_saphyr::from_str(&input).context("Failed to parse workflow YAML");
+        ensure_workflow_active(cancel.as_ref())?;
+        parsed
+    })
+    .await
+    .context("Workflow input worker failed")?
+    .map_err(|error| {
+        if error.downcast_ref::<crate::llm::LlmErrorKind>().is_some() {
+            error
+        } else {
+            crate::tools::budget::bounded_read_error(error)
+        }
+    })
 }
 
 pub fn run_workflow_tool_def() -> ToolDef {
@@ -818,3 +857,6 @@ steps:
 
 #[cfg(test)]
 mod preflight_tests;
+
+#[cfg(test)]
+mod input_tests;
