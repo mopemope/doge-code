@@ -2184,6 +2184,18 @@ steps:
     run: cargo clippy --all-targets | head -50
 ```
 
+YAML `run_workflow` inputs must be regular UTF-8 files of at most 1 MiB.
+Reading and parsing run on a blocking worker. Normal regular-file symlinks
+remain supported. `.yml` takes priority; `.yaml` is tried only when `.yml` is
+missing. Non-regular files (including FIFOs), over-limit files, read errors and
+invalid UTF-8/YAML return bounded errors before any command starts; a present
+invalid `.yml` is not bypassed by a valid `.yaml`. Input files are unchanged.
+Cancellation is checked before input acquisition, after reading and after
+parsing, and retains the existing cancellation outcome. A filesystem call
+already stalled in the kernel cannot be interrupted immediately; these are
+input limits, not a filesystem sandbox or wall-clock deadline. Markdown CLI
+workflows use a separate loader and are outside this YAML input policy.
+
 Before starting any command, `run_workflow` checks every step has exactly one
 of `run` or `program`. If a later step has both or neither, it reports the
 1-based step position and runs no commands. Correct the workflow file before
