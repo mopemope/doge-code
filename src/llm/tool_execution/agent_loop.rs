@@ -24,6 +24,22 @@ use super::ui_rendering::truncate_string_with_graphemes;
 use crate::features::agent_prompt::build_system_prompt;
 use crate::llm::message_utils::truncate_tool_output;
 
+const VERIFICATION_NOTE: &str = "File modification detected. Verify your changes:\n1. Read the file to confirm the content is correct.\n2. Run tests to ensure no regressions.";
+
+/// Annotate only the model-bound copy, then budget the complete JSON result.
+fn mutation_result_content(value: &serde_json::Value, tool_name: &str, changed: bool) -> String {
+    let annotated = changed.then(|| {
+        let mut annotated = value.clone();
+        if let Some(fields) = annotated.as_object_mut() {
+            fields.insert("verification_note".into(), VERIFICATION_NOTE.into());
+        }
+        annotated
+    });
+    let json = serde_json::to_string(annotated.as_ref().unwrap_or(value))
+        .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool result\"}".into());
+    truncate_tool_output(json, tool_name)
+}
+
 const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
 const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
 const MAX_TOOL_ARGUMENT_CORRECTIONS: usize = 2;
@@ -2276,13 +2292,12 @@ pub async fn run_agent_loop(
             }
 
             // Build tool message content (full JSON) for feeding back to the LLM
-            let mut tool_message_content = match &res {
-                Ok(output) => {
-                    let json_str = serde_json::to_string(&output.value).unwrap_or_else(|_e| {
-                        "{\"error\":\"failed to serialize tool result\"}".to_string()
-                    });
-                    truncate_tool_output(json_str, tool_name)
-                }
+            let tool_message_content = match &res {
+                Ok(output) => mutation_result_content(
+                    &output.value,
+                    tool_name,
+                    modifies_files && actually_changed,
+                ),
                 Err(e) => {
                     error!(error = %e, "tool execution failed");
                     let err_json = serde_json::json!({ "error": e.to_string() });
@@ -2292,19 +2307,6 @@ pub async fn run_agent_loop(
                     truncate_tool_output(json_str, tool_name)
                 }
             };
-
-            // Inject verification note if a file was actually mutated
-            if modifies_files && actually_changed {
-                let verification_note = r#"
-
-<SYSTEM_NOTE>
-File modification detected. You MUST now verify your changes:
-
-1. Read the file to confirm the content is correct.
-2. Run tests to ensure no regressions.
-</SYSTEM_NOTE>"#;
-                tool_message_content.push_str(verification_note);
-            }
 
             // Prepare a short result summary for UI log and truncate if necessary
 
@@ -3305,5 +3307,41 @@ mod append_only_agent_tests {
         assert_eq!(roles, vec!["assistant", "tool", "tool", "developer"]);
         crate::llm::history::validate_tool_blocks(history.as_slice(), false)
             .expect("valid pairing");
+    }
+}
+
+#[cfg(test)]
+mod mutation_result_content_tests {
+    use super::*;
+    #[test]
+    fn mutation_result_content_preserves_outcomes_and_original_value() {
+        let value =
+            serde_json::json!({"success":true,"changed":true,"diff":"日本語\n\"quote\"\\tail"});
+        let original = value.clone();
+        let content = mutation_result_content(&value, "edit", true);
+        let result: serde_json::Value = serde_json::from_str(&content).expect("JSON");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["changed"], true);
+        assert_eq!(result["diff"], value["diff"]);
+        assert_eq!(result["verification_note"], VERIFICATION_NOTE);
+        assert_eq!(value, original);
+        assert_eq!(
+            mutation_result_content(&value, "edit", false),
+            serde_json::to_string(&value).expect("JSON")
+        );
+    }
+    #[test]
+    fn mutation_result_content_budgets_note_with_escape_heavy_diff() {
+        let limit = crate::llm::max_output_chars("edit");
+        for diff in ["\"\\\n日本語".repeat(2000), "\"".repeat(3940)] {
+            let value = serde_json::json!({"success":true,"changed":true,"diff":diff});
+            let content = mutation_result_content(&value, "edit", true);
+            assert!(content.chars().count() <= limit);
+            let result: serde_json::Value = serde_json::from_str(&content).expect("complete JSON");
+            assert_eq!(result["success"], true, "{content}");
+            assert_eq!(result["changed"], true);
+            assert_eq!(result["verification_note"], VERIFICATION_NOTE);
+            assert!(result["diff"].as_str().expect("diff").contains("truncated"));
+        }
     }
 }
