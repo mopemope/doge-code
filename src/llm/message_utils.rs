@@ -75,9 +75,40 @@ fn budget_json_value(value: &mut serde_json::Value, budget: usize) -> bool {
                     budget_json_value(field, budget);
                 }
             }
-            fits(value)
+            // Escaping and object metadata can exceed the aggregate budget
+            // even when each string is below its individual character limit.
+            shrink_object_strings(value, budget)
         }
         _ => true,
+    }
+}
+
+fn shrink_object_strings(value: &mut serde_json::Value, budget: usize) -> bool {
+    loop {
+        let total = serialized_len(value);
+        if total <= budget {
+            return true;
+        }
+        let serde_json::Value::Object(fields) = value else {
+            return false;
+        };
+        let largest = fields
+            .values_mut()
+            .filter(|field| {
+                field.as_str().is_some_and(|text| {
+                    text.chars().count() > MIN_STRING_KEEP + TRUNCATION_MARKER_RESERVE
+                })
+            })
+            .max_by_key(|field| serialized_len(field));
+        let Some(serde_json::Value::String(text)) = largest else {
+            return false;
+        };
+        let smaller =
+            budget_string_field(text, text.chars().count().saturating_sub(total - budget));
+        if smaller == *text {
+            return false;
+        }
+        *text = smaller;
     }
 }
 

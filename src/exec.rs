@@ -2006,3 +2006,81 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mutation_result_wire_tests {
+    use super::*;
+    use httptest::{Expectation, matchers::*, responders::*};
+    #[tokio::test]
+    async fn mutation_result_wire_is_json_for_edit_change_noop_and_failure() {
+        for (target, replacement, changed, success) in [
+            ("old", "new", true, true),
+            ("old", "old", false, true),
+            ("missing", "new", false, false),
+        ] {
+            let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+            let root = tempfile::tempdir().expect("root");
+            let path = root.path().join("日本語.txt");
+            std::fs::write(&path, "old\n").expect("source");
+            let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let requests = captured.clone();
+            let call = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"edit-local","type":"function","function":{"name":"edit","arguments":serde_json::json!({"file_path":path,"target_block":target,"new_block":replacement}).to_string()}}]}}]});
+            let stop = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Local wire capture complete."}}]});
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("POST", "/v1/chat/completions"),
+                    request::body(json_decoded(move |body: &serde_json::Value| {
+                        requests.lock().expect("requests").push(body.clone());
+                        true
+                    }))
+                ])
+                .times(2)
+                .respond_with(cycle![json_encoded(call), json_encoded(stop)]),
+            );
+            let cfg = crate::config::AppConfig {
+                project_root: root.path().into(),
+                no_repomap: true,
+                api_key: Some("offline-placeholder".into()),
+                base_url: server.url_str("/v1"),
+                model: "test-model".into(),
+                ..Default::default()
+            };
+            let mut executor = Executor::new(cfg).await.expect("executor");
+            executor
+                .run("Exercise the local edit result.", false)
+                .await
+                .expect("run")
+                .require_completed()
+                .expect("completed");
+            let requests = captured.lock().expect("requests");
+            let content = requests.last().expect("request")["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .find(|message| {
+                    message["role"] == "tool" && message["tool_call_id"] == "edit-local"
+                })
+                .expect("edit result")["content"]
+                .as_str()
+                .expect("content");
+            let result: serde_json::Value =
+                serde_json::from_str(content).expect("complete tool result is JSON");
+            assert_eq!(result["changed"], changed);
+            assert_eq!(result["success"], success);
+            assert!(content.chars().count() <= crate::llm::max_output_chars("edit"));
+            assert_eq!(result.get("verification_note").is_some(), changed);
+            if changed {
+                assert!(
+                    result["verification_note"]
+                        .as_str()
+                        .expect("note")
+                        .contains("Run tests")
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(path).expect("source"),
+                if changed { "new\n" } else { "old\n" }
+            );
+        }
+    }
+}
