@@ -2289,7 +2289,9 @@ baseline, per-round candidate/agent/usage/check outputs, and a terminal candidat
 Storage errors may prevent a final record; the CLI returns an error with the run
 path and preserves whatever was already written. A stopped or crashed run is
 never automatically resumed. `repair inspect` reads evidence without making
-model requests.
+model requests. Contradictory ledger reservations, changed protected snapshots,
+and an accepted decision without completed passing verification are rejected
+during inspection; failed or corrupted evidence cannot authorize a restart.
 
 ```bash
 dgc repair inspect --run /absolute/project/.doge/repairs/<run-id>
