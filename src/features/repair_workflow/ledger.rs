@@ -20,6 +20,55 @@ pub struct Ledger {
     pub usage_records: u64,
     pub acceptance: String,
 }
+impl Ledger {
+    pub fn validate(&self, plan: &super::plan::Plan) -> Result<()> {
+        ensure!(
+            self.rounds_started <= plan.max_restarts + 1
+                && plan
+                    .per_run
+                    .tokens
+                    .checked_mul(u64::from(self.rounds_started))
+                    == Some(self.tokens_reserved)
+                && self.tokens_reserved <= plan.total_tokens
+                && self.requests_reserved <= plan.total_requests
+                && self.usage_records <= self.requests_reserved,
+            "repair ledger reservations inconsistent"
+        );
+        ensure!(
+            self.rounds_started > 0
+                || (self.requests_reserved == 0
+                    && self.usage_records == 0
+                    && self.provider_reported_tokens == 0),
+            "repair ledger usage without a started round"
+        );
+        ensure!(
+            self.usage_records > 0 || self.provider_reported_tokens == 0,
+            "repair ledger tokens without usage records"
+        );
+        ensure!(
+            self.acceptance == "pending",
+            "producer ledger cannot claim acceptance"
+        );
+        ensure!(
+            self.status != "already_verified" || self.rounds_started == 0,
+            "already_verified cannot contain agent rounds"
+        );
+        ensure!(
+            matches!(
+                self.status.as_str(),
+                "preparing"
+                    | "agent_running"
+                    | "stopped"
+                    | "already_verified"
+                    | "verified_candidate"
+                    | "storage_failed"
+                    | "token_budget_exhausted"
+            ),
+            "unknown repair ledger status"
+        );
+        Ok(())
+    }
+}
 #[derive(Debug)]
 pub struct Store {
     pub root: PathBuf,
