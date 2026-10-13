@@ -28,6 +28,15 @@ Handlers return `ToolOutput { value, is_success, result_summary }` — never a
 bare string (`src/llm/tool_execution/dispatch.rs`). `value` is serialized to
 JSON by the agent loop and handed to the LLM.
 
+Successful file mutations (`fs_write`, `edit`, `apply_patch`, `undo`) whose
+result reports `changed: true` add a `verification_note` string to the
+model-bound JSON object. The note asks for a content readback and regression
+checks. No-op and failed results do not add the note. The original handler
+value and mutation/provenance outcome remain unchanged. Serialization and the
+global output budget apply to the complete object, including the note; there
+is no text suffix after the JSON. Aggregate budgeting accounts for escaped
+string content and object metadata before falling back to a raw envelope.
+
 ## Global truncation
 
 `src/llm/message_utils.rs::truncate_tool_output` caps the **serialized JSON** of
