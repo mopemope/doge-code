@@ -691,6 +691,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_memory_input_omits_automatic_hints_without_mutating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = test_fs(dir.path());
+        let memory = dir.path().join(".doge/memory");
+        std::fs::create_dir_all(&memory).expect("memory dir");
+        let bad = memory.join("broken.md");
+        std::fs::write(&bad, [0xff, 0xfe]).expect("bad input");
+        let snapshot = RuntimeContextBuilder::new(&fs).build(Some("broken")).await;
+        assert!(snapshot.memory_context.is_none());
+        assert_eq!(std::fs::read(bad).expect("unchanged"), [0xff, 0xfe]);
+        #[cfg(unix)]
+        {
+            let fifo = memory.join("fifo.md");
+            let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("path");
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            let snapshot = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                RuntimeContextBuilder::new(&fs).build(Some("fifo")),
+            )
+            .await
+            .expect("bootstrap must not block");
+            assert!(snapshot.memory_context.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn test_builder_active_context_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let fs = test_fs(dir.path());
