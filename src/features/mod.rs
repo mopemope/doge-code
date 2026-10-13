@@ -1,3 +1,4 @@
+pub mod agent_prompt;
 pub mod doc_skill;
 pub mod evidence_report;
 pub mod structured_test_results;

@@ -52,6 +52,73 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `resources/system_prompt.md` | System prompt template (Tera, rust-embed) |
 | `elisp/` | Emacs integration (outside CI; see `elisp/emacs-integration.md`) |
 
+## Responsibility boundaries (develop audit, 2026-10-13)
+
+Ownership, dependency direction and observable contracts determine a split;
+file length alone does not. The audit starts from develop `ed6a967` (PR #134).
+
+| Boundary | Owner and allowed direction |
+|---|---|
+| Presentation | `main`, `exec`, `tui`: parse operations, wire modes and render state; call application features and jobs |
+| Shared prompt | `features/agent_prompt`: instruction discovery and composition; uses configuration/assets, never UI state or provider requests |
+| Agent application | `llm/tool_execution/agent_loop`: iteration, request budget, compaction and scheduling; uses provider client and ToolRuntime |
+| Provider adapter | `llm/client_core`, subscription/opencode features: transport, authentication, response/usage binding; do not own UI or saved acceptance |
+| Tool adapter | `tools`, `ToolRuntime`: schemas, scoped operations and mutation/provenance integration; finite process adapters delegate policy/mechanics to execution |
+| Execution/jobs | `execution`: policy-aware adapter → policy-free runner; `jobs`: ownership, cancellation, workspace gates and completion |
+| Durable state | `session`, `provenance`: exclusive session ownership, atomic checkpoints and versioned events; never use RepoMap as authoritative storage |
+| Evidence | evidence-report and verification features: frozen-input acquisition and conservative projections; observed checks do not imply human acceptance |
+| Evaluation entrypoints | live runner owns model/API orchestration; offline repair owns preparation/check/review/read-only handoff; neither imports the other |
+| Evaluation mechanism/policy | both entrypoints → `scripts/agent_eval_process.py` for bounded capture/cleanup; offline review → `repair_acceptance_contracts.py` for pure payload validation |
+
+The prompt implementation previously lived in TUI despite having no UI inputs.
+CLI, startup discovery, TUI and the agent loop now call the same application
+implementation directly. Discovery order, explicit-path resolution, literal
+rendering and missing/unreadable-file behavior are preserved. Add prompt changes
+and focused characterization tests there; presentation does not own discovery.
+
+The offline checker previously dynamically loaded the live-model entrypoint only
+to call `stream_child`. The shared process module now owns stream limits, timeout,
+interruption, reader completion and process-group cleanup. Callers supply commands,
+environments and sinks; it has no provider, API budget or trial accounting imports.
+The live runner retains the imported `stream_child` callable for its orchestration
+seam. Patch shared capture limits in the mechanism module when testing the actual
+capture contract. Review validation consumes payload/kind/machine outcome without
+filesystem writes; the offline entrypoint validates frozen evidence before calling
+it and performs the append-only write afterward.
+
+Fresh plans bind the offline entrypoint, process mechanism and review-contract
+source hashes. Previously prepared records retain their original checker identity:
+read-only inspection/summary still reads them without rescoring; new checks and
+review writes require the prepared checker. No serialized schema, CLI option,
+provider permission, evidence status or saved acceptance is migrated by this split.
+
+### Remaining findings and deliberate scope
+
+- The application loop still takes an unused `_tui_executor` argument. Remove it
+  in a dedicated caller/interface change; this refactor improves shared prompt
+  ownership but does not claim that the whole application is TUI-free.
+- Instruction loading uses synchronous unbounded `read_to_string` before request
+  budget/cancellation. Regular-file checks, byte bounds, special-file rejection
+  and failure presentation need an explicit acquisition contract; moving code
+  must not silently change configured-path compatibility.
+- Normal provenance reads use `load_all`, while history has bounded/no-follow
+  acquisition. Define complete-versus-partial evidence semantics before sharing
+  that reader; a partial history must not support a complete coverage claim.
+- `execution/process` uses the LLM cancellation error kind, and the provenance
+  classifier uses the tools output truncation helper. These residual ownership
+  dependencies merit separate small changes with error/downcast and truncation
+  compatibility tests, rather than relocation of aggregate error types.
+
+Large application loops, FsTools and provider clients remain intact because this
+audit did not establish an independent ownership seam warranting a full rewrite.
+Their shared request-budget ledger, borrowed tool handles and per-run cancellation
+must survive nested calls. Provider-neutral conversation schemas under `llm`
+also appear in session checkpoints: moving namespaces is not itself a reason to
+change persisted records. Job completion order, mutation receipts, frozen wire
+versions and conservative evidence classification remain separate contracts with
+existing regression coverage. Add an abstraction only when it owns a real
+responsibility or supports another consumer, never as a pass-through layer.
+
 ## Common Change Patterns
 
 ### Adding a new tool
@@ -62,7 +129,7 @@ keep schema, dispatch, tests, and README in sync.
 
 ### Changing the system prompt
 
-Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}`). It is embedded at compile time via rust-embed (`src/assets.rs`) — rebuild to pick up changes. Project instructions files (`AGENTS.md` / `QWEN.md` / `GEMINI.md`, or `project_instructions_file` config key) are appended at runtime (`src/tui/commands/prompt.rs`).
+Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}`). It is embedded at compile time via rust-embed (`src/assets.rs`) — rebuild to pick up changes. Project instructions files (`AGENTS.md` / `QWEN.md` / `GEMINI.md`, or `project_instructions_file` config key) are appended at runtime (`src/features/agent_prompt.rs`).
 
 `llm::runtime_context::advisory_context_message` quotes TUI bootstrap data in
 JSON. It retains system-shaped internal messages for durable filtering;

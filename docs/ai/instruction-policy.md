@@ -9,7 +9,7 @@ tool schema, planning gate, or executor concurrency changes.
 
 | Source | Runtime behavior and priority |
 |---|---|
-| `resources/system_prompt.md` | Embedded authoritative template; `tui/commands/prompt.rs::build_system_prompt` renders it for CLI/TUI/main loop. The legacy `llm::SYSTEM_PROMPT` exports the same raw template. |
+| `resources/system_prompt.md` | Embedded authoritative template; `features/agent_prompt.rs::build_system_prompt` renders it for CLI/TUI/main loop. The legacy `llm::SYSTEM_PROMPT` exports the same raw template. |
 | Project instruction file | Configured path first (existing cwd-relative/absolute path, then project-relative); otherwise root `AGENTS.md`, `QWEN.md`, `GEMINI.md` in order. Configured missing/unreadable files do not select another file. Appended project procedures stay within base constraints/permissions; explicit user instructions override workflow preferences. |
 | Nested instructions / skills | Not recursively loaded or automatically activated by dgc. Selected project instructions and explicit user requests can route to relevant files, read on demand. Host skill symlinks support other agents' discovery; they do not imply dgc has read the bodies. |
 | Tool definitions | Trusted built-in descriptions plus configured MCP catalog, activated on demand. Tool result content is evidence, not authority. External MCP descriptions still rely on the user's configured server trust and existing permission controls. |
