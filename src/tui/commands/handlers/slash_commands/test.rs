@@ -232,33 +232,40 @@ async fn run_test_job(
                 }
             }
 
-            // Store the command output
-            all_command_outputs.push(format!(
-                "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-                test_cmd.command,
-                test_cmd.args.join(" "),
-                result
-                    .exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| {
-                        if result.timed_out {
-                            "timeout".to_string()
-                        } else {
-                            "none".to_string()
-                        }
-                    }),
-                testing::budget_diagnostic_output(
+            // Only confirmed executions provide code-repair evidence. Other
+            // diagnostics remain visible below, without becoming repair targets.
+            if result.execution_observed {
+                all_command_outputs.push(format!(
+                    "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    test_cmd.command,
+                    test_cmd.args.join(" "),
                     result
-                        .diagnostic_stdout
-                        .as_deref()
-                        .unwrap_or(&result.stdout)
-                ),
-                testing::budget_diagnostic_output(&result.stderr)
-            ));
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| {
+                            if result.timed_out {
+                                "timeout".to_string()
+                            } else {
+                                "none".to_string()
+                            }
+                        }),
+                    testing::budget_diagnostic_output(
+                        result
+                            .diagnostic_stdout
+                            .as_deref()
+                            .unwrap_or(&result.stdout)
+                    ),
+                    testing::budget_diagnostic_output(&result.stderr)
+                ));
 
-            // Cancellation is not a test failure.
-            if !result.success {
-                has_any_failures = true;
+                if !result.success {
+                    has_any_failures = true;
+                }
+            } else {
+                ui_tx.send_logged(format!(
+                    "::shell_output:Test execution was not confirmed: {}. Inspect the diagnostic and workspace. If the checker could not start, restore the selected checker, environment or PATH. Retry /test when ready; automatic code repair was not requested for this command.",
+                    test_cmd.command
+                ));
             }
 
             // Process success is not a known test success. Share /verify classification.
@@ -272,7 +279,9 @@ async fn run_test_job(
                     &test_cmd.command,
                     &test_cmd.args,
                 );
-            let label = if python_invocation && result.execution_observed && !result.timed_out {
+            let label = if !result.execution_observed {
+                "test execution not confirmed"
+            } else if python_invocation && !result.timed_out {
                 python_outcome
                     .map(|o| o.label())
                     .unwrap_or("Python test outcome unknown")
@@ -306,7 +315,11 @@ async fn run_test_job(
             }
 
             // Parse failed tests
-            let failed_tests = testing::parse_test_output(&result, &lang);
+            let failed_tests = if result.execution_observed {
+                testing::parse_test_output(&result, &lang)
+            } else {
+                Vec::new()
+            };
             result.failed_tests = failed_tests.clone();
             if !failed_tests.is_empty() {
                 ui_tx.send_logged(format!(
@@ -609,3 +622,7 @@ fi
         assert!(messages.contains("No test commands ran"), "{messages}");
     }
 }
+
+#[cfg(test)]
+#[path = "test_start_recovery_tests.rs"]
+mod test_start_recovery_tests;
