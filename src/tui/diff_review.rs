@@ -117,6 +117,7 @@ impl DiffReviewState {
         self.files.get_mut(self.selected)
     }
 
+    #[cfg(test)]
     pub fn file_paths(&self) -> Vec<String> {
         self.files.iter().map(|f| f.path.clone()).collect()
     }

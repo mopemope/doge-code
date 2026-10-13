@@ -149,8 +149,19 @@ pub fn requirements_write(
         anyhow::bail!("No current session for requirements_write");
     };
     let store = ProvenanceStore::new(ctx.session_dir.clone());
-    let loaded = store.load_all()?;
+    anyhow::ensure!(
+        !fs_tools
+            .get_current_session()
+            .is_some_and(|s| s.provenance_incomplete),
+        "Complete provenance history unavailable: session has missing event writes"
+    );
+    let loaded = store.load_complete(&ctx.session_id)?;
     let state: RequirementState = current_requirements(&loaded.events);
+    anyhow::ensure!(
+        state.warnings.is_empty(),
+        "Current requirements unavailable: {}",
+        state.warnings.join("; ")
+    );
     let by_id: std::collections::HashMap<&str, &CurrentRequirement> =
         state.items.iter().map(|r| (r.id.as_str(), r)).collect();
 
@@ -240,8 +251,13 @@ pub fn requirements_write(
         }
     }
     // Rebuild after write.
-    let reloaded = store.load_all()?;
+    let reloaded = store.load_complete(&ctx.session_id)?;
     let new_state = current_requirements(&reloaded.events);
+    anyhow::ensure!(
+        new_state.warnings.is_empty(),
+        "Current requirements unavailable: {}",
+        new_state.warnings.join("; ")
+    );
     let mut warnings = reloaded.warnings;
     warnings.extend(new_state.warnings.clone());
     if fs_tools
@@ -356,9 +372,20 @@ pub fn requirements_read(
         });
     };
     let store = ProvenanceStore::new(ctx.session_dir);
-    let loaded = store.load_all()?;
+    anyhow::ensure!(
+        !fs_tools
+            .get_current_session()
+            .is_some_and(|s| s.provenance_incomplete),
+        "Complete provenance history unavailable: session has missing event writes"
+    );
+    let loaded = store.load_complete(&ctx.session_id)?;
     let mut warnings = loaded.warnings.clone();
     let state = current_requirements(&loaded.events);
+    anyhow::ensure!(
+        state.warnings.is_empty(),
+        "Current requirements unavailable: {}",
+        state.warnings.join("; ")
+    );
     warnings.extend(state.warnings.clone());
 
     let mut items: Vec<&CurrentRequirement> = state.items.iter().collect();

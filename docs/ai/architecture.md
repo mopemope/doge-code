@@ -92,22 +92,50 @@ read-only inspection/summary still reads them without rescoring; new checks and
 review writes require the prepared checker. No serialized schema, CLI option,
 provider permission, evidence status or saved acceptance is migrated by this split.
 
-### Remaining findings and deliberate scope
+### Follow-up boundary cleanup (develop `fef3a21`, PR #135 merged)
 
-- The application loop still takes an unused `_tui_executor` argument. Remove it
-  in a dedicated caller/interface change; this refactor improves shared prompt
-  ownership but does not claim that the whole application is TUI-free.
-- Instruction loading uses synchronous unbounded `read_to_string` before request
-  budget/cancellation. Regular-file checks, byte bounds, special-file rejection
-  and failure presentation need an explicit acquisition contract; moving code
-  must not silently change configured-path compatibility.
-- Normal provenance reads use `load_all`, while history has bounded/no-follow
-  acquisition. Define complete-versus-partial evidence semantics before sharing
-  that reader; a partial history must not support a complete coverage claim.
-- `execution/process` uses the LLM cancellation error kind, and the provenance
-  classifier uses the tools output truncation helper. These residual ownership
-  dependencies merit separate small changes with error/downcast and truncation
-  compatibility tests, rather than relocation of aggregate error types.
+- Remove the unused TUI executor argument from the application loop and all
+  callers. Test-only presentation conveniences are gated to tests; entirely
+  unused UI state/hooks are removed. PTY ownership remains private and retained
+  until session drop. Presentation stays private; no public UI API is added to
+  suppress dead-code warnings.
+- `agent_error::AgentErrorKind` owns the shared failure vocabulary. Provider and
+  execution adapters depend on this neutral type. `llm::LlmErrorKind` is a type
+  alias, preserving variants, display and `anyhow` downcast identity. New shared
+  failure categories belong there, not in an aggregate presentation error.
+- `utils::text_budget` owns Unicode slicing/formatting and `BudgetedText`.
+  Tool JSON-envelope budgets remain in `tools::budget`, which re-exports existing
+  text helpers for compatibility; provenance uses the neutral formatter directly.
+- `utils::bounded_file` owns bounded regular-file byte acquisition, handle
+  validation and Unix nonblocking open. Callers own symlink policy, limits,
+  UTF-8/JSON interpretation, diagnostics and completeness semantics. Prompt
+  acquisition allows regular symlink targets as before, at most 1 MiB; rejected
+  input uses the base prompt and existing error logging, never partial text or
+  a different default instruction file.
+- Provenance display history retains 256 KiB/event, 8 MiB total, 4,096 JSON inputs.
+  General acquisition uses 8 MiB/event, 128 MiB total and 65,536 directory entries
+  across all wire versions; limit failure returns Err, never the loaded subset.
+  Parse failures still produce historical warnings; consumed invalid bytes count
+  toward the shared total. No-follow checks reject symlinked event directories,
+  symlinked event files and special files.
+- `ProvenanceStore::load_complete(expected_session_id)` separates authoritative
+  reads from tolerant historical acquisition. Current application reads additionally
+  reject the session's missing-write flag. Requirements/plan state writes reject
+  incomplete history before publication. Verification keeps literal directive and
+  execution facts, withholding inferred plan/requirement/change/obligation links.
+  Mutation predecessor failure leaves the source committed and chain unlinked;
+  it marks incomplete only after successful event append so append failure is
+  still counted once by its existing caller.
+- `provenance_read` may return historical events with warnings, but incomplete
+  history returns unknown coverage and unknown current lifecycle, without inferred
+  classification IDs. Foreign-session events are omitted. Preserve source records,
+  version priority and schema; an error is not permission to delete/migrate them.
+
+Remaining scope: regular-file OS I/O is synchronous; nonblocking open and byte
+bounds do not provide a cancellation deadline, FUSE/disk latency guarantee or OS
+sandbox. Optimistic acquisition does not authenticate files or make history
+atomic against concurrent edits. Full asynchronous acquisition and explicit
+history-repair UX require separate design; this cleanup does not implement them.
 
 Large application loops, FsTools and provider clients remain intact because this
 audit did not establish an independent ownership seam warranting a full rewrite.

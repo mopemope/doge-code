@@ -376,7 +376,6 @@ pub(crate) fn spawn_agent_turn(
             ui_tx.clone(),
             Some(token),
             &cfg,
-            None,
             attribution,
         )
         .await;
@@ -552,8 +551,7 @@ pub(crate) fn spawn_agent_turn(
 ///
 /// Parity with the historical analysis dispatch: follow-ups run with
 /// saved plan context included (`skip_plan = false`), exactly like a default
-/// user dispatch. This differs from [`TuiExecutor::spawn_internal_followup`]
-/// (which skips plan context) used by the immediate synthetic path.
+/// user dispatch.
 pub(crate) fn spawn_synthetic_followup(
     executor: &mut TuiExecutor,
     ui: &mut TuiApp,
@@ -574,6 +572,7 @@ impl TuiExecutor {
     /// Synthetic follow-up (test/lint analysis) with no user directive.
     /// Never records `DirectiveObserved`; runs with `none()` attribution so
     /// it cannot authorize `requirements_write`.
+    #[cfg(test)]
     pub(crate) fn spawn_internal_followup(
         &mut self,
         ui: &mut TuiApp,

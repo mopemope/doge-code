@@ -149,6 +149,11 @@ base_url = "https://api.openai.com/v1"
 project_instructions_file = "PROJECT.md"
 ```
 
+Project instruction files are read as UTF-8 regular files up to 1 MiB. Regular
+symlink targets remain supported. Oversized, invalid or special-file input is
+logged and omitted; dgc uses its base prompt, without partial instructions or
+fallback to another file when an explicit path was selected.
+
 ## Use your ChatGPT plan (preview)
 
 On macOS and Linux, sign in through the official Sign in with ChatGPT flow to
@@ -956,6 +961,15 @@ step-2
 - Not tracked (reported honestly, never inferred): `execute_bash`, `execute_shell`, workflow runs, remote MCP verification, external/manual edits. Session `changed_files` are agent-write scoped, so not all workspace modifications are tracked.
 - `undo` is safe LIFO mutation rollback: current-state guard, created-file deletion, fail-closed conflicts, no redo yet.
 - Storage: `.doge/sessions/<id>/provenance/v8/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` and `provenance/v7/events/` remain readable but are never written or migrated. Deleting the session removes its provenance. The repomap SQLite DB is a rebuildable cache and is never used for durable provenance.
+- Provenance acquisition is limited to 8 MiB per event, 128 MiB total and
+  65,536 directory entries across legacy/current versions; exceeding a limit
+  returns an error. Special/symlinked records are rejected. Incomplete or
+  ambiguous history is historical evidence only: `provenance_read` reports
+  `provenance_incomplete=true`, unknown coverage/current lifecycle and no inferred
+  classification IDs. Foreign-session events are omitted. Requirements/plan
+  state operations reject missing/corrupt history or the session's recorded
+  write-failure flag. Original records are preserved; an error does not trigger
+  automatic deletion, migration or reassessment of old checks.
 - Use `provenance_read` to inspect events with pagination (`cursor` 0-based, `page_size` max 100) and coverage (`tracked_active`, `verified_active` = observed by at least one successful verification command, `unverified_active`, `diverged`, `unlinked`, `untracked_changed_files`, `reverted`). Filter by `verification_obligation_id` to see obligation definition transitions + matched verifications.
 
 ## Verification Obligations
