@@ -73,7 +73,10 @@ an agent. The default remains one historical Rust policy case and one explicitly
 synthetic Go case. Explicit `--case go-humanize-ftoa-limits` adds a separate
 real-history Go experiment from an external `--source-repo`; unselected cases do
 not enter its denominator. These fixtures and offline replays are not practical
-model acceptance results. Keep this separate from the dgc exec comparison below.
+model acceptance results. Keep this separate from the dgc exec comparison below. Its read-only candidate
+handoff ties patch/check/decision identities together; historical inspection and
+summary remain readable after a checker update without rescoring. Fresh checks
+and review writes still require the original prepared checker.
 
 ## Matched runs
 

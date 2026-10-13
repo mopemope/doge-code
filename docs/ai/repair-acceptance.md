@@ -2,7 +2,7 @@
 
 The small [runner](../../scripts/repair_acceptance.py) prepares fixed tasks, checks
 an externally produced candidate, records an independent operator decision, and
-summarizes all planned trials. It never starts a model or agent, calls a provider,
+summarizes all planned trials and inspects a checked candidate for review. It never starts a model or agent, calls a provider,
 configures credentials, fetches dependencies or adapts Codex event streams.
 It complements the existing dgc exec comparison runner; it does not replace it.
 
@@ -142,6 +142,11 @@ other platforms are deliberately outside this task rubric.
 check leaves `accepted` null. Check results cannot be overwritten or silently
 rerun: prepare a new experiment/trial after correcting a harness or candidate.
 Keep the original failed result and version any changed criteria explicitly.
+New prepared criteria fix an output-binding contract. Its executed checks require
+both stdout/stderr SHA-256 fields; deleting hashes cannot downgrade a new trial to
+legacy. Review/inspection/summary reject
+modified or missing hash-bound outputs. Older records lacking those hashes remain
+readable, explicitly marked unbound; they are not retroactively verified.
 
 An operator reviews the patch, check evidence and remaining uncertainty against
 `criteria.json`, then writes an evidence file using this shape:
@@ -180,7 +185,10 @@ not invented or recorded as zero. Missing timing coverage prevents per-accepted
 time metrics. Check wall
 clock is machine-observed separately. Review requires an explicit boolean and
 notes. Summary rechecks the reviewed candidate digest; later edits cannot be
-reported as the previously accepted patch. Checker changes require a new plan. `accepted: true` additionally requires all fixed checks passing, completed
+reported as the previously accepted patch. Checker changes require a new plan for checks or new review writes. Historical
+read-only inspection/summary uses saved results and reports both checker versions,
+without rerunning, rescoring or rewriting them. `accepted: true` additionally
+requires all fixed checks passing, completed
 execution, and unchanged candidate state. This is an operator assertion, not a
 mechanism proving that the reviewer is independent or preventing evidence edits.
 
@@ -193,6 +201,52 @@ failed and successful costs and is undefined with no accepted task or incomplete
 cost coverage. Offline replays require explicit zero model costs; compute/energy
 and human labor are not claimed free. Historical and synthetic review counts are
 shown separately; do not present a mixed total as historical task success.
+
+## Checked candidate handoff
+
+After the external candidate edit and fixed `check`, inspect the result before
+or after writing an operator review:
+
+```bash
+python3 scripts/repair_acceptance.py inspect \
+  --run /path/on/disk/humanize-offline/candidate--go-humanize-ftoa-limits--001
+python3 scripts/repair_acceptance.py inspect \
+  --run /path/on/disk/humanize-offline/candidate--go-humanize-ftoa-limits--001 \
+  --include-patch > /path/outside/experiment/candidate-handoff.json
+```
+
+JSON contains changed files, source/candidate/criteria/patch identities, saved
+check commands/statuses/exits/reported counts, environment, output-file bindings,
+operator acceptance (null until reviewed), and remaining uncertainty. Patch
+content is omitted by default; `--include-patch` explicitly includes up to 64 KiB
+or fails with a request to inspect candidate.patch separately. This is a private
+operator report, not a redacted/public upload, agent instruction, provider adapter
+or automatic PR comment. Keep the report destination outside the candidate/run
+and review it before sharing. No process/model/check is started, no review is
+created and no source/record is modified. An observed failed check is report data;
+a valid report exits 0, whereas missing/inconsistent artifacts exit nonzero.
+
+Prepared but unchecked runs have no handoff yet. Supported saved v1 records must
+retain candidate workspace, original criteria/oracle, checks and patch; their
+identities and any existing review/output bindings are checked again. Removed or
+changed candidates/patches/criteria and hash-bound logs do not silently acquire a
+valid handoff. Before/after reads detect inconsistent observed endpoints; this is
+not a transactional snapshot or an authenticated/tamper-proof store. Unknown
+schemas are refused rather than migrated.
+
+Updating the checker previously made even old summaries unreadable. Read-only
+`inspect` and `summary` now distinguish the recorded checker from the current
+reader using `checker.matches_current` and `saved_results_not_rescored`. They
+report the original decision/measurements, with old missing log hashes explicitly
+unbound; no new validation is attributed to that historical run. `check` and
+`review` still refuse a different checker and require a freshly prepared plan.
+There is no historical re-review/rescore or schema migration command.
+
+For a real dgc session, its existing `dgc session evidence` export remains the
+source of agent/provenance observations. This handoff reads the separate fixed
+repair-task artifacts; it neither imports nor fabricates session/model evidence.
+The practical next measurement still needs an authorized actual model run on
+unseen tasks. An offline candidate/reference handoff validates mechanics only.
 
 ## Later authorized model trials and comparisons
 
