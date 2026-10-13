@@ -190,6 +190,97 @@ class RepairAcceptanceTests(unittest.TestCase):
         self.assertFalse(result['checks'][0]['test_execution_attested'])
         self.assertIsNone(result['accepted'])
 
+    def test_inspection_is_read_only_and_never_launches_checks(self):
+        repair.check(self.run)
+        before=repair.evidence_files(self.run)
+        with patch.object(repair.runtime,'stream_child',side_effect=AssertionError('must not launch')),patch.object(repair.subprocess,'run',side_effect=AssertionError('must not probe')):
+            result=repair.inspect_run(self.run,include_patch=True)
+        self.assertIsNone(result['accepted'])
+        self.assertTrue(result['machine_passed'])
+        self.assertEqual(result['patch']['content'],'')
+        self.assertEqual(result['checks'][0]['output_evidence']['stdout']['hash_binding'],'verified')
+        self.assertEqual(repair.evidence_files(self.run),before)
+        self.assertFalse((self.run/'review.json').exists())
+
+    def test_historical_inspection_and_summary_do_not_rescore_after_checker_update(self):
+        repair.check(self.run);repair.review(self.run,self.evidence())
+        before=repair.evidence_files(self.run)
+        with patch.object(repair,'checker_identity',return_value={'different':'reader'}):
+            result=repair.inspect_run(self.run)
+            summary=repair.summarize(self.output)
+            self.assertFalse(result['checker']['matches_current'])
+            self.assertTrue(result['accepted'])
+            self.assertEqual(summary['variants']['candidate']['accepted'],1)
+            self.assertEqual(summary['checker']['interpretation'],'saved_results_not_rescored')
+            with self.assertRaisesRegex(ValueError,'checker changed'):repair.check(self.run)
+            with self.assertRaisesRegex(ValueError,'checker changed'):repair.review(self.run,self.evidence())
+        self.assertEqual(repair.evidence_files(self.run),before)
+
+    def test_new_recorded_log_tampering_blocks_review_inspection_and_summary(self):
+        repair.check(self.run)
+        repair.review(self.run,self.evidence())
+        (self.run/'all.stdout.txt').write_text('forged pass output')
+        for operation in [lambda:repair.inspect_run(self.run),lambda:repair.summarize(self.output),lambda:repair.review(self.run,self.evidence())]:
+            with self.assertRaisesRegex(ValueError,'output evidence changed'):operation()
+
+    def test_new_log_hash_deletion_cannot_downgrade_to_legacy(self):
+        repair.check(self.run)
+        path=self.run/'checks.json';checks=repair.read(path)
+        checks['checks'][0].pop('stdout_sha256')
+        path.write_text(json.dumps(checks))
+        (self.run/'all.stdout.txt').write_text('forged log')
+        for operation in [lambda:repair.inspect_run(self.run),lambda:repair.review(self.run,self.evidence())]:
+            with self.assertRaisesRegex(ValueError,'hash binding is missing'):operation()
+
+    def test_old_unbound_logs_are_explicit_not_promoted_to_verified(self):
+        repair.check(self.run)
+        path=self.run/'checks.json';checks=repair.read(path)
+        checks['checks'][0].pop('stdout_sha256');checks['checks'][0].pop('stderr_sha256')
+        checks.pop('output_binding')
+        # A saved legacy fixture has no prepared binding contract; changing only
+        # a new checks file must never downgrade it to this old record shape.
+        criteria=repair.read(self.run/'criteria.json');criteria.pop('output_binding')
+        (self.run/'criteria.json').write_text(json.dumps(criteria))
+        criteria_digest=repair.digest((self.run/'criteria.json').read_bytes())
+        plan=repair.read(self.output/'plan.json');plan['runs'][0]['criteria_digest']=criteria_digest
+        (self.output/'plan.json').write_text(json.dumps(plan))
+        checks['criteria_digest']=criteria_digest
+        path.write_text(json.dumps(checks))
+        result=repair.inspect_run(self.run)
+        self.assertEqual(result['checks'][0]['output_evidence']['stdout']['hash_binding'],'unrecorded_legacy_or_not_captured')
+        self.assertIsNone(result['accepted'])
+
+    def test_historical_inspection_preserves_criteria_patch_and_candidate_guards(self):
+        repair.check(self.run)
+        with patch.object(repair,'checker_identity',return_value={'different':'reader'}):
+            (self.run/'candidate.patch').write_text('changed')
+            with self.assertRaisesRegex(ValueError,'patch evidence changed'):repair.inspect_run(self.run)
+            (self.run/'candidate.patch').write_text('')
+            (self.run/'workspace/block.go').write_text('later patch')
+            with self.assertRaisesRegex(ValueError,'candidate changed'):repair.inspect_run(self.run)
+
+    def test_inspection_rejects_changed_files_during_read(self):
+        repair.check(self.run)
+        original=repair.saved_evidence
+        calls=0
+        def change_after_read(*args):
+            nonlocal calls
+            result=original(*args);calls+=1
+            if calls==2:(self.run/'all.stderr.txt').write_text('later output')
+            return result
+        with patch.object(repair,'saved_evidence',side_effect=change_after_read),self.assertRaisesRegex(ValueError,'evidence changed during inspection'):
+            repair.inspect_run(self.run)
+
+    def test_inspection_inline_patch_limit_and_identity_mismatch(self):
+        (self.run/'workspace/block.go').write_text('correct'+' '*70000)
+        repair.check(self.run)
+        self.assertIsNone(repair.inspect_run(self.run)['patch']['content'])
+        with self.assertRaisesRegex(ValueError,'64 KiB'):repair.inspect_run(self.run,include_patch=True)
+        repair.review(self.run,self.evidence())
+        row=repair.read(self.run/'review.json');row['variant']='different'
+        (self.run/'review.json').write_text(json.dumps(row))
+        with self.assertRaisesRegex(ValueError,'different trial identity'):repair.inspect_run(self.run)
+
     def test_candidate_change_after_review_rejects_summary(self):
         repair.check(self.run)
         repair.review(self.run,self.evidence())

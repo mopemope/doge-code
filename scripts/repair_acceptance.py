@@ -183,6 +183,7 @@ def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None
                 (workspace / "REPAIR_TASK.txt").write_text(case["prompt"] + "\n")
                 baseline["REPAIR_TASK.txt"] = digest((workspace / "REPAIR_TASK.txt").read_bytes())
                 criteria = {**case, "baseline": baseline, "source_digest": source_digest,
+                            "output_binding": "sha256-v1",
                             "oracle_digest": digest(oracle), "variant": variant, "trial": trial, "kind": kind}
                 write_new(run / "criteria.json", criteria)
                 runs.append({"run": name, "criteria_digest": digest((run / "criteria.json").read_bytes())})
@@ -192,10 +193,12 @@ def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None
     return plan
 
 
-def load_run(run):
+def load_run(run, require_current_checker=True):
     run = run.resolve()
     plan = read(run.parent / "plan.json")
-    if plan.get("checker") != checker_identity():
+    if plan.get("schema_version") != 1:
+        raise ValueError("unsupported saved experiment schema")
+    if require_current_checker and plan.get("checker") != checker_identity():
         raise ValueError("checker changed after preparation; preserve this experiment and prepare a new one")
     entry = next((r for r in plan["runs"] if r["run"] == run.name), None)
     if entry is None or digest((run / "criteria.json").read_bytes()) != entry["criteria_digest"]:
@@ -208,6 +211,8 @@ def load_run(run):
 
 def check(run):
     criteria = load_run(run)
+    if criteria.get("output_binding") != "sha256-v1":
+        raise ValueError("fresh checks require the prepared output-binding contract")
     if (run / "checks.json").exists():
         raise ValueError("checks already recorded; use a new planned trial for any rerun")
     workspace = run / "workspace"
@@ -275,6 +280,7 @@ def check(run):
                                     "timed_out": timeout, "elapsed_seconds": elapsed, "reported_tests": executed,
                                     "test_count_source": "not_applicable" if check_kind == "vet" else "stdout_heuristic", "test_execution_attested": None if check_kind == "vet" else False,
                                     "passed": passed, "error": error, "output_truncated": truncated,
+                                    "stdout_sha256": digest(stdout.read_bytes()), "stderr_sha256": digest(stderr.read_bytes()),
                                     "verifier_source_changed": source_changed})
     if signature(workspace) != before:
         snapshot_error = "candidate changed during verification"
@@ -286,6 +292,7 @@ def check(run):
         for row in results:
             row.update(status="invalidated", passed=False, candidate_snapshot_error=snapshot_error)
     result = {"schema_version": 1, "criteria_digest": digest((run / "criteria.json").read_bytes()),
+              "output_binding": criteria["output_binding"],
               "candidate_digest": digest(json.dumps(before, sort_keys=True).encode()),
               "candidate_patch_digest": digest((run / "candidate.patch").read_bytes()),
               "candidate_snapshot_error": snapshot_error,
@@ -312,6 +319,19 @@ def number(value, name, nullable=False):
     return value
 
 
+def validate_check_outputs(run, checks, require_hashes=False):
+    for command in checks["checks"]:
+        for stream in ("stdout", "stderr"):
+            expected = command.get(stream + "_sha256")
+            captured = "exit_code" in command or command.get("status") not in ("scope_denied", "invalidated")
+            if require_hashes and captured and expected is None:
+                raise ValueError("required check output hash binding is missing")
+            if expected is not None:
+                path = run / (command["name"] + "." + stream + ".txt")
+                if not path.is_file() or digest(path.read_bytes()) != expected:
+                    raise ValueError("recorded check output evidence changed or is missing")
+
+
 def review(run, evidence):
     criteria = load_run(run)
     checks = read(run / "checks.json")
@@ -322,6 +342,9 @@ def review(run, evidence):
     current = digest(json.dumps(signature(run / "workspace"), sort_keys=True).encode())
     if current != checks["candidate_digest"]:
         raise ValueError("candidate changed after checks; record a new trial")
+    if criteria.get("output_binding") != "sha256-v1" or checks.get("output_binding") != criteria["output_binding"]:
+        raise ValueError("new review requires the prepared output-binding contract")
+    validate_check_outputs(run, checks, require_hashes=True)
     if not isinstance(evidence, dict) or set(evidence) != {"accepted", "notes", "execution"}:
         raise ValueError("review fields must be accepted, notes, execution")
     if type(evidence.get("accepted")) is not bool or not isinstance(evidence.get("notes"), str) or not evidence["notes"].strip():
@@ -361,25 +384,81 @@ def review(run, evidence):
     return result
 
 
+def saved_evidence(run, criteria):
+    """Validate saved identities without rerunning or rescoring old checks."""
+    checks = read(run / "checks.json")
+    if checks.get("schema_version") != 1:
+        raise ValueError("unsupported saved check schema")
+    if checks["criteria_digest"] != digest((run / "criteria.json").read_bytes()):
+        raise ValueError("check evidence belongs to different criteria")
+    if checks["candidate_patch_digest"] != digest((run / "candidate.patch").read_bytes()):
+        raise ValueError("candidate patch evidence changed")
+    if checks["candidate_digest"] != digest(json.dumps(signature(run / "workspace"), sort_keys=True).encode()):
+        raise ValueError("reviewed candidate changed; preserve original evidence and use a new trial")
+    binding = criteria.get("output_binding")
+    if binding is not None and (binding != "sha256-v1" or checks.get("output_binding") != binding):
+        raise ValueError("saved output-binding contract changed or is unsupported")
+    validate_check_outputs(run, checks, require_hashes=binding == "sha256-v1")
+    row = read(run / "review.json") if (run / "review.json").exists() else None
+    if row is not None:
+        if row.get("schema_version") != 1 or row["checks_digest"] != digest((run / "checks.json").read_bytes()):
+            raise ValueError("check evidence changed after review or review schema is unsupported")
+        expected = {"case_id": criteria["case_id"], "variant": criteria["variant"], "kind": criteria["kind"], "provenance_kind": criteria["provenance"]["kind"]}
+        if any(row.get(key) != value for key, value in expected.items()):
+            raise ValueError("saved review belongs to a different trial identity")
+        if type(row.get("accepted")) is not bool or (row["accepted"] and (not checks["machine_passed"] or row["execution"]["status"] != "completed")):
+            raise ValueError("saved acceptance contradicts recorded checks or execution")
+    return checks, row
+
+
+def evidence_files(run):
+    paths = [run.parent / "plan.json", run / "criteria.json", run / "oracle", run / "checks.json", run / "candidate.patch", run / "review.json"]
+    paths.extend(run.glob("*.stdout.txt"))
+    paths.extend(run.glob("*.stderr.txt"))
+    return {str(path): digest(path.read_bytes()) if path.is_file() else None for path in paths}
+
+
+def inspect_run(run, include_patch=False):
+    """Read-only candidate handoff; an old checker is provenance, not a rescore."""
+    before = evidence_files(run)
+    criteria = load_run(run, require_current_checker=False)
+    checks, row = saved_evidence(run, criteria)
+    plan = read(run.parent / "plan.json")
+    patch = (run / "candidate.patch").read_bytes()
+    if include_patch and len(patch) > 65536:
+        raise ValueError("inline patch exceeds 64 KiB; inspect candidate.patch separately")
+    commands = []
+    for command in checks["checks"]:
+        item = dict(command)
+        item["output_evidence"] = {stream: {"path": command["name"] + "." + stream + ".txt", "hash_binding": "verified" if command.get(stream + "_sha256") is not None else "unrecorded_legacy_or_not_captured"} for stream in ("stdout", "stderr")}
+        commands.append(item)
+    result = {"schema_version": 1, "case_id": criteria["case_id"], "variant": criteria["variant"], "trial": criteria["trial"], "experiment_kind": criteria["kind"],
+              "source": {key: value for key, value in criteria["provenance"].items() if key in ("kind", "repository", "base_commit")},
+              "source_digest": criteria["source_digest"], "criteria_digest": checks["criteria_digest"],
+              "checker": {"recorded": plan["checker"], "reader": checker_identity(), "matches_current": plan["checker"] == checker_identity(), "interpretation": "saved_results_not_rescored"},
+              "changed_paths": checks["changed_paths"], "scope_violations": checks["scope_violations"], "machine_passed": checks["machine_passed"],
+              "accepted": row["accepted"] if row else None, "operator_review": row,
+              "candidate_digest": checks["candidate_digest"], "patch": {"path": "candidate.patch", "sha256": checks["candidate_patch_digest"], "bytes": len(patch), "content": patch.decode() if include_patch else None},
+              "check_host": checks.get("check_host"), "tool_versions": checks.get("tool_versions"), "checks": commands,
+              "remaining_uncertainty": ["Reported stdout test counts are not assertion attestation; independent implementation review is required.", "Only saved checks/environment are represented; no additional architecture or model execution is inferred.", "Directory isolation and local hashes are not an OS sandbox or authenticated evidence store."]}
+    saved_evidence(run, criteria)
+    if evidence_files(run) != before:
+        raise ValueError("evidence changed during inspection")
+    return result
+
+
 def summarize(output):
     plan = read(output / "plan.json")
     groups = {}
     for planned in plan["runs"]:
         run = output / planned["run"]
-        criteria = load_run(run)
+        criteria = load_run(run, require_current_checker=False)
         group = groups.setdefault(criteria["variant"], {"planned": 0, "reviews": []})
         group["planned"] += 1
         if (run / "review.json").exists():
-            row = read(run / "review.json")
-            if row["checks_digest"] != digest((run / "checks.json").read_bytes()):
-                raise ValueError("check evidence changed after review")
-            checks = read(run / "checks.json")
-            if checks["candidate_patch_digest"] != digest((run / "candidate.patch").read_bytes()):
-                raise ValueError("candidate patch evidence changed")
-            if checks["candidate_digest"] != digest(json.dumps(signature(run / "workspace"), sort_keys=True).encode()):
-                raise ValueError("reviewed candidate changed; preserve original evidence and use a new trial")
+            checks, row = saved_evidence(run, criteria)
             group["reviews"].append(row)
-    summary = {"kind": plan["kind"], "comparison": plan["comparison"], "variants": {}}
+    summary = {"kind": plan["kind"], "comparison": plan["comparison"], "checker": {"recorded": plan["checker"], "reader": checker_identity(), "matches_current": plan["checker"] == checker_identity(), "interpretation": "saved_results_not_rescored"}, "variants": {}}
     for variant, group in groups.items():
         rows, total = group["reviews"], group["planned"]
         accepted = sum(row["accepted"] for row in rows)
@@ -420,6 +499,7 @@ def main():
     p.add_argument("--case", dest="case_ids", action="append", help="explicit case ID; repeat to select multiple cases (default: original two cases)")
     p = commands.add_parser("check"); p.add_argument("--run", type=Path, required=True)
     p = commands.add_parser("review"); p.add_argument("--run", type=Path, required=True); p.add_argument("--evidence", type=Path, required=True)
+    p = commands.add_parser("inspect"); p.add_argument("--run", type=Path, required=True); p.add_argument("--include-patch", action="store_true", help="include the verified private patch, at most 64 KiB")
     p = commands.add_parser("summary"); p.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -429,6 +509,8 @@ def main():
             result = check(args.run.resolve())
         elif args.command == "review":
             result = review(args.run.resolve(), read(args.evidence))
+        elif args.command == "inspect":
+            result = inspect_run(args.run.resolve(), args.include_patch)
         else:
             result = summarize(args.output.resolve())
         print(json.dumps(result, indent=2, allow_nan=False))
