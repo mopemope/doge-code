@@ -178,7 +178,7 @@ pub(crate) fn spawn_agent_turn(
 
     // Build messages (system + history + shell context + plan + user).
     let mut msgs = Vec::new();
-    let sys_prompt = crate::tui::commands::prompt::build_system_prompt(&executor.cfg);
+    let sys_prompt = crate::features::agent_prompt::build_system_prompt(&executor.cfg);
     msgs.push(crate::llm::ChatMessage {
         reasoning: Default::default(),
         provider_state: None,

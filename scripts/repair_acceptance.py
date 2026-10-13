@@ -7,10 +7,8 @@ fixtures/checks are executed; disposable directories are not an OS sandbox.
 import argparse
 import difflib
 import hashlib
-import importlib.util
 import io
 import json
-import math
 import os
 import platform
 from pathlib import Path
@@ -23,11 +21,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "docs/ai/repair-cases"
-# Reuse bounded output capture and process-group cleanup from the existing runner.
+# Offline orchestration depends on neutral process mechanics, never a live launcher.
 sys.path.insert(0, str(ROOT / "scripts"))
-spec = importlib.util.spec_from_file_location("runtime_evals", ROOT / "scripts/run-agent-evals.py")
-runtime = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(runtime)
+import agent_eval_process as runtime
+from repair_acceptance_contracts import number, validate_review
 
 
 def read(path):
@@ -47,7 +44,7 @@ def digest(data):
 
 
 def checker_identity():
-    return {name: digest((ROOT / "scripts" / name).read_bytes()) for name in ("repair_acceptance.py", "run-agent-evals.py")}
+    return {name: digest((ROOT / "scripts" / name).read_bytes()) for name in ("repair_acceptance.py", "repair_acceptance_contracts.py", "agent_eval_process.py")}
 
 
 def signature(root):
@@ -305,20 +302,6 @@ def check(run):
     return result
 
 
-def number(value, name, nullable=False):
-    if value is None and nullable:
-        return value
-    if type(value) not in (int, float) or value < 0:
-        raise ValueError(f"{name} must be finite and nonnegative")
-    try:
-        finite = math.isfinite(value)
-    except OverflowError:
-        finite = False
-    if not finite:
-        raise ValueError(f"{name} must be finite and nonnegative")
-    return value
-
-
 def validate_check_outputs(run, checks, require_hashes=False):
     for command in checks["checks"]:
         for stream in ("stdout", "stderr"):
@@ -345,38 +328,7 @@ def review(run, evidence):
     if criteria.get("output_binding") != "sha256-v1" or checks.get("output_binding") != criteria["output_binding"]:
         raise ValueError("new review requires the prepared output-binding contract")
     validate_check_outputs(run, checks, require_hashes=True)
-    if not isinstance(evidence, dict) or set(evidence) != {"accepted", "notes", "execution"}:
-        raise ValueError("review fields must be accepted, notes, execution")
-    if type(evidence.get("accepted")) is not bool or not isinstance(evidence.get("notes"), str) or not evidence["notes"].strip():
-        raise ValueError("review needs an explicit accepted boolean and nonempty notes")
-    execution = evidence["execution"]
-    if not isinstance(execution, dict) or set(execution) != {"status", "elapsed_seconds", "review_seconds", "rework_seconds", "interventions", "cost"} | ({"identity"} if criteria["kind"] == "model-evaluation" else set()):
-        raise ValueError("unexpected or missing execution fields")
-    if execution["status"] not in ("completed", "failed", "timed_out", "blocked", "cancelled"):
-        raise ValueError("invalid execution status")
-    if evidence["accepted"] and (not checks["machine_passed"] or execution["status"] != "completed"):
-        raise ValueError("acceptance requires all checks and completed execution; machine pass alone never accepts")
-    for key in ("elapsed_seconds", "review_seconds", "rework_seconds"):
-        number(execution[key], key, nullable=True)
-    if not isinstance(execution["interventions"], list):
-        raise ValueError("interventions must be a list")
-    for event in execution["interventions"]:
-        if not isinstance(event, dict) or set(event) != {"kind", "note", "seconds"}:
-            raise ValueError("intervention fields must be kind, note, seconds")
-        if event["kind"] not in ("extra_instruction", "manual_edit", "restart", "environment_workaround") or not isinstance(event.get("note"), str) or not event["note"].strip():
-            raise ValueError("each intervention needs a recognized kind and a note")
-        number(event["seconds"], "intervention seconds", nullable=True)
-    if not isinstance(execution["cost"], dict) or set(execution["cost"]) != {"estimated_usd", "confirmed_usd"}:
-        raise ValueError("cost fields must be estimated_usd, confirmed_usd")
-    for key in ("estimated_usd", "confirmed_usd"):
-        number(execution["cost"][key], key, nullable=True)
-    if criteria["kind"] == "offline-replay":
-        if any(execution["cost"][key] != 0 for key in ("estimated_usd", "confirmed_usd")):
-            raise ValueError("offline replay requires explicit zero model cost")
-    else:
-        identity = execution.get("identity")
-        if not isinstance(identity, dict) or any(not isinstance(identity.get(k), str) or not identity[k].strip() for k in ("model", "provider", "configuration", "permissions", "environment")):
-            raise ValueError("model evaluation needs actual model/provider/configuration/permissions/environment identity")
+    validate_review(evidence, criteria["kind"], checks["machine_passed"])
     result = {"schema_version": 1, "case_id": criteria["case_id"], "variant": criteria["variant"],
               "kind": criteria["kind"], "provenance_kind": criteria["provenance"]["kind"],
               "checks_digest": digest((run / "checks.json").read_bytes()), **evidence}

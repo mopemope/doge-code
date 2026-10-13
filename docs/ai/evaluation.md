@@ -77,6 +77,10 @@ model acceptance results. Keep this separate from the dgc exec comparison below.
 handoff ties patch/check/decision identities together; historical inspection and
 summary remain readable after a checker update without rescoring. Fresh checks
 and review writes still require the original prepared checker.
+The offline entrypoint imports neutral `agent_eval_process` capture mechanics and
+pure `repair_acceptance_contracts` validation, without loading the live runner.
+New plans bind those sources and `repair_acceptance.py`; old checker identities
+remain part of saved provenance and are never rewritten by read-only handoff.
 
 ## Matched runs
 

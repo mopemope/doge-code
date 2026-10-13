@@ -31,6 +31,7 @@ def load_module(name, filename):
 
 common = load_module("agent_eval_common", "agent_eval_common.py")
 runner = load_module("run_agent_evals", "run-agent-evals.py")
+import agent_eval_process as process
 evals = load_module("evals_compare", "compare-agent-evals.py")
 
 
@@ -60,7 +61,7 @@ def readers_scheduled_after_join_budget():
             return super().join()
 
     try:
-        with patch.object(runner.threading, "Thread", DelayedReader):
+        with patch.object(process.threading, "Thread", DelayedReader):
             yield readers
     finally:
         for reader in readers:
@@ -630,7 +631,7 @@ class RunnerTests(HarnessCase):
     def test_final_drain_preserves_truncation_when_eof_is_observed(self):
         from unittest.mock import patch
         stdout, stderr = self.root / "stdout", self.root / "stderr"
-        with readers_scheduled_after_join_budget(), patch.object(runner, "MAX_STREAM_BYTES", 4):
+        with readers_scheduled_after_join_budget(), patch.object(process, "MAX_STREAM_BYTES", 4):
             result = runner.stream_child(
                 [sys.executable, "-c", "print('0123456789')"], self.root,
                 dict(os.environ), 5, 0.1, stdout, stderr,
@@ -643,7 +644,7 @@ class RunnerTests(HarnessCase):
     def test_final_drain_limits_consumed_bytes_even_when_sink_is_full(self):
         from unittest.mock import patch
         stdout, stderr = self.root / "stdout", self.root / "stderr"
-        with readers_scheduled_after_join_budget(), patch.object(runner, "MAX_STREAM_BYTES", 0), patch.object(runner, "MAX_FINAL_DRAIN_BYTES", 8):
+        with readers_scheduled_after_join_budget(), patch.object(process, "MAX_STREAM_BYTES", 0), patch.object(process, "MAX_FINAL_DRAIN_BYTES", 8):
             result = runner.stream_child(
                 [sys.executable, "-c", "print('0123456789')"], self.root,
                 dict(os.environ), 5, 0.1, stdout, stderr,
@@ -665,7 +666,7 @@ class RunnerTests(HarnessCase):
                 raise OSError("injected sink failure")
             return real_open(path, *args, **kwargs)
 
-        with readers_scheduled_after_join_budget(), patch.object(runner, "open", side_effect=fail_stdout, create=True):
+        with readers_scheduled_after_join_budget(), patch.object(process, "open", side_effect=fail_stdout, create=True):
             result = runner.stream_child(
                 [sys.executable, "-c", "print('complete output')"], self.root,
                 dict(os.environ), 5, 0.1, stdout, stderr,
@@ -677,7 +678,7 @@ class RunnerTests(HarnessCase):
         from unittest.mock import patch
         stdout = self.root / "stdout.txt"
         stderr = self.root / "stderr.txt"
-        with patch.object(runner, "MAX_STREAM_BYTES", 1024):
+        with patch.object(process, "MAX_STREAM_BYTES", 1024):
             result = runner.stream_child(
                 [sys.executable, "-c", "import os; os.write(1, b'x'*4096); os.write(2, b'y'*4096)"],
                 self.root, dict(os.environ), 5, 0.1, stdout, stderr,
