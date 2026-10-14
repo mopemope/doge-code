@@ -530,7 +530,7 @@ async fn repair_workflow_provider_timeout_retains_terminal_without_restart() {
         Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
             .times(1)
             .respond_with(delay_and_then(
-                Duration::from_millis(300),
+                Duration::from_secs(3),
                 json_encoded(completion(
                     serde_json::json!({"role":"assistant","content":"late"}),
                     true,
@@ -538,7 +538,10 @@ async fn repair_workflow_provider_timeout_retains_terminal_without_restart() {
             )),
     );
     let mut p = plan();
-    p.per_run.elapsed_ms = 60;
+    // The turn deadline includes durable checkpoint/scope/attempt preparation
+    // before transport. Give the request time to reach the fixture under full
+    // suite load, while keeping its response later than the entire turn.
+    p.per_run.elapsed_ms = 1000;
     let path = root.path().join("plan.json");
     write_json(&path, &p).expect("plan");
     let report = run(
@@ -552,6 +555,8 @@ async fn repair_workflow_provider_timeout_retains_terminal_without_restart() {
     let data = inspect(Path::new(&report.run)).expect("inspect");
     assert_eq!(data["ledger"]["rounds_started"], 1);
     assert_eq!(data["ledger"]["requests_reserved"], 1);
+    assert_eq!(data["ledger"]["usage_records"], 0);
+    assert_eq!(data["ledger"]["tokens_reserved"], p.per_run.tokens);
     assert!(
         Path::new(&report.run)
             .join("terminal-candidate/value.txt")
