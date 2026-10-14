@@ -531,6 +531,10 @@ async fn run_owned(
             &serde_json::json!({"status":run.status,"stop_reason":run.stop_reason,"budget":run.budget,"session_id":turn.review_link.map(|l|l.session_id)}),
         )?;
         ensure!(
+            run.budget.charged_tokens <= plan.per_run.tokens,
+            "repair turn budget exceeded; no verification or restart"
+        );
+        ensure!(
             source(origin, &env, cancel.clone()).await? == baseline,
             "original source changed; candidate retained without application"
         );
@@ -669,20 +673,34 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
         }
         workspace::check_scope(&candidate, &baseline, &plan, &suffixes)?;
         if ledger.status == "verified_candidate" {
-            let agent: serde_json::Value = serde_json::from_slice(&read_record(
-                &root.join(format!("{label}-agent.json")),
-                65536,
-            )?)?;
             ensure!(
                 passed
-                    && agent["status"] == "completed"
-                    && agent["stop_reason"].is_null()
-                    && agent["session_id"].as_str().is_some_and(|s| !s.is_empty())
                     && ledger.requests_reserved > 0
                     && ledger.requests_reserved == ledger.usage_records
                     && ledger.provider_reported_tokens <= ledger.tokens_reserved,
-                "verified status requires completed agent and known usage"
+                "verified status requires known usage"
             );
+            let mut session = None;
+            for round in 1..=ledger.rounds_started {
+                let agent: serde_json::Value = serde_json::from_slice(&read_record(
+                    &root.join(format!("round-{round}-agent.json")),
+                    65536,
+                )?)?;
+                let id = agent["session_id"].as_str().filter(|s| !s.is_empty());
+                ensure!(
+                    agent["status"] == "completed"
+                        && agent["stop_reason"].is_null()
+                        && id.is_some()
+                        && session
+                            .as_deref()
+                            .is_none_or(|previous| Some(previous) == id)
+                        && agent["budget"]["charged_tokens"]
+                            .as_u64()
+                            .is_some_and(|n| n <= plan.per_run.tokens),
+                    "verified status requires completed in-budget turns in one session"
+                );
+                session = id.map(str::to_owned);
+            }
         }
         Some(checks)
     } else {
