@@ -82,12 +82,21 @@ pub(crate) fn get_project_instructions_file_path(
 
 /// Combine the base system prompt with project-specific instructions.
 pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
+    let template = String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
+        .unwrap_or_default();
+    render_system_prompt(cfg, template)
+}
+
+pub(crate) fn build_repair_system_prompt(cfg: &crate::config::AppConfig) -> String {
+    render_system_prompt(
+        cfg,
+        include_str!("../../resources/repair_system_prompt.md").into(),
+    )
+}
+
+fn render_system_prompt(cfg: &crate::config::AppConfig, sys_prompt_template: String) -> String {
     let tera = Tera::default();
     let mut context = Context::new();
-
-    let sys_prompt_template =
-        String::from_utf8(Assets::get("system_prompt.md").unwrap().data.to_vec())
-            .unwrap_or_default();
 
     context.insert("date", &Local::now().format("%Y-%m-%d %A").to_string());
     context.insert("os", &std::env::consts::OS);
@@ -117,6 +126,23 @@ pub(crate) fn build_system_prompt(cfg: &crate::config::AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repair_prompt_keeps_project_guidance_with_fixed_tool_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guidance = "Use the repository's existing error conventions.\n";
+        std::fs::write(dir.path().join("AGENTS.md"), guidance).expect("guidance");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let prompt = build_repair_system_prompt(&cfg);
+        assert!(prompt.ends_with(guidance));
+        assert!(prompt.contains(&cfg.project_root.to_string_lossy().to_string()));
+        assert!(prompt.contains("There are no deferred tools or tool discovery"));
+        assert!(!prompt.contains("use `tool_search`"));
+        assert!(build_system_prompt(&cfg).contains("use `tool_search`"));
+    }
 
     #[test]
     fn embedded_prompt_renders_all_values_without_html_escaping() {
