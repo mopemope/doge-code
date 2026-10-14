@@ -54,10 +54,22 @@ pub fn classify(result: &TestResult) -> Outcome {
     if !result.execution_observed {
         return Outcome::SpawnFailed;
     }
-    if let Some(outcome) = result
-        .structured_test_result
-        .as_deref()
-        .and_then(crate::features::structured_test_results::pytest::outcome)
+    classify_reported_tests(
+        result.structured_test_result.as_deref(),
+        result.success,
+        result.output_truncated || !result.warnings.is_empty(),
+    )
+}
+
+/// Shared interpretation for queue and model feedback; process success alone
+/// never establishes that tests ran.
+pub(crate) fn classify_reported_tests(
+    structured: Option<&crate::features::structured_test_results::StructuredTestResult>,
+    success: bool,
+    incomplete: bool,
+) -> Outcome {
+    if let Some(outcome) =
+        structured.and_then(crate::features::structured_test_results::pytest::outcome)
     {
         use crate::features::structured_test_results::pytest::Outcome as Python;
         return match outcome {
@@ -72,17 +84,13 @@ pub fn classify(result: &TestResult) -> Outcome {
             Python::Unknown => Outcome::Unknown,
         };
     }
-    if !result.success {
+    if !success {
         return Outcome::Failed;
     }
-    if result.output_truncated || !result.warnings.is_empty() {
+    if incomplete {
         return Outcome::Incomplete;
     }
-    match result
-        .structured_test_result
-        .as_ref()
-        .map(|s| &s.observation)
-    {
+    match structured.map(|s| &s.observation) {
         Some(ResultObservation::Complete { test_events, .. }) if test_events.failed > 0 => {
             Outcome::Failed
         }
