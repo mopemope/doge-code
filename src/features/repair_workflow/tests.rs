@@ -47,6 +47,48 @@ fn repair_gate_refuses_complete_batch_before_declared_write() {
         "old"
     );
 }
+
+#[test]
+fn repair_search_accepts_candidate_absolute_glob_and_refuses_escapes() {
+    let owner = tempfile::tempdir().expect("root");
+    let root = owner.path().join(".doge/repairs/run/candidate");
+    fs::create_dir_all(&root).expect("candidate");
+    fs::write(root.as_path().join("value.txt"), "old").expect("source");
+    let guard = guard::Guard {
+        budget: None,
+        root: root.as_path().into(),
+        baseline: workspace::manifest(root.as_path()).expect("manifest"),
+        plan: plan(),
+        suffixes: BTreeMap::new(),
+    };
+    let search = |glob: String| crate::llm::types::ToolCall {
+        id: Some("search".into()),
+        r#type: "function".into(),
+        function: crate::llm::types::ToolCallFunction {
+            name: "search_text".into(),
+            arguments: serde_json::json!({"search_pattern":"old","file_glob":glob}).to_string(),
+        },
+    };
+    for glob in [
+        "value.txt".into(),
+        "*.txt".into(),
+        root.as_path().join("value.txt").display().to_string(),
+        root.as_path().join("*.txt").display().to_string(),
+    ] {
+        guard.preflight(&[search(glob)]).expect("candidate search");
+    }
+    for glob in [
+        "../*.txt".into(),
+        ".doge/*".into(),
+        "target/*".into(),
+        ".git/*".into(),
+        root.as_path().join("../*.txt").display().to_string(),
+        root.as_path().join(".doge/*").display().to_string(),
+        format!("{}-sibling/*.txt", root.as_path().display()),
+    ] {
+        assert!(guard.preflight(&[search(glob)]).is_err());
+    }
+}
 #[test]
 fn repair_ledger_reserves_before_start_without_refunding_or_resetting() {
     use crate::llm::client_core::RequestAttemptPolicy;
