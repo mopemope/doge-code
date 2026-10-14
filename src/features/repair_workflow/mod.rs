@@ -612,23 +612,21 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
         ledger.version == 1 && workspace::hash(&serde_json::to_vec(&plan)?) == ledger.plan_digest,
         "repair plan/ledger binding mismatch"
     );
-    ensure!(
-        ledger.rounds_started <= plan.max_restarts + 1
-            && ledger.requests_reserved <= plan.total_requests
-            && ledger.tokens_reserved <= plan.total_tokens,
-        "repair ledger limits changed"
-    );
-    let label = format!("round-{}", ledger.rounds_started);
-    let checks = if ledger.rounds_started > 0 && root.join(format!("{label}-checks.json")).exists()
-    {
+    ledger.validate(&plan)?;
+    let (label, candidate) = if ledger.rounds_started == 0 {
+        ("baseline".to_owned(), root.join("baseline"))
+    } else {
+        let label = format!("round-{}", ledger.rounds_started);
+        let candidate = root.join(format!("{label}-candidate"));
+        (label, candidate)
+    };
+    let checks = if root.join(format!("{label}-checks.json")).exists() {
         let checks: Verification = serde_json::from_slice(&read_record(
             &root.join(format!("{label}-checks.json")),
             64 * 1024 * 1024,
         )?)?;
         ensure!(
-            workspace::digest(&workspace::manifest(
-                &root.join(format!("{label}-candidate"))
-            )?)? == checks.candidate_digest,
+            workspace::digest(&workspace::manifest(&candidate)?)? == checks.candidate_digest,
             "reviewed candidate changed"
         );
         let complete = !checks.checks.is_empty()
@@ -669,12 +667,7 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
                 .to_owned(),
             );
         }
-        workspace::check_scope(
-            &root.join(format!("{label}-candidate")),
-            &baseline,
-            &plan,
-            &suffixes,
-        )?;
+        workspace::check_scope(&candidate, &baseline, &plan, &suffixes)?;
         if ledger.status == "verified_candidate" {
             let agent: serde_json::Value = serde_json::from_slice(&read_record(
                 &root.join(format!("{label}-agent.json")),
@@ -685,7 +678,9 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
                     && agent["status"] == "completed"
                     && agent["stop_reason"].is_null()
                     && agent["session_id"].as_str().is_some_and(|s| !s.is_empty())
-                    && ledger.requests_reserved == ledger.usage_records,
+                    && ledger.requests_reserved > 0
+                    && ledger.requests_reserved == ledger.usage_records
+                    && ledger.provider_reported_tokens <= ledger.tokens_reserved,
                 "verified status requires completed agent and known usage"
             );
         }
@@ -694,7 +689,10 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
         None
     };
     ensure!(
-        ledger.status != "verified_candidate" || checks.as_ref().is_some_and(|c| c.passed),
+        !matches!(
+            ledger.status.as_str(),
+            "verified_candidate" | "already_verified"
+        ) || checks.as_ref().is_some_and(|c| c.passed && c.complete),
         "verified status without bound checks"
     );
     let acceptance = if root.join("acceptance.json").exists() {
@@ -704,6 +702,21 @@ fn inspect(root: &Path) -> Result<serde_json::Value> {
             data["version"] == 1 && data["plan_digest"].as_str() == Some(&ledger.plan_digest),
             "acceptance plan binding changed"
         );
+        ensure!(
+            matches!(data["decision"].as_str(), Some("accepted" | "rejected"))
+                && data["original_application"] == "not_performed"
+                && data["note"]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty() && s.len() <= 8192),
+            "acceptance record fields inconsistent"
+        );
+        if data["decision"] == "accepted" {
+            ensure!(
+                ledger.status == "verified_candidate"
+                    && checks.as_ref().is_some_and(|c| c.passed && c.complete),
+                "accepted decision without completed verified candidate"
+            );
+        }
         ensure!(
             checks
                 .as_ref()
@@ -745,6 +758,12 @@ pub async fn cli(_cfg: crate::config::AppConfig, command: &RepairCommand) -> Res
             let root = run.canonicalize()?;
             let _lease = ledger::lock_owner(&root.join("owner.lock"), false)?;
             let data = inspect(&root)?;
+            ensure!(
+                data["ledger"]["rounds_started"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0),
+                "review requires an agent candidate; baseline acceptance unconfirmed"
+            );
             ensure!(
                 data["verification"]["candidate_digest"].as_str() == Some(candidate_digest),
                 "review candidate digest mismatch"
