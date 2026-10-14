@@ -95,11 +95,22 @@ impl Guard {
             if name == "search_text"
                 && let Some(pattern) = args["file_glob"].as_str()
             {
+                // search_text supports absolute candidate paths. Strip the
+                // literal root before checking traversal and excluded files;
+                // the candidate itself lives beneath an excluded .doge path.
+                let relative = if std::path::Path::new(pattern).is_absolute() {
+                    std::path::Path::new(pattern)
+                        .strip_prefix(&self.root)
+                        .context("repair search scope: external path")?
+                        .to_str()
+                        .context("repair search path encoding")?
+                } else {
+                    pattern
+                };
                 ensure!(
-                    !pattern.starts_with('/')
-                        && !pattern
-                            .split('/')
-                            .any(|c| c == ".." || matches!(c, ".doge" | ".git" | "target")),
+                    !relative
+                        .split('/')
+                        .any(|c| c == ".." || matches!(c, ".doge" | ".git" | "target")),
                     "repair search scope"
                 );
             }
