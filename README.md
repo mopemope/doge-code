@@ -694,7 +694,10 @@ environment. Captured output preserves line endings within the output budget.
 - `search_text`: Text-based search across files
 - `fs_read_many_files`: Batch file reading with budget management
 
-`search_text` resolves the literal directory prefix of `file_glob` and checks
+`search_text` searches individual lines with a regex; multiline patterns and
+arbitrary ripgrep flags are unsupported. Locate code with a short identifier,
+then use `fs_read` to inspect surrounding lines and `edit` for multiline changes.
+It resolves the literal directory prefix of `file_glob` and checks
 project scope and explicit `allowed_paths` before starting ripgrep. Parent
 traversal and directory symlinks cannot select an unauthorized search root.
 Exact filenames can use individually allowed files without granting access to

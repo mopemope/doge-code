@@ -173,14 +173,14 @@ pub fn tool_def() -> ToolDef {
         kind: "function".to_string(),
         function: ToolFunctionDef {
             name: "search_text".to_string(),
-            description: "Regex search within files matching `file_glob`. Wraps `rg`. `file_glob` is required (e.g., '**/*.rs'). Use for text/pattern finding.".to_string(),
+            description: "Line-oriented regex search within files matching `file_glob` (required, e.g., '**/*.rs'). Multiline patterns and rg command flags are unsupported. To inspect or replace a multiline code block, locate a simple identifier, then use fs_read and edit.".to_string(),
             strict: None,
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "search_pattern": {
                         "type": "string",
-                        "description": "The regular expression to search for within file contents."
+                        "description": "A single-line regular expression to search within file contents. Do not include newlines or a multiline code block; use a short identifier to locate code, then fs_read to inspect surrounding lines."
                     },
                     "file_glob": {
                         "type": "string",
