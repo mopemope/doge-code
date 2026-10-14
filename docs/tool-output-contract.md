@@ -70,6 +70,16 @@ Returning-tool responses should be structured JSON with:
   The LLM fetches the next page by re-issuing the same call with `cursor=<value>`
 - `applied_budget` (optional) — summary of the limits actually applied
 
+Classified completed/timed-out `execute_process` test commands additionally
+return `test_observation` (under 1,000 serialized characters): `outcome`, nullable
+`test_count` and `test_count_unit`, and a fixed explanatory `note`. Reported
+structured outcomes use the verification queue classifier. Complete plain Go
+output made solely of package `[no test files]` lines reports zero; mixed,
+unsupported, truncated or diagnostic output cannot establish plain-text counts.
+Ordinary command success and `ok == success` remain process outcomes. This is a
+model-facing projection, not a new durable verification record or automatic
+rerun. Policy denials, spawn failures and non-test commands omit the field.
+
 ### Budgeting
 
 Large-output tools should accept a `response_budget_chars` parameter (an upper
