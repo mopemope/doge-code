@@ -774,3 +774,176 @@ async fn repair_expired_verification_records_unstarted_stop_without_spawning() {
         .finish("stopped", Some("expired".into()))
         .expect("stop record");
 }
+
+fn saved_evidence(passed: bool) -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().expect("source");
+    fs::write(root.path().join("value.txt"), "old").expect("source");
+    fs::write(root.path().join("protected.txt"), "protected bytes").expect("protected");
+    let p = plan();
+    let store = Store::create(root.path(), &p).expect("store");
+    let baseline = workspace::manifest(root.path()).expect("manifest");
+    write_json(&store.root.join("baseline-manifest.json"), &baseline).expect("baseline");
+    workspace::copy(root.path(), &store.root.join("baseline"), &baseline).expect("copy");
+    workspace::copy(
+        root.path(),
+        &store.root.join("round-1-candidate"),
+        &baseline,
+    )
+    .expect("copy");
+    let digest = workspace::digest(&baseline).expect("digest");
+    write_json(
+        &store.root.join("round-1-checks.json"),
+        &Verification {
+            passed,
+            complete: true,
+            candidate_digest: digest,
+            checks: vec![Check {
+                exit_code: Some(if passed { 0 } else { 1 }),
+                status: "completed".into(),
+                stdout: "declared check".into(),
+                stderr: String::new(),
+                reported_tests: None,
+            }],
+        },
+    )
+    .expect("checks");
+    store.reserve_round(&p).expect("round");
+    {
+        let mut data = store.data.lock().expect("ledger");
+        data.requests_reserved = 1;
+        data.usage_records = 1;
+        data.provider_reported_tokens = 12;
+    }
+    write_json(&store.root.join("round-1-agent.json"),&serde_json::json!({"status":"completed","stop_reason":null,"session_id":"fixture-session"})).expect("agent");
+    store
+        .finish(
+            if passed {
+                "verified_candidate"
+            } else {
+                "stopped"
+            },
+            None,
+        )
+        .expect("finish");
+    let path = store.root.clone();
+    store.release_lease().expect("release");
+    (root, path)
+}
+#[tokio::test]
+async fn repair_corrupt_ledger_cannot_claim_free_round_or_acceptance() {
+    let (_source, root) = saved_evidence(true);
+    let original = read_record(&root.join("ledger.json"), 65536).expect("ledger");
+    for field in [
+        "tokens_reserved",
+        "requests_reserved",
+        "usage_records",
+        "acceptance",
+        "status",
+    ] {
+        let mut ledger: serde_json::Value = serde_json::from_slice(&original).expect("ledger");
+        ledger[field] = match field {
+            "acceptance" => serde_json::json!("accepted"),
+            "status" => serde_json::json!("unsupported"),
+            _ => serde_json::json!(0),
+        };
+        write_json(&root.join("ledger.json"), &ledger).expect("corrupt");
+        assert!(inspect(&root).is_err(), "corrupt {field} must be rejected");
+    }
+    fs::write(root.join("ledger.json"), original).expect("restore");
+    assert!(inspect(&root).is_ok());
+}
+#[tokio::test]
+async fn repair_corrupt_rejection_cannot_accept_failed_candidate() {
+    let (_source, root) = saved_evidence(false);
+    let digest = inspect(&root).expect("inspect")["verification"]["candidate_digest"]
+        .as_str()
+        .expect("digest")
+        .to_owned();
+    cli(
+        crate::config::AppConfig::default(),
+        &RepairCommand::Review {
+            run: root.clone(),
+            candidate_digest: digest,
+            accept: false,
+            note: "independent rejection".into(),
+        },
+    )
+    .await
+    .expect("reject");
+    let original = read_record(&root.join("acceptance.json"), 65536).expect("record");
+    for (field, value) in [
+        ("decision", "accepted"),
+        ("decision", "unsupported"),
+        ("original_application", "performed"),
+        ("note", ""),
+    ] {
+        let mut record: serde_json::Value = serde_json::from_slice(&original).expect("record");
+        record[field] = serde_json::json!(value);
+        write_json(&root.join("acceptance.json"), &record).expect("corrupt");
+        assert!(inspect(&root).is_err(), "{field}: {value}");
+    }
+    fs::write(root.join("acceptance.json"), original).expect("restore");
+    assert_eq!(
+        inspect(&root).expect("valid rejection")["acceptance"]["decision"],
+        "rejected"
+    );
+}
+#[test]
+fn repair_protected_snapshot_corruption_is_detected_without_touching_source() {
+    let (source, root) = saved_evidence(true);
+    for relative in ["round-1-candidate/protected.txt", "baseline/protected.txt"] {
+        let path = root.join(relative);
+        let original = fs::read(&path).expect("original");
+        fs::write(&path, "corruption").expect("corrupt");
+        assert!(inspect(&root).is_err());
+        fs::write(path, original).expect("restore");
+    }
+    assert_eq!(
+        fs::read_to_string(source.path().join("protected.txt")).expect("source"),
+        "protected bytes"
+    );
+    assert!(inspect(&root).is_ok());
+}
+
+#[test]
+fn repair_already_verified_requires_zero_rounds_and_bound_passing_baseline() {
+    let (_source, root) = saved_evidence(false);
+    let ledger_path = root.join("ledger.json");
+    let original = read_record(&ledger_path, 65536).expect("ledger");
+    let mut ledger: serde_json::Value = serde_json::from_slice(&original).expect("ledger");
+    ledger["status"] = serde_json::json!("already_verified");
+    write_json(&ledger_path, &ledger).expect("status");
+    assert!(
+        inspect(&root).is_err(),
+        "agent work cannot be described as a passing baseline"
+    );
+    ledger["rounds_started"] = serde_json::json!(0);
+    ledger["requests_reserved"] = serde_json::json!(0);
+    ledger["usage_records"] = serde_json::json!(0);
+    ledger["provider_reported_tokens"] = serde_json::json!(0);
+    ledger["tokens_reserved"] = serde_json::json!(0);
+    write_json(&ledger_path, &ledger).expect("zero rounds");
+    assert!(
+        inspect(&root).is_err(),
+        "missing baseline checks cannot verify baseline"
+    );
+    fs::copy(
+        root.join("round-1-checks.json"),
+        root.join("baseline-checks.json"),
+    )
+    .expect("failed baseline");
+    assert!(
+        inspect(&root).is_err(),
+        "failed baseline cannot be already verified"
+    );
+    let mut checks: Verification = serde_json::from_slice(
+        &read_record(&root.join("baseline-checks.json"), 65536).expect("checks"),
+    )
+    .expect("checks");
+    checks.passed = true;
+    checks.checks[0].exit_code = Some(0);
+    write_json(&root.join("baseline-checks.json"), &checks).expect("passing baseline");
+    assert!(inspect(&root).is_ok());
+    fs::write(root.join("baseline/protected.txt"), "corruption").expect("corrupt baseline");
+    assert!(inspect(&root).is_err());
+}
