@@ -25,6 +25,23 @@ pub enum ExecError {
     Timeout,
 }
 
+struct RepairRequestGate {
+    tools: FsTools,
+    policy: Arc<dyn crate::llm::client_core::RequestAttemptPolicy>,
+}
+impl crate::llm::client_core::RequestAttemptPolicy for RepairRequestGate {
+    fn before_attempt(&self) -> Result<()> {
+        self.tools.ensure_repair_checkpoint()?;
+        if let Some(guard) = &self.tools.repair_guard {
+            guard.check()?;
+        }
+        self.policy.before_attempt()
+    }
+    fn observe_usage(&self, usage: &crate::llm::types::Usage) {
+        self.policy.observe_usage(usage);
+    }
+}
+
 #[cfg(test)]
 mod completion_scope_tests {
     use super::*;
@@ -622,6 +639,46 @@ impl Executor {
         instruction: &str,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<ExecutorTurn> {
+        self.run_controlled_turn(instruction, cancel, None, self.cfg.agent_budget.clone())
+            .await
+    }
+
+    pub(crate) fn configure_repair(
+        &mut self,
+        guard: Arc<crate::features::repair_workflow::guard::Guard>,
+        policy: Arc<dyn crate::llm::client_core::RequestAttemptPolicy>,
+        raw_instruction: &str,
+    ) -> Result<crate::provenance::ProvenanceAttribution> {
+        let client = self
+            .client
+            .as_ref()
+            .context("repair requires initialized inference client")?;
+        self.tools.repair_guard = Some(guard);
+        self.tools.ensure_repair_checkpoint()?;
+        self.client = Some(
+            client.with_request_attempt_policy(Arc::new(RepairRequestGate {
+                tools: self.tools.clone(),
+                policy,
+            })),
+        );
+        let observed = crate::tools::provenance::record_directive_observed(
+            &self.tools,
+            crate::provenance::DirectiveOrigin::ExecRun,
+            raw_instruction,
+            raw_instruction,
+        )?;
+        Ok(crate::provenance::ProvenanceAttribution::with_directive(
+            observed.event_id,
+        ))
+    }
+
+    pub(crate) async fn run_controlled_turn(
+        &mut self,
+        instruction: &str,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        attribution: Option<crate::provenance::ProvenanceAttribution>,
+        budget: crate::config::AgentBudgetConfig,
+    ) -> Result<ExecutorTurn> {
         // Build this turn's request from the durable snapshot. The outer
         // history stays untouched until the canonical result commits.
         let msgs = self.build_request_messages(instruction).await;
@@ -637,21 +694,28 @@ impl Executor {
         // Record the observed user directive (exec run). A recording failure
         // never aborts the turn: mark provenance_incomplete and continue
         // with directive_id = None.
-        let attribution = match crate::tools::provenance::record_directive_observed(
-            &self.tools,
-            crate::provenance::DirectiveOrigin::ExecRun,
-            instruction,
-            instruction,
-        ) {
-            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
-            Err(e) => {
-                tracing::warn!(error = %e, "provenance.directive_record_failed");
-                let _ = self.tools.mark_current_session_provenance_failure();
-                crate::provenance::ProvenanceAttribution::none()
-            }
-        };
+        let attribution =
+            attribution.unwrap_or_else(
+                || match crate::tools::provenance::record_directive_observed(
+                    &self.tools,
+                    crate::provenance::DirectiveOrigin::ExecRun,
+                    instruction,
+                    instruction,
+                ) {
+                    Ok(env) => {
+                        crate::provenance::ProvenanceAttribution::with_directive(env.event_id)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "provenance.directive_record_failed");
+                        let _ = self.tools.mark_current_session_provenance_failure();
+                        crate::provenance::ProvenanceAttribution::none()
+                    }
+                },
+            );
 
         let usage_before = client_ref.usage_snapshot();
+        let mut run_config = self.cfg.clone();
+        run_config.agent_budget = budget;
         // Call run_agent_loop
         let res = llm::run_agent_loop(
             client_ref,
@@ -660,7 +724,7 @@ impl Executor {
             msgs,
             None,
             cancel,
-            &self.cfg,
+            &run_config,
             attribution,
         )
         .await;
@@ -682,6 +746,14 @@ impl Executor {
                 Err(error) => Err(error.context("failed to persist exec conversation history")),
             },
             Err(error) => Err(error),
+        };
+        let res = if self.tools.repair_guard.is_some() {
+            res.and_then(|run| {
+                self.tools.ensure_repair_checkpoint()?;
+                Ok(run)
+            })
+        } else {
+            res
         };
 
         if res.is_err()
