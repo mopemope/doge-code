@@ -45,7 +45,8 @@
         "min_tests": 1,
         "timeout_seconds": 600
       }
-    ]
+    ],
+    "category": "bug_fix"
   },
   {
     "case_id": "go-block-rounding",
@@ -78,7 +79,9 @@
         "min_tests": 12,
         "timeout_seconds": 120
       }
-    ]
+    ],
+    "category": "failed_test_repair",
+    "reference_fixture": "controls/go-block"
   },
   {
     "case_id": "go-humanize-ftoa-limits",
@@ -99,7 +102,7 @@
     "oracle": "oracles/go_humanize_ftoa_test.go",
     "acceptance": [
       "Existing upstream tests (excluding the injected oracle) execute and pass.",
-      "All twenty independent signed normal/zero/negative/extreme digit examples execute and pass without panic.",
+      "All twenty-four independent signed normal/zero/negative/extreme digit examples execute and pass without panic or rounding.",
       "Native go vet ./... passes; cross-architecture evidence is recorded separately, not inferred.",
       "Only ftoa.go changes; all pre-fix tests and build files remain intact.",
       "Independent reviewer confirms scope, correctness and remaining uncertainty."
@@ -130,7 +133,54 @@
           "^TestRepairAcceptanceFtoaLimits$",
           "."
         ],
-        "min_tests": 21,
+        "min_tests": 25,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "oracle_revision": 2,
+    "category": "bug_fix"
+  },
+  {
+    "case_id": "go-clamp-feature",
+    "default": false,
+    "category": "small_feature",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-clamp-feature/workspace",
+    "reference_fixture": "go-clamp-feature/reference",
+    "prompt": "Implement Clamp(value, low, high int64) (int64, error). Clamp to inclusive bounds, preserve in-range values and extreme int64 values, and reject low > high. Change only clamp.go.",
+    "allowed_paths": [
+      "clamp.go"
+    ],
+    "oracle": "oracles/go_clamp_feature_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 9,
         "timeout_seconds": 120
       },
       {
@@ -144,5 +194,303 @@
         "timeout_seconds": 120
       }
     ]
+  },
+  {
+    "case_id": "go-stable-unique-feature",
+    "default": false,
+    "category": "small_feature",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-stable-unique-feature/workspace",
+    "reference_fixture": "go-stable-unique-feature/reference",
+    "prompt": "Implement StableUnique([]string) []string. Retain the first occurrence of each exact string in input order; case is significant, empty/Unicode strings are ordinary values, nil input returns nil, and input elements must remain unchanged. Change only unique.go.",
+    "allowed_paths": [
+      "unique.go"
+    ],
+    "oracle": "oracles/go_stable_unique_feature_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 7,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ]
+  },
+  {
+    "case_id": "go-multi-blocks",
+    "default": false,
+    "category": "multi_file_change",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-multi-blocks/workspace",
+    "reference_fixture": "go-multi-blocks/reference",
+    "prompt": "Fix Blocks and roundedDiv across block.go and division.go. The public wrapper rejects negative bytes and nonpositive block sizes. The helper, called only with valid inputs, computes ceil(bytes/block) without overflow for all nonnegative int64 values. Both direct helper and public caller behavior are tested. Preserve kept.go and tests.",
+    "allowed_paths": [
+      "block.go",
+      "division.go"
+    ],
+    "oracle": "oracles/go_multi_blocks_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 12,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ]
+  },
+  {
+    "case_id": "go-multi-names",
+    "default": false,
+    "category": "multi_file_change",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-multi-names/workspace",
+    "reference_fixture": "go-multi-names/reference",
+    "prompt": "Fix NormalizeName in normalize.go and Names in names.go. NormalizeName trims surrounding Unicode whitespace and lowercases text. Names uses that helper, drops blank names, keeps the first normalized occurrence in order, returns nil for nil input, and does not modify input. Both helper and caller behavior are tested; keep other files unchanged.",
+    "allowed_paths": [
+      "normalize.go",
+      "names.go"
+    ],
+    "oracle": "oracles/go_multi_names_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 11,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ]
+  },
+  {
+    "case_id": "go-pair-failure",
+    "default": false,
+    "category": "failed_test_repair",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-pair-failure/workspace",
+    "reference_fixture": "go-pair-failure/reference",
+    "prompt": "Repair ParsePair(string) (key, value string, err error) so it splits at the first equals sign, trims surrounding whitespace on key/value, rejects missing equals or an empty key, and permits an empty value or additional equals in the value. Change only pair.go; do not alter failing tests or build files.",
+    "allowed_paths": [
+      "pair.go"
+    ],
+    "oracle": "oracles/go_pair_failure_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 8,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ]
+  },
+  {
+    "case_id": "go-resume-addition",
+    "default": false,
+    "category": "interruption_resume",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-resume-addition/workspace",
+    "reference_fixture": "go-resume-addition/reference",
+    "prompt": "Fix AddPositive(a,b int64) (int64,error) to add nonnegative operands without overflow, rejecting negative operands and overflowing sums. Change only add.go. The evaluation first asks for read-only inspection, ends that CLI process, then resumes the same session to perform the repair. Native tests alone do not establish that session resume worked.",
+    "allowed_paths": [
+      "add.go"
+    ],
+    "oracle": "oracles/go_resume_addition_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior.",
+      "Native code success alone does not prove resume: bind actual same-session checkpoint/resume evidence and review it independently."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 9,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "interaction": {
+      "mode": "resume_after_read",
+      "first_prompt": "Read add.go and summarize its behavior. Do not edit files. Finish this inspection turn.",
+      "required_observations": [
+        "read-only first phase",
+        "same persisted session after a new CLI process",
+        "original task and file-read result retained in resumed request",
+        "final native checks and source-scope review"
+      ],
+      "resume_prompt": "The inspection phase is complete. Now implement the original repair task within its declared scope and run its checks."
+    }
+  },
+  {
+    "case_id": "go-resume-suffix",
+    "default": false,
+    "category": "interruption_resume",
+    "language": "go",
+    "provenance": {
+      "kind": "synthetic",
+      "description": "Authored fixed scenario for offline/model evaluation; no historical issue or broad capability claim."
+    },
+    "fixture": "go-resume-suffix/workspace",
+    "reference_fixture": "go-resume-suffix/reference",
+    "prompt": "Fix TrimSuffixOnce(value,suffix string) string to remove at most one complete literal trailing suffix. A missing or empty suffix leaves the input unchanged; repeated and Unicode suffixes must work. Change only suffix.go. The evaluation interrupts the local provider after a real source-read checkpoint, then resumes the same ordinary exec session. Native tests alone cannot prove recovery.",
+    "allowed_paths": [
+      "suffix.go"
+    ],
+    "oracle": "oracles/go_resume_suffix_test.go",
+    "acceptance": [
+      "All fixed native examples execute and pass; unrelated files and public tests remain unchanged.",
+      "Only declared implementation paths change; independent reviewer verifies the requested behavior.",
+      "Native code success alone does not prove resume: bind actual same-session checkpoint/resume evidence and review it independently."
+    ],
+    "checks": [
+      {
+        "name": "all",
+        "argv": [
+          "go",
+          "test",
+          "-v",
+          "-count=1",
+          "./..."
+        ],
+        "min_tests": 9,
+        "timeout_seconds": 120
+      },
+      {
+        "name": "vet",
+        "kind": "vet",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "interaction": {
+      "mode": "resume_after_provider_failure",
+      "first_prompt": "Read suffix.go and summarize its behavior. Do not edit files. Finish this inspection turn.",
+      "required_observations": [
+        "planned local provider failure after source-read checkpoint",
+        "same persisted session after a new CLI process",
+        "original repair task retained in resumed request",
+        "exact unconsumed file-read result retained",
+        "no duplicated edit or invented tool result",
+        "final native checks and source-scope review"
+      ],
+      "resume_prompt": "The inspection phase is complete. Now implement the original repair task within its declared scope and run its checks."
+    }
   }
 ]
