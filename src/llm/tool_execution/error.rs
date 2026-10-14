@@ -73,7 +73,13 @@ pub fn handle_agent_error(error: &AgentLoopError, ui_tx: &Option<std::sync::mpsc
 pub fn get_error_hint(err_str: &str) -> Option<&'static str> {
     let err_lower = err_str.to_lowercase();
 
-    if err_lower.contains("target block not found") {
+    if err_lower.starts_with("ripgrep failed")
+        && (err_lower.contains("regex parse error") || err_lower.contains("not allowed in a regex"))
+    {
+        Some(
+            "Hint: search_text rejected the regular expression.\n1. Use a short single-line identifier pattern, such as a function name.\n2. Escape regex metacharacters when searching literal punctuation.\n3. Use `fs_read` for multiline source and `edit` for exact multiline replacement; rg multiline flags are unavailable.",
+        )
+    } else if err_lower.contains("target block not found") {
         Some(
             "Hint: The edit target no longer matches the current file.\n1. Use `fs_read` to fetch fresh content around the intended location.\n2. Retry `edit` with an exact, up-to-date `target_block`.\n3. If there are repeated similar blocks, include `start_line`/`end_line` to narrow scope.",
         )
@@ -180,5 +186,25 @@ mod tests {
         assert!(!hint.contains("thinking"));
         assert!(!hint.to_lowercase().contains("chain-of-thought"));
         assert!(hint.contains("Check unescaped quotes"));
+    }
+
+    #[test]
+    fn ripgrep_regex_failures_get_search_recovery_instead_of_json_recovery() {
+        for error in [
+            "ripgrep failed with exit status: 2: rg: regex parse error:\n    func FtoaWithDigits() string {\nerror: repetition quantifier expects a valid decimal",
+            "ripgrep failed with exit status: 2: rg: the literal \\\"\\n\\\" is not allowed in a regex\nConsider enabling multiline mode",
+            "ripgrep failed with exit status: 2: rg: regex parse error: JSON target block not found {",
+        ] {
+            let hint = get_error_hint(error).expect("regex recovery");
+            assert!(hint.contains("search_text"));
+            assert!(hint.contains("single-line"));
+            assert!(!hint.contains("JSON serialization"));
+            assert!(!hint.contains("file was not found"));
+        }
+        assert!(
+            get_error_hint("invalid json")
+                .expect("JSON recovery")
+                .contains("JSON serialization")
+        );
     }
 }
