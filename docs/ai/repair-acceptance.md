@@ -6,22 +6,93 @@ summarizes all planned trials and inspects a checked candidate for review. It ne
 configures credentials, fetches dependencies or adapts Codex event streams.
 It complements the existing dgc exec comparison runner; it does not replace it.
 
-Three cases are cataloged in [cases.json](repair-cases/cases.json). The original
-two remain the default; the external Go case is explicit opt-in:
+Ten cases are cataloged in [cases.json](repair-cases/cases.json). The original
+two remain the default; all other cases are explicit opt-in:
 
 | Case | Provenance | Candidate scope | Fixed verification |
 |---|---|---|---|
 | Rust legacy argument prefix | Actual doge-code pre-fix commit `168db022d32cea702c8ebaee210207860c6f6ce8`; historical fix `a78ff91a5ce7c22fb1d66ecf25654e3ccc176085` | Policy implementation only; existing inline tests preserved | Six independent policy regressions and existing policy tests |
 | Go block rounding (default) | Explicitly synthetic, authored for this harness; no historical issue claim | `block.go` only | Ordinary test plus ten normal/boundary/invalid subcases |
-| Go humanize digit limit (opt-in) | [Upstream PR #158](https://github.com/dustin/go-humanize/pull/158), exact pre-fix `e0c1e0ea6771283f4f3e4f7c0f148df4c446049d`, merged reference `33e8a42f57a2fe71951155d9c5ff72959623b1fa` | `ftoa.go` only | Existing tests, twenty independent signed/digit-limit examples, native `go vet` |
+| Go humanize digit limit (opt-in) | [Upstream PR #158](https://github.com/dustin/go-humanize/pull/158), exact pre-fix `e0c1e0ea6771283f4f3e4f7c0f148df4c446049d`, merged reference `33e8a42f57a2fe71951155d9c5ff72959623b1fa` | `ftoa.go` only | Existing tests, twenty-four independent signed/digit-limit examples, native `go vet` |
 
 The Rust task is a known historical defect in this product's own repository. It
 is useful for reproduction, not a representative sample or an unbiased task for
 an agent that has already seen the fix. The independent oracle is newly authored
 from the known contract; it is not a pre-existing external evaluation. The Go
 fixture is an overflow bug with ordinary tests initially passing. No case
-establishes practical agent usefulness. Additional historical cases and an unseen
-roughly six-case cohort still need selection before a live comparison.
+establishes practical agent usefulness. The ten slots contain two historical cases and eight synthetic micro tasks; they
+do not represent ten independent real repositories or an unseen evaluation.
+
+## Fixed ten-slot suite and native controls
+
+| Category | Case IDs | Additional fixture scope |
+|---|---|---|
+| Bug fix | `rust-legacy-prefix`, `go-humanize-ftoa-limits` | Historical sources above |
+| Small feature | `go-clamp-feature`, `go-stable-unique-feature` | Inclusive bounds; stable exact deduplication |
+| Multiple files | `go-multi-blocks`, `go-multi-names` | Public caller and independently tested helper |
+| Failed test repair | `go-block-rounding`, `go-pair-failure` | Overflow boundaries; first-equals parsing |
+| Interruption/resume | `go-resume-addition`, `go-resume-suffix` | Safe addition; literal suffix removal plus runtime evidence |
+
+The seven new synthetic fixtures preserve an unrelated implementation/test pair.
+Their references and independent oracles stay outside candidate workspaces. Select
+IDs using repeatable `--case`; this does not change the original two-case default.
+
+Revision 2 of the historical Ftoa oracle adds four fixed counterexamples:
+`±1.234567` with MaxInt digits retains all six digits, and `±1.999999` with zero
+digits truncates to `±1`. The exact upstream reference passes all 24 examples;
+the retained diagnosis-assisted candidate fails all four additions. Revision 1
+trial/check records retain their original oracle and results. The new oracle does
+not retrospectively turn an old machine pass into a different recorded score.
+
+Run the committed, provider-free positive/negative controls with an installed Go
+binary and a fresh output directory:
+
+```bash
+python3 scripts/check-fixed-acceptance-fixtures.py \
+  --go /absolute/path/to/go --output /path/on/disk/fixed-controls
+```
+
+This checks the eight synthetic baselines fail assertions, their references pass
+and vet succeeds, plus historical Ftoa positive/rejected controls. It starts zero
+models. The historical Rust case uses its separate existing checks; the native
+control script does not rerun it. Run these Go controls separately from the application Rust regressions; the
+current CI guidance job checks the Python harness contracts, not native Go fixtures. Preparing ten tasks or passing reference controls
+is not a measured ten-task model result.
+
+## Cohorts and observed session resumption
+
+Freeze `prepare --kind model-evaluation --cohort autonomous` before any generation.
+Diagnosis supplied in advance belongs in `--cohort diagnosis_hint`, with every
+instruction recorded as an intervention. Unclassified and hint-assisted plans
+are ineligible for the autonomous gate. An accepted autonomous review rejects
+extra instructions or manual candidate edits; planned restart actions are recorded.
+
+For each resume fixture, follow its frozen `task.json.interaction` recipe using
+ordinary `dgc exec`, since the finite repair command does not resume sessions:
+
+1. Run `dgc exec "<task.prompt> First inspect only: <interaction.first_prompt>"
+   --json` in the candidate.
+   Preserve the complete session ID, original directive, source checkpoint and
+   exact read result. The first phase must finish before any edit.
+2. For `resume_after_read`, finish that first CLI process normally. For
+   `resume_after_provider_failure`, use an owned local test provider to fail the
+   next request after the durable read checkpoint; preserve the failure event.
+3. Start a fresh CLI process with `dgc exec "<interaction.resume_prompt>" --json
+   --resume=<exact-session-id>`. Preserve the trace showing the original task and
+   exact checkpoint read result survived; the resume prompt advances the preplanned
+   repair phase without adding diagnosis. Record checks and final candidate.
+4. Independently inspect that trace, then store it as `runtime-trace.json` in the
+   run and supply `runtime_evidence` in the operator review. Bind the same full
+   session ID, SHA-256 of the checkpoint result and resumed result, trace bytes,
+   candidate digest from checks, and source checkpoint digest (the frozen baseline
+   mapping serialized with sorted keys). Set `planned_interruption_observed` only
+   for the provider-failure recipe. Never manufacture observations from native tests.
+
+The schema and local hashes bind an operator-reviewed observation; they do not
+prove a session event occurred without inspection of the actual trace. Accepted
+resume reviews require the same session/result, correct checkpoint/candidate and
+unchanged trace; offline controls cannot establish resumption. These two live
+interaction scenarios remain unmeasured until that evidence exists.
 
 ## Prepare without model usage
 
@@ -81,12 +152,12 @@ not copied from the upstream future regression file. It covers ordinary, zero,
 negative, very large, platform-MaxInt/near-MaxInt/MinInt digit counts and signed
 values/zero. Baseline reproduction showed existing tests passing while eight
 boundary examples panicked; changing only ftoa.go to the merged reference made
-existing tests and all twenty oracle examples pass. These are known offline
+existing tests and all twenty original oracle examples pass. These are known offline
 replays, not unseen model acceptance results.
 
 The fixed existing-test command skips only `TestRepairAcceptanceFtoaLimits`; the
 separate regression command selects only that oracle. A passing oracle reports
-21 entries (parent plus 20 subtests). Native `go vet ./...` is explicitly kind
+25 entries (parent plus 24 subtests) in revision 2. Native `go vet ./...` is explicitly kind
 `vet`, has no test-count requirement, and cannot mask a zero-test test check. Vet
 kind is restricted to that exact Go command; test checks always require a positive
 minimum reported count. A vet failure is not a failed assertion. No native pass

@@ -112,13 +112,21 @@ def archive(repo, commit, destination):
     return digest(data)
 
 
-def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None):
+def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None, cohort=None):
     if not variants or len(set(variants)) != len(variants) or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", v) for v in variants):
         raise ValueError("variant names must be unique path-safe labels")
     if type(trials) is not int or not 1 <= trials <= 10:
         raise ValueError("trials must be 1..10")
     if kind not in ("offline-replay", "model-evaluation"):
         raise ValueError("invalid experiment kind")
+    if kind == "offline-replay":
+        if cohort is not None:
+            raise ValueError("offline controls cannot declare a model cohort")
+        cohort = "offline_control"
+    elif cohort is None:
+        cohort = "unclassified"
+    elif cohort not in ("autonomous", "diagnosis_hint", "unclassified"):
+        raise ValueError("invalid model cohort")
     output = output.resolve()
     if output.exists():
         raise ValueError("output already exists; never overwrite a prior experiment")
@@ -176,15 +184,18 @@ def prepare(output, repo, variants, trials, kind="offline-replay", case_ids=None
                 (run / "oracle").write_bytes(oracle)
                 # Future reference identity is operator-only, not the task file.
                 task = {key: case[key] for key in ("case_id", "prompt", "allowed_paths")}
+                if "interaction" in case:
+                    task["interaction"] = case["interaction"]
                 write_new(run / "task.json", task)
                 (workspace / "REPAIR_TASK.txt").write_text(case["prompt"] + "\n")
                 baseline["REPAIR_TASK.txt"] = digest((workspace / "REPAIR_TASK.txt").read_bytes())
                 criteria = {**case, "baseline": baseline, "source_digest": source_digest,
                             "output_binding": "sha256-v1",
-                            "oracle_digest": digest(oracle), "variant": variant, "trial": trial, "kind": kind}
+                            "oracle_digest": digest(oracle), "variant": variant, "trial": trial, "kind": kind,
+                            "cohort": cohort}
                 write_new(run / "criteria.json", criteria)
                 runs.append({"run": name, "criteria_digest": digest((run / "criteria.json").read_bytes())})
-    plan = {"schema_version": 1, "kind": kind, "case_ids": [case["case_id"] for case in cases], "runs": runs, "checker": checker_identity(),
+    plan = {"schema_version": 1, "kind": kind, "cohort": cohort, "case_ids": [case["case_id"] for case in cases], "runs": runs, "checker": checker_identity(),
             "comparison": "unclassified; labels alone do not establish matched-model or product equivalence"}
     write_new(output / "plan.json", plan)
     return plan
@@ -201,6 +212,8 @@ def load_run(run, require_current_checker=True):
     if entry is None or digest((run / "criteria.json").read_bytes()) != entry["criteria_digest"]:
         raise ValueError("criteria are not the frozen planned criteria")
     criteria = read(run / "criteria.json")
+    if "cohort" in criteria and plan.get("cohort") != criteria["cohort"]:
+        raise ValueError("planned cohort differs from frozen criteria")
     if digest((run / "oracle").read_bytes()) != criteria["oracle_digest"]:
         raise ValueError("independent oracle changed after preparation")
     return criteria
@@ -328,12 +341,29 @@ def review(run, evidence):
     if criteria.get("output_binding") != "sha256-v1" or checks.get("output_binding") != criteria["output_binding"]:
         raise ValueError("new review requires the prepared output-binding contract")
     validate_check_outputs(run, checks, require_hashes=True)
-    validate_review(evidence, criteria["kind"], checks["machine_passed"])
+    validate_review(evidence, criteria["kind"], checks["machine_passed"],
+                    cohort=criteria.get("cohort"), interaction=criteria.get("interaction"))
+    validate_runtime_binding(run, criteria, checks, evidence)
     result = {"schema_version": 1, "case_id": criteria["case_id"], "variant": criteria["variant"],
               "kind": criteria["kind"], "provenance_kind": criteria["provenance"]["kind"],
               "checks_digest": digest((run / "checks.json").read_bytes()), **evidence}
     write_new(run / "review.json", result)
     return result
+
+
+def validate_runtime_binding(run, criteria, checks, evidence):
+    """Bind operator-reviewed resume evidence; native code checks alone are insufficient."""
+    if not evidence.get("accepted") or "interaction" not in criteria:
+        return
+    runtime_evidence = evidence["runtime_evidence"]
+    baseline_digest = digest(json.dumps(criteria["baseline"], sort_keys=True).encode())
+    if runtime_evidence["checkpoint_source_digest"] != baseline_digest:
+        raise ValueError("checkpoint source does not match the frozen initial fixture")
+    if runtime_evidence["candidate_digest"] != checks["candidate_digest"]:
+        raise ValueError("runtime evidence belongs to a different checked candidate")
+    trace = run / "runtime-trace.json"
+    if not trace.is_file() or digest(trace.read_bytes()) != runtime_evidence["trace_sha256"]:
+        raise ValueError("recorded runtime trace is missing or changed")
 
 
 def saved_evidence(run, criteria):
@@ -360,11 +390,18 @@ def saved_evidence(run, criteria):
             raise ValueError("saved review belongs to a different trial identity")
         if type(row.get("accepted")) is not bool or (row["accepted"] and (not checks["machine_passed"] or row["execution"]["status"] != "completed")):
             raise ValueError("saved acceptance contradicts recorded checks or execution")
+        if row["accepted"] and ("cohort" in criteria or "interaction" in criteria):
+            evidence = {key: row[key] for key in ("accepted", "notes", "execution", "runtime_evidence") if key in row}
+            validate_review(evidence, criteria["kind"], checks["machine_passed"],
+                            cohort=criteria.get("cohort"), interaction=criteria.get("interaction"))
+            validate_runtime_binding(run, criteria, checks, evidence)
     return checks, row
 
 
 def evidence_files(run):
     paths = [run.parent / "plan.json", run / "criteria.json", run / "oracle", run / "checks.json", run / "candidate.patch", run / "review.json"]
+    if (run / "runtime-trace.json").exists():
+        paths.append(run / "runtime-trace.json")
     paths.extend(run.glob("*.stdout.txt"))
     paths.extend(run.glob("*.stderr.txt"))
     return {str(path): digest(path.read_bytes()) if path.is_file() else None for path in paths}
@@ -384,7 +421,7 @@ def inspect_run(run, include_patch=False):
         item = dict(command)
         item["output_evidence"] = {stream: {"path": command["name"] + "." + stream + ".txt", "hash_binding": "verified" if command.get(stream + "_sha256") is not None else "unrecorded_legacy_or_not_captured"} for stream in ("stdout", "stderr")}
         commands.append(item)
-    result = {"schema_version": 1, "case_id": criteria["case_id"], "variant": criteria["variant"], "trial": criteria["trial"], "experiment_kind": criteria["kind"],
+    result = {"schema_version": 1, "case_id": criteria["case_id"], "variant": criteria["variant"], "trial": criteria["trial"], "experiment_kind": criteria["kind"], "cohort": criteria.get("cohort", "unclassified"), "interaction": criteria.get("interaction"),
               "source": {key: value for key, value in criteria["provenance"].items() if key in ("kind", "repository", "base_commit")},
               "source_digest": criteria["source_digest"], "criteria_digest": checks["criteria_digest"],
               "checker": {"recorded": plan["checker"], "reader": checker_identity(), "matches_current": plan["checker"] == checker_identity(), "interpretation": "saved_results_not_rescored"},
@@ -410,7 +447,9 @@ def summarize(output):
         if (run / "review.json").exists():
             checks, row = saved_evidence(run, criteria)
             group["reviews"].append(row)
-    summary = {"kind": plan["kind"], "comparison": plan["comparison"], "checker": {"recorded": plan["checker"], "reader": checker_identity(), "matches_current": plan["checker"] == checker_identity(), "interpretation": "saved_results_not_rescored"}, "variants": {}}
+    summary = {"kind": plan["kind"], "cohort": plan.get("cohort", "unclassified"),
+               "gate_eligible": plan["kind"] == "model-evaluation" and plan.get("cohort") == "autonomous",
+               "comparison": plan["comparison"], "checker": {"recorded": plan["checker"], "reader": checker_identity(), "matches_current": plan["checker"] == checker_identity(), "interpretation": "saved_results_not_rescored"}, "variants": {}}
     for variant, group in groups.items():
         rows, total = group["reviews"], group["planned"]
         accepted = sum(row["accepted"] for row in rows)
@@ -448,6 +487,7 @@ def main():
     p.add_argument("--variant", action="append", required=True)
     p.add_argument("--trials", type=int, default=1)
     p.add_argument("--kind", choices=("offline-replay", "model-evaluation"), default="offline-replay")
+    p.add_argument("--cohort", choices=("autonomous", "diagnosis_hint", "unclassified"), help="freeze model cohort before execution; omitted model cohorts stay unclassified")
     p.add_argument("--case", dest="case_ids", action="append", help="explicit case ID; repeat to select multiple cases (default: original two cases)")
     p = commands.add_parser("check"); p.add_argument("--run", type=Path, required=True)
     p = commands.add_parser("review"); p.add_argument("--run", type=Path, required=True); p.add_argument("--evidence", type=Path, required=True)
@@ -456,7 +496,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            result = prepare(args.output, args.source_repo, args.variant, args.trials, args.kind, args.case_ids)
+            result = prepare(args.output, args.source_repo, args.variant, args.trials, args.kind, args.case_ids, args.cohort)
         elif args.command == "check":
             result = check(args.run.resolve())
         elif args.command == "review":
