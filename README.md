@@ -2268,6 +2268,8 @@ Repair turns use a dedicated system prompt for their six available file/observat
 tools. Repository guidance is still loaded, within this profile: the model edits
 the declared files, and the controller performs verification. Tool discovery,
 command execution, delegation and separate plan tools are unavailable in this mode.
+Search globs may be relative to the candidate or absolute within its root;
+external roots, parent traversal and runtime/build paths remain refused.
 
 Each model turn reserves its full token allowance durably before it starts;
 request attempts share one persistent counter, including compaction. Reservations
