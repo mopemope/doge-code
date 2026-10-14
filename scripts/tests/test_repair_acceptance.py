@@ -48,6 +48,96 @@ class RepairAcceptanceTests(unittest.TestCase):
     def evidence(self, accepted=True, status='completed'):
         return {'accepted':accepted,'notes':'Independent operator review, offline replay only.', 'execution':{'status':status,'elapsed_seconds':10,'review_seconds':2,'rework_seconds':3,'interventions':[{'kind':'manual_edit','note':'offline reference replay','seconds':3}], 'cost':{'estimated_usd':0,'confirmed_usd':0}}}
 
+    def model_evidence(self, interventions=None):
+        value = self.evidence()
+        value['execution']['identity'] = {key: 'deterministic fixture, not a live model'
+                                         for key in ('model', 'provider', 'configuration', 'permissions', 'environment')}
+        value['execution']['interventions'] = interventions or []
+        return value
+
+    def prepare_model(self, name, cohort, interaction=False):
+        if interaction:
+            self.case['interaction'] = {'mode': 'resume_after_read'}
+            (self.cases/'cases.json').write_text(json.dumps([self.case]))
+        output = self.root/name
+        repair.prepare(output, self.root, ['candidate'], 1, 'model-evaluation', cohort=cohort)
+        run = output/'candidate--go-test--001'
+        (run/'workspace/block.go').write_text('good')
+        repair.check(run)
+        return output, run
+
+    def test_cohort_is_frozen_before_execution_and_diagnosis_stays_separate(self):
+        output, run = self.prepare_model('hinted', 'diagnosis_hint')
+        evidence = self.model_evidence([{'kind': 'extra_instruction', 'note': 'diagnosis supplied', 'seconds': 1}])
+        repair.review(run, evidence)
+        summary = repair.summarize(output)
+        self.assertEqual(summary['cohort'], 'diagnosis_hint')
+        self.assertFalse(summary['gate_eligible'])
+        plan = json.loads((output/'plan.json').read_text())
+        plan['cohort'] = 'autonomous'
+        (output/'plan.json').write_text(json.dumps(plan))
+        with self.assertRaisesRegex(ValueError, 'cohort differs'):
+            repair.inspect_run(run)
+
+    def test_autonomous_acceptance_refuses_diagnosis_or_manual_rescue(self):
+        _, run = self.prepare_model('autonomous', 'autonomous')
+        for kind in ('extra_instruction', 'manual_edit'):
+            with self.assertRaisesRegex(ValueError, 'assisted completion'):
+                repair.review(run, self.model_evidence([{'kind': kind, 'note': 'rescue', 'seconds': 1}]))
+        self.assertFalse((run/'review.json').exists())
+
+    def test_resume_acceptance_requires_same_session_and_bound_runtime_trace(self):
+        output, run = self.prepare_model('resume', 'autonomous', interaction=True)
+        evidence = self.model_evidence()
+        with self.assertRaisesRegex(ValueError, 'runtime evidence'):
+            repair.review(run, evidence)
+        criteria = json.loads((run/'criteria.json').read_text())
+        checks = json.loads((run/'checks.json').read_text())
+        trace = run/'runtime-trace.json'
+        trace.write_text('Synthetic unit-test trace only; no model or real resume claim.\n')
+        evidence['runtime_evidence'] = {
+            'mode': 'resume_after_read', 'first_session_id': 'fixture-session',
+            'resumed_session_id': 'fixture-session',
+            'checkpoint_source_digest': repair.digest(json.dumps(criteria['baseline'], sort_keys=True).encode()),
+            'candidate_digest': checks['candidate_digest'],
+            'checkpoint_result_sha256': 'a'*64, 'resumed_result_sha256': 'a'*64,
+            'trace_sha256': repair.digest(trace.read_bytes()), 'planned_interruption_observed': False,
+        }
+        for field, bad in [('resumed_session_id', 'other-session'), ('resumed_result_sha256', 'b'*64),
+                           ('candidate_digest', 'c'*64), ('checkpoint_source_digest', 'd'*64)]:
+            invalid = copy.deepcopy(evidence)
+            invalid['runtime_evidence'][field] = bad
+            with self.assertRaises(ValueError):
+                repair.review(run, invalid)
+        self.assertFalse((run/'review.json').exists())
+        repair.review(run, evidence)
+        trace.write_text('Changed after operator review')
+        with self.assertRaisesRegex(ValueError, 'runtime trace'):
+            repair.inspect_run(run)
+        with self.assertRaisesRegex(ValueError, 'runtime trace'):
+            repair.summarize(output)
+
+    def test_saved_autonomous_review_rechecks_recorded_interventions(self):
+        output, run = self.prepare_model('autonomous-saved', 'autonomous')
+        repair.review(run, self.model_evidence())
+        row = repair.read(run/'review.json')
+        row['execution']['interventions'].append({'kind': 'manual_edit', 'note': 'later recorded rescue', 'seconds': 1})
+        (run/'review.json').write_text(json.dumps(row))
+        for reader in (lambda: repair.inspect_run(run), lambda: repair.summarize(output)):
+            with self.assertRaisesRegex(ValueError, 'autonomous'):
+                reader()
+
+    def test_native_offline_pass_cannot_establish_resume(self):
+        self.case['interaction'] = {'mode': 'resume_after_provider_failure'}
+        (self.cases/'cases.json').write_text(json.dumps([self.case]))
+        output = self.root/'offline-resume'
+        repair.prepare(output, self.root, ['candidate'], 1)
+        run = output/'candidate--go-test--001'
+        (run/'workspace/block.go').write_text('good')
+        self.assertTrue(repair.check(run)['machine_passed'])
+        with self.assertRaisesRegex(ValueError, 'offline control'):
+            repair.review(run, self.evidence())
+
     def test_offline_import_does_not_load_live_model_entrypoint_or_budget(self):
         # Isolated interpreter: fail immediately if the offline entrypoint asks
         # to import the live runner's model-budget dependency.
@@ -468,5 +558,43 @@ assert not any(name in sys.modules for name in ('runtime_evals', 'agent_eval_api
         repair.archive(repo,commit,destination)
         self.assertEqual((destination/'bug.txt').read_text(),'before')
         self.assertFalse((destination/'.git').exists())
+
+class FixedCatalogTests(unittest.TestCase):
+    def test_fixed_catalog_categories_defaults_and_ftoa_revision(self):
+        cases_root = Path(repair.__file__).parents[1]/'docs/ai/repair-cases'
+        catalog = repair.read(cases_root/'cases.json')
+        self.assertEqual(len(catalog), 10)
+        self.assertEqual(sum(case.get('default', True) for case in catalog), 2)
+        categories = {category: sum(case['category'] == category for case in catalog)
+                      for category in ('bug_fix', 'small_feature', 'multi_file_change', 'failed_test_repair', 'interruption_resume')}
+        self.assertEqual(set(categories.values()), {2})
+        ftoa = next(case for case in catalog if case['case_id'] == 'go-humanize-ftoa-limits')
+        self.assertEqual(ftoa['oracle_revision'], 2)
+        oracle = (cases_root/ftoa['oracle']).read_text()
+        for name in ('all_six_positive', 'all_six_negative', 'zero_without_rounding_positive', 'zero_without_rounding_negative'):
+            self.assertIn(name, oracle)
+        self.assertEqual(next(check['min_tests'] for check in ftoa['checks'] if check['name'] == 'regression'), 25)
+
+    def test_new_seven_prepare_with_scope_and_no_reference_or_oracle_leak(self):
+        cases_root = Path(repair.__file__).parents[1]/'docs/ai/repair-cases'
+        cases = [case for case in repair.read(cases_root/'cases.json')
+                 if case['provenance']['kind'] == 'synthetic' and not case.get('default', True)]
+        self.assertEqual(len(cases), 7)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)/'prepared'
+            with patch.object(repair, 'CASES', cases_root), patch.object(repair, 'tool_versions', return_value={}):
+                repair.prepare(output, Path(temporary), ['candidate'], 1, 'model-evaluation',
+                               [case['case_id'] for case in cases], 'autonomous')
+            for case in cases:
+                run = output/('candidate--'+case['case_id']+'--001')
+                expected = repair.signature(cases_root/case['fixture'])
+                actual = repair.signature(run/'workspace')
+                actual.pop('REPAIR_TASK.txt')
+                self.assertEqual(actual, expected)
+                refs = cases_root/case['reference_fixture']
+                self.assertEqual(set(repair.signature(refs)), set(case['allowed_paths']))
+                task = repair.read(run/'task.json')
+                self.assertEqual(task.get('interaction'), case.get('interaction'))
+                self.assertNotIn('reference_fixture', task)
 
 if __name__=='__main__':unittest.main()

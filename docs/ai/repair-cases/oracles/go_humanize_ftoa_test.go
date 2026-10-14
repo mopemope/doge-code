@@ -35,6 +35,11 @@ func TestRepairAcceptanceFtoaLimits(t *testing.T) {
 		{"negative_zero", math.Copysign(0, -1), max, "-0"},
 		{"integer_positive", 42, max, "42"},
 		{"integer_negative", -42, max, "-42"},
+		// Revision 2: posttrial reviewer counterexamples, fixed for future runs.
+		{"all_six_positive", 1.234567, max, "1.234567"},
+		{"all_six_negative", -1.234567, max, "-1.234567"},
+		{"zero_without_rounding_positive", 1.999999, 0, "1"},
+		{"zero_without_rounding_negative", -1.999999, 0, "-1"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
