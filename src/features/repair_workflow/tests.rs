@@ -814,7 +814,7 @@ fn saved_evidence(passed: bool) -> (tempfile::TempDir, PathBuf) {
         data.usage_records = 1;
         data.provider_reported_tokens = 12;
     }
-    write_json(&store.root.join("round-1-agent.json"),&serde_json::json!({"status":"completed","stop_reason":null,"session_id":"fixture-session"})).expect("agent");
+    write_json(&store.root.join("round-1-agent.json"),&serde_json::json!({"status":"completed","stop_reason":null,"session_id":"fixture-session","budget":{"charged_tokens":12}})).expect("agent");
     store
         .finish(
             if passed {
@@ -945,5 +945,79 @@ fn repair_already_verified_requires_zero_rounds_and_bound_passing_baseline() {
     write_json(&root.join("baseline-checks.json"), &checks).expect("passing baseline");
     assert!(inspect(&root).is_ok());
     fs::write(root.join("baseline/protected.txt"), "corruption").expect("corrupt baseline");
+    assert!(inspect(&root).is_err());
+}
+
+#[tokio::test]
+async fn repair_retry_final_response_over_budget_stops_before_verification() {
+    use httptest::{Expectation, matchers::*, responders::*};
+    let root = fixture();
+    let original = root.path().to_path_buf();
+    let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = count.clone();
+    server.expect(Expectation::matching(request::method_path("POST","/v1/chat/completions")).times(3).respond_with(move || {
+        let n=n.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        let msg=if n==1 {serde_json::json!({"role":"assistant","tool_calls":[tool("fs_write",serde_json::json!({"path":candidate(&original).join("value.txt"),"content":"good"}))]})}else{serde_json::json!({"role":"assistant","content":"candidate ready"})};
+        let mut body=completion(msg,true);
+        if n==2 {body["usage"]=serde_json::json!({"prompt_tokens":30000,"completion_tokens":1,"total_tokens":30001});}
+        json_encoded(body)
+    }));
+    let path = root.path().join("plan.json");
+    write_json(&path, &plan()).expect("plan");
+    let report = run(
+        config_for(root.path(), &server),
+        &path,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("report");
+    assert_eq!(
+        report.status, "stopped",
+        "final response may complete but repair budget must stop: {:?}",
+        report
+    );
+    let run = PathBuf::from(&report.run);
+    assert!(
+        report
+            .reason
+            .as_deref()
+            .is_some_and(|s| s.contains("turn budget"))
+    );
+    assert!(
+        !run.join("round-2-checks.json").exists(),
+        "no verifier after budget stop"
+    );
+    assert_eq!(
+        fs::read_to_string(run.join("round-2-candidate/value.txt")).expect("saved"),
+        "good"
+    );
+    let data = inspect(&run).expect("inspect stopped");
+    assert_eq!(data["ledger"]["rounds_started"], 2);
+    assert_eq!(data["ledger"]["requests_reserved"], 3);
+    assert_eq!(data["ledger"]["tokens_reserved"], 60000);
+    assert_eq!(
+        fs::read_to_string(root.path().join("value.txt")).expect("original"),
+        "old"
+    );
+}
+
+#[test]
+fn repair_saved_turn_budget_must_be_known_and_within_allowance() {
+    let (_source, root) = saved_evidence(true);
+    let path = root.join("round-1-agent.json");
+    let raw = read_record(&path, 65536).expect("agent");
+    let mut record: serde_json::Value = serde_json::from_slice(&raw).expect("agent");
+    record["budget"]["charged_tokens"] = serde_json::json!(30000);
+    write_json(&path, &record).expect("at limit");
+    assert!(inspect(&root).is_ok());
+    record["budget"]["charged_tokens"] = serde_json::json!(30001);
+    write_json(&path, &record).expect("over limit");
+    assert!(inspect(&root).is_err());
+    record["budget"]
+        .as_object_mut()
+        .expect("budget")
+        .remove("charged_tokens");
+    write_json(&path, &record).expect("unknown");
     assert!(inspect(&root).is_err());
 }

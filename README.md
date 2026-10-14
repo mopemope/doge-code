@@ -2269,7 +2269,9 @@ request attempts share one persistent counter, including compaction. Reservation
 are never refunded on error or reset for the restart. Token limits use existing
 agent charging and provider-reported usage; an in-flight response can exceed its
 estimate, which stops further work. These limits do not implement a dollar cap.
-Unknown usage, exhausted budgets, partial agent status, timeout/cancellation,
+A completed final response that exceeds its turn token allowance is saved and
+stops before native verification or restart. Unknown usage, exhausted budgets,
+partial agent status, timeout/cancellation,
 authentication errors, scope changes or persistence errors stop the workflow.
 Timeout cleanup uses the existing owned runner/request cancellation. Bounded
 regular-file acquisition rejects FIFO/symlink inputs; synchronous filesystem
