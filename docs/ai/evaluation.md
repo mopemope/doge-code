@@ -72,7 +72,10 @@ independent checks and operator-reviewed all-trial accounting without launching
 an agent. The default remains one historical Rust policy case and one explicitly
 synthetic Go case. Explicit `--case go-humanize-ftoa-limits` adds a separate
 real-history Go experiment from an external `--source-repo`; unselected cases do
-not enter its denominator. These fixtures and offline replays are not practical
+not enter its denominator. Seven further opt-in synthetic fixtures complete a ten-slot
+category suite; see the fixed corpus and required resume evidence in that workflow.
+Freeze autonomous and diagnosis-hint cohorts separately before generation.
+These fixtures and offline replays are not practical
 model acceptance results. Keep this separate from the dgc exec comparison below. Its read-only candidate
 handoff ties patch/check/decision identities together; historical inspection and
 summary remain readable after a checker update without rescoring. Fresh checks
