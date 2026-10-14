@@ -231,6 +231,23 @@ async fn repair_workflow_one_restart_preserves_dirty_source_and_binds_review() {
             assert!(!system.contains("use `tool_search`"));
             assert!(system.contains("The controller runs the declared verifiers"));
         }
+        for (request_index, call_id) in [(1, "write-0"), (3, "write-2")] {
+            let result = captured[request_index]["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .find(|m| m["role"] == "tool" && m["tool_call_id"] == call_id)
+                .expect("mutation result");
+            let value: serde_json::Value =
+                serde_json::from_str(result["content"].as_str().expect("content"))
+                    .expect("mutation JSON");
+            let note = value["verification_note"]
+                .as_str()
+                .expect("verification note");
+            assert!(note.contains("controller runs"), "{note}");
+            assert!(!note.contains("Run tests"), "{note}");
+            assert_eq!(value["changed"], true);
+        }
         assert!(captured.iter().all(|r| r["model"] == "fixture"));
     }
     let data = inspect(&run).expect("inspect");

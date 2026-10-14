@@ -25,13 +25,24 @@ use crate::features::agent_prompt::build_system_prompt;
 use crate::llm::message_utils::truncate_tool_output;
 
 const VERIFICATION_NOTE: &str = "File modification detected. Verify your changes:\n1. Read the file to confirm the content is correct.\n2. Run tests to ensure no regressions.";
+const REPAIR_VERIFICATION_NOTE: &str = "File modification detected. Read the file to confirm the content is correct. The controller runs the declared verifiers after your turn; do not execute commands. This mutation result does not establish verification success or acceptance.";
 
 /// Annotate only the model-bound copy, then budget the complete JSON result.
-fn mutation_result_content(value: &serde_json::Value, tool_name: &str, changed: bool) -> String {
+fn mutation_result_content(
+    value: &serde_json::Value,
+    tool_name: &str,
+    changed: bool,
+    repair_mode: bool,
+) -> String {
     let annotated = changed.then(|| {
         let mut annotated = value.clone();
         if let Some(fields) = annotated.as_object_mut() {
-            fields.insert("verification_note".into(), VERIFICATION_NOTE.into());
+            let note = if repair_mode {
+                REPAIR_VERIFICATION_NOTE
+            } else {
+                VERIFICATION_NOTE
+            };
+            fields.insert("verification_note".into(), note.into());
         }
         annotated
     });
@@ -2327,6 +2338,7 @@ pub async fn run_agent_loop(
                     &output.value,
                     tool_name,
                     modifies_files && actually_changed,
+                    fs.repair_guard.is_some(),
                 ),
                 Err(e) => {
                     error!(error = %e, "tool execution failed");
@@ -3361,7 +3373,7 @@ mod mutation_result_content_tests {
         let value =
             serde_json::json!({"success":true,"changed":true,"diff":"日本語\n\"quote\"\\tail"});
         let original = value.clone();
-        let content = mutation_result_content(&value, "edit", true);
+        let content = mutation_result_content(&value, "edit", true, false);
         let result: serde_json::Value = serde_json::from_str(&content).expect("JSON");
         assert_eq!(result["success"], true);
         assert_eq!(result["changed"], true);
@@ -3369,22 +3381,36 @@ mod mutation_result_content_tests {
         assert_eq!(result["verification_note"], VERIFICATION_NOTE);
         assert_eq!(value, original);
         assert_eq!(
-            mutation_result_content(&value, "edit", false),
+            mutation_result_content(&value, "edit", false, false),
             serde_json::to_string(&value).expect("JSON")
         );
     }
     #[test]
     fn mutation_result_content_budgets_note_with_escape_heavy_diff() {
         let limit = crate::llm::max_output_chars("edit");
-        for diff in ["\"\\\n日本語".repeat(2000), "\"".repeat(3940)] {
-            let value = serde_json::json!({"success":true,"changed":true,"diff":diff});
-            let content = mutation_result_content(&value, "edit", true);
-            assert!(content.chars().count() <= limit);
-            let result: serde_json::Value = serde_json::from_str(&content).expect("complete JSON");
-            assert_eq!(result["success"], true, "{content}");
-            assert_eq!(result["changed"], true);
-            assert_eq!(result["verification_note"], VERIFICATION_NOTE);
-            assert!(result["diff"].as_str().expect("diff").contains("truncated"));
+        for repair_mode in [false, true] {
+            for diff in ["\"\\\n日本語".repeat(2000), "\"".repeat(3940)] {
+                let value = serde_json::json!({"success":true,"changed":true,"diff":diff});
+                let content = mutation_result_content(&value, "edit", true, repair_mode);
+                assert!(content.chars().count() <= limit);
+                let result: serde_json::Value =
+                    serde_json::from_str(&content).expect("complete JSON");
+                assert_eq!(result["success"], true, "{content}");
+                assert_eq!(result["changed"], true);
+                assert_eq!(
+                    result["verification_note"],
+                    if repair_mode {
+                        REPAIR_VERIFICATION_NOTE
+                    } else {
+                        VERIFICATION_NOTE
+                    }
+                );
+                assert!(result["diff"].as_str().expect("diff").contains("truncated"));
+                assert_eq!(
+                    mutation_result_content(&value, "edit", false, repair_mode),
+                    truncate_tool_output(serde_json::to_string(&value).expect("JSON"), "edit")
+                );
+            }
         }
     }
 }
