@@ -1106,7 +1106,7 @@ mod stream_cancellation_tests {
 mod probe_tests {
     use super::*;
     #[tokio::test]
-    async fn probe_clears_inherited_environment_and_bounds_capture() {
+    async fn probe_clears_inherited_environment() {
         let cwd = tempfile::tempdir().expect("cwd");
         let spec = ManagedProcessSpec::new(
             "/bin/sh",
@@ -1126,21 +1126,62 @@ mod probe_tests {
                 .await
                 .expect("ordinary");
         assert_ne!(inherited.stdout, "unset");
+    }
+    #[tokio::test]
+    async fn probe_bounds_finite_stdout_and_stderr_capture() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        // Finite output establishes truncation independently of process speed.
         let noisy = ManagedProcessSpec::new(
             "/bin/sh",
-            vec!["-c".into(), "while :; do printf '0123456789'; done".into()],
+            vec![
+                "-c".into(),
+                "printf '%s' \"$1\"; printf '%s' \"$2\" >&2".into(),
+                "probe".into(),
+                "x".repeat(4096),
+                "y".repeat(4096),
+            ],
             cwd.path().into(),
         );
         let out = run_managed_probe(
             noisy,
-            ManagedRunOptions::new(Some(Duration::from_millis(50))),
+            ManagedRunOptions::new(Some(Duration::from_secs(5))),
             1024,
         )
         .await
         .expect("bounded");
-        assert_eq!(out.termination, ManagedProcessTermination::TimedOut);
+        assert_eq!(out.termination, ManagedProcessTermination::Exited);
+        assert_eq!(out.exit_code, Some(0));
         assert!(out.capture_truncated);
-        assert!(out.stdout.len() < 1200);
+        for (stream, prefix) in [
+            (&out.stdout, "x".repeat(1024)),
+            (&out.stderr, "y".repeat(1024)),
+        ] {
+            assert!(stream.starts_with(&prefix), "{stream}");
+            assert!(stream.contains("3072 bytes omitted"), "{stream}");
+            assert!(stream.len() < 1200, "{} captured bytes", stream.len());
+        }
+    }
+    #[tokio::test]
+    async fn probe_times_out_without_requiring_output() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        // A timeout must stop the process even when it has produced no bytes.
+        let silent = ManagedProcessSpec::new(
+            "/bin/sh",
+            vec!["-c".into(), "sleep 30".into()],
+            cwd.path().into(),
+        );
+        let out = run_managed_probe(
+            silent,
+            ManagedRunOptions::new(Some(Duration::from_millis(50))),
+            1024,
+        )
+        .await
+        .expect("timeout");
+        assert_eq!(out.termination, ManagedProcessTermination::TimedOut);
+        assert_eq!(out.exit_code, None);
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
+        assert!(!out.capture_truncated);
     }
     #[tokio::test]
     async fn probe_cancel_stops_owned_process() {
