@@ -68,8 +68,19 @@ impl<'a> ToolRuntime<'a> {
 
         // MCP discovery timing is unchanged; the catalog only controls when
         // discovered schemas become LLM-visible.
-        let tool_catalog =
-            ToolCatalog::from_parts(default_tools_def(), &remote_tools, &fs.config.tool_routing);
+        let tool_catalog = ToolCatalog::from_parts(
+            default_tools_def()
+                .into_iter()
+                .filter(|tool| {
+                    fs.repair_guard.is_none()
+                        || crate::features::repair_workflow::guard::Guard::permits(
+                            &tool.function.name,
+                        )
+                })
+                .collect(),
+            &remote_tools,
+            &fs.config.tool_routing,
+        );
 
         let active_count = tool_catalog.active_count().await;
         let deferred = tool_catalog.is_deferred();

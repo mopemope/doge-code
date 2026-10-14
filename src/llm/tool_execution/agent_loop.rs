@@ -1994,6 +1994,20 @@ pub async fn run_agent_loop(
             .await;
         }
 
+        if let Some(guard) = &fs.repair_guard
+            && let Err(error) = guard.preflight(&msg.tool_calls)
+        {
+            for call in &msg.tool_calls {
+                history.push_tool_result(
+                    call.id.clone(),
+                    serde_json::json!({"ok":false,"error":{"kind":"repair_scope_denied"}})
+                        .to_string(),
+                );
+            }
+            history.checkpoint()?;
+            return Err(error.context("repair batch refused before dispatch"));
+        }
+
         let mut pending_interventions = Vec::new();
         let mut loop_detected = false;
         let mut batch_observations: Vec<crate::llm::reasoning::ToolObservation> = Vec::new();
@@ -2008,6 +2022,22 @@ pub async fn run_agent_loop(
         // mid-batch budget expiry without losing IDs.
         let batch_calls = msg.tool_calls.clone();
         for (tool_index, tc) in batch_calls.into_iter().enumerate() {
+            // A previous tool in this batch may change the match location.
+            // Revalidate the current call against the actual current bytes.
+            if let Some(guard) = &fs.repair_guard
+                && let Err(error) = guard
+                    .preflight(std::slice::from_ref(&tc))
+                    .and_then(|_| fs.ensure_repair_checkpoint())
+            {
+                for call in msg.tool_calls.iter().skip(tool_index) {
+                    history.push_tool_result(
+                        call.id.clone(),
+                        "{\"ok\":false,\"error\":{\"kind\":\"repair_scope_denied\"}}".into(),
+                    );
+                }
+                history.checkpoint()?;
+                return Err(error.context("repair call refused before dispatch"));
+            }
             if loop_detected {
                 // Skip remaining tool calls in the batch
                 debug!(tool = %tc.function.name, "Skipping tool call due to loop detection in same batch");
@@ -2533,6 +2563,19 @@ pub async fn run_agent_loop(
                 }
             }
             history.checkpoint()?;
+
+            if let Some(guard) = &fs.repair_guard
+                && let Err(error) = guard.check().and_then(|_| fs.ensure_repair_checkpoint())
+            {
+                for call in msg.tool_calls.iter().skip(tool_index + 1) {
+                    history.push_tool_result(
+                        call.id.clone(),
+                        "{\"ok\":false,\"error\":{\"kind\":\"repair_scope_denied\"}}".into(),
+                    );
+                }
+                history.checkpoint()?;
+                return Err(error.context("repair scope changed after tool"));
+            }
 
             // Loop Detection
             if tool_name == "plan_write" && success && plan_write_changed == Some(false) {

@@ -10,7 +10,7 @@ fn typed<T: DeserializeOwned>(arguments: &Value) -> Result<()> {
         .map_err(Into::into)
 }
 
-pub(super) fn validate_builtin_arguments(name: &str, arguments: &Value) -> Result<()> {
+pub(crate) fn validate_builtin_arguments(name: &str, arguments: &Value) -> Result<()> {
     ensure!(arguments.is_object(), "tool arguments must be an object");
     let check = match name {
         "find_file" => {
