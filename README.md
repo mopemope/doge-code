@@ -2264,6 +2264,11 @@ caller PATH, offline Cargo/Go, and no inherited credentials. Optional explicit
 Choose trusted native checks: repository code and declared programs retain the
 host user's permissions. This feature provides no OS sandbox.
 
+Repair turns use a dedicated system prompt for their six available file/observation
+tools. Repository guidance is still loaded, within this profile: the model edits
+the declared files, and the controller performs verification. Tool discovery,
+command execution, delegation and separate plan tools are unavailable in this mode.
+
 Each model turn reserves its full token allowance durably before it starts;
 request attempts share one persistent counter, including compaction. Reservations
 are never refunded on error or reset for the restart. Token limits use existing

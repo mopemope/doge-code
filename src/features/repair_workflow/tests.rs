@@ -183,6 +183,12 @@ async fn repair_workflow_one_restart_preserves_dirty_source_and_binds_review() {
                 .any(|m| m["role"] == "tool")
         );
         assert_eq!(captured[0]["tools"].as_array().expect("tools").len(), 6);
+        for request in captured.iter() {
+            let system = request["messages"][0]["content"].as_str().expect("system");
+            assert!(system.contains("# Finite repair tool profile"));
+            assert!(!system.contains("use `tool_search`"));
+            assert!(system.contains("The controller runs the declared verifiers"));
+        }
         assert!(captured.iter().all(|r| r["model"] == "fixture"));
     }
     let data = inspect(&run).expect("inspect");
