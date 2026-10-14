@@ -2235,4 +2235,45 @@ mod tests {
         );
         Ok(())
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_test_feedback_no_test_files_regression() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir()?;
+        let program = root.path().join("go");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf '?   \tcommand-line-arguments\t[no test files]\n'\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+        let config = Arc::new(AppConfig {
+            project_root: root.path().into(),
+            execution_configured: true,
+            ..Default::default()
+        });
+        let fs_tools = FsTools::new(Arc::new(RwLock::new(None)), config);
+        let runtime = ToolRuntime::build(&fs_tools, None, "test-model", None).await?;
+        let call = ToolCall {
+            id: Some("no-test-files".into()),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "execute_process".into(),
+                arguments: json!({"program":program,"args":["test", "pair.go"]}).to_string(),
+            },
+        };
+        let output = dispatch_tool_call(&runtime, &call).await?;
+        assert!(output.is_success);
+        assert_eq!(output.value["success"], true);
+        assert_eq!(output.value["ok"], true);
+        assert_eq!(output.value["exit_code"], 0);
+        assert_eq!(output.value["test_observation"]["outcome"], "zero_tests");
+        assert_eq!(output.value["test_observation"]["test_count"], 0);
+        assert!(
+            output.value["test_observation"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("does not establish")
+        );
+        Ok(())
+    }
 }

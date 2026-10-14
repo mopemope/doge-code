@@ -23,6 +23,7 @@ pub mod review_feedback;
 
 pub mod model_selection;
 
+pub mod verification_feedback;
 pub mod verification_paths;
 pub mod verification_queue;
 

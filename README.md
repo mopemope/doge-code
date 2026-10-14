@@ -524,6 +524,16 @@ Other output formats and v1–6 history remain unknown, without reparsing excerp
 on export. Original process success/exit status and change/obligation links remain
 separate from reported test results and human approval.
 
+Classified `execute_process` test commands also return a compact
+`test_observation`: reported tests passed, failed, zero tests, all reported tests
+skipped, incomplete, timed out, or unknown. Complete plain Go output containing
+only package `[no test files]` lines reports zero tests; ordinary `ok` text does
+not establish counts. Eligible Go JSON uses the existing reported-event counts.
+General commands and processes that did not start have no test observation.
+This model-facing summary does not change `success`, `ok`, exit status, the
+command, or durable provenance formats. Exit zero with zero or unknown tests is
+not passing test evidence; the agent must choose an appropriate check itself.
+
 Complete results count passed/failed/skipped terminal test events (parent tests,
 subtests and examples separately) and package outcomes. JSON `test_count` is this
 terminal-event total, accompanied by `test_count_unit`; it is not a unique-test,
