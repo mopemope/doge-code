@@ -183,6 +183,12 @@ pub async fn execute_process(
                     &status,
                 );
             }
+            if let Some(observation) =
+                crate::features::verification_feedback::observe(&program, &process_args, &value)
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("test_observation".into(), observation);
+            }
             Ok(ToolOutput {
                 value: value.clone(),
                 is_success: success,
