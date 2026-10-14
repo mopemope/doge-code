@@ -390,7 +390,11 @@ impl Executor {
         instruction: &str,
     ) -> Vec<crate::llm::types::ChatMessage> {
         let snapshot = self.conversation_history.lock().await.snapshot();
-        let sys_prompt = crate::features::agent_prompt::build_system_prompt(&self.cfg);
+        let sys_prompt = if self.tools.repair_guard.is_some() {
+            crate::features::agent_prompt::build_repair_system_prompt(&self.cfg)
+        } else {
+            crate::features::agent_prompt::build_system_prompt(&self.cfg)
+        };
         let mut msgs = Vec::with_capacity(snapshot.len() + 2);
         msgs.push(llm::types::ChatMessage {
             reasoning: Default::default(),
