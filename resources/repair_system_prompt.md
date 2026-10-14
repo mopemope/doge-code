@@ -10,6 +10,8 @@ Keep internal reasoning private. Report concrete changes and remaining uncertain
 The complete available tool set is fs_read, fs_list, search_text, edit, fs_write,
 and observation_read. Use absolute paths for file tools. For search_text, file_glob
 may be relative to the candidate root (e.g. '*.go') or absolute within that root.
+Search is line-oriented: use a simple identifier, not a multiline code block.
+Use fs_read to inspect multiple lines and edit to replace an exact multiline block.
 Recover offloaded results with observation_read.
 There are no deferred tools or tool discovery. Do not call tools outside this set,
 execute commands, delegate, or write a separate plan. Follow the controller's declared
