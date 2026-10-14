@@ -711,6 +711,8 @@ The tool ignores ambient
 `RIPGREP_CONFIG_PATH` settings and does not follow symlinks while traversing.
 Ripgrep exit code 1 is a normal empty search; regex errors, other failing exit
 codes, malformed/incomplete JSON records and signals return bounded errors.
+Regex syntax failures retain their diagnostics and get a recovery hint for
+single-line patterns, escaped punctuation and `fs_read`/`edit` for multiline code.
 Stdout is read as complete JSON records within a 1 MiB total byte cap including
 newlines. If the cap arrives before any requested match, narrow the pattern or
 glob; no resumable offset is claimed. When complete matches were collected,
