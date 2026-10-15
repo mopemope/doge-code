@@ -61,7 +61,12 @@ Once a finite local mutation has started, cooperative cancellation waits for its
 tracking to finish. Cancellation can therefore wait for filesystem I/O.
 
 Explicitly incomplete completions (`length`, `content_filter`), refusals, and
-invalid tool-call batches fail before tools execute. Compatible endpoints that
+invalid tool-call batches fail before tools execute. Rejected roles, malformed
+call identities and tools outside the active catalog show a fixed local reason
+and confirm that no tool in the batch ran. The failure remains a non-retryable
+client error; retry explicitly with the available schema. When `tool_search`
+is available, the diagnostic also suggests discovering deferred tools. Provider content, tool IDs and arguments are not included
+in this diagnostic. Compatible endpoints that
 omit `finish_reason` remain supported; absence is not proof of provider completion.
 Batch preflight checks assistant role, unique call IDs, advertised tool names and
 typed built-in mutation/process arguments. It is not a transaction that rolls

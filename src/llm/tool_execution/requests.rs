@@ -672,7 +672,20 @@ fn validate_tool_message_with_activation(
         }
         Ok(())
     })();
-    validation.map_err(|error| error.context(LlmErrorKind::Client))?;
+    validation.map_err(|error| {
+        // These validation reasons are fixed local strings, never provider
+        // text, tool names, IDs or arguments. Keep the Client category while
+        // making this reason visible through the UI's to_string() path.
+        let discovery = if base_tools.iter().chain(active_tools).any(|tool| tool.function.name == "tool_search") {
+            " Discover deferred tools with tool_search."
+        } else {
+            ""
+        };
+        let detail = format!(
+            "Invalid model tool response: {error}. No tools in this batch were executed. Try again with the available tools and their schemas.{discovery}"
+        );
+        error.context(LlmErrorKind::Client).context(detail)
+    })?;
 
     // Validate identities/catalog for the whole batch before classifying an
     // argument failure as correctable. No sibling may dispatch on either path.
@@ -2368,5 +2381,102 @@ mod tests {
         assert!(!rendered.contains(secret_arg));
         assert!(!rendered.contains(secret_output));
         assert_eq!(summary.tool_call_count, 1);
+    }
+    #[test]
+    fn tool_response_rejection_detail_is_visible_and_redacted() {
+        let tools = vec![crate::tools::read::tool_def()];
+        let call = crate::llm::types::ToolCall {
+            id: Some("PRIVATE_ID".into()),
+            r#type: "function".into(),
+            function: crate::llm::types::ToolCallFunction {
+                name: "fs_read".into(),
+                arguments: r#"{"path":"PRIVATE_PATH"}"#.into(),
+            },
+        };
+        for (case, expected) in [
+            ("role", "assistant role"),
+            ("duplicate", "invalid tool-call batch"),
+            ("catalog", "outside the active catalog"),
+        ] {
+            let mut message = ChoiceMessageWithTools {
+                refusal: None,
+                reasoning: Default::default(),
+                provider_state: None,
+                role: "assistant".into(),
+                content: Some("PRIVATE_CONTENT".into()),
+                tool_calls: vec![call.clone()],
+            };
+            match case {
+                "role" => message.role = "PRIVATE_ROLE".into(),
+                "duplicate" => message.tool_calls.push(call.clone()),
+                _ => message.tool_calls[0].function.name = "PRIVATE_TOOL".into(),
+            }
+            let error = validate_tool_message(&message, &tools).expect_err("rejected response");
+            assert_eq!(
+                error.downcast_ref::<LlmErrorKind>(),
+                Some(&LlmErrorKind::Client)
+            );
+            let rendered = error.to_string();
+            assert!(rendered.contains(expected), "{case}: {rendered}");
+            assert!(rendered.contains("No tools in this batch were executed"));
+            assert!(rendered.contains("available tools"));
+            assert!(
+                !rendered.contains("tool_search"),
+                "Discovery is not available in this catalog"
+            );
+            assert!(!rendered.contains("PRIVATE_"));
+            assert!(rendered.len() < 400);
+            let (tx, rx) = std::sync::mpsc::channel();
+            super::super::error::handle_agent_error(
+                &super::super::error::AgentLoopError::Llm(rendered),
+                &Some(tx),
+            );
+            assert!(rx.recv().expect("TUI error").contains(expected));
+        }
+    }
+
+    #[test]
+    fn tool_response_rejection_detail_only_suggests_available_discovery() {
+        let message: ChoiceMessageWithTools = serde_json::from_value(serde_json::json!({"role":"assistant","tool_calls":[{"id":"PRIVATE_ID","type":"function","function":{"name":"PRIVATE_TOOL","arguments":"{}"}}]})).expect("fixture");
+        let discovery = crate::tools::tool_search::tool_def();
+        for (base, active) in [(vec![discovery.clone()], vec![]), (vec![], vec![discovery])] {
+            let error = validate_tool_message_with_activation(&message, &base, &active)
+                .expect_err("unavailable tool");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Discover deferred tools with tool_search")
+            );
+            assert!(!error.to_string().contains("PRIVATE_"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_response_rejection_detail_keeps_client_nonretryable() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_scripted_tool_server(vec![ScriptedToolResponse {
+            status: 200, retry_after: None,
+            body: serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"PRIVATE_ID","type":"function","function":{"name":"PRIVATE_TOOL","arguments":"PRIVATE_ARGS"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}),
+        }], counter.clone()).await;
+        let client = tool_retry_client(url, 3);
+        let error = chat_tools_once(
+            &client,
+            "gpt-test",
+            &user_message(),
+            &[crate::tools::read::tool_def()],
+            None,
+            ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .expect_err("unavailable tool");
+        assert_eq!(
+            error.downcast_ref::<LlmErrorKind>(),
+            Some(&LlmErrorKind::Client)
+        );
+        assert!(error.to_string().contains("outside the active catalog"));
+        assert!(!format!("{error:#}").contains("PRIVATE_"));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }
