@@ -1038,7 +1038,8 @@ impl HistoryManager {
             if already_cleared {
                 continue;
             }
-            msg.content = Some("[cleared tool result: earlier tool output removed to free context; re-run the tool if needed]".to_string());
+            let original_bytes = msg.content.as_ref().map_or(0, String::len);
+            msg.content = Some(fallback_stub("unknown", original_bytes));
             cleared += 1;
         }
         cleared
@@ -2096,6 +2097,10 @@ mod tests {
                 .starts_with("[cleared tool result"),
             "old results cleared"
         );
+        let stub = messages[2].content.as_deref().expect("cleared result");
+        assert!(stub.contains("original result unavailable"), "{stub}");
+        assert!(stub.contains("read-only"), "{stub}");
+        assert!(!stub.contains("re-run"), "{stub}");
         assert_eq!(messages[5].content.as_deref(), Some("recent result 4"));
         assert_eq!(messages[6].content.as_deref(), Some("recent result 5"));
     }
@@ -2345,6 +2350,87 @@ mod tests {
         let report = mgr.offload_stale_tool_results(10_000, 1_000, 0.6, 0);
         assert_eq!(report.fallback_elisions, 1);
         assert_eq!(mgr.observations_snapshot().ids(), before_ids);
+    }
+
+    #[test]
+    fn test_rejected_observation_guides_read_only_recovery_without_reexecution() {
+        use crate::llm::observation::{
+            CLEARED_STUB_PREFIX, MAX_OBSERVATION_ENTRIES, MAX_OBSERVATION_STORE_BYTES,
+            MAX_SINGLE_OBSERVATION_BYTES,
+        };
+
+        for rejection in ["entry_count", "total_bytes", "single_result_bytes"] {
+            for tool_name in ["execute_process", "mcp__service__submit"] {
+                let mut mgr = test_manager(vec![make_msg("system", "sys")]);
+                {
+                    let mut store = mgr.observations.write().expect("store lock");
+                    let (entries, bytes) = match rejection {
+                        "entry_count" => (MAX_OBSERVATION_ENTRIES, 500),
+                        // Leave less room than the candidate requires, without exceeding
+                        // the single-entry limit or the total store limit while filling.
+                        "total_bytes" => (12, MAX_OBSERVATION_STORE_BYTES / 12),
+                        _ => (0, 0),
+                    };
+                    for i in 0..entries {
+                        assert!(
+                            store
+                                .insert(format!("fill-{i}"), "fs_read".into(), "z".repeat(bytes), 0)
+                                .is_some()
+                        );
+                    }
+                }
+                let before = mgr.observations_snapshot();
+                let content_bytes = if rejection == "single_result_bytes" {
+                    MAX_SINGLE_OBSERVATION_BYTES + 1
+                } else {
+                    3000
+                };
+                let content = "Q".repeat(content_bytes);
+                let mut call = make_assistant_with_tool_calls("call-rejected", "historical call");
+                call.tool_calls[0].function.name = tool_name.into();
+                call.tool_calls[0].function.arguments =
+                    r#"{"private_argument":"DO_NOT_COPY_SENTINEL"}"#.into();
+                mgr.push(call);
+                mgr.push_tool_result(Some("call-rejected".into()), content.clone());
+
+                let unseen = mgr.offload_stale_tool_results_for_pressure(0);
+                assert_eq!(unseen.fallback_elisions, 0);
+                assert_eq!(
+                    mgr.as_slice().last().unwrap().content.as_deref(),
+                    Some(content.as_str())
+                );
+                mgr.mark_sent_tool_results_seen();
+                let report = mgr.offload_stale_tool_results_for_pressure(0);
+                assert_eq!(report.fallback_elisions, 1, "{rejection}: {tool_name}");
+                assert_eq!(report.recoverable_offloads, 0);
+                assert_eq!(
+                    mgr.observations_snapshot(),
+                    before,
+                    "must not evict or allocate"
+                );
+                let result = mgr.as_slice().last().expect("tool result");
+                assert_eq!(result.tool_call_id.as_deref(), Some("call-rejected"));
+                let stub = result.content.as_deref().expect("fallback stub");
+                assert!(stub.starts_with(CLEARED_STUB_PREFIX));
+                assert!(stub.contains(tool_name));
+                assert!(stub.contains(&format!("{content_bytes} bytes")));
+                assert!(stub.contains("original result unavailable"), "{stub}");
+                assert!(stub.contains("read-only"), "{stub}");
+                assert!(
+                    stub.contains("Do not repeat side-effecting operations to recover this result"),
+                    "{stub}"
+                );
+                assert!(!stub.contains("re-run"), "{stub}");
+                assert!(!stub.contains("DO_NOT_COPY_SENTINEL"));
+                assert!(!stub.contains(&content));
+                assert!(report.reclaimed_bytes > 0);
+                assert_eq!(
+                    mgr.offload_stale_tool_results_for_pressure(0)
+                        .fallback_elisions,
+                    0
+                );
+            }
+        }
     }
 
     #[test]
