@@ -926,12 +926,12 @@ impl FsTools {
 
     pub async fn call_remote_tool(
         &self,
-        alias: &str,
+        expected: &crate::tools::remote_tools::RemoteToolDefinition,
         args: &serde_json::Value,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<Option<crate::tools::remote_tools::RemoteToolOutcome>> {
+    ) -> Result<crate::tools::remote_tools::RemoteToolOutcome> {
         self.remote_tool_manager
-            .call_remote_tool(alias, args, cancel_token)
+            .call_remote_tool(expected, args, cancel_token)
             .await
     }
     pub async fn read_memory(&self, key: &str) -> Result<String> {
