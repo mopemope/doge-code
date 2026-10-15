@@ -1777,6 +1777,12 @@ the same SQLite transaction. Unversioned or incompatible caches are rebuilt on
 the next analysis, even when source files are unchanged. Session checkpoints and
 provenance are stored separately and are not part of this cache rebuild.
 
+The CLI instruction-completion RepoMap hook acknowledges pending file changes
+only after a successful rebuild. Failed refreshes retry after the next instruction;
+edits made during a rebuild remain pending, including further edits to the same
+file. Session change history is retained independently. Resuming a session
+conservatively refreshes its recorded changed files again.
+
 ### Smart Editing
 - **Symbol-aware editing**: Edit entire functions, classes, modules
 - **Diff review**: Preview changes before applying
