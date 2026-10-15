@@ -781,28 +781,10 @@ fn validate_completion_files(items: &[PlanItem], valid_files: &[String]) -> Resu
         if item.status == "completed" {
             for cap in file_pattern.captures_iter(&item.content) {
                 let path = &cap["path"];
-                // Check if this path is in valid_files (which are changed files in this session)
-                // valid_files are relative or absolute. We check if the valid file *ends with* the detected path
-                // to handle relative match.
-                // e.g. detected "main.rs" matches valid "src/main.rs".
-
-                let found = valid_files.iter().any(|f| f.ends_with(path));
+                // Preserve basename/relative suffixes, but compare whole path
+                // components: domain.rs must not satisfy a claim for main.rs.
+                let found = valid_files.iter().any(|f| Path::new(f).ends_with(path));
                 if !found {
-                    // Try to see if it's just a casing issue or similar, but strict is better.
-                    // We allow if the path is NOT in the list, then we error.
-                    // BUT: What if the user mentions a file they *read* but didn't modify?
-                    // The requirement is "If a plan item is marked as completed... those files must be in changed_files".
-                    // This implies if you say "Read main.rs", it shouldn't trigger.
-                    // But usually "completed" implies modification in this context?
-                    // The user said: "plan_writeで修正内容と一致しない項目まで更新されている... 修正もしていないのにplanのチェックつけてしまう"
-                    // so yes, if it's completed, it implies modification.
-
-                    // However, we must be careful about "I read main.rs and it looks good".
-                    // If the user *just* read it, they might mark it done.
-                    // But the prompt says "Modify plan_write to check... if match ONLY".
-                    // If the user *manually* marks it done, they might use a tool.
-                    // If the *Agent* marks it done, it should have modified it.
-
                     anyhow::bail!(
                         "Plan item '{}' is marked as completed but refers to file '{}' which has not been modified in this session. \
                         Please only mark items as completed if you have actually modified the referenced files. \
@@ -1156,110 +1138,47 @@ mod tests {
 
     #[test]
     fn plan_write_validates_changed_files() {
-        let (_dir, base) = plan_dir();
-
-        let valid_files = vec!["src/main.rs".to_string(), "Cargo.toml".to_string()];
-
-        // 1. Success: Referred file is in changed_files
-        let items = vec![PlanItem {
-            id: "step-1".into(),
-            parent_id: None,
-            content: "Update src/main.rs".into(),
-            status: "completed".into(),
-            requirement_ids: Vec::new(),
-            verification_obligations: Vec::new(),
-        }];
-        let result = plan_write_from_base_path(
-            items,
-            PlanWriteMode::Replace,
-            "session",
-            base.clone(),
-            &AppConfig::default(),
-            Some(&valid_files),
-            None,
-        );
-        assert!(result.is_ok());
-
-        // 2. Failure: Referred file is NOT in changed_files
-        let items = vec![PlanItem {
-            id: "step-2".into(),
-            parent_id: None,
-            content: "Update utils.rs".into(),
-            status: "completed".into(),
-            requirement_ids: Vec::new(),
-            verification_obligations: Vec::new(),
-        }];
-        let result = plan_write_from_base_path(
-            items,
-            PlanWriteMode::Replace,
-            "session",
-            base.clone(),
-            &AppConfig::default(),
-            Some(&valid_files),
-            None,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("modified"));
-
-        // 3. Success: No files mentioned
-        let items = vec![PlanItem {
-            id: "step-3".into(),
-            parent_id: None,
-            content: "Think about life".into(),
-            status: "completed".into(),
-            requirement_ids: Vec::new(),
-            verification_obligations: Vec::new(),
-        }];
-        let result = plan_write_from_base_path(
-            items,
-            PlanWriteMode::Replace,
-            "session",
-            base.clone(),
-            &AppConfig::default(),
-            Some(&valid_files),
-            None,
-        );
-        assert!(result.is_ok());
-
-        // 4. Success: Pending item mentions file not in changed_files (should be ignored)
-        let items = vec![PlanItem {
-            id: "step-4".into(),
-            parent_id: None,
-            content: "Will update utils.rs".into(),
-            status: "pending".into(),
-            requirement_ids: Vec::new(),
-            verification_obligations: Vec::new(),
-        }];
-        let result = plan_write_from_base_path(
-            items,
-            PlanWriteMode::Replace,
-            "session",
-            base.clone(),
-            &AppConfig::default(),
-            Some(&valid_files),
-            None,
-        );
-        assert!(result.is_ok());
-
-        // 5. Success: Content contains "and/or" which shouldn't be matched as a file
-        let items = vec![PlanItem {
-            id: "step-5".into(),
-            parent_id: None,
-            content: "Review this and/or that".into(),
-            status: "completed".into(),
-            requirement_ids: Vec::new(),
-            verification_obligations: Vec::new(),
-        }];
-        let result = plan_write_from_base_path(
-            items,
-            PlanWriteMode::Replace,
-            "session",
-            base.clone(),
-            &AppConfig::default(),
-            Some(&valid_files),
-            None,
-        );
-        assert!(result.is_ok());
+        for (changed, content, status, allowed) in [
+            ("src/main.rs", "Update src/main.rs", "completed", true),
+            ("src/main.rs", "Update main.rs", "completed", true),
+            (
+                "/project/src/main.rs",
+                "Update src/main.rs",
+                "completed",
+                true,
+            ),
+            ("./src/main.rs", "Update main.rs", "completed", true),
+            ("Cargo.toml", "Update Cargo.toml", "completed", true),
+            ("src/main.rs", "Update utils.rs", "completed", false),
+            ("domain.rs", "Update main.rs", "completed", false),
+            ("not_src/foo.rs", "Update src/foo.rs", "completed", false),
+            ("src/main.rs", "Think about life", "completed", true),
+            ("src/main.rs", "Will update utils.rs", "pending", true),
+            ("src/main.rs", "Review this and/or that", "completed", true),
+        ] {
+            let (_dir, base) = plan_dir();
+            let items = vec![PlanItem {
+                id: "step-1".into(),
+                parent_id: None,
+                content: content.into(),
+                status: status.into(),
+                requirement_ids: Vec::new(),
+                verification_obligations: Vec::new(),
+            }];
+            let result = plan_write_from_base_path(
+                items,
+                PlanWriteMode::Replace,
+                "session",
+                base,
+                &AppConfig::default(),
+                Some(&[changed.into()]),
+                None,
+            );
+            assert_eq!(result.is_ok(), allowed, "{changed}: {content}: {result:?}");
+            if !allowed {
+                assert!(result.unwrap_err().to_string().contains("modified"));
+            }
+        }
     }
 
     fn obligation(id: &str) -> VerificationObligation {
