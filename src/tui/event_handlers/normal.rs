@@ -18,7 +18,10 @@ fn is_immediate_control_command(line: &str) -> bool {
     let line = line.trim();
     line == "/jobs"
         || line.split_whitespace().collect::<Vec<_>>() == ["/tokens", "context"]
-        || matches!(line.split_whitespace().next(), Some("/cancel" | "/models"))
+        || matches!(
+            line.split_whitespace().next(),
+            Some("/cancel" | "/models" | "/provider")
+        )
 }
 
 fn queued_input_preview(input: &str) -> String {
@@ -680,7 +683,14 @@ mod tests {
             crate::tui::state::Status::Thinking,
             crate::tui::state::Status::Running,
         ] {
-            for line in ["/jobs", " /cancel ", "/cancel job-2", "/cancel\tbad-id"] {
+            for line in [
+                "/jobs",
+                " /cancel ",
+                "/cancel job-2",
+                "/cancel\tbad-id",
+                "/models glm",
+                "/provider zen",
+            ] {
                 let calls = Arc::new(Mutex::new(Vec::new()));
                 let mut app = TuiApp::new_for_test("controls", None, "default");
                 app.handler = Some(Box::new(Recorder(calls.clone())));

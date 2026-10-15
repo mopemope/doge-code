@@ -32,10 +32,11 @@ use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
 impl CommandHandler for TuiExecutor {
     fn select_model_for_new_session(
         &mut self,
+        provider: crate::features::openai_subscription::ProviderKind,
         model: &str,
         ui: &mut TuiApp,
     ) -> anyhow::Result<String> {
-        self.start_model_session(model, ui)
+        self.start_model_session(provider, model, ui)
     }
 
     fn prepare_exit(&mut self, ui: &mut TuiApp) -> anyhow::Result<bool> {
@@ -172,6 +173,14 @@ impl CommandHandler for TuiExecutor {
                 self,
                 ui,
                 line.strip_prefix("/evidence").unwrap_or("").trim(),
+            );
+            return;
+        }
+        if line.split_whitespace().next() == Some("/provider") {
+            crate::tui::commands::handlers::slash_commands::models::handle_provider(
+                self,
+                ui,
+                line.strip_prefix("/provider").unwrap_or("").trim(),
             );
             return;
         }

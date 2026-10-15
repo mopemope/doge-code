@@ -77,7 +77,7 @@ fn model_selection_new_session_isolates_history_and_restores_selection() {
     executor.last_user_prompt = Some("old prompt".into());
     ui.last_user_input = Some("old prompt".into());
     let new_id = executor
-        .start_model_session("opencode-go/glm-5.3", &mut ui)
+        .start_model_session(ProviderKind::OpencodeGo, "opencode-go/glm-5.3", &mut ui)
         .unwrap();
     assert_ne!(old_id, new_id);
     assert!(history(&executor).is_empty());
@@ -107,6 +107,45 @@ fn model_selection_new_session_isolates_history_and_restores_selection() {
             .unwrap()
             .contains("SYNTHETIC_SECRET")
     );
+    let previous = executor.client.as_ref().unwrap().clone();
+    let zen_id = executor
+        .start_model_session(ProviderKind::OpencodeZen, "opencode/qwen3.8-max", &mut ui)
+        .unwrap();
+    let next = executor.client.as_ref().unwrap();
+    assert_eq!(executor.cfg.provider, ProviderKind::OpencodeZen);
+    assert_eq!(executor.cfg.base_url, opencode::ZEN_BASE);
+    assert_eq!(next.provider, ProviderKind::OpencodeZen);
+    assert_eq!(next.base_url, opencode::ZEN_BASE);
+    assert_eq!(next.api_key, previous.api_key);
+    assert!(!next.is_subscription() && !next.native_responses_compaction_enabled());
+    assert!(std::sync::Arc::ptr_eq(
+        &next.usage_ledger,
+        &previous.usage_ledger
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &next.total_tokens_used,
+        &previous.total_tokens_used
+    ));
+    assert_eq!(previous.provider, ProviderKind::OpencodeGo);
+    assert_eq!(previous.base_url, opencode::GO_BASE);
+    assert_eq!(previous.opencode_session, new_id);
+    assert_ne!(next.opencode_session, previous.opencode_session);
+    let saved_zen = store.load(&zen_id).unwrap();
+    assert!(saved_zen.conversation.is_empty() && saved_zen.unseen_tool_results.is_empty());
+    assert_eq!(
+        saved_zen.model_selection.unwrap().provider,
+        ProviderKind::OpencodeZen
+    );
+    assert!(
+        !String::from_utf8(std::fs::read(store.session_dir(&zen_id).join("session.json")).unwrap())
+            .unwrap()
+            .contains("SYNTHETIC_SECRET")
+    );
+    assert!(executor.switch_to_session(&old_id).is_err());
+    assert_eq!(id(&executor), zen_id);
+    executor
+        .start_model_session(ProviderKind::OpencodeGo, "gpt-6-luna", &mut ui)
+        .unwrap();
     executor
         .handle_session_command(&format!("switch {old_id}"), &mut ui)
         .unwrap();
@@ -141,19 +180,50 @@ fn model_selection_new_session_isolates_history_and_restores_selection() {
     assert_eq!(resumed.cfg.model, "glm-5.3");
     assert_eq!(ui.cfg.as_ref().unwrap().model, "glm-5.3");
     assert!(ui.inference_label.as_ref().unwrap().contains("glm-5.3"));
-    assert_eq!(store.list().unwrap().len(), 2);
+    assert_eq!(store.list().unwrap().len(), 4);
+    assert_eq!(
+        std::fs::read(store.session_dir(&old_id).join("session.json")).unwrap(),
+        old_bytes
+    );
 }
 #[test]
 fn model_selection_validation_and_prepare_failures_keep_current_state() {
     let (mut executor, mut ui, _dir) = fixture(true);
     let old = id(&executor);
     for model in ["unknown", "opencode/glm-5.3", "qwen3.8-max"] {
-        assert!(executor.start_model_session(model, &mut ui).is_err());
+        assert!(
+            executor
+                .start_model_session(ProviderKind::OpencodeGo, model, &mut ui)
+                .is_err()
+        );
         assert_eq!(id(&executor), old);
         assert_eq!(ui.model.as_deref(), Some("gpt-6-luna"));
     }
+    let mut compatible = executor.cfg.clone();
+    compatible.provider = ProviderKind::OpenaiCompatible;
+    compatible.api_key = Some("OPENAI_KEY_NOT_FOR_OPENCODE".into());
+    let keyless =
+        opencode::selection_config(&compatible, ProviderKind::OpencodeGo, "gpt-6-luna", None)
+            .unwrap();
+    let mut candidate = crate::session::SessionData::new();
+    candidate.model_selection = Some(crate::session::data::SessionModelSelection {
+        provider: ProviderKind::OpencodeGo,
+        model: "gpt-6-luna".into(),
+    });
+    let prepared = executor
+        .prepare_session_selection(&candidate, &keyless)
+        .unwrap();
+    assert!(prepared.1.is_none());
+    assert_eq!(
+        executor.client.as_ref().unwrap().api_key,
+        "SYNTHETIC_SECRET"
+    );
     executor.cfg.base_url = opencode::ZEN_BASE.into();
-    assert!(executor.start_model_session("glm-5.3", &mut ui).is_err());
+    assert!(
+        executor
+            .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+            .is_err()
+    );
     assert_eq!(id(&executor), old);
     assert_eq!(executor.cfg.model, "gpt-6-luna");
     assert_eq!(
@@ -178,9 +248,18 @@ fn model_selection_save_failure_keeps_runtime_client_ui_and_old_checkpoint() {
     let before = std::fs::read(root.join(&old).join("session.json")).unwrap();
     std::fs::rename(&root, &backup).unwrap();
     std::fs::write(&root, "not a directory").unwrap();
-    assert!(executor.start_model_session("glm-5.3", &mut ui).is_err());
+    assert!(
+        executor
+            .start_model_session(ProviderKind::OpencodeZen, "glm-5.3", &mut ui)
+            .is_err()
+    );
     assert_eq!(id(&executor), old);
     assert_eq!(executor.cfg.model, "gpt-6-luna");
+    assert_eq!(executor.cfg.provider, ProviderKind::OpencodeGo);
+    assert_eq!(
+        executor.client.as_ref().unwrap().provider,
+        ProviderKind::OpencodeGo
+    );
     assert_eq!(ui.cfg.as_ref().unwrap().model, "gpt-6-luna");
     assert_eq!(
         history(&executor)[0].content.as_deref(),
@@ -197,7 +276,9 @@ fn model_selection_save_failure_keeps_runtime_client_ui_and_old_checkpoint() {
 fn model_selection_keyless_resume_rejects_provider_and_binding_mismatch() {
     let (mut executor, mut ui, _dir) = fixture(false);
     let old = id(&executor);
-    let target = executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    let target = executor
+        .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+        .unwrap();
     executor.switch_to_session(&old).unwrap();
     let sm = executor.session_manager.lock().unwrap();
     let mut bad = sm.store.load(&target).unwrap();
@@ -263,7 +344,9 @@ fn model_selection_never_prunes_existing_sessions_even_after_exit_flush() {
         std::fs::set_permissions(&path, permissions).unwrap();
     }
     executor.switch_to_session(&original).unwrap();
-    executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    executor
+        .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+        .unwrap();
     executor.flush_session().unwrap();
     assert_eq!(store.list().unwrap().len(), 108);
     for id in existing {
@@ -276,7 +359,11 @@ async fn model_selection_rejects_background_jobs_and_queued_input() {
     let (mut executor, mut ui, _dir) = fixture(false);
     let old = id(&executor);
     ui.pending_instructions.push_back("previous prompt".into());
-    assert!(executor.start_model_session("glm-5.3", &mut ui).is_err());
+    assert!(
+        executor
+            .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+            .is_err()
+    );
     ui.pending_instructions.clear();
     let job = executor
         .jobs
@@ -293,7 +380,11 @@ async fn model_selection_rejects_background_jobs_and_queued_input() {
             },
         )
         .unwrap();
-    assert!(executor.start_model_session("glm-5.3", &mut ui).is_err());
+    assert!(
+        executor
+            .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+            .is_err()
+    );
     assert!(executor.switch_to_session(&old).is_err());
     assert!(executor.resume_session(&old).is_err());
     assert_eq!(id(&executor), old);
@@ -309,7 +400,7 @@ fn model_selection_picker_search_unsupported_cancel_paste_and_reopen() {
     let (mut executor, mut ui, _dir) = fixture(false);
     let old = id(&executor);
     ui.textarea.insert_str("keep draft");
-    for _ in 0..3 {
+    {
         executor.handle("/models", &mut ui);
         ui.handle_paste("qwen3.8-max");
         assert_eq!(ui.model_picker.as_ref().unwrap().query, "qwen3.8-max");
@@ -373,6 +464,8 @@ fn model_selection_picker_renders_supported_unsupported_and_empty_at_terminal_wi
             assert!(screen.contains("Models: opencode-go"), "{screen}");
             assert!(screen.contains(marker), "{screen}");
             assert!(screen.contains("Enter: NEW session"), "{screen}");
+            assert!(screen.contains("OPENCODE_API_KEY"), "{screen}");
+            assert!(screen.contains("Go (subscription)"), "{screen}");
         }
     }
 }
@@ -381,8 +474,46 @@ fn model_selection_enter_commits_once_and_repeats_do_not_create_sessions() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     let (executor, ui, _dir) = fixture(false);
     let manager = executor.session_manager.clone();
+    let old = id(&executor);
     let mut ui = ui.with_handler(Box::new(executor));
-    ui.dispatch("/models glm-5.3");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 32)).unwrap();
+    ui.textarea.insert_str("/provider zen");
+    ui.input_history.push("/provider zen".into());
+    crate::tui::event_handlers::handle_normal_mode_key(
+        &mut ui,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut terminal,
+    )
+    .unwrap();
+    assert!(
+        ui.pending_instructions.is_empty(),
+        "provider selection must bypass the prompt queue"
+    );
+    assert_eq!(
+        ui.model_picker.as_ref().unwrap().provider,
+        ProviderKind::OpencodeZen
+    );
+    assert_eq!(ui.cfg.as_ref().unwrap().provider, ProviderKind::OpencodeGo);
+    crate::tui::event_handlers::handle_model_picker_key(
+        &mut ui,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .unwrap();
+    assert_eq!(manager.lock().unwrap().current_session_id().unwrap(), old);
+    assert_eq!(ui.textarea.lines(), [""]);
+    ui.textarea.insert_str("keep draft");
+    ui.dispatch("/provider go opencode-go/qwen3.8-max");
+    crate::tui::event_handlers::handle_model_picker_key(
+        &mut ui,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .unwrap();
+    assert_eq!(
+        ui.model_picker.as_ref().unwrap().provider,
+        ProviderKind::OpencodeZen
+    );
+    assert_eq!(ui.model_picker.as_ref().unwrap().query, "qwen3.8-max");
+    assert_eq!(ui.cfg.as_ref().unwrap().provider, ProviderKind::OpencodeGo);
     let mut repeat = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     repeat.kind = KeyEventKind::Repeat;
     crate::tui::event_handlers::handle_model_picker_key(&mut ui, repeat).unwrap();
@@ -394,7 +525,9 @@ fn model_selection_enter_commits_once_and_repeats_do_not_create_sessions() {
     .unwrap();
     assert!(ui.model_picker.is_none());
     assert_eq!(manager.lock().unwrap().store.list().unwrap().len(), 2);
-    assert_eq!(ui.model.as_deref(), Some("glm-5.3"));
+    assert_eq!(ui.model.as_deref(), Some("qwen3.8-max"));
+    assert_eq!(ui.cfg.as_ref().unwrap().provider, ProviderKind::OpencodeZen);
+    assert_eq!(ui.textarea.lines(), ["keep draft"]);
     crate::tui::event_handlers::handle_model_picker_key(
         &mut ui,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -412,7 +545,9 @@ fn model_selection_postrename_sync_warning_keeps_disk_and_runtime_consistent() {
         .unwrap()
         .store
         .fail_directory_sync = true;
-    let selected = executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    let selected = executor
+        .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+        .unwrap();
     assert_eq!(id(&executor), selected);
     assert_eq!(ui.model.as_deref(), Some("glm-5.3"));
     let sm = executor.session_manager.lock().unwrap();
@@ -436,7 +571,9 @@ fn model_selection_allows_idle_persistent_shell_pty() {
     ui.shell_session = Some(crate::tui::shell::ShellSession::new(tx).unwrap());
     executor.handle("/models glm-5.3", &mut ui);
     assert!(ui.model_picker.is_some());
-    executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    executor
+        .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+        .unwrap();
     assert_eq!(executor.cfg.model, "glm-5.3");
 }
 
@@ -445,7 +582,9 @@ fn session_operation_list_prefixes_resolve_switch_resume_and_render() {
     use ratatui::{Terminal, backend::TestBackend};
     let (mut executor, mut ui, _dir) = fixture(false);
     let original = id(&executor);
-    let selected = executor.start_model_session("glm-5.3", &mut ui).unwrap();
+    let selected = executor
+        .start_model_session(ProviderKind::OpencodeGo, "glm-5.3", &mut ui)
+        .unwrap();
     let (summaries, legacy) = {
         let manager = executor.session_manager.lock().unwrap();
         let (legacy, _lease, _outcome) = manager

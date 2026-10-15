@@ -157,15 +157,21 @@ impl TuiApp {
         let inner = block.inner(area);
         f.render_widget(block, area);
         let parts = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(4),
             Constraint::Min(1),
             Constraint::Length(7),
         ])
         .split(inner);
         f.render_widget(
             Paragraph::new(format!(
-                "Search: {}\nEnter: NEW session | Esc: cancel",
-                picker.query
+                "Search: {}\n{} | {}\nTab: Go/Zen | Enter: NEW session\nEsc: cancel (no change)",
+                picker.query,
+                crate::features::opencode::billing_label(picker.provider),
+                if picker.key_available {
+                    "key set"
+                } else {
+                    "NO KEY"
+                }
             )),
             parts[0],
         );
@@ -203,7 +209,7 @@ impl TuiApp {
                 &mut state,
             );
         }
-        let detail = if let Some(error) = &picker.error {
+        let mut detail = if let Some(error) = &picker.error {
             error.clone()
         } else if let Some(spec) = results.get(picker.selected) {
             format!(
@@ -216,6 +222,14 @@ impl TuiApp {
         } else {
             "Edit search or Esc to cancel".into()
         };
+        detail = format!(
+            "{}\n{detail}",
+            if picker.key_available {
+                "Uses the selected OpenCode key; not saved here."
+            } else {
+                "NO KEY: export OPENCODE_API_KEY in your shell and restart dgc."
+            }
+        );
         f.render_widget(
             Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
             parts[2],

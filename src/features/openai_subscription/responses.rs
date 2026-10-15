@@ -903,6 +903,11 @@ pub(crate) async fn infer_api_key(
             .is_some_and(|e| crate::llm::retry::is_context_length_exceeded_code(&e.code))
         {
             error.context(crate::llm::LlmErrorKind::ContextLengthExceeded)
+        } else if error
+            .downcast_ref::<ProviderError>()
+            .is_some_and(|error| matches!(error.status, Some(401 | 403)))
+        {
+            error.context(crate::features::opencode::auth_guidance(client.provider))
         } else {
             error
         }

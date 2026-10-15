@@ -223,7 +223,7 @@ impl TuiExecutor {
                 sm.flush_before_transition()?
             };
             let (session, messages, prepared) = sm.switch_to_prepared_session(id, |session| {
-                self.prepare_session_selection(session)
+                self.prepare_session_selection(session, &self.cfg)
             })?;
             (session, messages, prepared, outcome)
         };
@@ -256,7 +256,7 @@ impl TuiExecutor {
             };
             if let Some(target) = target {
                 Some(sm.switch_to_prepared_session(&target, |session| {
-                    self.prepare_session_selection(session)
+                    self.prepare_session_selection(session, &self.cfg)
                 })?)
             } else {
                 if sm.current_session.is_none() {

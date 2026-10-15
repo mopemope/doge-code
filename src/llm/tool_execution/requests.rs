@@ -459,8 +459,7 @@ async fn chat_tools_once_attempt(
                 Some(status),
                 retry_after,
                 provider_code,
-                anyhow!(LlmErrorKind::Authentication)
-                    .context(format!("chat (tools) auth error: {status}")),
+                client.authentication_error(status, "chat (tools) auth error"),
             ));
         }
 

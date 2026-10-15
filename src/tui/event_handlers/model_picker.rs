@@ -16,6 +16,7 @@ pub(crate) fn handle_model_picker_key(app: &mut TuiApp, key: KeyEvent) -> Result
         KeyCode::Char('c' | 'g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.model_picker = None;
         }
+        KeyCode::Tab | KeyCode::BackTab => picker.toggle_provider(),
         KeyCode::Up => picker.move_selection(false),
         KeyCode::Down => picker.move_selection(true),
         KeyCode::Backspace => {
@@ -39,7 +40,8 @@ pub(crate) fn handle_model_picker_key(app: &mut TuiApp, key: KeyEvent) -> Result
             }
             Some(spec) => {
                 if let Some(mut handler) = app.handler.take() {
-                    let result = handler.select_model_for_new_session(spec.id, app);
+                    let result =
+                        handler.select_model_for_new_session(picker.provider, spec.id, app);
                     app.handler = Some(handler);
                     match result {
                         Ok(_) => app.model_picker = None,

@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 pub trait CommandHandler {
     fn select_model_for_new_session(
         &mut self,
+        _provider: crate::features::openai_subscription::ProviderKind,
         _model: &str,
         _ui: &mut TuiApp,
     ) -> anyhow::Result<String> {

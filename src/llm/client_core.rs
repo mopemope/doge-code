@@ -121,7 +121,12 @@ impl OpenAIClient {
             cfg.api_key
                 .as_ref()
                 .map(|key| {
-                    Self::new(&cfg.base_url, key).map(|mut c| {
+                    Self::new(
+                        crate::features::opencode::default_base(cfg.provider)
+                            .unwrap_or(&cfg.base_url),
+                        key,
+                    )
+                    .map(|mut c| {
                         c.provider = cfg.provider;
                         c.with_llm_config(cfg.llm.clone())
                     })
@@ -176,7 +181,7 @@ impl OpenAIClient {
             None if crate::features::opencode::default_base(self.provider).is_some() => format!(
                 "{:?}:{}:{:?}:{model}",
                 self.provider,
-                self.base_url.trim_end_matches('/'),
+                crate::features::opencode::identity_base(self.provider, &self.base_url),
                 crate::features::opencode::api(self.provider, model)?
             ),
             None => "openai-compatible".into(),
@@ -188,12 +193,43 @@ impl OpenAIClient {
         format!(
             "{:?}:{}:responses",
             self.provider,
-            self.base_url.trim_end_matches('/')
+            crate::features::opencode::identity_base(self.provider, &self.base_url)
         )
     }
 
     pub fn is_subscription(&self) -> bool {
         self.subscription.is_some()
+    }
+
+    /// Carry process usage into a freshly validated connection, never its auth
+    /// or provider-specific state. Existing job clones retain their own route.
+    pub(crate) fn share_usage_from(&mut self, previous: &Self) {
+        self.tokens_used = previous.tokens_used.clone();
+        self.prompt_tokens_used = previous.prompt_tokens_used.clone();
+        self.total_tokens_used = previous.total_tokens_used.clone();
+        self.usage_record_count = previous.usage_record_count.clone();
+        self.usage_ledger = previous.usage_ledger.clone();
+        self.total_prompt_tokens_used = previous.total_prompt_tokens_used.clone();
+        self.reasoning_tokens_used = previous.reasoning_tokens_used.clone();
+        self.total_reasoning_tokens_used = previous.total_reasoning_tokens_used.clone();
+        self.reasoning_usage_seen = previous.reasoning_usage_seen.clone();
+        self.prompt_cache_counters = previous.prompt_cache_counters.clone();
+    }
+
+    pub(crate) fn authentication_error(
+        &self,
+        status: reqwest::StatusCode,
+        context: &str,
+    ) -> anyhow::Error {
+        let message = if crate::features::opencode::default_base(self.provider).is_some() {
+            format!(
+                "HTTP {status}. {}",
+                crate::features::opencode::auth_guidance(self.provider)
+            )
+        } else {
+            format!("{context}: {status}")
+        };
+        anyhow::anyhow!(crate::llm::LlmErrorKind::Authentication).context(message)
     }
 
     /// Resolved Responses native-compaction threshold, if this client uses
