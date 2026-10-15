@@ -180,68 +180,44 @@ pub async fn run_workflow(cfg: AppConfig, workflow_name: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod yaml_compatibility_tests {
-    use super::*;
-    #[test]
-    fn legacy_markdown_frontmatter_preserves_multiline_description() {
-        let workflow = Workflow::parse(
-            "legacy",
-            "---\ndescription: |\n  on 001 null\n  日本語\n---\n- first step\n- second step\n",
-            PathBuf::from("legacy.md"),
-        )
-        .expect("legacy workflow");
-        assert_eq!(
-            workflow.metadata.description.as_deref(),
-            Some("on 001 null\n日本語\n")
-        );
-        assert_eq!(workflow.steps, ["first step", "second step"]);
-    }
-}
-
-#[cfg(test)]
 mod frontmatter_delimiter_tests {
     use super::*;
     fn parse(content: &str) -> Workflow {
         Workflow::parse("local", content, PathBuf::from("local.md")).expect("valid workflow")
     }
     #[test]
-    fn quoted_description_dashes_are_literal_metadata() {
-        let workflow = parse("---\ndescription: \"Fix foo --- keep\"\n---\n- actual step\n");
-        assert_eq!(
-            workflow.metadata.description.as_deref(),
-            Some("Fix foo --- keep")
-        );
-        assert_eq!(workflow.steps, ["actual step"]);
-    }
-    #[test]
-    fn plain_description_dashes_do_not_become_extra_instructions() {
-        let workflow = parse("---\ndescription: Fix foo --- keep\n---\n- actual step\n");
-        assert_eq!(
-            workflow.metadata.description.as_deref(),
-            Some("Fix foo --- keep")
-        );
-        assert_eq!(workflow.steps, ["actual step"]);
-    }
-    #[test]
-    fn indented_block_scalar_delimiter_is_metadata_not_a_boundary() {
-        let workflow =
-            parse("---\ndescription: |\n  first --- detail\n  ---\n  日本語\n---\n- actual step\n");
-        assert_eq!(
-            workflow.metadata.description.as_deref(),
-            Some("first --- detail\n---\n日本語\n")
-        );
-        assert_eq!(workflow.steps, ["actual step"]);
-    }
-    #[test]
-    fn crlf_and_leading_blank_lines_keep_description_and_step_order() {
-        let workflow = parse(
-            "\r\n \r\n--- \r\ndescription: \"literal --- detail\"\r\n---\r\n1. first\r\n2. second\r\n",
-        );
-        assert_eq!(
-            workflow.metadata.description.as_deref(),
-            Some("literal --- detail")
-        );
-        assert_eq!(workflow.steps, ["first", "second"]);
+    fn yaml_frontmatter_preserves_metadata_and_step_order() {
+        for (content, description, steps) in [
+            (
+                "---\ndescription: \"Fix foo --- keep\"\n---\n- actual step\n",
+                "Fix foo --- keep",
+                vec!["actual step"],
+            ),
+            (
+                "---\ndescription: Fix foo --- keep\n---\n- actual step\n",
+                "Fix foo --- keep",
+                vec!["actual step"],
+            ),
+            (
+                "---\ndescription: |\n  first --- detail\n  ---\n  日本語\n---\n- actual step\n",
+                "first --- detail\n---\n日本語\n",
+                vec!["actual step"],
+            ),
+            (
+                "---\ndescription: |\n  on 001 null\n  日本語\n---\n- first step\n- second step\n",
+                "on 001 null\n日本語\n",
+                vec!["first step", "second step"],
+            ),
+            (
+                "\r\n \r\n--- \r\ndescription: \"literal --- detail\"\r\n---\r\n1. first\r\n2. second\r\n",
+                "literal --- detail",
+                vec!["first", "second"],
+            ),
+        ] {
+            let workflow = parse(content);
+            assert_eq!(workflow.metadata.description.as_deref(), Some(description));
+            assert_eq!(workflow.steps, steps);
+        }
     }
     #[test]
     fn no_frontmatter_preserves_literal_body_and_missing_close_behavior() {
