@@ -44,7 +44,7 @@ use clap::{Parser, Subcommand};
     about = "Interactive AI coding agent (TUI)"
 )]
 pub struct Cli {
-    /// Inference billing provider (default: existing API-key provider)
+    /// Inference billing provider (OpenCode shortcuts: go, zen; default: API-key provider)
     #[arg(long, value_enum)]
     pub provider: Option<features::openai_subscription::ProviderKind>,
     /// API base URL (OpenCode uses OPENCODE_BASE_URL or its provider-specific default)

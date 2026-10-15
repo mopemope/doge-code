@@ -62,7 +62,7 @@ pub(crate) fn validate_binding(
         Some(format!(
             "{:?}:{}:{:?}:{}",
             cfg.provider,
-            cfg.base_url.trim_end_matches('/'),
+            opencode::identity_base(cfg.provider, &cfg.base_url),
             opencode::api(cfg.provider, &cfg.model)
                 .map_err(|error| with_recovery(error, session))?,
             cfg.model

@@ -23,13 +23,17 @@ impl TuiExecutor {
     pub(crate) fn prepare_session_selection(
         &self,
         session: &SessionData,
+        startup: &AppConfig,
     ) -> Result<(AppConfig, Option<OpenAIClient>)> {
         let cfg =
-            crate::session::selection::config_for_session(session, &self.cfg, &self.initial_model)?;
+            crate::session::selection::config_for_session(session, startup, &self.initial_model)?;
         let client = if opencode::default_base(cfg.provider).is_some() {
             // Validate/build before committing; keep process usage shared by existing clones.
-            let ready = OpenAIClient::from_config(&cfg)?;
-            self.client.clone().or(ready)
+            let mut ready = OpenAIClient::from_config(&cfg)?;
+            if let (Some(next), Some(previous)) = (ready.as_mut(), self.client.as_ref()) {
+                next.share_usage_from(previous);
+            }
+            ready
         } else {
             self.client.clone()
         };
@@ -61,24 +65,42 @@ impl TuiExecutor {
         ui.last_llm_response_content = None;
         ui.last_elapsed_time = None;
     }
-    pub(crate) fn start_model_session(&mut self, model: &str, ui: &mut TuiApp) -> Result<String> {
+    pub(crate) fn start_model_session(
+        &mut self,
+        provider: crate::features::openai_subscription::ProviderKind,
+        model: &str,
+        ui: &mut TuiApp,
+    ) -> Result<String> {
         self.ensure_model_selection_idle(ui)?;
-        let model = opencode::lookup(self.cfg.provider, model)?;
-        opencode::api(self.cfg.provider, model.id)?;
+        let model = opencode::lookup(provider, model)?;
+        opencode::api(provider, model.id)?;
+        let cfg = opencode::selection_config(
+            &self.cfg,
+            provider,
+            model.id,
+            std::env::var("OPENCODE_API_KEY").ok(),
+        )?;
         let selection = SessionModelSelection {
-            provider: self.cfg.provider,
+            provider,
             model: model.id.into(),
         };
         let mut candidate = SessionData::new();
         candidate.model_selection = Some(selection.clone());
-        let prepared = self.prepare_session_selection(&candidate)?;
+        let prepared = self.prepare_session_selection(&candidate, &cfg)?;
         // Acquire every fallible lock before saving, then publish infallibly.
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (id, outcome) = {
             let mut manager =
                 crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            manager.create_session_with_model(Some(format!("Model: {}", model.id)), selection)?
+            manager.create_session_with_model(
+                Some(format!(
+                    "{}: {}",
+                    opencode::billing_label(provider),
+                    model.id
+                )),
+                selection,
+            )?
         };
         history.clear();
         drop(history);
@@ -95,7 +117,11 @@ impl TuiExecutor {
         {
             ui.push_log(format!("Warning: {message}"));
         }
-        ui.push_log(format!("New model session: {} ({id})", self.cfg.model));
+        ui.push_log(format!(
+            "New session: {} / {} ({id})",
+            opencode::billing_label(provider),
+            self.cfg.model
+        ));
         Ok(id)
     }
 }

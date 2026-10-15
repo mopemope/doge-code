@@ -6,8 +6,48 @@ use anyhow::{Result, bail};
 pub(crate) mod catalog;
 pub use catalog::{catalog, lookup, print_catalog};
 
-pub const GO_BASE: &str = "https://opencode.ai/zen/go/v1";
-pub const ZEN_BASE: &str = "https://opencode.ai/zen/v1";
+pub const GO_BASE: &str = "https://opencode.ai/inference/go/v1";
+pub const ZEN_BASE: &str = "https://opencode.ai/inference/v1";
+
+fn legacy_base(provider: ProviderKind) -> Option<&'static str> {
+    match provider {
+        ProviderKind::OpencodeGo => Some("https://opencode.ai/zen/go/v1"),
+        ProviderKind::OpencodeZen => Some("https://opencode.ai/zen/v1"),
+        _ => None,
+    }
+}
+
+/// Keep existing checkpoint and opaque Responses identities stable across
+/// official URL aliases. Go and Zen identities always remain distinct.
+pub(crate) fn identity_base(provider: ProviderKind, base: &str) -> &str {
+    if let Some(legacy) = legacy_base(provider)
+        && validate_base(provider, base).is_ok()
+    {
+        legacy
+    } else {
+        base.trim_end_matches('/')
+    }
+}
+
+pub(crate) fn billing_label(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::OpencodeGo => "Go (subscription)",
+        ProviderKind::OpencodeZen => "Zen (pay-as-you-go)",
+        _ => provider_name(provider),
+    }
+}
+
+pub(crate) fn auth_guidance(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::OpencodeGo => {
+            "OpenCode Go: check OPENCODE_API_KEY and your Go subscription in the OpenCode Console. Export the key in your shell and restart dgc; no key is saved by /provider. No Zen fallback is used."
+        }
+        ProviderKind::OpencodeZen => {
+            "OpenCode Zen: check OPENCODE_API_KEY and your Zen billing/access in the OpenCode Console. Export the key in your shell and restart dgc; no key is saved by /provider. No Go fallback is used."
+        }
+        _ => "Check the selected provider API key and access.",
+    }
+}
 
 pub fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
@@ -43,11 +83,49 @@ pub(crate) fn config_value<T>(
 }
 
 pub(crate) fn missing_auth_message(provider: ProviderKind) -> &'static str {
-    if default_base(provider).is_some() {
-        "OpenCode API key not set; use OPENCODE_API_KEY or --api-key for the selected provider."
-    } else {
-        "OPENAI_API_KEY not set; cannot call LLM."
+    match provider {
+        ProviderKind::OpencodeGo => {
+            "OpenCode Go API key not set. Export OPENCODE_API_KEY in your shell and restart dgc --provider go (or use --api-key). Keys are not saved by /provider."
+        }
+        ProviderKind::OpencodeZen => {
+            "OpenCode Zen API key not set. Export OPENCODE_API_KEY in your shell and restart dgc --provider zen (or use --api-key). Keys are not saved by /provider."
+        }
+        _ => {
+            "OPENAI_API_KEY not set; cannot call LLM. For OpenCode, export OPENCODE_API_KEY and choose --provider go or --provider zen."
+        }
     }
+}
+
+/// An explicit new-session choice can share a selected OpenCode key between
+/// Go and Zen. It never carries credentials from another provider.
+pub(crate) fn selection_config(
+    current: &crate::config::AppConfig,
+    provider: ProviderKind,
+    model: &str,
+    environment_key: Option<String>,
+) -> Result<crate::config::AppConfig> {
+    let base = default_base(provider).ok_or_else(|| anyhow::anyhow!("Choose Go or Zen"))?;
+    let mut cfg = current.clone();
+    if default_base(current.provider).is_some() {
+        validate_base(current.provider, &current.base_url)?;
+    } else {
+        cfg.api_key = environment_key;
+        cfg.api_key_origin = cfg
+            .api_key
+            .as_ref()
+            .map(|_| crate::config::ConfigOrigin::Environment);
+    }
+    cfg.api_key = cfg.api_key.filter(|key| !key.trim().is_empty());
+    if cfg.api_key.is_none() {
+        cfg.api_key_origin = None;
+    }
+    cfg.provider = provider;
+    cfg.provider_origin = crate::config::ConfigOrigin::Session;
+    cfg.base_url = base.into();
+    cfg.base_url_origin = crate::config::ConfigOrigin::Session;
+    cfg.model = model.into();
+    cfg.resume = None;
+    Ok(cfg)
 }
 
 pub fn model_id(provider: ProviderKind, model: &str) -> Result<&str> {
@@ -81,7 +159,8 @@ pub fn api(provider: ProviderKind, model: &str) -> Result<ApiKind> {
 pub fn validate_base(provider: ProviderKind, base: &str) -> Result<()> {
     if let Some(expected) = default_base(provider) {
         anyhow::ensure!(
-            base.trim_end_matches('/') == expected,
+            base.trim_end_matches('/') == expected
+                || Some(base.trim_end_matches('/')) == legacy_base(provider),
             "OpenCode provider requires its own base URL: {expected}; no Go/Zen fallback is performed"
         );
     }
