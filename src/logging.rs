@@ -1,22 +1,20 @@
 use anyhow::{Context, Result};
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::fs::{File, TryLockError};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
-/// Project-local diagnostic log path: `.doge/logs/debug.log`.
-pub fn project_log_path(root: &Path) -> PathBuf {
-    root.join(".doge").join("logs").join("debug.log")
-}
+mod files;
+
+const RUN_BYTES: u64 = 2 * 1024 * 1024;
+const TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+const RUN_COUNT: usize = 8;
+const LIMIT_NOTICE: &[u8] = b"\n[diagnostic log byte limit reached]\n";
 
 /// Keep only identifier-safe characters and bound the length.
-///
-/// Allowed: ASCII alphanumeric plus `_ - . :`. Control characters
-/// (including CR/LF), whitespace, and all other symbols are removed.
-/// Output is truncated to 128 characters.
-///
-/// Canonical home for the shared helper so `llm::telemetry` and
-/// `features::openai_subscription` do not form a module cycle.
+/// Shared by telemetry and provider diagnostics; never use for free text.
 pub fn safe_identifier(value: &str) -> String {
     value
         .chars()
@@ -25,158 +23,195 @@ pub fn safe_identifier(value: &str) -> String {
         .collect()
 }
 
-/// Open the log under a trusted project root (root aliases may be symlinks).
-///
-/// Unix follows no symlinks below that root, using held directory handles.
-/// Permissions and truncation affect the opened inode, not a re-resolved path.
-/// Other platforms perform preflight checks without Unix race guarantees.
-/// Valid existing logs are still truncated at startup; this is not rotation.
-pub fn open_project_log(root: &Path) -> Result<File> {
-    #[cfg(unix)]
-    {
-        unix_log::open(root)
-    }
-    #[cfg(not(unix))]
-    {
-        let doge = root.join(".doge");
-        let dir = doge.join("logs");
-        let path = dir.join("debug.log");
-        for component in [&doge, &dir, &path] {
-            reject_symlink(component)?;
-        }
-        std::fs::create_dir_all(&dir).context("create log directory")?;
-        for component in [&doge, &dir, &path] {
-            reject_symlink(component)?;
-        }
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .context("open project log")
-    }
+#[derive(Clone)]
+pub struct RunLog(Arc<Mutex<CappedFile>>);
+
+struct CappedFile {
+    // The exclusive lease stays held until the final writer is dropped.
+    file: File,
+    bytes: u64,
+    limit: u64,
+    exhausted: bool,
 }
 
-#[cfg(not(unix))]
-fn reject_symlink(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => anyhow::bail!("refusing symlinked log path"),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("inspect log path"),
-    }
-}
-
-#[cfg(unix)]
-mod unix_log {
-    use super::*;
-    use std::ffi::CStr;
-    use std::os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    };
-
-    pub(super) fn open(root: &Path) -> Result<File> {
-        // The selected root and its ancestors are trusted. Aliases retain their
-        // historical meaning; everything beneath the opened root is no-follow.
-        let root = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(root)
-            .context("open project root for logging")?;
-        let doge = child_dir(&root, c".doge")?;
-        let logs = child_dir(&doge, c"logs")?;
-        open_in(&logs)
-    }
-
-    pub(super) fn child_dir(parent: &File, name: &CStr) -> Result<File> {
-        // SAFETY: parent stays alive; name is a valid NUL-terminated single
-        // component. mkdirat returns no owned descriptor.
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(error).context("create project log directory");
+impl Write for RunLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("log writer poisoned"))?;
+        if !state.exhausted {
+            let remaining = state.limit.saturating_sub(state.bytes);
+            if bytes.len() as u64 + LIMIT_NOTICE.len() as u64 <= remaining {
+                // A failed write_all may already have persisted a prefix.
+                // Stop permanently rather than undercounting and retrying.
+                state.exhausted = true;
+                state.file.write_all(bytes)?;
+                state.bytes += bytes.len() as u64;
+                state.exhausted = false;
+            } else {
+                state.exhausted = true;
+                if LIMIT_NOTICE.len() as u64 <= remaining {
+                    state.file.write_all(LIMIT_NOTICE)?;
+                    state.bytes += LIMIT_NOTICE.len() as u64;
+                }
             }
         }
-        // SAFETY: the borrowed fd and C string remain valid for this call.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("open log directory without following symlinks");
-        }
-        // SAFETY: successful openat gives one fresh owned fd, transferred once.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        // Suppression is intentional after the bounded notice. Do not split
+        // UTF-8 or buffer an unbounded tracing event to complete a line.
+        Ok(bytes.len())
     }
 
-    pub(super) fn open_in(logs: &File) -> Result<File> {
-        logs.set_permissions(std::fs::Permissions::from_mode(0o700))
-            .context("chmod opened log directory 0700")?;
-        // No O_TRUNC: reject symlinks, nonregular files and existing hardlinks
-        // before changing an inode. NONBLOCK avoids hanging on a FIFO fixture.
-        // SAFETY: logs stays alive and the constant C string is valid. The
-        // creation mode is passed with C vararg integer promotion.
-        let fd = unsafe {
-            libc::openat(
-                logs.as_raw_fd(),
-                c"debug.log".as_ptr(),
-                libc::O_WRONLY
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600 as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("open log file without following symlinks");
-        }
-        // SAFETY: this fresh fd has one owner and is closed on every error path.
-        let file = unsafe { File::from_raw_fd(fd) };
-        prepare_file(file)
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("log writer poisoned"))?
+            .file
+            .flush()
     }
+}
 
-    pub(super) fn prepare_file(file: File) -> Result<File> {
-        let metadata = file.metadata().context("stat opened log file")?;
-        anyhow::ensure!(
-            metadata.is_file() && metadata.nlink() == 1,
-            "refusing nonregular or multiply linked log file"
-        );
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .context("chmod opened log file 0600")?;
-        file.set_len(0).context("truncate opened project log")?;
-        Ok(file)
+pub fn open_project_log(root: &Path) -> Result<RunLog> {
+    open_with_limits(root, RUN_COUNT, TOTAL_BYTES, RUN_BYTES)
+}
+
+fn run_header(name: &str) -> Option<String> {
+    let id = name.strip_prefix("run-")?.strip_suffix(".log")?;
+    let uuid = uuid::Uuid::parse_str(id).ok()?;
+    (uuid.to_string() == id).then(|| format!("DGC_LOG_V1 {id}\n"))
+}
+
+fn open_with_limits(root: &Path, count: usize, total: u64, per_run: u64) -> Result<RunLog> {
+    let directory = files::LogDirectory::open(root)?;
+    let retention = directory.open_file(".retention.lock", false)?;
+    files::validate(&retention).context("unsafe retention lock")?;
+    retention
+        .try_lock()
+        .context("log retention is busy; retry startup")?;
+    let mut candidates = Vec::new();
+    let mut bytes = 0u64;
+    let mut runs = 0usize;
+    let mut active_runs = 0usize;
+    let mut active_bytes = 0u64;
+    for name in directory.names()? {
+        let Some(header) = run_header(&name) else {
+            continue;
+        };
+        let mut file = match directory.open_existing(&name) {
+            Ok(file) => file,
+            Err(error) => {
+                let io = error.downcast_ref::<std::io::Error>();
+                // Symlinks are unmanaged, and vanished entries consume no
+                // capacity. Other errors cannot establish a safe size bound.
+                let vanished = io.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+                #[cfg(unix)]
+                let symlink = io.is_some_and(|e| e.raw_os_error() == Some(libc::ELOOP));
+                #[cfg(not(unix))]
+                let symlink = false;
+                if vanished || symlink {
+                    continue;
+                }
+                return Err(error).context("inspect potential managed run log");
+            }
+        };
+        if files::validate(&file).is_err() {
+            continue;
+        }
+        let mut actual = vec![0; header.len()];
+        match file.read_exact(&mut actual) {
+            Ok(()) if actual == header.as_bytes() => {}
+            Ok(()) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => continue,
+            Err(error) => return Err(error).context("read managed log header"),
+        }
+        let inactive = match file.try_lock() {
+            Ok(()) => true,
+            Err(TryLockError::WouldBlock) => false,
+            Err(TryLockError::Error(error)) => return Err(error).context("inspect run log lease"),
+        };
+        let metadata = file.metadata()?;
+        let size = if inactive {
+            metadata.len()
+        } else {
+            metadata.len().max(per_run)
+        };
+        bytes = bytes.checked_add(size).context("run log size overflow")?;
+        runs += 1;
+        if !inactive {
+            active_runs += 1;
+            active_bytes = active_bytes
+                .checked_add(size)
+                .context("active log size overflow")?;
+        }
+        if inactive {
+            candidates.push((metadata.modified()?, name, file, size));
+        }
     }
+    // Do not discard useful inactive diagnostics when active reservations
+    // alone already make this startup impossible.
+    anyhow::ensure!(
+        active_runs < count
+            && active_bytes
+                .checked_add(per_run)
+                .is_some_and(|n| n <= total),
+        "active diagnostic logs exhaust retention capacity; close another run and retry"
+    );
+    candidates.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    for (_, name, file, size) in candidates {
+        if runs < count && bytes.checked_add(per_run).is_some_and(|n| n <= total) {
+            break;
+        }
+        directory.remove_if_same(&name, &file)?;
+        runs -= 1;
+        bytes -= size;
+    }
+    anyhow::ensure!(
+        runs < count && bytes.checked_add(per_run).is_some_and(|n| n <= total),
+        "active diagnostic logs exhaust retention capacity; close another run and retry"
+    );
+    let name = format!("run-{}.log", uuid::Uuid::new_v4());
+    let header = run_header(&name).context("invalid run log name")?;
+    anyhow::ensure!(
+        per_run >= (header.len() + LIMIT_NOTICE.len()) as u64,
+        "log byte budget too small"
+    );
+    let mut file = directory.open_file(&name, true)?;
+    files::validate(&file)?;
+    file.try_lock().context("acquire new run log lease")?;
+    file.write_all(header.as_bytes())?;
+    Ok(RunLog(Arc::new(Mutex::new(CappedFile {
+        file,
+        bytes: header.len() as u64,
+        limit: per_run,
+        exhausted: false,
+    }))))
 }
 
 pub fn init_logging() -> Result<()> {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let log_file = std::sync::Arc::new(open_project_log(&root)?);
+    let root = std::env::current_dir().context("resolve project root for logging")?;
+    let log = open_project_log(&root)?;
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::from_default_env())
         .with_ansi(false)
         .with_file(true)
         .with_line_number(true)
-        .with_writer(log_file)
+        .with_writer(move || log.clone())
         .finish();
-
     tracing::subscriber::set_global_default(subscriber)?;
-
-    // Set up panic hook to log panics to the same tracing subscriber
     std::panic::set_hook(Box::new(|panic_info| {
-        let panic_msg = format!("PANIC: {}", panic_info);
-        error!("{}", panic_msg);
-
-        // Also print to stderr to ensure it's always visible
-        eprintln!("{}", panic_msg);
+        // Panic payloads can contain source text or secrets. Persist location
+        // only; the local terminal retains the ordinary panic diagnostic.
+        if let Some(location) = panic_info.location() {
+            error!(
+                file = location.file(),
+                line = location.line(),
+                "application panic"
+            );
+        } else {
+            error!("application panic");
+        }
+        eprintln!("PANIC: {panic_info}");
     }));
-
     info!("logging initialized");
     Ok(())
 }
@@ -184,305 +219,259 @@ pub fn init_logging() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn project_log_path_is_project_local() {
-        let root = Path::new("/tmp/example-project");
-        assert_eq!(
-            project_log_path(root),
-            Path::new("/tmp/example-project/.doge/logs/debug.log")
-        );
-        assert!(
-            !project_log_path(root).ends_with("debug.log")
-                || project_log_path(root)
-                    .to_string_lossy()
-                    .contains(".doge/logs/debug.log")
-        );
-        // Must not be the legacy repository-root file.
-        assert_ne!(
-            project_log_path(root),
-            Path::new("/tmp/example-project/debug.log")
-        );
-        assert_ne!(project_log_path(root), PathBuf::from("./debug.log"));
-    }
-
-    #[test]
-    fn open_project_log_creates_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = open_project_log(dir.path()).expect("open log");
-        drop(file);
-        assert!(project_log_path(dir.path()).is_file());
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn open_project_log_enforces_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = open_project_log(dir.path()).expect("open log");
-        drop(file);
-        let log_dir = dir.path().join(".doge").join("logs");
-        let dir_mode = std::fs::metadata(&log_dir)
-            .expect("dir meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dir_mode, 0o700, "log directory must be 0700");
-        let log_path = project_log_path(dir.path());
-        let file_mode = std::fs::metadata(&log_path)
-            .expect("file meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(file_mode, 0o600, "log file must be 0600");
+    use std::fs::OpenOptions;
+
+    fn paths(root: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(root.join(".doge/logs"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| run_header(p.file_name().unwrap().to_str().unwrap()).is_some())
+            .collect()
     }
 
-    #[cfg(unix)]
     #[test]
-    fn open_project_log_repairs_existing_permissive_file() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_dir = dir.path().join(".doge").join("logs");
-        std::fs::create_dir_all(&log_dir).expect("mkdir");
-        let log_path = log_dir.join("debug.log");
-        std::fs::write(&log_path, "old").expect("seed");
-        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod seed");
-        let doge = dir.path().join(".doge");
-        std::fs::set_permissions(&doge, std::fs::Permissions::from_mode(0o750)).unwrap();
-        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut file = open_project_log(dir.path()).expect("open log");
-        assert_eq!(
-            file.metadata().unwrap().len(),
-            0,
-            "startup truncation is preserved"
-        );
-        std::io::Write::write_all(&mut file, b"new log").unwrap();
-        drop(file);
-        assert_eq!(std::fs::read(&log_path).unwrap(), b"new log");
-        assert_eq!(
-            std::fs::metadata(&doge).unwrap().permissions().mode() & 0o777,
-            0o750
-        );
-        assert_eq!(
-            std::fs::metadata(&log_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        let mode = std::fs::metadata(&log_path)
-            .expect("meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_project_log_rejects_doge_ancestor_symlink_without_touching_target() {
-        use std::os::unix::{fs::PermissionsExt, fs::symlink};
-        let project = tempfile::tempdir().expect("project");
-        let external = tempfile::tempdir().expect("isolated external target");
-        let logs = external.path().join("logs");
-        std::fs::create_dir(&logs).expect("logs");
-        let victim = logs.join("debug.log");
-        std::fs::write(&victim, "external-fixture-content").expect("fixture");
-        std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-        symlink(external.path(), project.path().join(".doge")).expect("ancestor symlink");
-        let outcome = open_project_log(project.path());
-        let contents = std::fs::read_to_string(&victim).unwrap();
-        let directory_mode = std::fs::metadata(&logs).unwrap().permissions().mode() & 0o777;
-        let file_mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
-        assert!(
-            outcome.is_err()
-                && contents == "external-fixture-content"
-                && directory_mode == 0o755
-                && file_mode == 0o644,
-            "ancestor symlink: accepted={}, preserved_bytes={}, directory_mode={directory_mode:o}, file_mode={file_mode:o}",
-            outcome.is_ok(),
-            contents.len()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_project_log_rejects_dangling_symlinks_at_each_component() {
-        for component in [".doge", ".doge/logs", ".doge/logs/debug.log"] {
-            let project = tempfile::tempdir().unwrap();
-            let external = tempfile::tempdir().unwrap();
-            let missing = external.path().join("must-not-be-created");
-            let link = project.path().join(component);
-            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-            std::os::unix::fs::symlink(&missing, &link).unwrap();
-            assert!(
-                open_project_log(project.path()).is_err(),
-                "component={component}"
-            );
-            assert!(!missing.exists());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_project_log_rejects_hardlinked_file_without_chmod_or_truncate() {
-        use std::os::unix::fs::PermissionsExt;
-        let project = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let logs = project.path().join(".doge/logs");
-        std::fs::create_dir_all(&logs).unwrap();
-        let victim = external.path().join("victim");
-        std::fs::write(&victim, "keep hardlink content").unwrap();
-        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-        std::fs::hard_link(&victim, logs.join("debug.log")).unwrap();
-        assert!(open_project_log(project.path()).is_err());
-        assert_eq!(
-            std::fs::read_to_string(&victim).unwrap(),
-            "keep hardlink content"
-        );
-        assert_eq!(
-            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_project_log_rejects_fifo_without_waiting_for_a_reader() {
-        use std::os::unix::{ffi::OsStrExt, fs::FileTypeExt};
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".doge/logs")).unwrap();
-        let fifo = project_log_path(project.path());
-        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: temporary fixture path is a valid NUL-terminated string.
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let path = project.path().to_owned();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let worker =
-            std::thread::spawn(move || sender.send(open_project_log(&path).is_err()).unwrap());
-        assert!(
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("FIFO must fail without waiting for a reader")
-        );
-        worker.join().unwrap();
-        assert!(
-            std::fs::symlink_metadata(&fifo)
-                .unwrap()
-                .file_type()
-                .is_fifo()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_project_log_preserves_trusted_root_aliases() {
-        let parent = tempfile::tempdir().unwrap();
-        let project = parent.path().join("project");
-        let alias = parent.path().join("alias");
-        std::fs::create_dir(&project).unwrap();
-        std::os::unix::fs::symlink(&project, &alias).unwrap();
-        drop(open_project_log(&alias).unwrap());
-        assert!(project_log_path(&project).is_file());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn opened_log_handles_do_not_redirect_after_ancestor_or_final_swaps() {
-        use std::os::unix::{fs::PermissionsExt, fs::symlink};
-        for component in ["doge", "logs", "file"] {
-            let project = tempfile::tempdir().unwrap();
-            let external = tempfile::tempdir().unwrap();
-            let target_logs = external.path().join("logs");
-            std::fs::create_dir(&target_logs).unwrap();
-            let victim = target_logs.join("debug.log");
-            std::fs::write(&victim, "external unchanged").unwrap();
-            std::fs::set_permissions(&target_logs, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-            let root = File::open(project.path()).unwrap();
-            let doge = unix_log::child_dir(&root, c".doge").unwrap();
-            if component == "doge" {
-                std::fs::rename(project.path().join(".doge"), project.path().join("held")).unwrap();
-                symlink(external.path(), project.path().join(".doge")).unwrap();
-                let logs = unix_log::child_dir(&doge, c"logs").unwrap();
-                drop(unix_log::open_in(&logs).unwrap());
-                assert!(project.path().join("held/logs/debug.log").is_file());
-            } else {
-                let logs = unix_log::child_dir(&doge, c"logs").unwrap();
-                let local = project_log_path(project.path());
-                std::fs::write(&local, "old log").unwrap();
-                if component == "logs" {
-                    std::fs::rename(local.parent().unwrap(), project.path().join("held")).unwrap();
-                    symlink(&target_logs, local.parent().unwrap()).unwrap();
-                    drop(unix_log::open_in(&logs).unwrap());
-                    assert!(
-                        std::fs::read(project.path().join("held/debug.log"))
-                            .unwrap()
-                            .is_empty()
-                    );
-                } else {
-                    let file = OpenOptions::new().write(true).open(&local).unwrap();
-                    let held = project.path().join("held-log");
-                    std::fs::rename(&local, &held).unwrap();
-                    symlink(&victim, &local).unwrap();
-                    drop(unix_log::prepare_file(file).unwrap());
-                    assert!(std::fs::read(&held).unwrap().is_empty());
-                }
-            }
+    fn restarting_preserves_prior_log_and_legacy_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".doge/logs")).unwrap();
+        let legacy = root.path().join(".doge/logs/debug.log");
+        std::fs::write(&legacy, b"legacy evidence").unwrap();
+        let mut first = open_project_log(root.path()).unwrap();
+        first.write_all(b"prior run evidence").unwrap();
+        let previous = paths(root.path()).pop().unwrap();
+        let bytes = std::fs::read(&previous).unwrap();
+        let second = open_project_log(root.path()).unwrap();
+        assert_eq!(std::fs::read(&previous).unwrap(), bytes);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy evidence");
+        assert_eq!(paths(root.path()).len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::read_to_string(&victim).unwrap(),
-                "external unchanged"
-            );
-            assert_eq!(
-                std::fs::metadata(&target_logs)
+                std::fs::metadata(root.path().join(".doge/logs"))
                     .unwrap()
                     .permissions()
                     .mode()
                     & 0o777,
-                0o755
+                0o700
             );
             assert_eq!(
-                std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(previous).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(legacy).unwrap().permissions().mode() & 0o777,
                 0o644
             );
+        }
+        drop((first, second));
+    }
+
+    #[test]
+    fn concurrent_writers_share_one_byte_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let log = open_with_limits(root.path(), 8, 1024, 256).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let mut writer = log.clone();
+                scope.spawn(move || {
+                    for _ in 0..16 {
+                        writer.write_all("検証".as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        let output = std::fs::read(paths(root.path()).pop().unwrap()).unwrap();
+        assert!(output.len() <= 256);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text.matches("[diagnostic log byte limit reached]").count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn io_failure_permanently_suppresses_further_writes() {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let mut log = RunLog(Arc::new(Mutex::new(CappedFile {
+            file,
+            bytes: 0,
+            limit: 256,
+            exhausted: false,
+        })));
+        assert!(log.write(b"first event").is_err());
+        assert!(log.0.lock().unwrap().exhausted);
+        assert_eq!(log.write(b"later event").unwrap(), b"later event".len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_bounds_reserve_active_runs_and_preserve_unmanaged_files() {
+        for (count, total) in [(3, 4096), (8, 768)] {
+            let root = tempfile::tempdir().unwrap();
+            let inactive = open_with_limits(root.path(), count, total, 256).unwrap();
+            let old = paths(root.path()).pop().unwrap();
+            drop(inactive);
+            // A managed file modified outside dgc still counts at its actual
+            // size, including a size larger than the normal per-run cap.
+            let oversized = OpenOptions::new().write(true).open(&old).unwrap();
+            oversized.set_len(600).unwrap();
+            oversized
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+                .unwrap();
+            drop(oversized);
+            let unknown = root
+                .path()
+                .join(".doge/logs/run-00000000-0000-0000-0000-000000000000.log");
+            std::fs::write(&unknown, "not a managed header").unwrap();
+            let first = open_with_limits(root.path(), count, total, 256).unwrap();
+            let second = open_with_limits(root.path(), count, total, 256).unwrap();
+            let third = open_with_limits(root.path(), count, total, 256).unwrap();
+            assert!(!old.exists());
+            assert_eq!(
+                std::fs::read_to_string(&unknown).unwrap(),
+                "not a managed header"
+            );
+            // A restored inactive log must survive an impossible startup.
+            let restored = run_header(old.file_name().unwrap().to_str().unwrap()).unwrap();
+            std::fs::write(&old, &restored).unwrap();
+            assert!(open_with_limits(root.path(), count, total, 256).is_err());
+            assert_eq!(std::fs::read(&old).unwrap(), restored.as_bytes());
+            drop(first);
+            assert!(open_with_limits(root.path(), count, total, 256).is_ok());
+            drop((second, third));
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn open_project_log_rejects_final_symlink() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_dir = dir.path().join(".doge").join("logs");
-        std::fs::create_dir_all(&log_dir).expect("mkdir");
-        let victim = dir.path().join("victim.txt");
-        std::fs::write(&victim, "victim-content").expect("victim");
-        let link = log_dir.join("debug.log");
-        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-        let err = open_project_log(dir.path()).unwrap_err();
-        assert!(
-            format!("{err:?}").contains("symlink"),
-            "must refuse symlinked log file, got {err:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&victim).expect("read victim"),
-            "victim-content",
-            "victim must not be truncated"
-        );
+    fn unsafe_ancestors_and_retention_locks_preserve_targets_without_blocking() {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{PermissionsExt, symlink},
+        };
+        for component in [".doge", ".doge/logs", ".doge/logs/.retention.lock"] {
+            for attack in ["symlink", "dangling", "hardlink", "fifo"] {
+                if attack == "hardlink" && component != ".doge/logs/.retention.lock" {
+                    continue;
+                }
+                if attack == "fifo" && component != ".doge/logs/.retention.lock" {
+                    continue;
+                }
+                let root = tempfile::tempdir().unwrap();
+                let external = tempfile::tempdir().unwrap();
+                let victim = external.path().join("victim");
+                std::fs::write(&victim, b"preserve external").unwrap();
+                let path = root.path().join(component);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                match attack {
+                    "symlink" => symlink(&victim, &path).unwrap(),
+                    "dangling" => symlink(external.path().join("missing"), &path).unwrap(),
+                    "hardlink" => std::fs::hard_link(&victim, &path).unwrap(),
+                    "fifo" => {
+                        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                        // SAFETY: owned temporary fixture, valid NUL-terminated path.
+                        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                    }
+                    _ => unreachable!(),
+                }
+                let start = std::time::Instant::now();
+                assert!(
+                    open_project_log(root.path()).is_err(),
+                    "{component}/{attack}"
+                );
+                assert!(start.elapsed() < std::time::Duration::from_secs(2));
+                assert_eq!(std::fs::read(&victim).unwrap(), b"preserve external");
+                assert_eq!(
+                    std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn open_project_log_rejects_symlinked_dir() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let doge = dir.path().join(".doge");
-        std::fs::create_dir_all(&doge).expect("mkdir");
-        let target = dir.path().join("elsewhere");
-        std::fs::create_dir_all(&target).expect("target");
-        let link = doge.join("logs");
-        std::os::unix::fs::symlink(&target, &link).expect("symlink dir");
-        let err = open_project_log(dir.path()).unwrap_err();
+    fn unsafe_run_candidates_are_never_deleted_or_modified() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        for attack in ["symlink", "hardlink", "fifo"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let log = open_with_limits(root.path(), 1, 256, 256).unwrap();
+            let path = paths(root.path()).pop().unwrap();
+            drop(log);
+            let victim = external.path().join("victim");
+            std::fs::rename(&path, &victim).unwrap();
+            let before = std::fs::read(&victim).unwrap();
+            match attack {
+                "symlink" => symlink(&victim, &path).unwrap(),
+                "hardlink" => std::fs::hard_link(&victim, &path).unwrap(),
+                "fifo" => {
+                    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: valid owned fixture path.
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                }
+                _ => unreachable!(),
+            }
+            assert!(open_with_limits(root.path(), 1, 256, 256).is_ok());
+            assert!(std::fs::symlink_metadata(&path).is_ok());
+            assert_eq!(std::fs::read(&victim).unwrap(), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_alias_and_held_directories_do_not_redirect_after_swaps() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let alias_parent = tempfile::tempdir().unwrap();
+        let alias = alias_parent.path().join("alias");
+        symlink(root.path(), &alias).unwrap();
+        let mut writer = open_project_log(&alias).unwrap();
+        let prior = paths(root.path()).pop().unwrap();
+        let held = root.path().join("held");
+        std::fs::rename(root.path().join(".doge"), &held).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        symlink(external.path(), root.path().join(".doge")).unwrap();
+        writer.write_all(b"held writer").unwrap();
+        assert!(std::fs::read_dir(external.path()).unwrap().next().is_none());
         assert!(
-            format!("{err:?}").contains("symlink"),
-            "must refuse symlinked log directory, got {err:?}"
+            std::fs::read(held.join("logs").join(prior.file_name().unwrap()))
+                .unwrap()
+                .ends_with(b"held writer")
         );
+        let directory = files::LogDirectory::open(alias_parent.path()).unwrap();
+        let moved = alias_parent.path().join("held-logs");
+        std::fs::rename(alias_parent.path().join(".doge/logs"), &moved).unwrap();
+        symlink(external.path(), alias_parent.path().join(".doge/logs")).unwrap();
+        let file = directory.open_file("run-owned.log", true).unwrap();
+        assert!(moved.join("run-owned.log").exists());
+        drop(file);
+        assert!(std::fs::read_dir(external.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_lock_contention_and_final_identity_changes_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let log = open_project_log(root.path()).unwrap();
+        let directory = files::LogDirectory::open(root.path()).unwrap();
+        let lock = directory.open_file(".retention.lock", false).unwrap();
+        lock.try_lock().unwrap();
+        assert!(open_project_log(root.path()).is_err());
+        drop(lock);
+        let path = paths(root.path()).pop().unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let original = directory.open_existing(name).unwrap();
+        let held = root.path().join("original");
+        std::fs::rename(&path, &held).unwrap();
+        std::fs::write(&path, b"replacement must survive").unwrap();
+        assert!(directory.remove_if_same(name, &original).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement must survive");
+        drop(log);
     }
 }
