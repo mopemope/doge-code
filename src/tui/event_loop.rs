@@ -574,7 +574,10 @@ impl TuiApp {
                         .as_ref()
                         .is_some_and(|last_content| msg == *last_content)
                     {
-                        debug!("Skipping duplicate LLM response: {}", msg);
+                        debug!(
+                            response_bytes = msg.len(),
+                            "Skipping duplicate LLM response"
+                        );
                         self.last_llm_response_content = None;
                     } else {
                         self.push_log(msg);
