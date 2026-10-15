@@ -331,11 +331,6 @@ impl CommandHandler for TuiExecutor {
             && let Some(job) = self.jobs.get_snapshot(id)
             && job.kind == crate::jobs::JobKind::AgentTurn
             && job.status.is_terminal()
-            && (self.cfg.show_diff
-                || ui
-                    .review_feedback
-                    .as_ref()
-                    .is_some_and(|draft| draft.job_id == Some(id)))
             && let Some(payload) = self.tools.finish_review_for_job(id)
         {
             ui.show_diff_review(crate::tools::provenance::enrich_diff_review_with_evidence(
