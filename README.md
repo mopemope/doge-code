@@ -775,6 +775,9 @@ and memory search/write tools; memory metadata can contain arbitrary JSON.
 
 ### Session Management
 - `plan_write`/`plan_read`: Save and read task/execution plans (tied to sessions). `plan_write` returns compact update metadata; `plan_read` retrieves full state
+  Completed items mentioning files match changed files by whole path components.
+  Basename shorthand (`main.rs` for `src/main.rs`) is supported; `domain.rs`
+  does not match `main.rs`.
 
 Planning is required by agent guidance for complex work (multiple substantive
 dependent steps, broad/uncertain scope, or likely interruption/resumption) and
