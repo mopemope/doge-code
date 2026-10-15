@@ -5,7 +5,11 @@ use super::{MAX_OUTPUT_BYTES, ReportError, Result};
 
 pub(super) fn render(report: &EvidenceReport, format: ReportFormat) -> Result<String> {
     // Render fully before touching stdout; errors never produce partial JSON.
-    let json = serde_json::to_string_pretty(report)?;
+    let raw = serde_json::to_value(report)?;
+    if serde_json::to_vec(&raw)?.len() > MAX_OUTPUT_BYTES {
+        return Err(ReportError::Limit("output bytes"));
+    }
+    let json = serde_json::to_string_pretty(&crate::features::safe_display::json(raw))?;
     if json.len() > MAX_OUTPUT_BYTES {
         return Err(ReportError::Limit("output bytes"));
     }
@@ -23,7 +27,7 @@ pub(super) fn render(report: &EvidenceReport, format: ReportFormat) -> Result<St
 /// active markup. Control characters are visible rather than terminal escapes.
 fn cell(text: &str) -> String {
     let mut out = String::new();
-    for c in text.chars() {
+    for c in crate::features::safe_display::text(text, None).chars() {
         match c {
             '\n' | '\r' => out.push_str(" / "),
             c if c.is_control() => {
@@ -229,7 +233,14 @@ fn markdown(r: &EvidenceReport, json: &str) -> String {
     }
     out.push_str("\n## Command observations\n\n| Observation | Program and argv | Outcome | Exit code | Execution endpoints | Current code |\n|---|---|---|---|---|---|\n");
     for v in &r.verifications {
-        let command = format!("{} {:?}", v.program, v.args);
+        let command = crate::features::safe_display::json(
+            serde_json::json!({"program":v.program, "args":v.args}),
+        );
+        let command = format!(
+            "{} {}",
+            command["program"].as_str().unwrap_or("?"),
+            command["args"]
+        );
         let _ = writeln!(
             out,
             "| {} | {} | {} | {:?} | {:?} | {:?} |",

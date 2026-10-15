@@ -55,13 +55,12 @@ impl TuiExecutor {
     pub(crate) fn sync_selection_ui(&self, ui: &mut TuiApp) {
         ui.model = Some(self.cfg.model.clone());
         ui.cfg = Some(self.cfg.clone());
-        if opencode::default_base(self.cfg.provider).is_some() {
-            ui.inference_label = Some(self.cfg.inference_label());
-        }
+        ui.inference_label = Some(self.cfg.inference_label());
         ui.auto_compact_prompt_token_threshold = self.cfg.get_effective_compaction_limit();
         ui.tokens_used = 0;
         ui.tokens_prompt_used = 0;
         ui.update_remaining_context_tokens(self.cfg.get_context_window_size());
+        ui.finalize_and_append_llm_response("");
         ui.last_llm_response_content = None;
         ui.last_elapsed_time = None;
     }
@@ -109,13 +108,13 @@ impl TuiExecutor {
         self.sync_selection_ui(ui);
         ui.plan_list.clear();
         self.send_plan_items_to_ui(&[]);
-        for line in self.cfg.inference_diagnostics() {
-            ui.push_log(line);
-        }
         if let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } =
             outcome
         {
             ui.push_log(format!("Warning: {message}"));
+        }
+        if self.client.is_none() {
+            ui.push_log(opencode::missing_auth_message(self.cfg.provider));
         }
         ui.push_log(format!(
             "New session: {} / {} ({id})",

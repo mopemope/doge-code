@@ -39,7 +39,6 @@ mod tests {
                 model: None,
                 spinner_state: 0,
                 scroll_state,
-                plan_list: &[],
                 theme: &app.theme,
                 log_heights: &app.log_heights,
             };
@@ -89,7 +88,6 @@ mod tests {
             model: None,
             spinner_state: 0,
             scroll_state,
-            plan_list: &[],
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
@@ -129,7 +127,6 @@ mod tests {
             model: None,
             spinner_state: 0,
             scroll_state: &scroll_state,
-            plan_list: &[],
             theme: &app.theme,
             log_heights: &app.log_heights,
         };
