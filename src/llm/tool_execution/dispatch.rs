@@ -127,21 +127,21 @@ async fn dispatch_inner(
         "impact_analyze" => tools::impact_analyze(runtime, args_val).await,
 
         other => {
-            if let Some(outcome) = runtime
+            let expected = runtime
+                .tool_catalog
+                .remote_definition(other)
+                .ok_or_else(|| anyhow!("unknown tool: {other}"))?;
+            let outcome = runtime
                 .fs
-                .call_remote_tool(other, args_val, runtime.cancel_token.clone())
-                .await?
-            {
-                Ok(ToolOutput {
-                    value: outcome.value,
-                    // MCP transport success is not tool success. The remote
-                    // normalizer derives this from CallToolResult.is_error.
-                    is_success: outcome.success,
-                    result_summary: outcome.summary,
-                })
-            } else {
-                Err(anyhow!("unknown tool: {other}"))
-            }
+                .call_remote_tool(&expected, args_val, runtime.cancel_token.clone())
+                .await?;
+            Ok(ToolOutput {
+                value: outcome.value,
+                // MCP transport success is not tool success. The remote
+                // normalizer derives this from CallToolResult.is_error.
+                is_success: outcome.success,
+                result_summary: outcome.summary,
+            })
         }
     }
 }
