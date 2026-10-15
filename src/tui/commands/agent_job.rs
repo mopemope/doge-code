@@ -512,8 +512,13 @@ pub(crate) fn spawn_agent_turn(
                 ui.last_observed_seq = observed_seq;
                 ui.last_observed_directive_id = None;
             }
-            ui.push_log(format!("> {display}"));
-            ui.push_log(String::new());
+            ui.finalize_and_append_llm_response("");
+            ui.last_llm_response_content = None;
+            if provenance.observed_raw().is_some() {
+                ui.push_log(format!("> {display}"));
+            } else {
+                ui.push_log(format!("[auto] {display}"));
+            }
             ui.processing_start_time = Some(std::time::Instant::now());
             ui.last_elapsed_time = None;
             ui.dirty = true;

@@ -486,6 +486,9 @@ async fn run_tui(
     };
 
     exec.sync_selection_ui(&mut app);
+    if exec.client.is_none() {
+        app.push_log(features::opencode::missing_auth_message(exec.cfg.provider));
+    }
 
     if let Some(account) = exec
         .client
@@ -493,18 +496,10 @@ async fn run_tui(
         .and_then(|client| client.account_label())
     {
         app.inference_label = Some(format!("openai | {account} | {}", exec.cfg.model));
-        app.push_log(format!(
-            "Provider: openai | Account: {account} | Model: {}",
-            exec.cfg.model
-        ));
-        app.push_log("ChatGPT plan usage: review limits in ChatGPT Settings > Usage. Token counts do not indicate remaining allowance.");
     }
 
     if features::opencode::default_base(cfg.provider).is_some() {
         app.inference_label = Some(exec.cfg.inference_label());
-    }
-    for line in exec.cfg.inference_diagnostics() {
-        app.push_log(line);
     }
 
     let mut exec = exec;
@@ -513,13 +508,6 @@ async fn run_tui(
     // Keep a clone for graceful shutdown after the UI exits. The manager
     // owns all foreground/background job tasks via TaskTracker.
     let jobs = exec.jobs.clone();
-    // Show which project instructions file (if any) was used at startup
-    if let Some(path) = crate::features::agent_prompt::get_project_instructions_file_path(&exec.cfg)
-    {
-        app.push_log(format!("Project instructions file: {}", path.display()));
-    } else {
-        app.push_log("Project instructions file: (none)");
-    }
     app = app.with_handler(Box::new(exec));
 
     // Handle repomap status messages if available
@@ -571,16 +559,6 @@ async fn run_tui(
         )));
     }
     run_result?;
-
-    // Display session statistics on shutdown
-    if let Some(handler) = &app.handler
-        && let Some(executor) = handler.as_any().downcast_ref::<TuiExecutor>()
-    {
-        let session_manager = utils::safe_std_lock(&executor.session_manager, "session_manager")?;
-        if let Some(stats) = session_manager.get_session_statistics() {
-            println!("{}", stats);
-        }
-    }
 
     Ok(())
 }

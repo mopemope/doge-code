@@ -141,7 +141,7 @@ pub fn format_summary_list(summaries: &[SessionSummary], current_id: Option<&str
     while out.ends_with('\n') {
         out.pop();
     }
-    out
+    crate::features::safe_display::text(&out, None)
 }
 
 /// Recorded metadata only; it does not inspect event completeness.
@@ -177,7 +177,7 @@ pub fn format_detail(data: &SessionData) -> String {
         data.changed_files.len()
     );
     let detail = format!("{detail}\n  {}", provenance_status(data));
-    if let Some(selection) = &data.model_selection {
+    let detail = if let Some(selection) = &data.model_selection {
         format!(
             "{detail}\n  Model selection: {} / {:?} (session-local)",
             crate::features::opencode::provider_name(selection.provider),
@@ -185,7 +185,63 @@ pub fn format_detail(data: &SessionData) -> String {
         )
     } else {
         format!("{detail}\n  Model selection: legacy (startup selection not recorded)")
+    };
+    let mut out = crate::features::safe_display::text(&detail, None);
+    out.push_str("\nRetained tool activity (checkpoint order, not a complete audit; older content may be compacted):\n");
+    let mut activity = String::new();
+    'entries: for (index, entry) in data
+        .conversation
+        .iter()
+        .enumerate()
+        .skip(data.conversation.len().saturating_sub(100))
+    {
+        if let Some(calls) = entry
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+        {
+            for call in calls {
+                if activity.len() >= 64_000 {
+                    activity
+                        .push_str("\n[Further retained activity omitted: bounded human view]\n");
+                    break 'entries;
+                }
+                let safe = crate::features::safe_display::json(call.clone()).to_string();
+                activity.push_str(&format!(
+                    "#{} call {}\n",
+                    index + 1,
+                    crate::tools::budget::head_tail_truncate(&safe, 4000).text
+                ));
+            }
+        }
+        if activity.len() >= 64_000 {
+            activity.push_str("\n[Further retained activity omitted: bounded human view]\n");
+            break;
+        }
+        if entry.get("role").and_then(serde_json::Value::as_str) == Some("tool") {
+            let content = entry
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let observation = crate::llm::observation::stub_observation_id(content)
+                .and_then(|id| data.observations.get(&id));
+            let safe = crate::features::safe_display::text(
+                observation.map_or(content, |o| o.content.as_str()),
+                None,
+            );
+            let id = entry
+                .get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            activity.push_str(&format!(
+                "#{} result {}: {}\n",
+                index + 1,
+                crate::features::safe_display::text(id, None),
+                crate::tools::budget::head_tail_truncate(&safe, 4000).text
+            ));
+        }
     }
+    out.push_str(&crate::tools::budget::head_tail_truncate(&activity, 32_000).text);
+    out
 }
 
 #[cfg(test)]
@@ -298,11 +354,50 @@ mod tests {
         let mut data = SessionData::new();
         data.meta.id = "0198abcd-1234-5678-9abc-def012345678".to_string();
         data.meta.title = "Test session".to_string();
-        data.add_conversation_entry(HashMap::new());
+        data.add_conversation_entry(HashMap::from([
+            ("role".into(), serde_json::json!("assistant")),
+            ("tool_calls".into(), serde_json::json!([{"id":"call-1", "function":{"name":"execute_process", "arguments":r#"{"program":"fixture","args":["--token","PRIVATE_ARG"],"env":{"API_KEY":"PRIVATE_ENV"}}"#}}])),
+        ]));
+        data.add_conversation_entry(HashMap::from([
+            ("role".into(), serde_json::json!("tool")),
+            ("tool_call_id".into(), serde_json::json!("call-1")),
+            ("content".into(), serde_json::json!({"status":"policy_denied","error":"not allowed", "access_token":"PRIVATE_RESULT"}).to_string().into()),
+        ]));
+        let observation = data
+            .observations
+            .insert(
+                "call-1".into(),
+                "execute_process".into(),
+                "offloaded detail access_token=PRIVATE_OBSERVATION".into(),
+                100,
+            )
+            .unwrap();
+        data.conversation[1].insert(
+            "content".into(),
+            crate::llm::observation::observation_stub("execute_process", 100, &observation).into(),
+        );
+        let before = serde_json::to_vec(&data).unwrap();
         let out = format_detail(&data);
         assert!(out.contains("Session 0198abcd"));
         assert!(out.contains("Test session"));
-        assert!(out.contains("Messages: 1"));
+        assert!(out.contains("Messages: 2"));
+        for expected in [
+            "call-1",
+            "execute_process",
+            "offloaded detail",
+            "[REDACTED]",
+        ] {
+            assert!(out.contains(expected), "{out}");
+        }
+        for secret in [
+            "PRIVATE_ARG",
+            "PRIVATE_ENV",
+            "PRIVATE_RESULT",
+            "PRIVATE_OBSERVATION",
+        ] {
+            assert!(!out.contains(secret), "{out}");
+        }
+        assert_eq!(serde_json::to_vec(&data).unwrap(), before);
         assert!(out.contains(&data.meta.id));
     }
 }

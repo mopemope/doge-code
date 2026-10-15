@@ -340,12 +340,22 @@ async fn links_outcomes_pending_and_private_content() {
 #[tokio::test]
 async fn stable_json_markdown_and_safe_rendering() {
     let f = fixture(true);
-    let first = report(&f, true).await;
+    let mut first = report(&f, true).await;
     let second = report(&f, true).await;
     assert_eq!(
         render::render(&first, ReportFormat::Json).expect("first"),
         render::render(&second, ReportFormat::Json).expect("second")
     );
+    first.directives[0].raw_input = Some("API_KEY=PRIVATE_DISPLAY_KEY Authorization: Bearer PRIVATE_DISPLAY_TOKEN\u{1b}]0;INJECT_TITLE\u{7}\nsafe text".into());
+    for format in [ReportFormat::Json, ReportFormat::Markdown] {
+        let output = render::render(&first, format).unwrap();
+        assert!(
+            !output.contains("PRIVATE_DISPLAY_KEY") && !output.contains("PRIVATE_DISPLAY_TOKEN"),
+            "{output}"
+        );
+        assert!(!output.contains("INJECT_TITLE"));
+        assert!(output.contains("safe text"));
+    }
     let md = render::render(&first, ReportFormat::Markdown).expect("Markdown");
     assert!(md.contains("&#124;") && md.contains("&#60;script&#62;"));
     assert!(md.contains("````json"));

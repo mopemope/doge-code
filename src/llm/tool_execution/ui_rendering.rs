@@ -27,34 +27,82 @@ pub fn truncate_string_with_graphemes(s: &str, max_width: usize) -> String {
     result
 }
 
+/// UI-only failure details; model/tool JSON remains unchanged. Keep both ends
+/// of long diagnostics so an exit reason cannot be buried by routine output.
+pub(super) fn tool_failure_message(
+    name: &str,
+    summary: &str,
+    value: Option<&serde_json::Value>,
+) -> String {
+    let mut message = format!(
+        "{name}: {}",
+        crate::tools::budget::head_tail_truncate(summary, 1000).text
+    );
+    if let Some(value) = value {
+        for key in [
+            "status",
+            "exit_code",
+            "error",
+            "message",
+            "stderr",
+            "stdout",
+        ] {
+            if let Some(detail) = value.get(key).filter(|v| !v.is_null()) {
+                let detail = detail
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| detail.to_string());
+                if !detail.trim().is_empty() && !summary.contains(&detail) {
+                    message.push_str(&format!(
+                        "\n{key}: {}",
+                        crate::tools::budget::head_tail_truncate(&detail, 2000).text
+                    ));
+                }
+            }
+        }
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_truncate_ascii() {
-        assert_eq!(truncate_string_with_graphemes("hello world", 5), "he...");
-        assert_eq!(truncate_string_with_graphemes("hello", 5), "hello");
-        assert_eq!(truncate_string_with_graphemes("hello", 10), "hello");
+    fn truncation_respects_graphemes_and_display_width() {
+        for (input, width, expected) in [
+            ("hello world", 5, "he..."),
+            ("hello", 5, "hello"),
+            ("hello", 10, "hello"),
+            ("こんにちは", 4, "..."),
+            ("こんにちは", 5, "こ..."),
+            ("🦀🚀🔥", 4, "..."),
+            ("🦀🚀🔥", 5, "🦀..."),
+        ] {
+            assert_eq!(truncate_string_with_graphemes(input, width), expected);
+        }
     }
 
     #[test]
-    fn test_truncate_unicode() {
-        // "こんにちは" (width 10)
-        assert_eq!(truncate_string_with_graphemes("こんにちは", 4), "..."); // Only fit nothing + ...
-        assert_eq!(truncate_string_with_graphemes("こんにちは", 5), "こ..."); // "こ" is width 2. 2 < 5-3=2. next "ん" is width 2. 2+2=4 > 2? wait. target=2. current=0. +2=2 <= 2. push. next +2=4 > 2. break. -> "こ..."
-
-        // precise check:
-        // target = 5 - 3 = 2.
-        // "こ" (2) -> current 2. OK.
-        // "ん" (2) -> current 4 > 2. Break.
-        // Result: "こ..."
-    }
-
-    #[test]
-    fn test_truncate_emoji() {
-        let s = "🦀🚀🔥"; // width 2+2+2 = 6
-        assert_eq!(truncate_string_with_graphemes(s, 4), "..."); // target 1. 🦀(2)>1. break. -> ...
-        assert_eq!(truncate_string_with_graphemes(s, 5), "🦀..."); // target 2. 🦀(2)<=2. push. 🚀(2)+2=4>2. break. -> 🦀...
+    fn failed_tool_keeps_cause_and_tail_of_long_diagnostics() {
+        let value = serde_json::json!({"status":"policy_denied", "error":{"message":"command not allowed", "hint":"check allowed_commands"}, "stderr":format!("first error\n{}\nlast failure", "x".repeat(10_000))});
+        let message = tool_failure_message("execute_process", "Process failed", Some(&value));
+        for expected in [
+            "execute_process",
+            "policy_denied",
+            "command not allowed",
+            "check allowed_commands",
+            "first error",
+            "last failure",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+        assert!(message.len() < 4000);
+        let error = tool_failure_message(
+            "fs_read",
+            &format!("first cause {} final actionable cause", "x".repeat(10_000)),
+            None,
+        );
+        assert!(error.contains("first cause") && error.contains("final actionable cause"));
     }
 }

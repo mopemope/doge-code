@@ -119,7 +119,6 @@ fn viewport_render_plan_indicator_matches_clamped_content() {
         model: None,
         spinner_state: 0,
         scroll_state: &app.scroll_state,
-        plan_list: &app.plan_list,
         theme: &app.theme,
         log_heights: &app.log_heights,
     });

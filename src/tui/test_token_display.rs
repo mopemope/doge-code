@@ -1,45 +1,55 @@
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
-    use crate::tui::state::{LogEntry, Status, TuiApp, build_render_plan};
+    use crate::tui::state::TuiApp;
     use crate::tui::state_render::truncate_display;
 
     #[test]
-    fn test_no_token_display_when_zero() {
-        // Test that token usage is not displayed when tokens_used = 0
-        let title = "Test Title";
-        let status = Status::Ready;
-        let log: Vec<LogEntry> = Vec::new();
-        // let input_mode = InputMode::Normal; // 不要
-        let w = 80;
-        let h = 24;
-        let model = Some("test-model");
-        let spinner_state = 0;
-        // let tokens_used = 0; // 不要
-        // let textarea = crate::tui::state::TuiApp::new("", None, "")
-        //     .unwrap()
-        //     .textarea; // 不要
-
-        let theme = crate::tui::theme::Theme::dark();
-        let params = crate::tui::state::BuildRenderPlanParams {
-            title,
-            status,
-            log: &log,
-            width: w,
-            main_content_height: h - 3,
-            model,
-            spinner_state,
-            scroll_state: &crate::tui::state::ScrollState::default(),
-            plan_list: &[],
-            theme: &theme,
-            log_heights: &[],
-        };
-        let plan = build_render_plan(params);
-
-        // Check that the token count is not included in the title when it's 0
-        assert!(!plan.footer_lines[0].contains("tokens:"));
-        // Check that the model is still included
-        assert!(plan.footer_lines[0].contains("model:test-model"));
+    fn normal_status_omits_usage_but_explicit_dashboard_keeps_it() {
+        let mut app = TuiApp::new("Test", None, "dark").unwrap();
+        app.model = Some("test-model API_KEY=MODEL_SECRET".into());
+        app.tokens_prompt_used = 12345;
+        app.plan_list = vec![crate::tui::state::PlanItem {
+            id: "one".into(),
+            content: "detail-plan-marker API_KEY=PLAN_SECRET".into(),
+            status: "in_progress".into(),
+            parent_id: None,
+        }];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| app.view(frame, Some("test-model")))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("test-model"));
+        assert!(
+            !text.contains("12345") && !text.contains("tokens"),
+            "{text}"
+        );
+        assert!(!text.contains("detail-plan-marker"), "{text}");
+        app.view_mode = crate::tui::state::ViewMode::Dashboard;
+        terminal
+            .draw(|frame| app.view(frame, Some("test-model")))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Tokens Used: 12345"), "{text}");
+        assert!(text.contains("detail-plan-marker"), "{text}");
+        assert!(
+            !text.contains("MODEL_SECRET") && !text.contains("PLAN_SECRET"),
+            "{text}"
+        );
     }
 
     #[test]
