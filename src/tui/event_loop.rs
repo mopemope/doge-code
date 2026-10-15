@@ -192,27 +192,7 @@ impl TuiApp {
                             {
                                 continue;
                             }
-                            let review_state = DiffReviewState::from_payload(payload);
-                            let file_count = review_state.files.len();
-                            let notice = if review_state.rejectable {
-                                format!(
-                                    "[diff] Ready for review: {file_count} file(s) changed. Use a=accept, r=reject, q=dismiss."
-                                )
-                            } else {
-                                format!(
-                                    "[diff] View only: {} Use a=accept, q=dismiss.",
-                                    review_state
-                                        .reject_reason
-                                        .as_deref()
-                                        .unwrap_or("No turn-owned rollback capture.")
-                                )
-                            };
-                            self.feedback_review_arrived(&review_state);
-                            self.diff_review = Some(review_state);
-                            self.diff_review_focus = DiffReviewFocus::Input;
-                            self.diff_rejected_pending = false;
-                            self.dirty = true;
-                            self.push_log(notice);
+                            self.show_diff_review(payload);
                         } else if let Ok(err_payload) =
                             serde_json::from_str::<DiffReviewError>(payload)
                         {
@@ -958,6 +938,39 @@ impl TuiApp {
             }
             _ => Ok(false),
         }
+    }
+
+    pub(crate) fn show_diff_review(&mut self, payload: DiffReviewPayload) {
+        if payload.review_id.is_some()
+            && self
+                .diff_review
+                .as_ref()
+                .and_then(|review| review.review_id.as_ref())
+                == payload.review_id.as_ref()
+        {
+            return;
+        }
+        let review_state = DiffReviewState::from_payload(payload);
+        let file_count = review_state.files.len();
+        let notice = if review_state.rejectable {
+            format!(
+                "[diff] Ready for review: {file_count} file(s) changed. Use a=accept, r=reject, q=dismiss."
+            )
+        } else {
+            format!(
+                "[diff] View only: {} Use a=accept, q=dismiss.",
+                review_state
+                    .reject_reason
+                    .as_deref()
+                    .unwrap_or("No turn-owned rollback capture.")
+            )
+        };
+        self.feedback_review_arrived(&review_state);
+        self.diff_review = Some(review_state);
+        self.diff_review_focus = DiffReviewFocus::Input;
+        self.diff_rejected_pending = false;
+        self.dirty = true;
+        self.push_log(notice);
     }
 
     pub(crate) fn accept_job_message(&self, id: crate::jobs::JobId) -> bool {

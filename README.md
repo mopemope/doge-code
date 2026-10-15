@@ -1591,6 +1591,11 @@ rollback scope. Accept and dismiss only discard review evidence; they do not edi
 files. Review evidence is memory-local and expires when a new turn replaces it or
 the session ends.
 
+Managed TUI turns publish their captured changes after the job finishes,
+including provider failure, cancellation, or a resource-budget stop. Applied
+changes remain on disk until explicitly rejected; rollback still refuses
+external conflicts. Feedback repairs use the same terminal review path.
+
 Set `show_diff = false` in `.doge/config.toml` to disable the panel.
 
 ## 🛡️ Linter and Auto-Fix /lint
