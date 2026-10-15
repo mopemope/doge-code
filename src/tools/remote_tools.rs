@@ -23,6 +23,42 @@ const MAX_SUMMARY_CHARS: usize = 320;
 const REMOTE_SERVER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 const UNLIMITED_DISCOVERY_GRACE: Duration = Duration::from_secs(5);
 
+/// Binding captured in the immutable, model-visible catalog for one agent run.
+#[derive(Clone, PartialEq)]
+pub struct RemoteToolDefinition {
+    pub alias: String,
+    pub server_name: String,
+    pub remote_name: String,
+    pub input_schema: JsonValue,
+}
+
+impl RemoteToolDefinition {
+    fn matches(&self, tool: &RemoteToolInfo) -> bool {
+        self.alias == tool.alias
+            && self.server_name == tool.server_name
+            && self.remote_name == tool.remote_name
+            && self.input_schema == tool.parameters
+    }
+
+    fn changed(&self) -> RemoteToolOutcome {
+        RemoteToolOutcome {
+            server_name: self.server_name.clone(),
+            tool_name: self.remote_name.clone(),
+            success: false,
+            is_error: true,
+            summary: "Remote tool definition changed; no tool call was sent".into(),
+            value: json!({
+                "ok": false,
+                "is_error": true,
+                "error": {
+                    "kind": "tool_definition_changed",
+                    "message": "Remote tool definition changed. No tool call was sent. Start a new turn to rediscover tools; do not retry this turn."
+                }
+            }),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteToolInfo {
     pub alias: String,
@@ -588,10 +624,10 @@ impl RemoteToolManager {
     /// MCP tools may have non-idempotent side effects.
     pub async fn call_remote_tool(
         &self,
-        alias: &str,
+        expected: &RemoteToolDefinition,
         args: &JsonValue,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<Option<RemoteToolOutcome>> {
+    ) -> Result<RemoteToolOutcome> {
         self.ensure_remote_tools_with_cancellation(cancel_token.as_ref())
             .await?;
 
@@ -599,11 +635,14 @@ impl RemoteToolManager {
             let guard = self.remote_tools.read().await;
             guard
                 .as_ref()
-                .and_then(|registry| registry.lookup.get(alias).cloned())
+                .and_then(|registry| registry.lookup.get(&expected.alias).cloned())
         };
         let Some(tool) = tool else {
-            return Ok(None);
+            return Ok(expected.changed());
         };
+        if !expected.matches(&tool) {
+            return Ok(expected.changed());
+        }
 
         let arguments: Option<JsonMap<String, JsonValue>> = match args {
             JsonValue::Null => None,
@@ -647,41 +686,63 @@ impl RemoteToolManager {
             tool.server_list_changed.store(true, Ordering::Release);
         }
 
-        let response = if let Some(token) = cancel_token.as_ref() {
-            let client_guard = tokio::select! {
+        let client_guard = if let Some(token) = cancel_token.as_ref() {
+            tokio::select! {
                 biased;
                 _ = token.cancelled() => return Err(anyhow!(LlmErrorKind::Cancelled)),
                 guard = client.lock() => guard,
-            };
-            client_guard
-                .call_tool_once(params, cancel_token.as_ref())
-                .await
+            }
         } else {
-            let client_guard = client.lock().await;
-            client_guard.call_tool_once(params, None).await
+            client.lock().await
         };
+        // Pin validation and dispatch to the same connection, including after
+        // reconnect. Notifications alone cannot detect silent schema changes.
+        let listed = match client_guard
+            .list_tools_with_cancellation(cancel_token.as_ref())
+            .await
+        {
+            Ok(listed) => listed,
+            Err(error) if error.is_cancelled() => return Err(anyhow!(LlmErrorKind::Cancelled)),
+            Err(error) => {
+                tool.healthy.store(false, Ordering::Release);
+                return Err(anyhow!(error));
+            }
+        };
+        let mut matching = listed
+            .iter()
+            .filter(|item| item.name == expected.remote_name);
+        let unchanged = matching.next().is_some_and(|item| {
+            JsonValue::Object((*item.input_schema).clone()) == expected.input_schema
+        }) && matching.next().is_none();
+        if !unchanged {
+            tool.server_list_changed.store(true, Ordering::Release);
+            return Ok(expected.changed());
+        }
+        let response = client_guard
+            .call_tool_once(params, cancel_token.as_ref())
+            .await;
 
         match response {
-            Ok(CallToolResponse::Complete(result)) => Ok(Some(normalize_call_tool_result(
+            Ok(CallToolResponse::Complete(result)) => Ok(normalize_call_tool_result(
                 &tool.server_name,
                 &tool.remote_name,
                 result,
-            ))),
-            Ok(CallToolResponse::InputRequired(_)) => Ok(Some(RemoteToolOutcome::unsupported(
+            )),
+            Ok(CallToolResponse::InputRequired(_)) => Ok(RemoteToolOutcome::unsupported(
                 &tool.server_name,
                 &tool.remote_name,
                 "remote MCP tool requires interactive input, but Doge-Code does not support MCP input-required flows yet",
-            ))),
-            Ok(CallToolResponse::Task(_)) => Ok(Some(RemoteToolOutcome::unsupported(
+            )),
+            Ok(CallToolResponse::Task(_)) => Ok(RemoteToolOutcome::unsupported(
                 &tool.server_name,
                 &tool.remote_name,
                 "server returned MCP Task, but remote task execution is not enabled",
-            ))),
-            Ok(_) => Ok(Some(RemoteToolOutcome::unsupported(
+            )),
+            Ok(_) => Ok(RemoteToolOutcome::unsupported(
                 &tool.server_name,
                 &tool.remote_name,
                 "server returned an unsupported MCP tool response variant",
-            ))),
+            )),
             Err(error) if error.is_cancelled() => Err(anyhow!(LlmErrorKind::Cancelled)),
             Err(error) => {
                 tool.healthy.store(false, Ordering::Release);
@@ -1380,28 +1441,221 @@ mod tests {
         let manager = RemoteToolManager::new(Arc::new(config));
         manager.ensure_remote_tools().await.expect("discovery");
 
+        let expected = |alias: &str, registry: &RemoteToolRegistry| {
+            let info = &registry.lookup[alias];
+            RemoteToolDefinition {
+                alias: info.alias.clone(),
+                server_name: info.server_name.clone(),
+                remote_name: info.remote_name.clone(),
+                input_schema: info.parameters.clone(),
+            }
+        };
+        let registry = manager.registry_status().await.unwrap();
         let success = manager
-            .call_remote_tool("mcp_local_say_hello", &json!({}), None)
+            .call_remote_tool(
+                &expected("mcp_local_say_hello", &registry),
+                &json!({}),
+                None,
+            )
             .await
-            .expect("remote call")
-            .expect("known remote tool");
+            .expect("remote call");
         assert!(success.success);
         assert_eq!(success.value["ok"], true);
 
         let failure = manager
             .call_remote_tool(
-                "mcp_local_fs_read",
+                &expected("mcp_local_fs_read", &registry),
                 &json!({ "path": temp.path().join("missing.txt").to_string_lossy() }),
                 None,
             )
             .await
-            .expect("remote tool-level error")
-            .expect("known remote tool");
+            .expect("remote tool-level error");
         assert!(!failure.success);
         assert_eq!(failure.value["ok"], false);
         assert_eq!(failure.value["is_error"], true);
 
         handle.shutdown().await.expect("server shutdown");
+    }
+
+    #[derive(Clone, Default)]
+    struct DefinitionServer {
+        changed: Arc<AtomicBool>,
+        fail_call: Arc<AtomicBool>,
+        fail_list: Arc<AtomicBool>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl rmcp::ServerHandler for DefinitionServer {
+        fn get_info(&self) -> rmcp::model::ServerConfig {
+            rmcp::model::ServerConfig::new(
+                rmcp::model::ServerCapabilities::builder()
+                    .enable_tools()
+                    .build(),
+            )
+        }
+
+        async fn list_tools(
+            &self,
+            _: Option<rmcp::model::PaginatedRequestParams>,
+            _: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            if self.fail_list.load(Ordering::Acquire) {
+                return Err(rmcp::ErrorData::internal_error(
+                    "fixture disconnected",
+                    None,
+                ));
+            }
+            let schema = if self.changed.load(Ordering::Acquire) {
+                json!({"type":"object","properties":{"changed":{"type":"boolean"}}})
+            } else {
+                json!({"properties":{},"type":"object"})
+            };
+            Ok(rmcp::model::ListToolsResult::with_all_items(vec![
+                Tool::new(
+                    "submit",
+                    "fixture",
+                    Arc::new(schema.as_object().unwrap().clone()),
+                ),
+            ]))
+        }
+
+        async fn call_tool(
+            &self,
+            _: CallToolRequestParams,
+            _: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<CallToolResponse, rmcp::ErrorData> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail_call.load(Ordering::Acquire) {
+                return Err(rmcp::ErrorData::internal_error(
+                    "fixture unknown outcome",
+                    None,
+                ));
+            }
+            Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+                ContentBlock::text("done"),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_definition_is_refused_before_dispatch_and_next_turn_rediscovers() -> Result<()>
+    {
+        use crate::llm::tool_execution::dispatch_tool_call;
+        use crate::llm::{
+            tool_runtime::ToolRuntime,
+            types::{ToolCall, ToolCallFunction},
+        };
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        };
+        for mode in ["silent_change", "list_changed", "reconnect", "list_failure"] {
+            let fixture = DefinitionServer::default();
+            let cancellation = CancellationToken::new();
+            let service_fixture = fixture.clone();
+            let service = StreamableHttpService::new(
+                move || Ok(service_fixture.clone()),
+                LocalSessionManager::default().into(),
+                StreamableHttpServerConfig::default().with_cancellation_token(cancellation.clone()),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let shutdown = cancellation.clone();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+                    .with_graceful_shutdown(shutdown.cancelled_owned())
+                    .await
+            });
+            let root = tempfile::tempdir()?;
+            let config = Arc::new(AppConfig {
+                project_root: root.path().into(),
+                mcp_servers: vec![McpServerConfig {
+                    name: "fixture".into(),
+                    enabled: true,
+                    transport: McpTransport::Http,
+                    address: Some(format!("http://{address}/mcp")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            let fs = crate::tools::FsTools::new(Arc::new(RwLock::new(None)), config);
+            let runtime = ToolRuntime::build(&fs, None, "fixture", None).await?;
+            runtime
+                .tool_catalog
+                .activate(&["mcp_fixture_submit".into()])
+                .await;
+            let published = serde_json::to_value(runtime.active_tool_defs().await)?;
+            let call = ToolCall {
+                id: Some("fixture-call".into()),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "mcp_fixture_submit".into(),
+                    arguments: "{}".into(),
+                },
+            };
+            let mut sent = 0;
+            if mode == "reconnect" {
+                fixture.fail_call.store(true, Ordering::Release);
+                assert!(dispatch_tool_call(&runtime, &call).await.is_err());
+                sent = 1;
+                assert_eq!(
+                    fixture.calls.load(Ordering::Acquire),
+                    sent,
+                    "no automatic replay"
+                );
+                fixture.fail_call.store(false, Ordering::Release);
+            }
+            if mode == "list_failure" {
+                fixture.fail_list.store(true, Ordering::Release);
+                assert!(dispatch_tool_call(&runtime, &call).await.is_err());
+                assert_eq!(fixture.calls.load(Ordering::Acquire), 0);
+                let registry = fs
+                    .get_remote_tool_manager()
+                    .registry_status()
+                    .await
+                    .unwrap();
+                assert!(!registry.tools[0].healthy.load(Ordering::Acquire));
+                fixture.fail_list.store(false, Ordering::Release);
+                assert!(dispatch_tool_call(&runtime, &call).await?.is_success);
+                sent = 1;
+            }
+            fixture.changed.store(true, Ordering::Release);
+            if mode == "list_changed" {
+                let registry = fs
+                    .get_remote_tool_manager()
+                    .registry_status()
+                    .await
+                    .unwrap();
+                registry.tools[0]
+                    .server_list_changed
+                    .store(true, Ordering::Release);
+            }
+            let outcome = dispatch_tool_call(&runtime, &call).await?;
+            assert!(!outcome.is_success, "{mode}: changed tool executed");
+            assert_eq!(outcome.value["error"]["kind"], "tool_definition_changed");
+            assert_eq!(
+                fixture.calls.load(Ordering::Acquire),
+                sent,
+                "{mode}: tools/call must not be sent"
+            );
+            assert_eq!(
+                serde_json::to_value(runtime.active_tool_defs().await)?,
+                published,
+                "published schemas must remain immutable within a turn"
+            );
+            let next = ToolRuntime::build(&fs, None, "fixture", None).await?;
+            next.tool_catalog
+                .activate(&["mcp_fixture_submit".into()])
+                .await;
+            assert_ne!(
+                serde_json::to_value(next.active_tool_defs().await)?,
+                published
+            );
+            assert!(dispatch_tool_call(&next, &call).await?.is_success);
+            assert_eq!(fixture.calls.load(Ordering::Acquire), sent + 1);
+            cancellation.cancel();
+            server.await??;
+        }
+        Ok(())
     }
 
     #[test]
