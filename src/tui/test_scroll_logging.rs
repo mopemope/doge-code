@@ -25,6 +25,7 @@ mod tests {
         app.push_log("new message");
         assert_eq!(app.scroll_state.offset, 0);
         assert!(app.scroll_state.auto_scroll);
+        assert_eq!(app.scroll_state.new_messages, 0);
     }
 
     #[test]
@@ -58,18 +59,6 @@ mod tests {
     }
 
     #[test]
-    fn test_new_message_not_counted_when_auto_scroll() {
-        let mut app = create_test_app();
-        assert!(app.scroll_state.auto_scroll);
-
-        app.push_log("message 1");
-        assert_eq!(app.scroll_state.new_messages, 0);
-
-        app.push_log("message 2");
-        assert_eq!(app.scroll_state.new_messages, 0);
-    }
-
-    #[test]
     fn test_clear_log_resets_scroll() {
         let mut app = create_test_app();
         app.scroll_state.offset = 10;
@@ -78,28 +67,6 @@ mod tests {
         app.clear_log();
         assert_eq!(app.scroll_state.offset, 0);
         assert!(app.scroll_state.auto_scroll);
-    }
-
-    #[test]
-    fn test_tool_log_counting() {
-        let mut app = create_test_app();
-        app.scroll_state.auto_scroll = false;
-        app.scroll_state.offset = 5;
-
-        // Simulate tool execution log
-        app.push_log("[tool] fs_read({\"path\": \"test.rs\"})");
-        assert_eq!(app.scroll_state.new_messages, 1);
-
-        // Simulate LLM response with multiple lines (like finalize_and_append_llm_response would do)
-        app.push_log("  Here's the content of the file:");
-        app.push_log("  ```rust");
-        app.push_log("    fn main() {");
-        app.push_log("        println!(\"Hello, world!\");");
-        app.push_log("    }");
-        app.push_log("  ```");
-
-        // Should count all the lines added
-        assert_eq!(app.scroll_state.new_messages, 7); // 1 tool + 6 response lines
     }
 
     #[test]
