@@ -216,28 +216,12 @@ impl TuiExecutor {
             return;
         }
         // Busy/missing-key rejection is owned inside the spawn path: it logs
-        // without touching history, provenance, or ownership. Only echo the
-        // staged prompt after a successful reservation so a rejected handoff
-        // never leaves a phantom `> prompt` in the UI.
+        // without touching history, provenance, or ownership. The spawn path
+        // displays only the short synthetic purpose after reservation.
         let display = followup.display.clone();
         let prompt = followup.prompt.clone();
-        let kind = followup.kind;
-        if crate::tui::commands::agent_job::spawn_synthetic_followup(
-            self,
-            ui,
-            &display,
-            prompt.clone(),
-        )
-        .is_ok()
-        {
-            match kind {
-                JobKind::Test => ui.push_log("[test] Sending failures to LLM..."),
-                JobKind::Lint => ui.push_log("[lint] Sending output to LLM..."),
-                _ => ui.push_log("[job] Sending follow-up to LLM..."),
-            }
-            ui.push_log(format!("> {prompt}"));
-            ui.dirty = true;
-        }
+        let _ =
+            crate::tui::commands::agent_job::spawn_synthetic_followup(self, ui, &display, prompt);
     }
 }
 
@@ -558,6 +542,9 @@ mod tests {
         let snapshot = executor.jobs.get_snapshot(successor).unwrap();
         assert_eq!(snapshot.kind, crate::jobs::JobKind::AgentTurn);
         assert!(!executor.deferred_followups.contains(producer));
+        assert!(log_contains(&ui, "[auto]"));
+        assert!(!log_contains(&ui, "> "));
+        assert!(!log_contains(&ui, "The following test(s)"));
 
         // Duplicate completion signal: no duplicate follow-up.
         executor.handle_deferred_followup(&producer.to_string(), &mut ui);

@@ -121,7 +121,6 @@ pub struct BuildRenderPlanParams<'a> {
     pub model: Option<&'a str>,
     pub spinner_state: usize,
     pub scroll_state: &'a ScrollState,
-    pub plan_list: &'a [PlanItem],
     pub theme: &'a Theme,
     pub log_heights: &'a [usize],
 }
@@ -135,8 +134,6 @@ pub struct RenderPlan {
     pub input_cursor_col: u16,
     // scroll indicator info
     pub scroll_info: Option<ScrollInfo>,
-    /// Plan list items to be rendered separately from the log area
-    pub plan_list: Vec<PlanItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,12 +196,9 @@ pub struct TuiApp {
     pub(crate) llm_parsing_buffer: String,
     // spinner state for "Thinking..." display
     pub spinner_state: usize,
-    // Flag to prevent duplicate LLM response display
-    pub is_llm_response_active: bool,
     /// Stores the content of the last LLM response added to the log to prevent duplicate printing.
     pub last_llm_response_content: Option<String>,
-    /// Index in `log` where the current streaming response started so it can be replaced
-    /// with the final markdown-rendered content.
+    /// Index of the single mutable response block; rebased on log eviction.
     pub current_stream_start: Option<usize>,
     // Input mode
     pub input_mode: InputMode,
@@ -506,8 +500,7 @@ impl TuiApp {
 
             theme,
             llm_parsing_buffer: String::new(),
-            spinner_state: 0,              // Initialize spinner state
-            is_llm_response_active: false, // Initialize the flag
+            spinner_state: 0, // Initialize spinner state
             last_llm_response_content: None,
             current_stream_start: None,
             input_mode: InputMode::default(),
@@ -686,7 +679,10 @@ impl TuiApp {
     pub fn push_log<S: Into<String>>(&mut self, s: S) {
         let lines_before = self.log.len();
         let mut lines_added = 0;
-        let content = s.into();
+        let content = crate::features::safe_display::text(
+            &s.into(),
+            self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref()),
+        );
         for line in content.split('\n') {
             let entry = LogEntry::Plain(line.to_string());
             let height = if self.log_width > 0 {
@@ -708,6 +704,9 @@ impl TuiApp {
             let overflow = self.log.len() - self.max_log_lines;
             let removed_height: usize = self.log_heights.iter().take(overflow).sum();
 
+            self.current_stream_start = self
+                .current_stream_start
+                .and_then(|index| index.checked_sub(overflow));
             self.log.drain(0..overflow);
             self.log_heights.drain(0..overflow);
 
@@ -732,6 +731,10 @@ impl TuiApp {
     }
 
     pub fn push_markdown_response(&mut self, content: &str) {
+        let content = crate::features::safe_display::text(
+            content,
+            self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref()),
+        );
         if content.trim().is_empty() {
             return;
         }
@@ -755,6 +758,9 @@ impl TuiApp {
             let overflow = self.log.len() - self.max_log_lines;
             let removed_height: usize = self.log_heights.iter().take(overflow).sum();
 
+            self.current_stream_start = self
+                .current_stream_start
+                .and_then(|index| index.checked_sub(overflow));
             self.log.drain(0..overflow);
             self.log_heights.drain(0..overflow);
 
@@ -804,15 +810,9 @@ impl TuiApp {
     }
 
     fn max_log_scroll_offset(&self) -> usize {
-        let plan_rows = if self.plan_list.is_empty() {
-            0
-        } else {
-            self.plan_list.len() + 2
-        };
         self.log_heights
             .iter()
             .sum::<usize>()
-            .saturating_add(plan_rows)
             .saturating_sub(self.main_content_height)
     }
 
@@ -846,6 +846,8 @@ impl TuiApp {
     pub fn clear_log(&mut self) {
         self.log.clear();
         self.log_heights.clear();
+        self.current_stream_start = None;
+        self.llm_parsing_buffer.clear();
         self.last_llm_response_content = None;
         self.scroll_state = ScrollState::default();
     }

@@ -243,6 +243,10 @@ impl TuiApp {
                     // starts strictly after the predecessor. UI status
                     // messages never authorize this path.
                     if let Some(producer) = msg.strip_prefix("::job_completed:") {
+                        if crate::jobs::JobId::parse_arg(producer) == self.latest_agent_job_id {
+                            self.finalize_and_append_llm_response("");
+                            is_streaming = false;
+                        }
                         if self.handler.is_some() && self.exit_requested_at.is_none() {
                             let mut handler = self.handler.take().unwrap();
                             handler.handle_job_completed(producer, self);
@@ -317,13 +321,15 @@ impl TuiApp {
 
                         if let Some(msg_body) = rest.strip_prefix("waiting:") {
                             self.status = Status::Thinking; // Was Waiting
-                            self.push_log(format!("[WAIT] {}", msg_body));
+                            self.detailed_status = Some(msg_body.to_string());
                             self.dirty = true;
                             self.spinner_state = 0;
                             continue;
                         }
 
                         if let Some(msg_body) = rest.strip_prefix("working:") {
+                            self.finalize_and_append_llm_response("");
+                            is_streaming = false;
                             self.status = Status::Running;
                             self.detailed_status = Some(msg_body.to_string());
                             self.dirty = true;
@@ -333,7 +339,7 @@ impl TuiApp {
 
                         if let Some(msg_body) = rest.strip_prefix("compacting:") {
                             self.status = Status::Thinking; // Was Processing
-                            self.push_log(format!("[AUTO] {}", msg_body));
+                            self.detailed_status = Some(msg_body.to_string());
                             self.dirty = true;
                             self.spinner_state = 0;
                             continue;
@@ -390,6 +396,11 @@ impl TuiApp {
                                 continue;
                             }
                             "preparing" | "sending" | "waiting" | "processing" => {
+                                if is_streaming {
+                                    self.finalize_and_append_llm_response("");
+                                    is_streaming = false;
+                                }
+                                self.detailed_status = None;
                                 self.status = Status::Thinking;
                                 self.dirty = true;
                                 self.spinner_state = 0;
@@ -397,7 +408,7 @@ impl TuiApp {
                             }
                             "streaming" => {
                                 if !is_streaming {
-                                    self.llm_parsing_buffer.clear();
+                                    self.begin_llm_response();
                                     is_streaming = true;
                                 }
                                 self.status = Status::Thinking; // Streaming is also Thinking/Active
@@ -461,6 +472,10 @@ impl TuiApp {
                     }
 
                     if let Some(payload) = msg.strip_prefix("::append:") {
+                        if !is_streaming {
+                            self.begin_llm_response();
+                            is_streaming = true;
+                        }
                         self.append_stream_token_structured(payload);
                         self.dirty = true;
                         continue;
@@ -494,7 +509,7 @@ impl TuiApp {
                     }
 
                     if msg == "::trigger_compact" {
-                        self.push_log("[AUTO] Triggering /compact".to_string());
+                        self.detailed_status = Some("Compacting conversation".into());
                         self.dispatch("/compact");
                         self.dirty = true;
                         continue;
@@ -502,10 +517,9 @@ impl TuiApp {
 
                     if msg == "[SUCCESS] Conversation history has been compacted." {
                         self.auto_compact_pending = false;
-                        self.push_log(msg);
+                        self.detailed_status = Some("Continuing conversation".into());
                         self.dirty = true;
                         if let Some(last_input) = self.last_user_input.clone() {
-                            self.push_log("[AUTO] Retrying last user input.".to_string());
                             // Replay inherits the original directive id when
                             // known; never records a duplicate observation.
                             self.dispatch_retry_after_compact(&last_input);
@@ -549,18 +563,8 @@ impl TuiApp {
                         continue;
                     }
 
-                    if self
-                        .last_llm_response_content
-                        .as_ref()
-                        .is_some_and(|last_content| msg == *last_content)
-                    {
-                        debug!(
-                            response_bytes = msg.len(),
-                            "Skipping duplicate LLM response"
-                        );
-                        self.last_llm_response_content = None;
-                    } else {
-                        self.push_log(msg);
+                    if self.append_inbox_message(&msg) {
+                        is_streaming = false;
                     }
                     self.dirty = true;
                 }

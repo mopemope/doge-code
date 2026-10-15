@@ -14,7 +14,6 @@ use crate::llm::types::{ChatMessage, ChoiceMessage};
 use crate::tools::FsTools;
 use crate::tools::plan::{PlanList, PlanWriteArgs};
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, FixedOffset, Utc};
 use std::hash::{Hash, Hasher};
 
 use tokio_util::sync::CancellationToken;
@@ -2187,6 +2186,9 @@ pub async fn run_agent_loop(
             // tools never touch the provider, so their delta is empty and
             // free; any nested LLM tool using the shared client is charged
             // automatically without a per-tool allowlist.
+            if let Some(tx) = &ui_tx {
+                let _ = tx.send(format!("::status:working:{tool_name}"));
+            }
             let tool_usage_before = client.usage_snapshot();
             // Processes own cancellation and must finish tree cleanup/reaping.
             // Local mutations must finish commit/readback/finalization once
@@ -2304,24 +2306,6 @@ pub async fn run_agent_loop(
                 modifies_files && actually_changed,
             );
 
-            let ui_args = if success
-                && ui_tx.is_some()
-                && matches!(
-                    tool_name,
-                    "fs_read"
-                        | "edit"
-                        | "fs_list"
-                        | "search_text"
-                        | "search_repomap"
-                        | "execute_bash"
-                        | "execute_process"
-                        | "execute_shell"
-                ) {
-                serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()
-            } else {
-                None
-            };
-
             // Set file_was_written flag for tools that actually mutated files
             if modifies_files && actually_changed {
                 file_was_written = true;
@@ -2345,164 +2329,24 @@ pub async fn run_agent_loop(
                 }
             };
 
-            // Prepare a short result summary for UI log and truncate if necessary
-
-            // Send a more visually appealing multi-line tool execution display
             if let Some(tx) = &ui_tx {
-                let status_text = if success { "✅ SUCCESS" } else { "❌ FAILED" };
-
-                // Map tool names to appropriate icons
-                let tool_icon = match tool_name {
-                    "fs_list" => "🗂️",
-                    "fs_read" => "📖",
-                    "fs_read_many_files" => "📚",
-                    "fs_write" => "📝",
-                    "search_text" => "🔍",
-                    "execute_bash" => "🔧",
-                    "execute_process" => "⚙️",
-                    "execute_shell" => "🐚",
-                    "find_file" => "📁",
-                    "search_repomap" => "🗺️",
-                    "edit" => "✏️",
-                    "apply_patch" => "🧩",
-                    "plan_write" => "🗂️",
-                    "plan_read" => "🗂️",
-                    _ => "🔧", // default icon
-                };
-
-                let start_time = std::time::SystemTime::now();
-                let utc_datetime: DateTime<Utc> = start_time.into();
-                let jst_offset =
-                    FixedOffset::east_opt(9 * 3600).unwrap_or(FixedOffset::east_opt(0).unwrap()); // JST is UTC+9, fallback to UTC
-                let jst_datetime = utc_datetime.with_timezone(&jst_offset);
-                let timestamp_short = jst_datetime.format("%H:%M:%S").to_string(); // HH:MM:SS format in JST
-
-                // Send indented lines to create a visually distinct tool execution display
-                let header_line =
-                    format!("🛠️  [{timestamp_short}] {tool_icon} {tool_name} => {status_text}");
-                let _ = tx.send(header_line);
-
-                // For fs_read, show the file path right after SUCCESS
-                if tool_name == "fs_read"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
-                {
-                    let _ = tx.send(path.to_string());
-                }
-
-                // For edit, show the file path right after SUCCESS
-                if tool_name == "edit"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                    && let Some(path) = args.get("file_path").and_then(|v| v.as_str())
-                {
-                    let _ = tx.send(path.to_string());
-                }
-
-                // For fs_list, show the directory path right after SUCCESS
-                if tool_name == "fs_list"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                    && let Some(path) = args.get("path").and_then(|v| v.as_str())
-                {
-                    let _ = tx.send(path.to_string());
-                }
-
-                // For search_text, show the search keyword right after SUCCESS
-                if tool_name == "search_text"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                    && let Some(keyword) = args.get("search_pattern").and_then(|v| v.as_str())
-                {
-                    let _ = tx.send(format!("Keyword: {}", keyword));
-                }
-
-                // For search_repomap, show the search keywords right after SUCCESS
-                if tool_name == "search_repomap"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                {
-                    // Check keyword_search field
-                    if let Some(keyword_search) =
-                        args.get("keyword_search").and_then(|v| v.as_array())
-                        && !keyword_search.is_empty()
-                    {
-                        let keywords: Vec<String> = keyword_search
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .collect();
-                        if !keywords.is_empty() {
-                            let _ = tx.send(format!("Keywords: {}", keywords.join(", ")));
-                        }
-                    }
-                }
-
-                // For execute_bash/execute_shell, show the command that was executed right after SUCCESS
-                if (tool_name == "execute_bash" || tool_name == "execute_shell")
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                    && let Some(command) = args.get("command").and_then(|v| v.as_str())
-                {
-                    let _ = tx.send(format!("Command: {}", command));
-                }
-
-                // For execute_process, show program + args without building a
-                // shell string (and never show env values).
-                if tool_name == "execute_process"
-                    && success
-                    && let Some(args) = ui_args.as_ref()
-                {
-                    let program = args.get("program").and_then(|v| v.as_str()).unwrap_or("?");
-                    let arg_count = args
-                        .get("args")
-                        .and_then(|v| v.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    let preview: Vec<String> = args
-                        .get("args")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .take(5)
-                                .filter_map(|v| v.as_str())
-                                .map(|s| {
-                                    // Char-based truncation: byte slicing (`&s[..60]`)
-                                    // panics on multi-byte UTF-8 boundaries.
-                                    if s.chars().count() > 60 {
-                                        format!("{}…", s.chars().take(60).collect::<String>())
-                                    } else {
-                                        s.to_string()
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if preview.is_empty() {
-                        let _ = tx.send(format!("Process: {} ({} args)", program, arg_count));
-                    } else {
-                        let _ = tx.send(format!(
-                            "Process: {} Args: [{}]{}",
-                            program,
-                            preview.join(", "),
-                            if arg_count > preview.len() {
-                                format!(" (+{} more)", arg_count - preview.len())
-                            } else {
-                                String::new()
-                            }
-                        ));
-                    }
-                }
-
-                // If failed, try to show the error message in the TUI log
                 if !success {
-                    let _ = tx.send(format!("    Error: {}", result_summary));
+                    let error_detail = res.as_ref().err().map(ToString::to_string);
+                    let message = super::ui_rendering::tool_failure_message(
+                        tool_name,
+                        error_detail.as_deref().unwrap_or(&result_summary),
+                        output_value,
+                    );
+                    let _ = tx.send(format!("::error:tool:{message}"));
                 }
-
-                // Tool arguments and results are intentionally not displayed in the TUI to avoid leaking sensitive data.
-
-                let _ = tx.send("".to_string()); // Extra blank line for spacing
+                if let Some(warnings) = output_value
+                    .and_then(|value| value.get("warnings"))
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+                        let _ = tx.send(format!("::status:warning:{tool_name}: {warning}"));
+                    }
+                }
             }
 
             // Also emit structured debug/error logs (include truncated result summary for debugging)
@@ -2841,18 +2685,31 @@ mod tests {
             },
         ];
 
+        let (ui_tx, ui_rx) = std::sync::mpsc::channel();
         let run = run_agent_loop(
             &client,
             "test-model",
             &fs,
             messages,
-            None,
+            Some(ui_tx),
             None,
             &cfg,
             crate::provenance::ProvenanceAttribution::none(),
         )
         .await
         .expect("agent loop completes");
+        let ui_messages: Vec<_> = ui_rx.try_iter().collect();
+        assert!(
+            !ui_messages
+                .iter()
+                .any(|s| s.contains("SUCCESS") || s.contains("🛠") || s.is_empty()),
+            "{ui_messages:?}"
+        );
+        assert!(
+            ui_messages
+                .iter()
+                .any(|s| s == "::status:working:search_memory")
+        );
         let updated_messages = run.messages;
         let final_msg = run.final_message;
         assert_eq!(run.status, AgentRunStatus::Completed);

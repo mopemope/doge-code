@@ -37,6 +37,28 @@ is claimed. See [practical acceptance evaluation](docs/ai/evaluation.md#practica
 ### Execution Modes
 
 #### 1. Interactive TUI Mode (Default)
+
+The normal view focuses on your messages, answers, current work and actionable
+warnings/errors. Tool successes, command arguments and routine context-maintenance
+logs are omitted; synthetic follow-ups use an `[auto]` purpose label rather than
+appearing as user messages. Provider/model and current work appear in the status
+line. Streams update one answer block, retaining partial answers on interruption.
+Usage remains available through `/tokens`, `/context` and the explicit Ctrl+D
+dashboard, which also holds the plan list; `/jobs` shows job details. Exiting the TUI prints no session statistics.
+For retained tool calls/results, use `/session show <id>` or
+`dgc session show <id>` (redirect its text output to export it). The view resolves
+retained offloaded results, keeps call IDs/checkpoint order and bounds excerpts;
+compaction and retention mean it is not a permanent execution audit.
+`dgc session evidence <id> --include-content` also applies the human-facing
+credential/control-character projection, in both Markdown and JSON.
+Known credential fields, authorization values and common key formats are masked;
+unknown secrets can still require manual removal before sharing.
+Canonical `.doge/sessions/.../session.json`, provenance and `/session export`
+recovery files stay exact for recovery and may contain sensitive text. Do not
+share those raw files externally. No duplicate raw log, new storage policy or
+file-permission change is introduced.
+These display choices do not change `exec --json`, MCP or tool result formats.
+
 ```bash
 cargo run --release
 # or
