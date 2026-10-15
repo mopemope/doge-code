@@ -177,6 +177,11 @@ fn open_with_limits(root: &Path, count: usize, total: u64, per_run: u64) -> Resu
     );
     let mut file = directory.open_file(&name, true)?;
     files::validate(&file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     file.try_lock().context("acquire new run log lease")?;
     file.write_all(header.as_bytes())?;
     Ok(RunLog(Arc::new(Mutex::new(CappedFile {
@@ -236,6 +241,11 @@ mod tests {
         std::fs::create_dir_all(root.path().join(".doge/logs")).unwrap();
         let legacy = root.path().join(".doge/logs/debug.log");
         std::fs::write(&legacy, b"legacy evidence").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let mut first = open_project_log(root.path()).unwrap();
         first.write_all(b"prior run evidence").unwrap();
         let previous = paths(root.path()).pop().unwrap();
@@ -366,6 +376,7 @@ mod tests {
                 let external = tempfile::tempdir().unwrap();
                 let victim = external.path().join("victim");
                 std::fs::write(&victim, b"preserve external").unwrap();
+                std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
                 let path = root.path().join(component);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 match attack {
