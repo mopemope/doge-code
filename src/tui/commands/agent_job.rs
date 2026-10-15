@@ -415,17 +415,6 @@ pub(crate) fn spawn_agent_turn(
                 let _ = tx.send(format!("::feedback_outcome:{json}"));
             }
         }
-        if matches!(
-            provenance_for_job,
-            AgentTurnProvenance::ReviewFeedback { .. }
-        ) && let Some(payload) = fs.seal_review()
-            && let Some(tx) = &ui_tx
-        {
-            let enriched = crate::tools::provenance::enrich_diff_review_with_evidence(&fs, payload);
-            if let Ok(json) = serde_json::to_string(&enriched) {
-                let _ = tx.send(format!("::diff_review:{json}"));
-            }
-        }
         let tokens_used = client.get_prompt_tokens_used();
         let total_tokens = client.get_total_tokens_used();
         match res {
