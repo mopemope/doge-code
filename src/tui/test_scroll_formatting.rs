@@ -18,7 +18,6 @@ fn test_build_render_plan_with_scroll() {
     .into_iter()
     .map(|line| LogEntry::Plain(line.to_string()))
     .collect();
-    let plan_items: Vec<crate::tui::state::PlanItem> = vec![];
     let theme = Theme::dark();
     let log_heights = vec![1; log_lines.len()];
 
@@ -31,7 +30,6 @@ fn test_build_render_plan_with_scroll() {
         model: None,
         spinner_state: 0,
         scroll_state: &scroll_state,
-        plan_list: &plan_items,
         theme: &theme,
         log_heights: &log_heights,
     };

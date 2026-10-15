@@ -105,18 +105,84 @@ mod tests {
         app.scroll_state.auto_scroll = false;
         app.scroll_state.offset = 5;
 
-        // Simulate streaming tokens being added immediately
+        app.log_width = 20;
+        app.push_log("older message");
+        let offset = app.scroll_state.offset;
         app.append_stream_token_structured("Hello");
-        app.append_stream_token_structured(" world");
+        app.append_stream_token_structured(" 世界");
         app.append_stream_token_structured("!\nNext line");
-
-        // Check that streaming content was added to log immediately
-        let texts = log_texts(&app);
-        assert!(texts.iter().any(|line| line.contains("Hello")));
-        assert!(texts.iter().any(|line| line.contains("world")));
-        assert!(texts.iter().any(|line| line.contains("Next line")));
-
-        // Check that new messages were counted
-        assert!(app.scroll_state.new_messages > 0);
+        assert_eq!(log_texts(&app), ["older message", "Hello 世界!\nNext line"]);
+        assert_eq!(app.scroll_state.new_messages, 2);
+        assert_eq!(app.scroll_state.offset, offset + app.log_heights[1]);
+        let partial = log_texts(&app);
+        app.finalize_and_append_llm_response(""); // cancelled / EOF
+        assert_eq!(log_texts(&app), partial);
+        app.finalize_and_append_llm_response("Hello 世界!\nNext line");
+        assert_eq!(log_texts(&app), partial); // repeated finalization
+        app.push_log("important tool failure");
+        app.append_stream_token_structured("new request");
+        app.finalize_and_append_llm_response("new request");
+        assert_eq!(
+            log_texts(&app),
+            [
+                "older message",
+                "Hello 世界!\nNext line",
+                "important tool failure",
+                "new request"
+            ]
+        );
+        app.begin_llm_response();
+        app.append_stream_token_structured("intermediate answer");
+        app.append_inbox_message("intermediate answer"); // agent tool-call response repeats whole content
+        app.finalize_and_append_llm_response(""); // tool starts
+        assert_eq!(
+            log_texts(&app)
+                .iter()
+                .filter(|s| *s == "intermediate answer")
+                .count(),
+            1
+        );
+        // Request boundaries, including identical answers, never deduplicate across requests.
+        app.begin_llm_response();
+        app.append_stream_token_structured(" ");
+        app.append_stream_token_structured("new request");
+        app.push_log("warning during stream");
+        app.append_stream_token_structured("e\u{0301}🦀");
+        app.finalize_and_append_llm_response(" new requeste\u{0301}🦀");
+        assert!(log_texts(&app).ends_with(&[
+            " new requeste\u{0301}🦀".into(),
+            "warning during stream".into()
+        ]));
+        app.begin_llm_response();
+        app.append_stream_token_structured(" new requeste\u{0301}🦀");
+        app.finalize_and_append_llm_response("");
+        assert_eq!(
+            log_texts(&app)
+                .iter()
+                .filter(|s| *s == " new requeste\u{0301}🦀")
+                .count(),
+            2
+        );
+        // Eviction rebases the active entry instead of replacing a warning.
+        app.max_log_lines = 3;
+        app.begin_llm_response();
+        app.append_stream_token_structured("partial");
+        app.push_log("error after stream start");
+        app.append_stream_token_structured(" answer");
+        app.finalize_and_append_llm_response("");
+        assert!(
+            log_texts(&app)
+                .ends_with(&["partial answer".into(), "error after stream start".into()])
+        );
+        assert_eq!(app.log.len(), app.log_heights.len());
+        app.append_stream_token_structured("next partial");
+        app.clear_log();
+        app.push_log("keep user message");
+        app.append_stream_token_structured("\u{1b}]0;hidden-control\u{7}");
+        app.finalize_and_append_llm_response("");
+        assert_eq!(log_texts(&app), ["keep user message"]);
+        app.clear_log();
+        app.append_stream_token_structured("after clear");
+        assert_eq!(log_texts(&app), ["after clear"]);
     }
 }

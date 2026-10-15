@@ -16,6 +16,20 @@ impl TuiApp {
     }
 
     pub fn view(&mut self, f: &mut Frame, model: Option<&str>) {
+        self.render_view(f, model);
+        // Protect the terminal even for editable input or legacy view paths.
+        // This changes only drawn cells, never drafts, anchors or stored data.
+        for cell in &mut f.buffer_mut().content {
+            if cell.symbol().chars().any(|c| {
+                c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            }) {
+                let safe = crate::features::safe_display::terminal_text(cell.symbol());
+                cell.set_symbol(if safe.is_empty() { " " } else { &safe });
+            }
+        }
+    }
+
+    fn render_view(&mut self, f: &mut Frame, model: Option<&str>) {
         let size = f.area();
         // Search needs room for results even when the preserved draft is long.
         let draft_rows = if self.input_mode == crate::tui::state::InputMode::Normal {
@@ -83,7 +97,6 @@ impl TuiApp {
             model,
             spinner_state: self.spinner_state,
             scroll_state: &self.scroll_state,
-            plan_list: &self.plan_list,
             theme: &self.theme,
             log_heights: &self.log_heights,
         };
@@ -242,6 +255,10 @@ impl TuiApp {
             .as_deref()
             .unwrap_or_else(|| model.unwrap_or("unknown"));
 
+        let model_name = crate::features::safe_display::text(
+            model_name,
+            self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref()),
+        );
         let status_str = match self.status {
             crate::tui::state::Status::Ready => "READY",
             crate::tui::state::Status::Thinking => "THINKING",
@@ -256,7 +273,7 @@ impl TuiApp {
             crate::tui::state::Status::Error => Color::Red,
         };
 
-        // DOGE-CODE | model: [model] | [status] | tokens: [used] | [spinner]
+        // Keep the normal status focused on selection and current work.
         let spinner = if self.status == crate::tui::state::Status::Thinking
             || self.status == crate::tui::state::Status::Running
         {
@@ -298,7 +315,13 @@ impl TuiApp {
         }
         spans.extend([
             Span::styled(
-                format!(" [{}] ", display_status_str),
+                format!(
+                    " [{}] ",
+                    crate::features::safe_display::text(
+                        display_status_str,
+                        self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref())
+                    )
+                ),
                 Style::default()
                     .bg(status_color)
                     .fg(Color::Black)
@@ -306,8 +329,6 @@ impl TuiApp {
             ),
             Span::raw(" "),
             Span::styled(model_name, Style::default().fg(Color::Cyan)),
-            Span::raw(" | "),
-            Span::raw(format!("{} tokens", self.tokens_prompt_used)),
             Span::raw(" "),
             Span::styled(spinner, Style::default().fg(status_color)),
         ]);
@@ -393,7 +414,14 @@ impl TuiApp {
                     _ => ("•", Style::default().fg(Color::Gray)),
                 };
 
-                let content = format!("{} {}", symbol, item.content);
+                let content = format!(
+                    "{} {}",
+                    symbol,
+                    crate::features::safe_display::text(
+                        &item.content,
+                        self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref())
+                    )
+                );
                 ListItem::new(content).style(style)
             })
             .collect();
@@ -429,7 +457,13 @@ impl TuiApp {
         );
 
         // Model
-        let model_text = format!("Model: {}", self.model.as_deref().unwrap_or("Unknown"));
+        let model_text = format!(
+            "Model: {}",
+            crate::features::safe_display::text(
+                self.model.as_deref().unwrap_or("Unknown"),
+                self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref())
+            )
+        );
         f.render_widget(
             Paragraph::new(model_text).style(theme.log_style),
             stats_chunks[1],
@@ -634,7 +668,13 @@ impl TuiApp {
                     if row.selected {
                         style = style.add_modifier(Modifier::BOLD);
                     }
-                    Line::from(Span::styled(row.content.clone(), style))
+                    Line::from(Span::styled(
+                        crate::features::safe_display::text(
+                            &row.content,
+                            self.cfg.as_ref().and_then(|cfg| cfg.api_key.as_deref()),
+                        ),
+                        style,
+                    ))
                 })
                 .collect();
 

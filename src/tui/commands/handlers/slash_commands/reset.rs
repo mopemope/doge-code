@@ -10,7 +10,6 @@ pub fn handle_reset(ui: &mut TuiApp) {
     ui.diff_rejected_pending = false;
 
     // Reset other processing flags
-    ui.is_llm_response_active = false;
     ui.spinner_state = 0;
     ui.current_stream_start = None;
     ui.last_llm_response_content = None;

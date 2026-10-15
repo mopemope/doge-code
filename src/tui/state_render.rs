@@ -35,7 +35,6 @@ pub fn build_render_plan(
     let model = params.model;
     let spinner_state = params.spinner_state;
     let scroll_state = params.scroll_state;
-    let plan_list = params.plan_list;
     let w_usize = w as usize;
     let status_str = match status {
         crate::tui::state::Status::Ready => "Ready".to_string(),
@@ -65,16 +64,7 @@ pub fn build_render_plan(
     // Build wrapped physical lines from logs with scroll support
     let max_log_rows = main_content_height as usize;
 
-    // Calculate total height from cached heights
-    let total_plan_rows = if !plan_list.is_empty() {
-        // "--- Plan List ---" (1) + items (N) + "-----------------" (1)
-        plan_list.len() + 2
-    } else {
-        0
-    };
-
-    let total_log_rows: usize = params.log_heights.iter().sum();
-    let total_rows = total_log_rows + total_plan_rows;
+    let total_rows: usize = params.log_heights.iter().sum();
 
     // Calculate visible range
     let view_end_row = if scroll_state.auto_scroll || scroll_state.offset == 0 {
@@ -118,99 +108,6 @@ pub fn build_render_plan(
         }
     }
 
-    // 2. Render visible Plan List items (if active and in view)
-    if !plan_list.is_empty() && current_row < view_end_row {
-        // Helper to render a plain line similar to LogEntry logic
-        let render_plain = |text: String, row_idx: usize| {
-            if row_idx >= view_start_row && row_idx < view_end_row {
-                crate::tui::state::LogEntry::Plain(text)
-                    .render(w_usize, params.theme)
-                    .into_iter()
-                    .next() // Assuming single line for these headers/items
-            } else {
-                None
-            }
-        };
-
-        // Header
-        let header_text = "--- Plan List ---".to_string();
-        if let Some(line) = render_plain(header_text, current_row) {
-            log_lines.push(line);
-        }
-        current_row += 1;
-
-        // Items
-        // Build parent-child map
-        let mut children: std::collections::HashMap<
-            Option<&String>,
-            Vec<&crate::tui::state::PlanItem>,
-        > = std::collections::HashMap::new();
-        for item in plan_list {
-            children
-                .entry(item.parent_id.as_ref())
-                .or_default()
-                .push(item);
-        }
-
-        // Use a stack for depth-first traversal (item, depth)
-        let mut stack: Vec<(&crate::tui::state::PlanItem, usize)> = Vec::new();
-
-        // Initialize stack with root items (reverse order to process first-to-last)
-        if let Some(roots) = children.get(&None) {
-            for root in roots.iter().rev() {
-                stack.push((root, 0));
-            }
-        }
-
-        // Track visited to handle cycles or orphans safely (though orphans won't be reached here)
-        let mut visited_ids = std::collections::HashSet::new();
-
-        while let Some((item, depth)) = stack.pop() {
-            if current_row >= view_end_row {
-                break;
-            }
-
-            if !visited_ids.insert(&item.id) {
-                continue; // Prevent infinite loops in case of cycles
-            }
-
-            let status_symbol = match item.status.as_str() {
-                "pending" => "◌",
-                "in_progress" => "◔",
-                "completed" => "✓",
-                _ => "○",
-            };
-
-            let indent = "  ".repeat(depth);
-
-            // Wait, double indent? "  " * depth is enough?
-            // The original indentation in my thought was just `indent`.
-            // "{} {}" -> indent symbol content.
-            // Let's use 2 spaces per level.
-            let line_text = format!("{}{} {}", indent, status_symbol, item.content);
-
-            if let Some(line) = render_plain(line_text, current_row) {
-                log_lines.push(line);
-            }
-            current_row += 1;
-
-            // Push children (reverse order)
-            if let Some(kids) = children.get(&Some(&item.id)) {
-                for kid in kids.iter().rev() {
-                    stack.push((kid, depth + 1));
-                }
-            }
-        }
-
-        // Footer
-        if current_row < view_end_row
-            && let Some(line) = render_plain("-----------------".to_string(), current_row)
-        {
-            log_lines.push(line);
-        }
-        // current_row += 1; // Unused assignment
-    }
-
     // Create scroll info
     let scroll_info = if total_rows > max_log_rows {
         let current_line = view_end_row;
@@ -235,7 +132,5 @@ pub fn build_render_plan(
         input_line,
         input_cursor_col,
         scroll_info,
-        // Pass an empty plan list since we've already added the items to the log
-        plan_list: vec![],
     }
 }
