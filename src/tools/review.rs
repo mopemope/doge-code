@@ -213,6 +213,7 @@ impl FsTools {
             capture.lock().unwrap().record(receipt.clone(), change_id);
         }
     }
+    #[cfg(test)]
     pub(crate) fn seal_review(&self) -> Option<DiffReviewPayload> {
         let capture = self.review_capture.as_ref()?;
         let mut capture = capture.lock().unwrap();
