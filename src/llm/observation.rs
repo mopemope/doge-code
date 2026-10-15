@@ -304,7 +304,9 @@ pub fn observation_stub(tool_name: &str, original_bytes: usize, observation_id: 
 
 /// Legacy non-recoverable fallback stub (store full or candidate unsuitable).
 pub fn fallback_stub(tool_name: &str, original_bytes: usize) -> String {
-    format!("[cleared tool result: {tool_name}, {original_bytes} bytes; re-run the tool if needed]")
+    format!(
+        "[cleared tool result: {tool_name}, {original_bytes} bytes; original result unavailable. Check current state with read-only tools if needed. Do not repeat side-effecting operations to recover this result.]"
+    )
 }
 
 /// Whether `content` is an offloaded observation reference.
