@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 fn serialize_rfc3339<S>(val: &str, serializer: S) -> Result<S::Ok, S::Error>
@@ -149,8 +149,12 @@ pub struct SessionData {
     pub tool_call_successes: HashMap<String, u64>,
     /// Tool call failure counts by tool name
     pub tool_call_failures: HashMap<String, u64>,
-    /// Changed files during the session for repomap update
+    /// Changed files across the session, retained for impact/provenance queries.
     pub changed_files: Vec<String>,
+    /// Process-local RepoMap work, separate from session change evidence.
+    /// Restored sessions conservatively start with every changed file pending.
+    #[serde(skip)]
+    repomap_dirty_files: Option<BTreeMap<String, Uuid>>,
     /// True when at least one provenance event write failed. The source
     /// change is never rolled back for a provenance failure; this flag keeps
     /// the gap visible instead.
@@ -198,6 +202,7 @@ impl SessionData {
             tool_call_successes: HashMap::new(),
             tool_call_failures: HashMap::new(),
             changed_files: Vec::new(),
+            repomap_dirty_files: None,
             provenance_incomplete: false,
             provenance_record_failures: 0,
             observations: crate::llm::observation::ObservationStore::new(),
@@ -272,6 +277,8 @@ impl SessionData {
     /// Add a changed file to the session.
     pub fn add_changed_file(&mut self, path: std::path::PathBuf) {
         let path_str = path.to_string_lossy().to_string();
+        self.pending_repomap_changes()
+            .insert(path_str.clone(), Uuid::now_v7());
         if !self.changed_files.contains(&path_str) {
             self.changed_files.push(path_str);
         }
@@ -300,7 +307,33 @@ impl SessionData {
     /// Clear the changed files list.
     pub fn clear_changed_files(&mut self) {
         self.changed_files.clear();
+        self.repomap_dirty_files = Some(BTreeMap::new());
         self.timestamp = Utc::now().to_rfc3339(); // Update timestamp
+    }
+
+    fn pending_repomap_changes(&mut self) -> &mut BTreeMap<String, Uuid> {
+        self.repomap_dirty_files.get_or_insert_with(|| {
+            self.changed_files
+                .iter()
+                .map(|path| (path.clone(), Uuid::now_v7()))
+                .collect()
+        })
+    }
+
+    pub(crate) fn repomap_dirty_snapshot(&mut self) -> BTreeMap<String, Uuid> {
+        self.pending_repomap_changes().clone()
+    }
+
+    /// Acknowledge only the file generations included in a successful build.
+    /// Returns false when the build has been superseded entirely.
+    pub(crate) fn acknowledge_repomap_changes(
+        &mut self,
+        snapshot: &BTreeMap<String, Uuid>,
+    ) -> bool {
+        let pending = self.pending_repomap_changes();
+        let before = pending.len();
+        pending.retain(|path, version| snapshot.get(path) != Some(version));
+        pending.len() != before
     }
 
     /// Mark a provenance recording failure without touching the committed
