@@ -397,11 +397,13 @@ impl TuiApp {
     }
 
     pub fn update_file_path_completion_candidates(&mut self, input: &str) {
-        debug!("Updating file path completion for input: {}", input);
+        debug!(
+            input_chars = input.chars().count(),
+            "Updating file path completion"
+        );
 
         if let Some(at_pos) = input.rfind('@') {
             let path_part = &input[at_pos + 1..];
-            // debug!("Path part: {}", path_part);
             let project_root = match self
                 .cfg
                 .as_ref()
@@ -411,13 +413,11 @@ impl TuiApp {
             {
                 Ok(path) => path,
                 Err(_e) => {
-                    // debug!("Error getting current dir: {}", e);
                     self.completion_active = false;
                     self.completion_candidates.clear();
                     return;
                 }
             };
-            // debug!("Project root: {:?}", project_root);
 
             let mut candidates = Vec::new();
             let walker = ignore::WalkBuilder::new(&project_root)
@@ -432,18 +432,20 @@ impl TuiApp {
                         if let Ok(relative_path) = entry.path().strip_prefix(&project_root) {
                             let path_str = relative_path.to_string_lossy();
                             if path_str.to_lowercase().contains(&path_part.to_lowercase()) {
-                                debug!("Found candidate: {}", path_str);
                                 candidates.push(path_str.to_string());
                             }
                         }
                     }
-                    Err(e) => {
-                        debug!("Error walking directory: {}", e);
+                    Err(_) => {
+                        debug!("File path completion directory traversal failed");
                     }
                 }
             }
             candidates.sort();
-            // debug!("Found {} candidates", candidates.len());
+            debug!(
+                candidate_count = candidates.len(),
+                "File path completion candidates updated"
+            );
 
             if candidates.is_empty() {
                 self.completion_active = false;
