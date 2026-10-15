@@ -1882,28 +1882,23 @@ pub async fn run_agent_loop(
                 }
             }
 
-            // If files were written during tool execution, compute and send git diff
+            // Captured TUI turns publish once from the terminal callback,
+            // after persistence/cleanup, for every terminal outcome.
             if cfg.show_diff
+                && fs.review_capture.is_none()
                 && file_was_written
                 && let Some(tx) = &ui_tx
             {
-                let payload = if fs.review_capture.is_some() {
-                    fs.seal_review()
-                } else {
-                    match crate::llm::tool_execution::collect_diff_review_payload(
-                        &cfg.project_root,
-                        &fs.get_session_changed_files(),
-                    )
-                    .await
-                    {
-                        Ok(payload) => payload,
-                        Err(e) => {
-                            handle_agent_error(
-                                &AgentLoopError::DiffCollection(e.to_string()),
-                                &ui_tx,
-                            );
-                            None
-                        }
+                let payload = match crate::llm::tool_execution::collect_diff_review_payload(
+                    &cfg.project_root,
+                    &fs.get_session_changed_files(),
+                )
+                .await
+                {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        handle_agent_error(&AgentLoopError::DiffCollection(e.to_string()), &ui_tx);
+                        None
                     }
                 };
                 if let Some(payload) = payload {
