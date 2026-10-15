@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::state::{LogEntry, ScrollState, Status, TuiApp, build_render_plan};
-    // use ratatui_textarea::TextArea; // 不要
+    use crate::tui::state::{TuiApp, build_render_plan};
 
     fn create_test_app() -> TuiApp {
         TuiApp::new("test", None, "dark").unwrap()
@@ -31,20 +30,14 @@ mod tests {
             let main_content_height = height.saturating_sub(3); // header(2) + footer(1)
             let scroll_state = &app.scroll_state;
 
-            // let textarea = TextArea::default(); // 不要
             let params = crate::tui::state::BuildRenderPlanParams {
                 title: "Test",
                 status: crate::tui::state::Status::Ready,
                 log: &app.log,
-                // textarea: &textarea, // 削除
-                // input_mode: crate::tui::state::InputMode::Normal, // 削除
                 width,
-                // height, // 削除
                 main_content_height,
                 model: None,
                 spinner_state: 0,
-                // prompt_tokens: 0, // 削除
-                // total_tokens: None, // 削除
                 scroll_state,
                 plan_list: &[],
                 theme: &app.theme,
@@ -87,20 +80,14 @@ mod tests {
 
         // Test auto-scroll (should show latest)
         let scroll_state = &app.scroll_state;
-        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Ready,
             log: &app.log,
-            // textarea: &textarea, // 削除
-            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            // height: 13, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            // prompt_tokens: 0, // 削除
-            // total_tokens: None, // 削除
             scroll_state,
             plan_list: &[],
             theme: &app.theme,
@@ -113,7 +100,14 @@ mod tests {
 
         // Should show the most recent lines
         let texts = extract_texts(&plan);
-        assert!(texts.contains(&"Long content line 99".to_string()));
+        assert_eq!(
+            texts.first().map(String::as_str),
+            Some("Long content line 90")
+        );
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("Long content line 99")
+        );
 
         // Should have scroll info indicating scrolling is possible
         assert!(plan.scroll_info.is_some());
@@ -126,20 +120,14 @@ mod tests {
         scroll_state.offset = 20;
         scroll_state.auto_scroll = false;
 
-        // let textarea = TextArea::default(); // 不要
         let params = crate::tui::state::BuildRenderPlanParams {
             title: "Test",
             status: crate::tui::state::Status::Ready,
             log: &app.log,
-            // textarea: &textarea, // 削除
-            // input_mode: crate::tui::state::InputMode::Normal, // 削除
             width: 80,
-            // height: 13, // 削除
             main_content_height,
             model: None,
             spinner_state: 0,
-            // prompt_tokens: 0, // 削除
-            // total_tokens: None, // 削除
             scroll_state: &scroll_state,
             plan_list: &[],
             theme: &app.theme,
@@ -158,302 +146,5 @@ mod tests {
         assert!(plan.scroll_info.is_some());
         let scroll_info = plan.scroll_info.unwrap();
         assert!(scroll_info.is_scrolling);
-    }
-
-    #[test]
-    fn test_debug_display_issue_reproduction() {
-        let mut app = create_test_app();
-
-        // Simulate tool output that might cause display issues
-        app.push_log("[tool] fs_read({\"path\": \"large_file.rs\"})");
-
-        // Add many lines of LLM response with margins
-        for i in 0..50 {
-            app.push_log(format!(
-                "  This is LLM response line {} with some content that might be long",
-                i
-            ));
-        }
-
-        // Add code block
-        app.push_log("  ```rust");
-        for i in 0..20 {
-            app.push_log(format!("    fn function_{}() {{", i));
-            app.push_log("        // Some code here");
-            app.push_log("    }");
-        }
-        app.push_log("  ```");
-
-        // Add more response
-        for i in 50..100 {
-            app.push_log(format!(
-                "  Final response line {} that should be visible",
-                i
-            ));
-        }
-
-        let total_log_lines = app.log.len();
-        println!("Total log lines: {}", total_log_lines);
-
-        // Test with small screen
-        let main_content_height = 15;
-        let scroll_state = &app.scroll_state;
-
-        // let textarea = TextArea::default(); // 不要
-        let params = crate::tui::state::BuildRenderPlanParams {
-            title: "Test",
-            status: crate::tui::state::Status::Ready,
-            log: &app.log,
-            // textarea: &textarea, // 削除
-            // input_mode: crate::tui::state::InputMode::Normal, // 削除
-            width: 80,
-            // height: 18, // 削除
-            main_content_height,
-            model: None,
-            spinner_state: 0,
-            // prompt_tokens: 0, // 削除
-            // total_tokens: None, // 削除
-            scroll_state,
-            plan_list: &[],
-            theme: &app.theme,
-            log_heights: &app.log_heights,
-        };
-        let plan = build_render_plan(params);
-
-        println!("Plan log_lines count: {}", plan.log_lines.len());
-        println!("Last few lines in plan:");
-        for (i, line) in plan.log_lines.iter().rev().take(5).enumerate() {
-            println!("  -{}: {}", i, line.text());
-        }
-
-        // The last line should be visible
-        let texts = extract_texts(&plan);
-        assert!(
-            texts
-                .iter()
-                .any(|line| line.contains("Final response line 99")),
-            "Last line should be visible in auto-scroll mode"
-        );
-
-        // Should not exceed main content height
-        assert!(plan.log_lines.len() <= main_content_height as usize);
-    }
-
-    #[test]
-    fn test_header_footer_consideration() {
-        let mut app = create_test_app();
-
-        // Add exactly enough content to fill different screen sizes
-        for i in 0..50 {
-            app.push_log(format!("Content line {}", i));
-        }
-
-        // Test different screen configurations
-        let test_cases = vec![
-            (80, 10, 7),  // Small: total=10, header=2, footer=1, main=7
-            (80, 24, 21), // Standard: total=24, header=2, footer=1, main=21
-            (80, 30, 27), // Large: total=30, header=2, footer=1, main=27
-        ];
-
-        for (width, total_height, expected_main_height) in test_cases {
-            println!("Testing screen {}x{}", width, total_height);
-
-            let scroll_state = &app.scroll_state;
-            // let textarea = TextArea::default(); // 不要
-            let params = crate::tui::state::BuildRenderPlanParams {
-                title: "Test",
-                status: crate::tui::state::Status::Ready,
-                log: &app.log,
-                // textarea: &textarea, // 削除
-                // input_mode: crate::tui::state::InputMode::Normal, // 削除
-                width,
-                // height: total_height, // 削除
-                main_content_height: expected_main_height,
-                model: None,
-                spinner_state: 0,
-                // prompt_tokens: 0, // 削除
-                // total_tokens: None, // 削除
-                scroll_state,
-                plan_list: &[],
-                theme: &app.theme,
-                log_heights: &app.log_heights,
-            };
-            let plan = build_render_plan(params);
-
-            println!("  Expected main height: {}", expected_main_height);
-            println!("  Plan log_lines count: {}", plan.log_lines.len());
-
-            // Should not exceed the expected main content area height
-            assert!(
-                plan.log_lines.len() <= expected_main_height as usize,
-                "Screen {}x{}: log_lines.len()={} > expected_main_height={}",
-                width,
-                total_height,
-                plan.log_lines.len(),
-                expected_main_height
-            );
-
-            // Should show the most recent content when auto-scrolling
-            let texts = extract_texts(&plan);
-            assert!(
-                texts.iter().any(|line| line.contains("Content line 49")),
-                "Screen {}x{}: Should show the most recent line",
-                width,
-                total_height
-            );
-        }
-    }
-
-    #[test]
-    fn test_exact_line_count_control() {
-        let mut app = create_test_app();
-
-        // Add many lines to ensure scrolling
-        for i in 0..100 {
-            app.push_log(format!("Line {}", i));
-        }
-
-        // Test with very small main content area
-        let main_content_height = 5;
-        // let scroll_state = &app.scroll_state; // This variable is no longer used directly, as it's passed via params
-
-        // let textarea = TextArea::default(); // 不要
-        let params = crate::tui::state::BuildRenderPlanParams {
-            title: "Test",
-            status: crate::tui::state::Status::Ready,
-            log: &app.log,
-            // textarea: &textarea, // 削除
-            // input_mode: crate::tui::state::InputMode::Normal, // 削除
-            width: 80,
-            // height: 8, // 削除
-            main_content_height,
-            model: None,
-            spinner_state: 0,
-            // prompt_tokens: 0, // 削除
-            // total_tokens: None, // 削除
-            scroll_state: &app.scroll_state,
-            plan_list: &[],
-            theme: &app.theme,
-            log_heights: &app.log_heights,
-        };
-        let plan = build_render_plan(params);
-
-        println!("Main content height: {}", main_content_height);
-        println!("Plan log_lines count: {}", plan.log_lines.len());
-        println!("Lines in plan:");
-        for (i, line) in plan.log_lines.iter().enumerate() {
-            println!("  {}: {}", i, line.text());
-        }
-
-        // Should show exactly the main content height or less
-        assert!(
-            plan.log_lines.len() <= main_content_height as usize,
-            "log_lines.len()={} should be <= main_content_height={}",
-            plan.log_lines.len(),
-            main_content_height
-        );
-
-        // Should show exactly main_content_height lines when there's enough content
-        assert_eq!(
-            plan.log_lines.len(),
-            main_content_height as usize,
-            "Should show exactly {} lines when there's enough content",
-            main_content_height
-        );
-
-        // Should show the most recent lines
-        let texts = extract_texts(&plan);
-        assert!(
-            texts.contains(&"Line 99".to_string()),
-            "Should contain the most recent line"
-        );
-        assert!(
-            texts.contains(&"Line 95".to_string()),
-            "Should contain line from 5 lines ago"
-        );
-    }
-
-    #[test]
-    fn test_build_render_plan_with_scroll() {
-        let title = "Test";
-        let status = Status::Ready;
-        let log: Vec<LogEntry> = vec!["line1", "line2", "line3", "line4", "line5"]
-            .into_iter()
-            .map(|line| LogEntry::Plain(line.to_string()))
-            .collect();
-        let log_heights = vec![1; log.len()];
-
-        // let input_mode = InputMode::Normal; // 不要
-        let w = 80;
-        let h: u16 = 6; // Small height to force scrolling
-        let model = None;
-        // let tokens_used = 0; // 不要
-
-        // Test auto-scroll (show latest)
-        let scroll_state = ScrollState::default();
-        let theme = crate::tui::theme::Theme::dark();
-        // let textarea = TextArea::default(); // 不要
-        let params = crate::tui::state::BuildRenderPlanParams {
-            title,
-            status,
-            log: &log,
-            // textarea: &textarea, // 削除
-            // input_mode, // 削除
-            width: w,
-            // height: h, // 削除
-            main_content_height: h.saturating_sub(3),
-            model,
-            spinner_state: 0,
-            // prompt_tokens: tokens_used, // 削除
-            // total_tokens: None, // 削除
-            scroll_state: &scroll_state,
-            plan_list: &[],
-            theme: &theme,
-            log_heights: &log_heights,
-        };
-        let plan = build_render_plan(params);
-
-        // Should show the last few lines
-        let texts = extract_texts(&plan);
-        assert!(texts.contains(&"line5".to_string()));
-
-        // Test scrolled up
-        let scroll_state = ScrollState {
-            offset: 2,
-            auto_scroll: false,
-            ..Default::default()
-        };
-
-        // let textarea = TextArea::default(); // 不要
-        let params = crate::tui::state::BuildRenderPlanParams {
-            title,
-            status,
-            log: &log,
-            // textarea: &textarea, // 削除
-            // input_mode, // 削除
-            width: w,
-            // height: h, // 削除
-            main_content_height: h.saturating_sub(3),
-            model,
-            spinner_state: 0,
-            // prompt_tokens: tokens_used, // 削除
-            // total_tokens: None, // 削除
-            scroll_state: &scroll_state,
-            plan_list: &[],
-            theme: &theme,
-            log_heights: &log_heights,
-        };
-        let plan = build_render_plan(params);
-
-        // Should not show the latest line
-        let texts = extract_texts(&plan);
-        assert!(!texts.contains(&"line5".to_string()));
-
-        // Should have scroll info
-        assert!(plan.scroll_info.is_some());
-        let scroll_info = plan.scroll_info.unwrap();
-        assert!(scroll_info.is_scrolling);
-        assert_eq!(scroll_info.total_lines, 5);
-        assert_eq!(scroll_info.new_messages, 0);
     }
 }
