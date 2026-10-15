@@ -649,26 +649,36 @@ a short publication step; interruption after confirmation may leave a record.
 
 ## Diagnostic Logging
 
-Diagnostic logs live at `.doge/logs/debug.log` with a `0700` log directory and
-`0600` log file on Unix. Existing `.doge` permissions are retained.
-Below the selected project root, Unix opens `.doge`,
-`logs`, and `debug.log` without following symlinks; permissions and startup
-truncation use held handles. Existing hardlinked or nonregular log files are
-refused. The selected root and its ancestors are trusted, so root aliases remain
-supported. Held directories may still be renamed, and concurrent changes to the
-opened inode (including new hardlinks) are outside this guarantee. Other
-platforms use symlink preflight checks without the Unix race guarantees.
-Unix needs permission to open the root and child directories for reading;
-if a directory cannot be opened, startup fails without repairing it through a
-path. Restore access to that directory before retrying.
-Normal startup still truncates the previous log; this does not add rotation.
+Each normal run writes a new `.doge/logs/run-<UUID>.log`; startup preserves
+previous runs. Managed logs have a versioned header matching their filename.
+Each run is capped at 2 MiB (then emits a fixed limit notice and suppresses
+further records). Retention allows at most 8 managed runs and 8 MiB in total,
+reserving the full 2 MiB for every active run. Oldest inactive managed logs
+are removed first. Active logs hold an exclusive file lease and are never
+removed. If active runs exhaust the budget or retention is busy, startup
+returns an error; close another run or retry.
+
+On Unix, the log directory is `0700` and new files are `0600`; existing `.doge`
+permissions remain unchanged. Directory handles, nofollow opens, ownership,
+regular-file and single-link checks protect log creation and cleanup.
+The selected root may be an intentional alias. Held directories may still
+be renamed; hostile inode swaps after the final identity check and changes to
+opened inodes are outside this guarantee. Other platforms use preflight checks
+and refuse automatic deletion: archive inactive run logs manually when full.
+The scan is bounded to 4096 directory entries and otherwise returns an error.
+Unknown files and legacy `.doge/logs/debug.log` are neither modified nor deleted
+and are outside the managed-log capacity budget. The `.retention.lock` file is
+kept permanently to coordinate concurrent startups. Root and child directories
+must be readable; startup does not repair access through a path.
+
 Even with
 `RUST_LOG=debug`, prompts, source/file content, tool arguments/results,
 model output, raw request/response bodies, provider error bodies, refusal
 bodies, encrypted Responses state, and credentials are never logged. Logs
 record shape and counts instead. TUI submission, paste events, and file-path
 completion diagnostics omit input text and candidate paths; they record only
-operation kinds and counts. Other metadata includes message counts,
+operation kinds and counts. Panic payloads stay on the local terminal; logs
+record only their source location. Other metadata includes message counts,
 request/response bytes, tool counts, token usage, retry metadata, provider codes,
 request IDs, and durations. JSON parsing errors in Chat Completions responses, tool-call argument
 validation, and Responses usage report only their category and line/column
