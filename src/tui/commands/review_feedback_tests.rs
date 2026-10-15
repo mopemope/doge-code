@@ -454,55 +454,134 @@ async fn feedback_revalidates_after_workspace_gate_before_directive_or_model() {
     );
 }
 #[tokio::test]
-async fn feedback_cancellation_and_partial_budget_expose_repair_receipts_without_resolving_comments()
- {
-    for cancel in [true, false] {
-        let (mut executor, mut ui, _dir, batch) = fixture().await;
-        let path = executor.cfg.project_root.join("a.txt");
-        let original_after = std::fs::read_to_string(&path).unwrap();
-        if !cancel {
-            executor.cfg.agent_budget.max_iterations = 1;
+async fn turn_terminal_outcomes_expose_owned_review_without_duplicate_or_stale_publication() {
+    for feedback in [false, true] {
+        for mode in ["error", "cancel", "partial", "success", "hidden"] {
+            let (mut executor, mut ui, _dir, batch) = fixture().await;
+            let path = executor.cfg.project_root.join("a.txt");
+            let original_after = std::fs::read_to_string(&path).unwrap();
+            if mode == "partial" {
+                executor.cfg.agent_budget.max_iterations = 1;
+            }
+            executor.cfg.show_diff = mode != "hidden";
+            let second = if mode == "error" {
+                (
+                    500,
+                    json!({"error":{"message":"fixture provider failure","type":"server_error"}}),
+                )
+            } else {
+                (200, done())
+            };
+            let provider = Provider::new(vec![(200, write(&path)), second], mode == "cancel").await;
+            provider.configure(&mut executor);
+            let id = if feedback {
+                let id = executor
+                    .submit_review_feedback(batch.clone(), &mut ui)
+                    .unwrap();
+                ui.review_feedback.as_mut().unwrap().job_id = Some(id);
+                id
+            } else {
+                ui.review_feedback = None;
+                ui.diff_review = None;
+                crate::tui::commands::agent_job::spawn_agent_turn(
+                    &mut executor,
+                    &mut ui,
+                    "Apply a change",
+                    "Apply a change".into(),
+                    true,
+                    crate::tui::commands::agent_job::AgentTurnProvenance::ObserveUserPrompt {
+                        raw_input: "Apply a change".into(),
+                    },
+                )
+                .unwrap()
+            };
+            if mode == "cancel" {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while provider.requests.lock().unwrap().len() < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                executor.jobs.cancel(id);
+            }
+            terminal(&executor, id).await;
+            executor.handle_job_completed(&id.to_string(), &mut ui);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "repair-only change"
+            );
+            if !feedback && mode == "hidden" {
+                assert!(
+                    ui.diff_review.is_none(),
+                    "show_diff=false must suppress automatic review"
+                );
+                continue;
+            }
+            let review = ui
+                .diff_review
+                .as_ref()
+                .expect("applied changes must remain reviewable");
+            let repair = review.review_id.clone().unwrap();
+            assert_ne!(Some(&repair), batch.source.review_id.as_ref());
+            assert!(review.rejectable);
+            let messages = notices(&ui);
+            assert!(
+                !messages.iter().any(|m| m.starts_with("::diff_review:")),
+                "managed captures must publish through the terminal callback only"
+            );
+            if feedback {
+                assert_eq!(
+                    ui.review_feedback.as_ref().unwrap().batch.comments,
+                    batch.comments
+                );
+                assert!(
+                    messages.iter().any(|m| m.contains("::feedback_outcome:")
+                        && m.contains(match mode {
+                            "cancel" => "Cancelled",
+                            "partial" => "Partial",
+                            "error" => "Failed",
+                            _ => "Completed",
+                        })),
+                    "{mode}: {messages:?}"
+                );
+            }
+            let notices_before = ui.log.len();
+            executor.handle_job_completed(&id.to_string(), &mut ui);
+            assert_eq!(
+                ui.log.len(),
+                notices_before,
+                "duplicate terminal publication"
+            );
+            let review = ui.diff_review.take();
+            ui.latest_agent_job_id = Some(JobId(u64::MAX));
+            executor.handle_job_completed(&id.to_string(), &mut ui);
+            assert!(
+                ui.diff_review.is_none(),
+                "old job must not publish into a newer turn"
+            );
+            ui.diff_review = review;
+            ui.latest_agent_job_id = Some(id);
+            if mode == "error" {
+                std::fs::write(&path, "external after failure").unwrap();
+                let report = executor
+                    .tools
+                    .reject_review(&repair, &tokio_util::sync::CancellationToken::new())
+                    .await;
+                assert!(report.error.is_some(), "{report:?}");
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    "external after failure"
+                );
+            } else {
+                let report = executor
+                    .tools
+                    .reject_review(&repair, &tokio_util::sync::CancellationToken::new())
+                    .await;
+                assert!(report.error.is_none(), "{report:?}");
+                assert_eq!(std::fs::read_to_string(path).unwrap(), original_after);
+            }
         }
-        let provider = Provider::new(vec![(200, write(&path)), (200, done())], cancel).await;
-        provider.configure(&mut executor);
-        let id = executor
-            .submit_review_feedback(batch.clone(), &mut ui)
-            .unwrap();
-        ui.review_feedback.as_mut().unwrap().job_id = Some(id);
-        if cancel {
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while provider.requests.lock().unwrap().len() < 2 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            executor.jobs.cancel(id);
-        }
-        terminal(&executor, id).await;
-        executor.handle_job_completed(&id.to_string(), &mut ui);
-        let messages = notices(&ui);
-        assert!(
-            messages.iter().any(|m| m.contains("::feedback_outcome:")
-                && m.contains(if cancel { "Cancelled" } else { "Partial" })),
-            "{messages:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "repair-only change"
-        );
-        assert_eq!(
-            ui.review_feedback.as_ref().unwrap().batch.comments,
-            batch.comments
-        );
-        let repair = ui.diff_review.as_ref().unwrap().review_id.clone().unwrap();
-        assert_ne!(Some(&repair), batch.source.review_id.as_ref());
-        let report = executor
-            .tools
-            .reject_review(&repair, &tokio_util::sync::CancellationToken::new())
-            .await;
-        assert!(report.error.is_none(), "{report:?}");
-        assert_eq!(std::fs::read_to_string(path).unwrap(), original_after);
     }
 }
 #[tokio::test]
