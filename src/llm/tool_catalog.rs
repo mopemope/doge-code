@@ -131,6 +131,26 @@ impl std::fmt::Debug for ToolCatalog {
 }
 
 impl ToolCatalog {
+    pub fn remote_definition(
+        &self,
+        name: &str,
+    ) -> Option<crate::tools::remote_tools::RemoteToolDefinition> {
+        let entry = self.entries.get(name)?;
+        let ToolSource::RemoteMcp {
+            server_name,
+            remote_name,
+        } = &entry.source
+        else {
+            return None;
+        };
+        Some(crate::tools::remote_tools::RemoteToolDefinition {
+            alias: name.to_owned(),
+            server_name: server_name.clone(),
+            remote_name: remote_name.clone(),
+            input_schema: entry.definition.function.parameters.clone(),
+        })
+    }
+
     /// Build from built-in definitions plus a remote snapshot.
     pub fn from_parts(
         builtin_defs: Vec<ToolDef>,
