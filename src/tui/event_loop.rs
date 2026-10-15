@@ -11,6 +11,18 @@ use crate::tui::event_handlers::{
 };
 use crate::tui::state::{DiffReviewFocus, InputMode, Status, TuiApp};
 
+pub(crate) fn log_terminal_event(event: &Event) {
+    let event_kind = match event {
+        Event::FocusGained => "focus_gained",
+        Event::FocusLost => "focus_lost",
+        Event::Key(_) => "key",
+        Event::Mouse(_) => "mouse",
+        Event::Paste(_) => "paste",
+        Event::Resize(_, _) => "resize",
+    };
+    tracing::debug!(event_kind, "Terminal event captured");
+}
+
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -596,7 +608,7 @@ impl TuiApp {
 
             if event::poll(Duration::from_millis(10))? {
                 let event = event::read()?;
-                tracing::debug!("Event captured: {:?}", event);
+                log_terminal_event(&event);
 
                 match event {
                     Event::Paste(text) => self.handle_paste(&text),
