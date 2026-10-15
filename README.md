@@ -1902,6 +1902,10 @@ an explicit value takes precedence over model defaults.
 - Historical tool results are offloaded recoverably to the Observation Store
   (`obs-*` + `observation_read`) before full compaction; unseen results are
   never offloaded or summarized until the model has seen them once
+- If a seen result cannot be retained within Observation Store limits, its
+  placeholder explicitly says the original result is unavailable and recommends
+  read-only checks of current state, without repeating side-effecting operations
+  just to recover the old result. No automatic retry is introduced.
 - LLM-based summarization preserves essential context
 - Automatic local summarization is applied only when the complete serialized
   history becomes smaller. A rejected summary leaves history and recoverable
