@@ -299,7 +299,12 @@ pub(crate) fn spawn_agent_turn(
                 message: crate::jobs::types::bound_error(&error.to_string()),
             };
         }
-        let fs = fs.with_review_capture(ctx.id);
+        let publish_review = cfg.show_diff
+            || matches!(
+                provenance_for_job,
+                AgentTurnProvenance::ReviewFeedback { .. }
+            );
+        let fs = fs.with_review_capture_policy(ctx.id, publish_review);
         let token = ctx.cancellation_token();
         if let Some(tx) = &ui_tx {
             let _ = tx.send("::status:sending".into());

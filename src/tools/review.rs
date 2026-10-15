@@ -26,6 +26,7 @@ pub(crate) struct ReviewCapture {
     restored: usize,
     reason: Option<String>,
     sealed: bool,
+    publish: bool,
     rejecting: bool,
     #[cfg(test)]
     post_restore_verify_failure: bool,
@@ -189,8 +190,17 @@ impl ReviewCapture {
 }
 
 impl FsTools {
-    /// Clone-local capture handle: only this job and its descendants record here.
-    pub(crate) fn with_review_capture(mut self, job: crate::jobs::JobId) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_review_capture(self, job: crate::jobs::JobId) -> Self {
+        self.with_review_capture_policy(job, true)
+    }
+
+    /// Freeze publication policy with the owned capture, independently of UI drafts.
+    pub(crate) fn with_review_capture_policy(
+        mut self,
+        job: crate::jobs::JobId,
+        publish: bool,
+    ) -> Self {
         let capture = Arc::new(Mutex::new(ReviewCapture {
             id: format!("{job}-{}", uuid::Uuid::now_v7()),
             session: self.get_current_session().map(|s| s.meta.id),
@@ -200,6 +210,7 @@ impl FsTools {
             restored: 0,
             reason: None,
             sealed: false,
+            publish,
             rejecting: false,
             #[cfg(test)]
             post_restore_verify_failure: false,
@@ -227,7 +238,7 @@ impl FsTools {
     ) -> Option<DiffReviewPayload> {
         let registry = self.review_registry.lock().ok()?;
         let mut capture = registry.as_ref()?.lock().ok()?;
-        if !capture.id.starts_with(&format!("{job}-")) {
+        if !capture.publish || !capture.id.starts_with(&format!("{job}-")) {
             return None;
         }
         capture.sealed = true;
