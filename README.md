@@ -254,21 +254,26 @@ and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-
 
 ### OpenCode Go / Zen (API key)
 
-Choose `--provider opencode-go` for subscription usage or `--provider opencode-zen`
-for pay-as-you-go Zen. These select different endpoints; dgc never falls back from
-Go to Zen and rejects HTTP redirects that could change routes. Supply a key through `OPENCODE_API_KEY`, `--api-key`, or the existing
+Choose `--provider go` (`opencode-go`) for subscription usage or `--provider zen`
+(`opencode-zen`) for pay-as-you-go Zen. Export `OPENCODE_API_KEY` in your calling
+shell, then start `dgc --provider go`; no configuration file or OAuth login is
+needed. These select different endpoints; dgc never falls back from Go to Zen and
+rejects HTTP redirects that could change routes. Supply a key through `OPENCODE_API_KEY`, `--api-key`, or the existing
 `api_key` config field. `OPENAI_API_KEY` is reserved for the existing compatible
-provider. No ChatGPT OAuth login is needed for these routes.
+provider.
 
 ```sh
-dgc --provider opencode-go --model gpt-6-luna exec "Explain this project"
-dgc --provider opencode-go --model kimi-k2.6
-dgc --provider opencode-zen --model qwen3.8-max
+dgc --provider go --model gpt-6-luna exec "Explain this project"
+dgc --provider go --model kimi-k2.6
+dgc --provider zen --model qwen3.8-max
 ```
 
-The default bases are `https://opencode.ai/zen/go/v1` and
-`https://opencode.ai/zen/v1`. Configured bases must match the selected provider;
-`OPENCODE_BASE_URL` is an optional explicit override for the same official base.
+The default bases are `https://opencode.ai/inference/go/v1` and
+`https://opencode.ai/inference/v1`. The matching legacy `/zen/go/v1` and `/zen/v1`
+configurations are still accepted and use the current URL in memory. Files are
+not rewritten, and saved same-provider sessions retain their logical connection
+identity. Other URLs and cross-provider bases are rejected; `OPENCODE_BASE_URL`
+can explicitly select only one of the same provider's official aliases.
 The default OpenCode model is `gpt-6-luna`. Bare IDs and matching OpenCode aliases
 (`opencode-go/<id>` / `opencode/<id>`) are accepted; requests send bare IDs.
 OpenCode uses `OPENCODE_MODEL`; legacy `OPENAI_MODEL` remains scoped to the other
@@ -283,8 +288,10 @@ model = "gpt-6-luna"
 # API key is supplied by OPENCODE_API_KEY; no key needs to be stored here.
 ```
 
-Routing follows the [Go](https://docs.opencode.ai/docs/go/) and
-[Zen](https://docs.opencode.ai/docs/zen/) endpoint tables verified on 2026-10-09.
+Endpoint bases follow the current [Go](https://opencode.ai/v2/docs/console/go/)
+and [model endpoint](https://opencode.ai/v2/docs/console/models/) tables checked on
+2026-10-15. The offline model/protocol catalog remains the dated 2026-10-09
+snapshot; it does not establish current model availability.
 Supported Chat Completions models include GLM, Kimi and DeepSeek; GPT 6 Luna uses
 API-key Responses. Messages, Google, System One and unknown models fail before
 sending a request. For example, `qwen3.8-max` uses Messages on Go and is unavailable
@@ -306,15 +313,29 @@ mismatched prefixes and unsupported selections exit with an error. A supported
 adapter does not establish live availability, subscription access or remaining
 allowance. `dgc models --provider openai` keeps the existing OAuth account catalog.
 
-Inside the Go/Zen TUI, `/models` opens the same offline catalog. Type or paste a
-model ID/API name to filter, use Up/Down to move, and Enter to create an empty
-**new session** with a supported model. `/models glm` opens with a search query.
-The selected row shows its API and adapter support reason; unsupported entries
-are inspectable but cannot be selected. Esc, Ctrl+G or Ctrl+C closes the picker
-without changing the current session or draft. Enter key repeats are ignored.
+In the TUI, `/provider` opens the existing model picker from any provider.
+`/provider go` or `/provider zen` previews that billing route; add a model search,
+for example `/provider zen qwen3.8-max`. The picker labels Go as subscription and
+Zen as pay-as-you-go, and shows whether an OpenCode key is set. Tab/Shift+Tab
+switches the preview between Go and Zen; it does not send a request or change the
+current conversation. Type or paste a model ID/API name to filter and use Up/Down
+to move. Enter explicitly creates an empty **new session** with the displayed
+provider/model. Unsent draft text is retained. Esc cancels without changing the
+conversation or draft. Unsupported API entries are inspectable but cannot be
+selected. Enter key repeats are ignored.
 
-Selection is session-local: no config or key is saved and the provider/billing
-route stays fixed. The new session stores non-secret provider/model metadata;
+On Go/Zen, `/models` opens the same offline picker; `/models glm` searches it.
+Go/Zen selections deliberately reuse the already selected OpenCode key. Entering
+from another provider uses only `OPENCODE_API_KEY`; OpenAI keys and OAuth
+credentials are never carried across. No key is requested, saved or displayed by
+the picker. With no key, selection is still available offline; export
+`OPENCODE_API_KEY` and restart to make requests. Authentication failures identify
+the selected route and suggest checking its key/subscription or billing in the
+OpenCode Console. Keys are not verified merely by opening the picker.
+
+Selection is session-local: no config or key is saved. Each conversation's
+provider/billing route stays fixed; switching Go/Zen starts a new conversation.
+The new session stores non-secret provider/model metadata;
 `/session switch` and `--resume=<id>` restore it before loading that conversation.
 Provider/account/binding mismatches and unavailable adapters fail before switching.
 Legacy sessions without model selection use the startup model and existing
@@ -325,7 +346,10 @@ selection/history intact. Creating selected-model sessions never prunes existing
 sessions. A successful atomic checkpoint replacement with unconfirmed directory
 sync is reported as a durability warning rather than a rollback.
 
-The picker currently supports Go/Zen only. OAuth account catalogs remain available
+The picker selects Go/Zen only. To resume a saved conversation on the other
+route, first explicitly select that provider with `/provider go` or `/provider zen`;
+ordinary session switching and resume never silently change billing routes.
+OAuth account catalogs remain available
 through `dgc models --provider openai`; arbitrary compatible endpoints have no
 offline catalog. No live model availability or authentication check occurs.
 
@@ -1336,7 +1360,8 @@ The TUI provides various slash commands for quick operations:
 | `/open` | Open a file |
 | `/git-worktree` | Create an isolated linked worktree and branch (does not switch the current session into it) |
 | `/theme` | Change color theme |
-| `/models [search]` | Search the offline Go/Zen catalog; Enter starts a new session with that model, Esc/Ctrl+C cancels |
+| `/provider [go\|zen] [search]` | Preview Go/Zen from any provider; Tab switches route, Enter starts a new conversation, Esc cancels |
+| `/models [search]` | Search the offline Go/Zen catalog; Tab previews Go/Zen, Enter starts a new session, Esc/Ctrl+C cancels |
 | `/tokens` | Display token usage (prompt/cache/reasoning usage when reported by the provider) |
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |

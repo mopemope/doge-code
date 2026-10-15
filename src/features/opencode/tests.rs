@@ -1,6 +1,8 @@
 use super::*;
 #[test]
 fn routes_are_provider_specific_and_fail_closed() {
+    assert_eq!(GO_BASE, "https://opencode.ai/inference/go/v1");
+    assert_eq!(ZEN_BASE, "https://opencode.ai/inference/v1");
     assert_eq!(
         api(ProviderKind::OpencodeGo, "opencode-go/gpt-6-luna").unwrap(),
         ApiKind::Responses
@@ -18,6 +20,28 @@ fn routes_are_provider_specific_and_fail_closed() {
     assert!(api(ProviderKind::OpencodeGo, "opencode/gpt-6-luna").is_err());
     assert!(validate_base(ProviderKind::OpencodeGo, ZEN_BASE).is_err());
     assert!(validate_base(ProviderKind::OpencodeZen, GO_BASE).is_err());
+    for (provider, current) in [
+        (ProviderKind::OpencodeGo, GO_BASE),
+        (ProviderKind::OpencodeZen, ZEN_BASE),
+    ] {
+        let legacy = legacy_base(provider).unwrap();
+        assert!(validate_base(provider, legacy).is_ok());
+        assert_eq!(
+            identity_base(provider, current),
+            identity_base(provider, legacy)
+        );
+        for bad in [
+            format!("{current}/other"),
+            format!("{current}?key=secret"),
+            "http://opencode.ai/inference/v1".into(),
+        ] {
+            assert!(validate_base(provider, &bad).is_err());
+        }
+    }
+    assert_ne!(
+        identity_base(ProviderKind::OpencodeGo, GO_BASE),
+        identity_base(ProviderKind::OpencodeZen, ZEN_BASE)
+    );
 }
 
 use crate::config::{LlmConfig, ReasoningMode};
@@ -28,9 +52,9 @@ use tokio_util::sync::CancellationToken;
 
 fn fixture_client(server: &httptest::Server, provider: ProviderKind) -> OpenAIClient {
     let path = if provider == ProviderKind::OpencodeGo {
-        "/zen/go/v1"
+        "/inference/go/v1"
     } else {
-        "/zen/v1"
+        "/inference/v1"
     };
     let mut client = OpenAIClient::new(server.url_str(path), "fixture-key")
         .expect("client")
@@ -123,21 +147,69 @@ fn api_key_configuration_never_loads_oauth_and_rejects_mismatched_bases() {
         assert!(client.api_key_responses(&cfg.model).expect("route"));
         assert!(!client.native_responses_compaction_enabled());
         assert!(!client.responses_identity().contains("fixture-key"));
+        cfg.base_url = legacy_base(provider).unwrap().into();
+        let legacy = OpenAIClient::from_config(&cfg).unwrap().unwrap();
+        assert_eq!(legacy.base_url, base);
+        assert_eq!(
+            legacy.inference_binding(&cfg.model).unwrap(),
+            client.inference_binding(&cfg.model).unwrap()
+        );
+        assert_eq!(legacy.responses_identity(), client.responses_identity());
+        let mut session = crate::session::SessionData::new();
+        session.inference_binding = Some(legacy.inference_binding(&cfg.model).unwrap());
+        crate::session::selection::validate_binding(&session, &cfg, None).unwrap();
+        cfg.base_url = base.into();
+        crate::session::selection::validate_binding(&session, &cfg, None).unwrap();
+        cfg.provider = if provider == ProviderKind::OpencodeGo {
+            ProviderKind::OpencodeZen
+        } else {
+            ProviderKind::OpencodeGo
+        };
+        cfg.base_url = default_base(cfg.provider).unwrap().into();
+        assert!(crate::session::selection::validate_binding(&session, &cfg, None).is_err());
+        cfg.provider = provider;
         cfg.base_url = "https://api.openai.com/v1".into();
         assert!(OpenAIClient::from_config(&cfg).is_err());
     }
-    assert_eq!(
-        serde_json::from_str::<ProviderKind>("\"openai-compatible\"").expect("legacy"),
-        ProviderKind::OpenaiCompatible
+    for (name, provider) in [
+        ("openai-compatible", ProviderKind::OpenaiCompatible),
+        ("go", ProviderKind::OpencodeGo),
+        ("opencode-go", ProviderKind::OpencodeGo),
+        ("zen", ProviderKind::OpencodeZen),
+        ("opencode-zen", ProviderKind::OpencodeZen),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<ProviderKind>(json!(name)).unwrap(),
+            provider
+        );
+        use clap::ValueEnum;
+        assert_eq!(ProviderKind::from_str(name, false).unwrap(), provider);
+    }
+    let mut current = crate::config::AppConfig {
+        project_root: temp.path().into(),
+        api_key: Some("OPENAI_KEY_DO_NOT_COPY".into()),
+        ..Default::default()
+    };
+    assert!(
+        selection_config(&current, ProviderKind::OpencodeGo, "gpt-6-luna", None)
+            .unwrap()
+            .api_key
+            .is_none()
     );
-    assert_eq!(
-        serde_json::from_str::<ProviderKind>("\"opencode-go\"").expect("Go"),
-        ProviderKind::OpencodeGo
-    );
-    assert_eq!(
-        serde_json::from_str::<ProviderKind>("\"opencode-zen\"").expect("Zen"),
-        ProviderKind::OpencodeZen
-    );
+    let go = selection_config(
+        &current,
+        ProviderKind::OpencodeGo,
+        "gpt-6-luna",
+        Some("OPENCODE_FIXTURE".into()),
+    )
+    .unwrap();
+    let zen = selection_config(&go, ProviderKind::OpencodeZen, "qwen3.8-max", None).unwrap();
+    assert_eq!(zen.api_key, go.api_key);
+    assert_eq!(zen.base_url, ZEN_BASE);
+    assert_eq!(current.api_key.as_deref(), Some("OPENAI_KEY_DO_NOT_COPY"));
+    current.provider = ProviderKind::OpencodeGo;
+    current.base_url = "https://untrusted.invalid/v1".into();
+    assert!(selection_config(&current, ProviderKind::OpencodeZen, "gpt-6-luna", None).is_err());
 }
 
 #[tokio::test]
@@ -146,7 +218,7 @@ async fn responses_flat_tools_opaque_reasoning_and_session_round_trip() {
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     let tools = vec![crate::tools::tool_search::tool_def()];
     server.expect(Expectation::matching(all_of![
-        request::method_path("POST", "/zen/go/v1/responses"),
+        request::method_path("POST", "/inference/go/v1/responses"),
         request::headers(contains(("authorization", "Bearer fixture-key"))),
         request::headers(contains(("x-opencode-session", "conversation-a"))),
         request::headers(contains(("user-agent", concat!("dgc/", env!("CARGO_PKG_VERSION"))))),
@@ -165,7 +237,7 @@ async fn responses_flat_tools_opaque_reasoning_and_session_round_trip() {
         ]))));
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", "conversation-a"))),
             request::body(json_decoded(|body: &Value| {
                 let input = body["input"].as_array().expect("input");
@@ -216,7 +288,7 @@ async fn chat_reasoning_survives_tool_result_and_session_without_unknown_knobs()
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     let tools = vec![crate::tools::tool_search::tool_def()];
     server.expect(Expectation::matching(all_of![
-        request::method_path("POST", "/zen/go/v1/chat/completions"),
+        request::method_path("POST", "/inference/go/v1/chat/completions"),
         request::headers(contains(("x-opencode-session", "conversation-a"))),
         request::headers(contains(("user-agent", concat!("dgc/", env!("CARGO_PKG_VERSION"))))),
         request::body(json_decoded(|body: &Value| body["model"] == "kimi-k2.6"
@@ -228,7 +300,7 @@ async fn chat_reasoning_survives_tool_result_and_session_without_unknown_knobs()
     }}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}))));
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/chat/completions"),
+            request::method_path("POST", "/inference/go/v1/chat/completions"),
             request::headers(contains(("x-opencode-session", "conversation-a"))),
             request::body(json_decoded(
                 |body: &Value| body["messages"][1]["reasoning_content"] == "fixture-reasoning"
@@ -278,7 +350,7 @@ async fn responses_failure_eof_done_and_cancel_never_commit_partial_calls_or_usa
         let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         let client = fixture_client(&server, ProviderKind::OpencodeGo);
         server.expect(
-            Expectation::matching(request::method_path("POST", "/zen/go/v1/responses"))
+            Expectation::matching(request::method_path("POST", "/inference/go/v1/responses"))
                 .times(1)
                 .respond_with(
                     status_code(200)
@@ -313,7 +385,7 @@ async fn responses_rate_limit_retry_reuses_identity_and_quota_does_not_retry_or_
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", "conversation-a")))
         ])
         .times(2)
@@ -339,7 +411,7 @@ async fn responses_rate_limit_retry_reuses_identity_and_quota_does_not_retry_or_
     let server = crate::test_support::HTTP_SERVER_POOL.get_server();
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(
-        Expectation::matching(request::method_path("POST", "/zen/go/v1/responses"))
+        Expectation::matching(request::method_path("POST", "/inference/go/v1/responses"))
             .times(1)
             .respond_with(status_code(429).body("{\"error\":{\"code\":\"insufficient_quota\"}}")),
     );
@@ -354,6 +426,37 @@ async fn responses_rate_limit_retry_reuses_identity_and_quota_does_not_retry_or_
             .retryable
     );
     assert_eq!(client.usage_snapshot().attempts, 1);
+    drop(server);
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        for (model, suffix) in [
+            ("gpt-6-luna", "responses"),
+            ("kimi-k2.6", "chat/completions"),
+        ] {
+            for status in [401, 403] {
+                let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+                let client = fixture_client(&server, provider);
+                let path = format!(
+                    "{}{suffix}",
+                    if provider == ProviderKind::OpencodeGo {
+                        "/inference/go/v1/"
+                    } else {
+                        "/inference/v1/"
+                    }
+                );
+                server.expect(Expectation::matching(request::method_path("POST", path)).times(1).respond_with(status_code(status).body(r#"{"error":{"message":"SECRET_BODY_NEVER_SHOW","code":"invalid_api_key"}}"#)));
+                let error = infer(&client, model, &[message("user", "hi")], &[])
+                    .await
+                    .expect_err("auth failure");
+                let text = format!("{error:#}");
+                assert!(
+                    text.contains("OPENCODE_API_KEY")
+                        && text.contains(billing_label(provider).split(' ').next().unwrap())
+                );
+                assert!(!text.contains("SECRET_BODY_NEVER_SHOW") && !text.contains("fixture-key"));
+                assert_eq!(client.usage_snapshot().attempts, 1);
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -363,7 +466,7 @@ async fn responses_tools_free_stream_and_compaction_use_same_conversation_header
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", "conversation-a"))),
             request::body(json_decoded(|body: &Value| body["tools"] == json!([])
                 && !body.to_string().contains("opaque-fixture")
@@ -417,7 +520,7 @@ async fn immutable_conversation_clones_and_chat_auxiliary_headers() {
     for id in ["conversation-a", "conversation-b"] {
         server.expect(
             Expectation::matching(all_of![
-                request::method_path("POST", "/zen/go/v1/chat/completions"),
+                request::method_path("POST", "/inference/go/v1/chat/completions"),
                 request::headers(contains(("x-opencode-session", id))),
                 request::headers(contains((
                     "user-agent",
@@ -529,7 +632,7 @@ async fn zen_chat_and_go_chat_stream_use_distinct_routes_and_headers() {
     let server = crate::test_support::HTTP_SERVER_POOL.get_server();
     let zen = fixture_client(&server, ProviderKind::OpencodeZen);
     server.expect(Expectation::matching(all_of![
-        request::method_path("POST", "/zen/v1/chat/completions"),
+        request::method_path("POST", "/inference/v1/chat/completions"),
         request::headers(contains(("authorization", "Bearer fixture-key"))),
         request::headers(contains(("x-opencode-session", "conversation-a"))),
         request::body(json_decoded(|body: &Value| body["model"] == "qwen3.8-max" && body.get("reasoning_effort").is_none()))
@@ -544,7 +647,7 @@ async fn zen_chat_and_go_chat_stream_use_distinct_routes_and_headers() {
     );
     let go = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(Expectation::matching(all_of![
-        request::method_path("POST", "/zen/go/v1/chat/completions"),
+        request::method_path("POST", "/inference/go/v1/chat/completions"),
         request::headers(contains(("x-opencode-session", "conversation-a"))),
         request::headers(contains(("user-agent", concat!("dgc/", env!("CARGO_PKG_VERSION")))))
     ]).times(1).respond_with(status_code(200).append_header("content-type", "text/event-stream").body(
@@ -571,7 +674,7 @@ async fn responses_refusal_cannot_become_auxiliary_edit_text_and_usage_is_retain
     let server = crate::test_support::HTTP_SERVER_POOL.get_server();
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(
-        Expectation::matching(request::method_path("POST", "/zen/go/v1/responses"))
+        Expectation::matching(request::method_path("POST", "/inference/go/v1/responses"))
             .times(1)
             .respond_with(
                 status_code(200)
@@ -639,7 +742,7 @@ async fn local_responses_compaction_protects_unseen_opaque_tool_batch_and_can_co
         serde_json::to_value(&history.as_slice()[history.len() - 2..]).expect("protected suffix");
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", "conversation-a"))),
             request::body(json_decoded(|body: &Value| body["tools"] == json!([])
                 && !body.to_string().contains("unseen-opaque")
@@ -663,7 +766,7 @@ async fn local_responses_compaction_protects_unseen_opaque_tool_batch_and_can_co
     assert_eq!(before, after);
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", "conversation-a"))),
             request::body(json_decoded(|body: &Value| body["input"]
                 .as_array()
@@ -726,7 +829,7 @@ async fn main_agent_uses_persisted_conversation_ids_and_subagent_inherits_snapsh
         .with_session_manager(manager.clone());
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", first_id.clone())))
         ])
         .times(2)
@@ -783,7 +886,7 @@ async fn main_agent_uses_persisted_conversation_ids_and_subagent_inherits_snapsh
     assert_ne!(first_id, next_id);
     server.expect(
         Expectation::matching(all_of![
-            request::method_path("POST", "/zen/go/v1/responses"),
+            request::method_path("POST", "/inference/go/v1/responses"),
             request::headers(contains(("x-opencode-session", next_id)))
         ])
         .times(1)
@@ -814,11 +917,11 @@ async fn opencode_redirects_do_not_switch_billing_routes() {
     let server = crate::test_support::HTTP_SERVER_POOL.get_server();
     let client = fixture_client(&server, ProviderKind::OpencodeGo);
     server.expect(
-        Expectation::matching(request::method_path("POST", "/zen/go/v1/responses"))
+        Expectation::matching(request::method_path("POST", "/inference/go/v1/responses"))
             .times(1)
             .respond_with(
                 status_code(307)
-                    .append_header("location", server.url_str("/zen/v1/responses"))
+                    .append_header("location", server.url_str("/inference/v1/responses"))
                     .body("{\"error\":{\"code\":\"wrong_route\"}}"),
             ),
     );

@@ -14,6 +14,7 @@ pub enum ConfigOrigin {
     Environment,
     Global,
     Project,
+    Session,
 }
 
 pub(crate) fn project_denied(setting: &str) -> anyhow::Error {

@@ -425,6 +425,7 @@ impl AppConfig {
         };
         let model = crate::features::opencode::model_id(provider, &model)?.to_owned();
         crate::features::opencode::validate_base(provider, &base_url)?;
+        let base_url = opencode_base.map(str::to_owned).unwrap_or(base_url);
         if opencode_base.is_some() {
             crate::features::opencode::api(provider, &model)?;
         }
@@ -681,8 +682,8 @@ fn resolve_provider(
         return match environment {
             "openai-compatible" => Ok(ProviderKind::OpenaiCompatible),
             "openai" => Ok(ProviderKind::Openai),
-            "opencode-go" => Ok(ProviderKind::OpencodeGo),
-            "opencode-zen" => Ok(ProviderKind::OpencodeZen),
+            "opencode-go" | "go" => Ok(ProviderKind::OpencodeGo),
+            "opencode-zen" | "zen" => Ok(ProviderKind::OpencodeZen),
             _ => anyhow::bail!("invalid DGC_PROVIDER"),
         };
     }
