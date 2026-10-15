@@ -346,6 +346,7 @@ impl TuiApp {
             "/rebuild-repomap".to_string(),
             "/tokens".to_string(),
             "/models".to_string(),
+            "/provider".to_string(),
             "/cancel".to_string(),
             "/jobs".to_string(),
             "/compact".to_string(),

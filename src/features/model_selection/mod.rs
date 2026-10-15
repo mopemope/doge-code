@@ -1,4 +1,4 @@
-//! Offline same-provider picker; selecting is a separate session transaction.
+//! Offline Go/Zen picker; selecting is a separate session transaction.
 use crate::features::{openai_subscription::ProviderKind, opencode};
 use anyhow::Result;
 
@@ -8,18 +8,20 @@ pub struct ModelPicker {
     pub query: String,
     pub selected: usize,
     pub error: Option<String>,
+    pub key_available: bool,
 }
 impl ModelPicker {
     pub fn new(provider: ProviderKind, query: &str) -> Result<Self> {
         anyhow::ensure!(
             !opencode::catalog(provider).is_empty(),
-            "TUI /models supports the offline Go/Zen catalogs only; use dgc models --provider openai for the OAuth account catalog"
+            "Use /provider go or /provider zen for OpenCode; dgc models --provider openai lists the OAuth account catalog"
         );
         Ok(Self {
             provider,
             query: query.into(),
             selected: 0,
             error: None,
+            key_available: false,
         })
     }
     pub fn results(&self) -> Vec<&'static opencode::catalog::ModelSpec> {
@@ -40,6 +42,23 @@ impl ModelPicker {
     pub fn refresh(&mut self) {
         self.selected = 0;
         self.error = None;
+    }
+
+    pub fn toggle_provider(&mut self) {
+        let model = self.results().get(self.selected).map(|spec| spec.id);
+        self.query = opencode::model_id(self.provider, &self.query)
+            .unwrap_or(&self.query)
+            .to_owned();
+        self.provider = match self.provider {
+            ProviderKind::OpencodeGo => ProviderKind::OpencodeZen,
+            _ => ProviderKind::OpencodeGo,
+        };
+        self.refresh();
+        self.selected = self
+            .results()
+            .iter()
+            .position(|spec| Some(spec.id) == model)
+            .unwrap_or(0);
     }
     pub fn move_selection(&mut self, down: bool) {
         let count = self.results().len();

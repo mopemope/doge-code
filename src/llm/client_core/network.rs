@@ -192,8 +192,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
             );
 
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err(anyhow::anyhow!(LlmErrorKind::Authentication)
-                    .context(format!("chat error: {status}")));
+                return Err(client.authentication_error(status, "chat error"));
             }
             if status.as_u16() == 400
                 && let Some(code) = provider_code.as_deref()
