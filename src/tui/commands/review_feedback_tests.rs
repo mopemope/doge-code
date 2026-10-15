@@ -495,6 +495,10 @@ async fn turn_terminal_outcomes_expose_owned_review_without_duplicate_or_stale_p
                 )
                 .unwrap()
             };
+            if feedback && mode == "hidden" {
+                // Discarding submitted comments must not discard the repair's review.
+                ui.review_feedback = None;
+            }
             if mode == "cancel" {
                 tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     while provider.requests.lock().unwrap().len() < 2 {
@@ -523,7 +527,11 @@ async fn turn_terminal_outcomes_expose_owned_review_without_duplicate_or_stale_p
                 .as_ref()
                 .expect("applied changes must remain reviewable");
             let repair = review.review_id.clone().unwrap();
-            assert_ne!(Some(&repair), batch.source.review_id.as_ref());
+            assert_ne!(
+                Some(&repair),
+                batch.source.review_id.as_ref(),
+                "feedback={feedback}, mode={mode}"
+            );
             assert!(review.rejectable);
             let messages = notices(&ui);
             assert!(
@@ -531,10 +539,14 @@ async fn turn_terminal_outcomes_expose_owned_review_without_duplicate_or_stale_p
                 "managed captures must publish through the terminal callback only"
             );
             if feedback {
-                assert_eq!(
-                    ui.review_feedback.as_ref().unwrap().batch.comments,
-                    batch.comments
-                );
+                if mode == "hidden" {
+                    assert!(ui.review_feedback.is_none());
+                } else {
+                    assert_eq!(
+                        ui.review_feedback.as_ref().unwrap().batch.comments,
+                        batch.comments
+                    );
+                }
                 assert!(
                     messages.iter().any(|m| m.contains("::feedback_outcome:")
                         && m.contains(match mode {
