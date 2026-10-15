@@ -1809,6 +1809,13 @@ Verification failures are returned to LLM for automatic correction.
 - Connect to remote MCP servers for additional tool capabilities
 - Unified tool interface for local and remote tools
 - Automatic paginated tool discovery and registration
+- Each run pins the published MCP alias, server, remote name, and input schema.
+  Before each remote call, `tools/list` revalidates that binding on the same
+  connection (using the configured list timeout). A changed, missing, or
+  ambiguous definition returns `tool_definition_changed` before `tools/call`;
+  start a new turn to rediscover. Reconnects never replay a tool call whose
+  outcome is unknown. This adds a discovery round trip per call; MCP does not
+  provide an atomic list-and-call operation against a server changing afterward.
 - MCP protocol negotiation is delegated to rmcp; Streamable HTTP probes the
   2026-07-28 lifecycle when supported and falls back to legacy `initialize`,
   while stdio uses the established initialize lifecycle
