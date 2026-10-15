@@ -666,9 +666,11 @@ Even with
 `RUST_LOG=debug`, prompts, source/file content, tool arguments/results,
 model output, raw request/response bodies, provider error bodies, refusal
 bodies, encrypted Responses state, and credentials are never logged. Logs
-record shape and counts instead (message counts, request/response bytes,
-tool counts, token usage, retry metadata, provider codes, request IDs,
-durations). JSON parsing errors in Chat Completions responses, tool-call argument
+record shape and counts instead. TUI submission, paste events, and file-path
+completion diagnostics omit input text and candidate paths; they record only
+operation kinds and counts. Other metadata includes message counts,
+request/response bytes, tool counts, token usage, retry metadata, provider codes,
+request IDs, and durations. JSON parsing errors in Chat Completions responses, tool-call argument
 validation, and Responses usage report only their category and line/column
 position in logs and propagated errors; provider values and raw parser messages
 are omitted. Older versions may have written such content to a repository-root
