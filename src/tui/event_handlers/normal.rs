@@ -144,8 +144,12 @@ pub fn handle_normal_mode_key(
             }
 
             if submit {
-                debug!("Submitting line: '{}'", app.textarea.lines().join("\n"));
                 let line = app.textarea.lines().join("\n");
+                debug!(
+                    input_chars = line.chars().count(),
+                    input_lines = app.textarea.lines().len(),
+                    "Submitting input"
+                );
                 if line.trim().is_empty() {
                     return Ok(false);
                 }
