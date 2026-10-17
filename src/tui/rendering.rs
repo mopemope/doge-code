@@ -238,9 +238,9 @@ impl TuiApp {
         detail = format!(
             "{}\n{detail}",
             if picker.key_available {
-                "Uses the selected OpenCode key; not saved here."
+                "Uses the selected OpenCode key."
             } else {
-                "NO KEY: export OPENCODE_API_KEY in your shell and restart dgc."
+                "NO KEY: run `dgc auth login opencode` in a shell, then retry."
             }
         );
         f.render_widget(

@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
     Login {
-        #[arg(value_parser = ["openai"])]
+        #[arg(value_parser = ["openai", "opencode"])]
         provider: String,
         #[arg(long, conflicts_with = "new_account")]
         account: Option<String>,
@@ -19,20 +19,20 @@ pub enum AuthCommand {
         enable_plan_usage: bool,
     },
     Status {
-        #[arg(value_parser = ["openai"])]
+        #[arg(value_parser = ["openai", "opencode"])]
         provider: String,
     },
     List {
-        #[arg(value_parser = ["openai"])]
+        #[arg(value_parser = ["openai", "opencode"])]
         provider: String,
     },
     Use {
-        #[arg(value_parser = ["openai"])]
+        #[arg(value_parser = ["openai", "opencode"])]
         provider: String,
         account: String,
     },
     Logout {
-        #[arg(value_parser = ["openai"])]
+        #[arg(value_parser = ["openai", "opencode"])]
         provider: String,
         account: Option<String>,
     },
@@ -43,6 +43,9 @@ pub async fn run(
     store: CredentialStore,
     cancel: CancellationToken,
 ) -> Result<()> {
+    if let Some(result) = run_opencode(&command) {
+        return result;
+    }
     match command {
         AuthCommand::Login {
             account,
@@ -144,4 +147,36 @@ pub async fn models(store: CredentialStore, cancel: CancellationToken) -> Result
         println!("{}\t{}", model.slug, model.display_name);
     }
     Ok(())
+}
+
+/// OpenCode (Go/Zen) uses a stored API key, not ChatGPT OAuth accounts.
+fn run_opencode(command: &AuthCommand) -> Option<Result<()>> {
+    use crate::features::opencode::key_store;
+    match command {
+        AuthCommand::Login {
+            provider,
+            account,
+            new_account,
+            no_browser,
+            enable_plan_usage,
+        } if provider == "opencode" => Some(
+            if account.is_some() || *new_account || *no_browser || *enable_plan_usage {
+                Err(anyhow::anyhow!(
+                    "OpenCode login takes no account or browser options"
+                ))
+            } else {
+                key_store::login()
+            },
+        ),
+        AuthCommand::Status { provider } | AuthCommand::List { provider }
+            if provider == "opencode" =>
+        {
+            Some(key_store::status())
+        }
+        AuthCommand::Logout { provider, .. } if provider == "opencode" => Some(key_store::logout()),
+        AuthCommand::Use { provider, .. } if provider == "opencode" => Some(Err(anyhow::anyhow!(
+            "OpenCode has a single stored key; choose the route with --provider go|zen or /provider"
+        ))),
+        _ => None,
+    }
 }

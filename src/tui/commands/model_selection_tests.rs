@@ -464,7 +464,7 @@ fn model_selection_picker_renders_supported_unsupported_and_empty_at_terminal_wi
             assert!(screen.contains("Models: opencode-go"), "{screen}");
             assert!(screen.contains(marker), "{screen}");
             assert!(screen.contains("Enter: NEW session"), "{screen}");
-            assert!(screen.contains("OPENCODE_API_KEY"), "{screen}");
+            assert!(screen.contains("dgc auth login"), "{screen}");
             assert!(screen.contains("Go (subscription)"), "{screen}");
         }
     }

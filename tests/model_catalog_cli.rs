@@ -30,7 +30,7 @@ fn model_catalog_cli_lists_supported_and_unsupported_without_config_or_key() {
         let output = models(provider, None);
         assert!(output.status.success(), "{:?}", output);
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("offline snapshot 2026-10-09"));
+        assert!(text.contains("offline snapshot 2026-10-17"));
         assert!(text.contains("gpt-6-luna | Responses | yes"));
         assert!(text.contains("claude-haiku-5-5 | Messages | no"));
         assert!(text.contains("availability and account access are not checked"));

@@ -2,7 +2,7 @@
 use super::{ApiKind, ProviderKind, model_id};
 use anyhow::{Result, bail};
 
-pub const SNAPSHOT: &str = "2026-10-09";
+pub const SNAPSHOT: &str = "2026-10-17";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayApi {
     ChatCompletions,
@@ -48,10 +48,6 @@ const OPENCODEGO: &[ModelSpec] = &[
         api: GatewayApi::Responses,
     },
     ModelSpec {
-        id: "grok-4.6",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
         id: "gpt-6-luna",
         api: GatewayApi::Responses,
     },
@@ -60,12 +56,24 @@ const OPENCODEGO: &[ModelSpec] = &[
         api: GatewayApi::Responses,
     },
     ModelSpec {
-        id: "muse-spark-1.3-contributor",
-        api: GatewayApi::Responses,
+        id: "claude-haiku-5-5",
+        api: GatewayApi::Messages,
     },
     ModelSpec {
-        id: "muse-spark-1.2-contributor",
-        api: GatewayApi::Responses,
+        id: "gemini-4-argon-contributor",
+        api: GatewayApi::Google,
+    },
+    ModelSpec {
+        id: "glm-5.3-flash",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.2",
+        api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
         id: "kimi-k3",
@@ -76,19 +84,15 @@ const OPENCODEGO: &[ModelSpec] = &[
         api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
-        id: "kimi-k2.6",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
         id: "longcat-2.0",
         api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
-        id: "longcat-2.5-preview-free",
+        id: "deepseek-v4.1-flash",
         api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
-        id: "step-5-preview-free",
+        id: "deepseek-v4-pro",
         api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
@@ -108,56 +112,16 @@ const OPENCODEGO: &[ModelSpec] = &[
         api: GatewayApi::ChatCompletions,
     },
     ModelSpec {
-        id: "hy4-preview",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "hy3",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "space-bunny",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.3-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.3",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.2",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4.1-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-pro",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-flash-vision-exp",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "claude-haiku-5-5",
-        api: GatewayApi::Messages,
-    },
-    ModelSpec {
         id: "minimax-m3",
         api: GatewayApi::Messages,
     },
     ModelSpec {
-        id: "minimax-m2.7",
-        api: GatewayApi::Messages,
+        id: "muse-spark-1.3-contributor",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "muse-spark-1.2-contributor",
+        api: GatewayApi::Responses,
     },
     ModelSpec {
         id: "qwen3.8-max",
@@ -170,6 +134,30 @@ const OPENCODEGO: &[ModelSpec] = &[
     ModelSpec {
         id: "qwen3.7-plus",
         api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "hy4-preview",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "hy3",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "space-bunny",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "longcat-2.5-preview-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "step-5-preview",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "beam-free",
+        api: GatewayApi::ChatCompletions,
     },
 ];
 const OPENCODEZEN: &[ModelSpec] = &[
@@ -270,150 +258,6 @@ const OPENCODEZEN: &[ModelSpec] = &[
         api: GatewayApi::Responses,
     },
     ModelSpec {
-        id: "grok-4.7",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "grok-4.6",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "grok-4.5",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "grok-build-0.1",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "muse-spark-1.3",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "muse-spark-1.2",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "muse-spark-1.3-contributor-free",
-        api: GatewayApi::Responses,
-    },
-    ModelSpec {
-        id: "qwen3.8-max",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "minimax-m3",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "minimax-m2.7",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "minimax-m2.5",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.1",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "kimi-k2.5",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "kimi-k2.6",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "kimi-k2.7-code",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "kimi-k3",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "mistral-large-4",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "big-pickle",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "space-bunny-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "longcat-2.5-preview-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "step-5-preview-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "exo-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "mimo-v2.6-flash-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "mimo-v2.5-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "ling-3.1-flash-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "ling-3.0-flash-fin-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "nemotron-3-ultra-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "nemotron-3.5-lightning-free",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.3-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.3",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "glm-5.2",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4.1-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-pro",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-flash",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
-        id: "deepseek-v4-flash-vision-exp",
-        api: GatewayApi::ChatCompletions,
-    },
-    ModelSpec {
         id: "claude-fable-5-1",
         api: GatewayApi::Messages,
     },
@@ -470,24 +314,8 @@ const OPENCODEZEN: &[ModelSpec] = &[
         api: GatewayApi::Messages,
     },
     ModelSpec {
-        id: "qwen3.8-flash",
-        api: GatewayApi::Messages,
-    },
-    ModelSpec {
-        id: "qwen3.7-max",
-        api: GatewayApi::Messages,
-    },
-    ModelSpec {
-        id: "qwen3.7-plus",
-        api: GatewayApi::Messages,
-    },
-    ModelSpec {
-        id: "qwen3.6-plus",
-        api: GatewayApi::Messages,
-    },
-    ModelSpec {
-        id: "qwen3.5-plus",
-        api: GatewayApi::Messages,
+        id: "gemini-4-argon",
+        api: GatewayApi::Google,
     },
     ModelSpec {
         id: "gemini-3.8-flash",
@@ -518,12 +346,176 @@ const OPENCODEZEN: &[ModelSpec] = &[
         api: GatewayApi::Google,
     },
     ModelSpec {
+        id: "grok-4.7",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "grok-4.6",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "grok-4.5",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "grok-build-0.1",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "muse-spark-1.3",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "muse-spark-1.2",
+        api: GatewayApi::Responses,
+    },
+    ModelSpec {
+        id: "qwen3.8-max",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "qwen3.8-flash",
+        api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.7-max",
+        api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.7-plus",
+        api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.6-plus",
+        api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.5-plus",
+        api: GatewayApi::Messages,
+    },
+    ModelSpec {
+        id: "deepseek-v4.1-flash",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "deepseek-v4-pro",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "minimax-m3",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "minimax-m2.7",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "minimax-m2.5",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3-flash",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.2",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.1",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k2.5",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k2.6",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k2.7-code",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k3",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mistral-large-4",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
         id: "jev-1.13",
         api: GatewayApi::SystemOne,
     },
     ModelSpec {
         id: "jev-1.13-free",
         api: GatewayApi::SystemOne,
+    },
+    ModelSpec {
+        id: "big-pickle",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3-flash-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "deepseek-v4.1-flash-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "space-bunny-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "beam-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "ll-alpha-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "longcat-2.5-preview-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "exo-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mimo-v2.6-flash-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mimo-v2.5-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3-ultra-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3.5-lightning-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3.5-super-vl-free",
+        api: GatewayApi::ChatCompletions,
+    },
+    ModelSpec {
+        id: "muse-spark-1.3-contributor-free",
+        api: GatewayApi::Responses,
     },
 ];
 pub fn catalog(provider: ProviderKind) -> &'static [ModelSpec] {

@@ -8,7 +8,7 @@ fn routes_are_provider_specific_and_fail_closed() {
         ApiKind::Responses
     );
     assert_eq!(
-        api(ProviderKind::OpencodeGo, "kimi-k2.6").unwrap(),
+        api(ProviderKind::OpencodeGo, "kimi-k2.7-code").unwrap(),
         ApiKind::ChatCompletions
     );
     assert!(api(ProviderKind::OpencodeGo, "qwen3.8-max").is_err());
@@ -291,7 +291,7 @@ async fn chat_reasoning_survives_tool_result_and_session_without_unknown_knobs()
         request::method_path("POST", "/inference/go/v1/chat/completions"),
         request::headers(contains(("x-opencode-session", "conversation-a"))),
         request::headers(contains(("user-agent", concat!("dgc/", env!("CARGO_PKG_VERSION"))))),
-        request::body(json_decoded(|body: &Value| body["model"] == "kimi-k2.6"
+        request::body(json_decoded(|body: &Value| body["model"] == "kimi-k2.7-code"
             && body.get("reasoning_effort").is_none() && body["messages"].as_array().expect("msgs").len() == 1))
     ]).times(1).respond_with(json_encoded(json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{
         "role":"assistant","content":null,"reasoning_content":"fixture-reasoning",
@@ -315,7 +315,7 @@ async fn chat_reasoning_survives_tool_result_and_session_without_unknown_knobs()
         )),
     );
     let mut history = vec![message("user", "hi")];
-    let reply = infer(&client, "opencode-go/kimi-k2.6", &history, &tools)
+    let reply = infer(&client, "opencode-go/kimi-k2.7-code", &history, &tools)
         .await
         .expect("tool");
     assert!(!format!("{:?}", reply.reasoning).contains("fixture-reasoning"));
@@ -329,7 +329,7 @@ async fn chat_reasoning_survives_tool_result_and_session_without_unknown_knobs()
         .expect("save");
     let reply = infer(
         &client,
-        "kimi-k2.6",
+        "kimi-k2.7-code",
         &session.conversation_messages().expect("resume"),
         &tools,
     )
@@ -430,7 +430,7 @@ async fn responses_rate_limit_retry_reuses_identity_and_quota_does_not_retry_or_
     for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
         for (model, suffix) in [
             ("gpt-6-luna", "responses"),
-            ("kimi-k2.6", "chat/completions"),
+            ("kimi-k2.7-code", "chat/completions"),
         ] {
             for status in [401, 403] {
                 let server = crate::test_support::HTTP_SERVER_POOL.get_server();
@@ -526,7 +526,9 @@ async fn immutable_conversation_clones_and_chat_auxiliary_headers() {
                     "user-agent",
                     concat!("dgc/", env!("CARGO_PKG_VERSION"))
                 ))),
-                request::body(json_decoded(|body: &Value| body["model"] == "kimi-k2.6"))
+                request::body(json_decoded(
+                    |body: &Value| body["model"] == "kimi-k2.7-code"
+                ))
             ])
             .times(1)
             .respond_with(json_encoded(
@@ -537,10 +539,14 @@ async fn immutable_conversation_clones_and_chat_auxiliary_headers() {
     }
     for c in [&client, &other] {
         assert_eq!(
-            c.chat_once("opencode-go/kimi-k2.6", vec![message("user", "hi")], None)
-                .await
-                .expect("aux")
-                .content,
+            c.chat_once(
+                "opencode-go/kimi-k2.7-code",
+                vec![message("user", "hi")],
+                None
+            )
+            .await
+            .expect("aux")
+            .content,
             "done"
         );
     }
@@ -654,7 +660,7 @@ async fn zen_chat_and_go_chat_stream_use_distinct_routes_and_headers() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"go\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
     )));
     let mut stream = go
-        .chat_stream("kimi-k2.6", &[message("user", "hi")], None)
+        .chat_stream("kimi-k2.7-code", &[message("user", "hi")], None)
         .await
         .expect("Go stream");
     let mut text = String::new();
@@ -964,4 +970,43 @@ fn catalog_entries_are_unique_and_match_runtime_routes() {
         "Chat Completions"
     );
     assert!(lookup(ProviderKind::OpencodeGo, "opencode/gpt-6-luna").is_err());
+}
+
+mod key_store_tests {
+    use super::super::key_store::{clear_at, load_at, save_at};
+
+    #[test]
+    fn saves_owner_only_and_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg").join("opencode_api_key");
+        assert_eq!(load_at(&path).expect("missing is ok"), None);
+        save_at(&path, " sk-test \n").expect("save");
+        assert_eq!(load_at(&path).expect("load").as_deref(), Some("sk-test"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        save_at(&path, "sk-new").expect("overwrite");
+        assert_eq!(load_at(&path).expect("load").as_deref(), Some("sk-new"));
+        assert!(clear_at(&path).expect("clear"));
+        assert!(!clear_at(&path).expect("clear again"));
+    }
+
+    #[test]
+    fn rejects_invalid_keys_and_unsafe_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("opencode_api_key");
+        assert!(save_at(&path, "  ").is_err());
+        assert!(save_at(&path, "two words").is_err());
+        assert!(!path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, "sk-open\n").expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+            assert!(load_at(&path).is_err(), "group/world-readable key refused");
+        }
+    }
 }
