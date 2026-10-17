@@ -24,6 +24,10 @@ target
 # Added by cargo
 
 /target
+
+# Local credentials/environment files
+.env
+
 # Project-local agent state (sessions, memory, workflows) is ignored,
 # but the committed dogfood config is tracked.
 .doge/*

@@ -86,10 +86,10 @@ pub(crate) fn config_value<T>(
 pub(crate) fn missing_auth_message(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::OpencodeGo => {
-            "OpenCode Go API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider go."
+            "OpenCode Go API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider go. If you already logged in, `dgc auth status opencode` shows why the stored key was ignored."
         }
         ProviderKind::OpencodeZen => {
-            "OpenCode Zen API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider zen."
+            "OpenCode Zen API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider zen. If you already logged in, `dgc auth status opencode` shows why the stored key was ignored."
         }
         _ => {
             "OPENAI_API_KEY not set; cannot call LLM. For OpenCode, run `dgc auth login opencode` and choose --provider go or --provider zen."
@@ -109,6 +109,19 @@ pub(crate) fn selection_config(
     let mut cfg = current.clone();
     if default_base(current.provider).is_some() {
         validate_base(current.provider, &current.base_url)?;
+        // A session started without a key picks up one stored since (login in
+        // another shell); an existing key is never replaced.
+        if cfg
+            .api_key
+            .as_deref()
+            .is_none_or(|key| key.trim().is_empty())
+        {
+            cfg.api_key = environment_key;
+            cfg.api_key_origin = cfg
+                .api_key
+                .as_ref()
+                .map(|_| crate::config::ConfigOrigin::Environment);
+        }
     } else {
         cfg.api_key = environment_key;
         cfg.api_key_origin = cfg

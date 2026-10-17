@@ -23,8 +23,8 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /lint - Run linting tools for Go, Rust, and TypeScript");
     ui.push_log("  /verify [refresh [paths...] | run <id> | feedback <id>] - Inspect/run a selected check or stage failure evidence on a live review hunk");
     ui.push_log("  /test - Run tests for the project");
-    ui.push_log("  /fix <instruction> - Attempt to fix code based on instruction");
-    ui.push_log("  /plan <instruction> - Creates an implementation plan based on the instruction");
+    ui.push_log("  /fix <file>:<start_line>-<end_line> <instruction> - Fix the given line range");
+    ui.push_log("  /plan show - Display the current plan");
     ui.push_log("");
 
     ui.push_log("Repository Analysis:");
@@ -37,7 +37,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("Session Management:");
     ui.push_log("  /session <new|list|show|switch|save|export|recovery|delete|current|clear> - Manage sessions");
     ui.push_log("  /evidence [id] - Inspect saved session evidence and show its export command");
-    ui.push_log("  /stack [add <task>|next|list] - Manage ephemeral task stack");
+    ui.push_log("  /stack [add <task>|next|list|clear] - Manage ephemeral task stack");
 
     ui.push_log("");
 

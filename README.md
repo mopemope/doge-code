@@ -22,7 +22,7 @@ is claimed. See [practical acceptance evaluation](docs/ai/evaluation.md#practica
 - **Code Analysis**: tree-sitter based code parsing and symbol extraction for Rust, JavaScript/TypeScript (including JSX/TSX), Python, Go, C/C++, C#, and Markdown
 - **Interactive Terminal UI**: TUI with syntax highlighting, diff review, and real-time LLM interaction
 - **MCP Server**: Model Context Protocol server for integration with MCP-enabled clients like Claude Desktop
-- **Persistent Sessions**: JSON session checkpoints saved through atomic replacement of `session.json` to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume [SESSION_ID]` to continue where you left off
+- **Persistent Sessions**: JSON session checkpoints saved through atomic replacement of `session.json` to maintain context across runs. Manage them via `dgc session` (list/show/delete) or `--resume[=SESSION_ID]` to continue where you left off
 - **Multi-Mode Interaction**: Support for both interactive TUI mode and command-line execution
 
 ### Parser Support
@@ -138,13 +138,7 @@ The snapshot check narrows the external-write race window; it is not an OS-level
 atomic compare-and-swap or a sandbox. Watch remains a mutating mode.
 Monitors file changes and automatically triggers LLM assistant.
 
-#### 5. Code Rewrite Mode
-```bash
-dgc rewrite --prompt "Convert to async/await" --code-file /tmp/code.rs
-```
-Rewrites specific code snippets with LLM assistant.
-
-#### 6. Session Management Mode
+#### 5. Session Management Mode
 ```bash
 dgc session list
 dgc session show <id>
@@ -286,8 +280,13 @@ dgc --provider go           # subscription; or: dgc --provider zen (pay-as-you-g
 Inside the TUI, `/provider go` or `/provider zen` (and `/models`) switches route
 and model from the picker without restarting. `dgc auth status opencode` shows
 whether a key is present (not whether it is valid) and `dgc auth logout opencode`
-removes it. The key is stored at `~/.config/doge-code/opencode_api_key` (next to
-`DOGE_CODE_CONFIG` when that is set). Piped input also works:
+removes it. The key is stored at `$XDG_CONFIG_HOME/doge-code/opencode_api_key`
+(`~/.config/doge-code/opencode_api_key` by default, on macOS too), next to the
+user config; when `DOGE_CODE_CONFIG` is set it lives next to that file instead.
+On macOS, a key saved earlier under `~/Library/Application Support/doge-code/` is still
+read when no key exists at the new location, and `dgc auth logout opencode` removes both.
+A session that started without a key picks up one saved later when you reopen
+`/provider` or `/models`. Piped input also works:
 `echo "$KEY" | dgc auth login opencode`.
 
 Choose `--provider go` (`opencode-go`) for subscription usage or `--provider zen`
@@ -968,8 +967,7 @@ Budget-limited results retain `status: "partial"`, `stop_reason`, response,
 usage and the saved session, but report `success: false`. `exec` exit codes are
 0 for completion, 2 for partial execution, and 1 for errors or cancellation.
 A workflow stops at an incomplete step instead of executing subsequent steps.
-Partial rewrite output is reported as evidence rather than a completed code
-replacement. Partial desktop
+Partial desktop
 notifications say that execution stopped, not that it succeeded. Resume a saved
 session to continue work. Completion describes the agent loop outcome, not an
 independent guarantee that the requested change is correct or accepted. Agent
@@ -1171,11 +1169,6 @@ dgc exec --resume=0198abcd "Add error handling to the login flow"
 
 # JSON output for programmatic use (includes tools_called, token usage, etc.)
 dgc exec --json "Refactor database layer"
-
-# Rewrite specific code
-dgc rewrite --prompt "Optimize this function for performance" \
-    --code-file /tmp/algorithm.rs \
-    --json
 ```
 
 ### Session Management
@@ -1366,9 +1359,9 @@ Doge-Code provides a powerful Emacs integration. Setup is simple:
 ```
 
 This enables:
-- **Analyze/Refactor**: `C-c d a` (Analyze), `C-c d r` (Rewrite snippet)
+- **Analyze/Explain**: `C-c d a` (Analyze region), `C-c d e` (Explain region), `C-c d b` (Analyze buffer)
 - **MCP Tools**: `C-c d m s` (Symbol Search), `C-c d m f` (Read File)
-- **Auto-Fix**: `C-c d f` (Fix Flymake error), Compilation auto-fix
+- **Refactor**: `C-c d R` (Global refactor via `exec`)
 - **HUD**: Semantic info overlays (optional, set `doge-code-enable-hud` to t)
 
 See [elisp/emacs-integration.md](elisp/emacs-integration.md) for detailed configuration options.
@@ -1381,7 +1374,8 @@ The TUI provides various slash commands for quick operations:
 |---------|-------------|
 | `/help` | Display available commands and help |
 | `/quit` | Exit the application |
-| `/clear` | Clear the screen |
+| `/clear` | Clear the conversation history and start a new session (token counters reset) |
+| `/reset` | Force the TUI state back to idle (emergency use; keeps the conversation) |
 | `/cancel [job-id]` | Cancel the current foreground job or a specific job (`/cancel job-12`) |
 | `/jobs` | List running and recent jobs |
 | `/evidence [id]` | Inspect saved evidence and show the session-specific export command |
@@ -1392,16 +1386,18 @@ The TUI provides various slash commands for quick operations:
 | `/verify [refresh [paths...] \| run <id> \| feedback <id>]` | Inspect snapshot-bound verification suggestions or execute one selected candidate |
 | `/map` | Display RepoMap |
 | `/rebuild-repomap` | Rebuild the RepoMap |
-| `/open` | Open a file |
+| `/open <path>` | Open a file |
 | `/git-worktree` | Create an isolated linked worktree and branch (does not switch the current session into it) |
-| `/theme` | Change color theme |
+| `/theme <dark\|light>` | Change color theme |
 | `/provider [go\|zen] [search]` | Preview Go/Zen from any provider; Tab switches route, Enter starts a new conversation, Esc cancels |
 | `/models [search]` | Search the offline Go/Zen catalog; Tab previews Go/Zen, Enter starts a new session, Esc/Ctrl+C cancels |
-| `/tokens` | Display token usage (prompt/cache/reasoning usage when reported by the provider) |
+| `/tokens [context]` | Display token usage (prompt/cache/reasoning usage when reported by the provider); `context` opens the context usage view |
+| `/quick <instruction>` | Run an instruction without projecting the saved plan |
+| `/fix <file>:<start>-<end> <instruction>` | Ask the agent to fix a specific line range |
 | `/tools` | List available tools |
 | `/plan show` | Display current plan |
-| `/session <sub>` | Manage sessions: `new`, `list`, `show`, `switch`, `save`, `delete`, `current`, `clear` |
-| `/stack [add <task>|next|list]` | Manage ephemeral task stack (prompts waiting for manual execution) |
+| `/session <sub>` | Manage sessions: `new`, `list`, `show`, `switch`, `save`, `export`, `recovery`, `delete`, `current`, `clear` |
+| `/stack [add <task>\|next\|list\|clear]` | Manage ephemeral task stack (prompts waiting for manual execution) |
 
 `/stack` holds prompts waiting for manual execution; `/jobs` shows work
 currently executing or recently finished. They are different lists: a busy
@@ -2025,7 +2021,7 @@ an explicit value takes precedence over model defaults.
 
 ### Custom Commands
 - Define custom slash commands in `.doge/commands/`
-- Template-based command definitions
+- Markdown-based command definitions (see "Adding Custom Commands")
 - Parameter support for dynamic commands
 
 ## 📚 Configuration
@@ -2034,6 +2030,14 @@ an explicit value takes precedence over model defaults.
 - `OPENAI_API_KEY`: API key
 - `OPENAI_BASE_URL`: API base URL (default: `https://api.openai.com/v1`)
 - `OPENAI_MODEL`: Model name (default: `gpt-4o-mini`)
+- `OPENCODE_API_KEY`, `OPENCODE_BASE_URL`, `OPENCODE_MODEL`: OpenCode Go/Zen
+  credentials, endpoint and model (see the OpenCode section); `DGC_PROVIDER`
+  selects the provider
+- `DOGE_AUTO_COMPACT_PROMPT_TOKEN_THRESHOLD`: Auto-compaction prompt token
+  threshold (unsigned integer; takes precedence over config files)
+- `DOGE_STREAM_TOOLS`: `true`/`false`, overrides `enable_stream_tools`
+- `DGC_DISABLE_NOTIFICATIONS`: Set to `1` to disable desktop notifications for
+  agent runs
 - `DOGE_CODE_CONFIG`: Explicit global config path. When set, that path alone
   is authoritative: a missing, unreadable, or invalid file is a startup error
   and no other config candidate is consulted.
@@ -2562,11 +2566,14 @@ its implementation, module wiring, schema registration, dispatch handler, behavi
 tests, and a README entry. Run the guidance check to detect missing wiring.
 
 ### Adding Custom Commands
-Create a TOML file in `.doge/commands/` directory:
-```toml
-name = "my-command"
-description = "Description of my command"
-template = "Execute the following task: {args}"
+Create a Markdown file in `.doge/commands/` (project) or
+`~/.config/doge-code/commands/` (user). The file name is the command name
+(`my-command.md` → `/my-command`), the first line is its description, and the
+rest is the prompt. `$ARGUMENTS` expands to all arguments and `$1`, `$2`, … to
+individual ones. Files with other extensions (for example `.toml`) are ignored.
+```markdown
+Description of my command
+Execute the following task: $ARGUMENTS
 ```
 
 ## 📖 Documentation
