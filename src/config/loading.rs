@@ -39,6 +39,8 @@ pub struct FileConfig {
     /// Local MCP HTTP listener (`[mcp_server]`). Separate from `[[mcp_servers]]`
     /// remote/outbound endpoints.
     pub mcp_server: Option<PartialLocalMcpServerConfig>,
+    /// Removed with `dgc rewrite`; still accepted so existing configs load.
+    #[allow(dead_code)]
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub execution: Option<PartialExecutionConfig>,
@@ -143,7 +145,6 @@ show_diff = true
 auto_compact_prompt_token_threshold = 250000
 # auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
 resume = false
-rewrite_timeout_sec = 30
 # Managed finite-command timeout; 0 means unlimited (cancellation still works)
 command_timeout_ms = 300000
 
@@ -278,11 +279,28 @@ fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
 ///
 /// An empty value is treated as unset to avoid surprising startup failures
 /// from inherited empty environment entries.
-fn explicit_config_path() -> Option<PathBuf> {
+pub(crate) fn explicit_config_path() -> Option<PathBuf> {
     std::env::var("DOGE_CODE_CONFIG")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
+}
+
+/// User-level dgc directory: `XDG_CONFIG_HOME/doge-code`, else
+/// `HOME/.config/doge-code`. Empty values are unset. Shared with files that
+/// must live next to the user config (e.g. the stored OpenCode key).
+pub(crate) fn user_config_dir() -> Option<PathBuf> {
+    use std::env;
+
+    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME")
+        && !xdg_home.is_empty()
+    {
+        return Some(Path::new(&xdg_home).join("doge-code"));
+    }
+    match env::var("HOME") {
+        Ok(home) if !home.is_empty() => Some(Path::new(&home).join(".config/doge-code")),
+        _ => None,
+    }
 }
 
 /// Implicit global candidates in precedence order:
@@ -298,18 +316,9 @@ fn implicit_candidate_paths() -> Vec<ConfigSource> {
     use std::env;
 
     let mut sources = Vec::new();
-    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME")
-        && !xdg_home.is_empty()
-    {
+    if let Some(dir) = user_config_dir() {
         sources.push(ConfigSource {
-            path: Path::new(&xdg_home).join("doge-code/config.toml"),
-            kind: ConfigSourceKind::User,
-        });
-    } else if let Ok(home) = env::var("HOME")
-        && !home.is_empty()
-    {
-        sources.push(ConfigSource {
-            path: Path::new(&home).join(".config/doge-code/config.toml"),
+            path: dir.join("config.toml"),
             kind: ConfigSourceKind::User,
         });
     }

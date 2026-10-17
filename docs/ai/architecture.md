@@ -22,7 +22,7 @@ Read only the section relevant to the requested change. Paths are relative to th
 | `src/llm/context_budget.rs` | Preflight context governor: request footprint, token estimate, pressure classification (pure, no history mutation) |
 | `src/config/context_budget.rs` | Preflight governor config (`[context_budget] mode = auto/observe/off`) |
 | `src/llm/message_utils.rs` | Global tool-output truncation caps (see `docs/tool-output-contract.md`) |
-| `src/llm/tool_runtime.rs` | Shared runtime handles; `MAX_ITERS` loop bound (256) |
+| `src/llm/tool_runtime.rs` | Shared runtime handles; loop bound from `agent_budget.max_iterations` (default 256, `src/config/agent_budget.rs`) |
 | `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context); `subagent/budget.rs` tracks finite resources, `subagent/evidence.rs` preserves bounded partial findings |
 | `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
 | `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |

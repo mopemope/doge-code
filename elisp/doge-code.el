@@ -56,11 +56,6 @@
   "Disable Repomap generation for faster startup (passed as --no-repomap)."
   :type 'boolean)
 
-(defcustom doge-code-fix-retry 3
-  "Number of retries for the fix command."
-  :type 'integer)
-
-
 (defcustom doge-code-resume nil
   "Resume the latest session context (passed as --resume)."
   :type 'boolean)
@@ -77,14 +72,6 @@
   "Enable Semantic HUD if `doge-hud.el` is available."
   :type 'boolean)
 
-(defcustom doge-code-enable-flymake t
-  "Enable Flymake integration if `doge-flymake.el` is available."
-  :type 'boolean)
-
-(defcustom doge-code-enable-compile t
-  "Enable Compilation auto-fix if `doge-compile.el` is available."
-  :type 'boolean)
-
 (defcustom doge-code-enable-refactor t
   "Enable Refactoring tools if `doge-refactor.el` is available."
   :type 'boolean)
@@ -95,9 +82,6 @@
 (defvar doge-code--current-process nil
   "Current running Doge-Code process.")
 
-(defvar doge-code--prompt-history nil
-  "Minibuffer history for Doge-Code rewrite prompts.")
-
 (define-minor-mode doge-code-mode
   "Minor mode for Doge-Code integration."
   :lighter " Doge"
@@ -107,7 +91,6 @@
 (defun doge-code-mode-setup ()
   "Setup keybindings for doge-code-mode."
   (define-key doge-code-mode-map (kbd "C-c d a") 'doge-code-analyze-region)
-  (define-key doge-code-mode-map (kbd "C-c d r") 'doge-code-refactor-region)
   (define-key doge-code-mode-map (kbd "C-c d e") 'doge-code-explain-region)
   (define-key doge-code-mode-map (kbd "C-c d b") 'doge-code-analyze-buffer)
   ;; Cancel command
@@ -172,18 +155,6 @@
       (when (require 'doge-hud nil t)
         (doge-hud-mode 1)
         (message "Doge-Code: Semantic HUD enabled.")))
-
-    ;; Flymake
-    (when doge-code-enable-flymake
-      (when (require 'doge-flymake nil t)
-        (define-key doge-code-mode-map (kbd "C-c d f") 'doge-flymake-fix-at-point)
-        (message "Doge-Code: Flymake integration enabled.")))
-
-    ;; Compile
-    (when doge-code-enable-compile
-      (when (require 'doge-compile nil t)
-        (doge-compile-mode 1)
-        (message "Doge-Code: Compilation auto-fix enabled.")))
 
     ;; Refactor
     (when doge-code-enable-refactor
@@ -286,72 +257,6 @@ If JSON-OUTPUT, add --json flag. CALLBACK defaults to `doge-code--handle-respons
       (doge-code--show-progress "Error occurred")
       (message "Doge-Code Error: %s" response))))
 
-(defun doge-code--rewrite-snippet (prompt temp-file buffer start-marker end-marker file-path original-snippet)
-  "Rewrite snippet by invoking Doge-Code rewrite subcommand.
-PROMPT is the user instruction.
-TEMP-FILE contains the snippet to rewrite.
-BUFFER is the target buffer that should receive the rewrite.
-START-MARKER and END-MARKER delimit the region to replace.
-FILE-PATH optionally provides context to the CLI.
-ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying the rewrite."
-  (let* ((global-args (append (when doge-code-model (list "--model" doge-code-model))
-                              (when doge-code-disable-repomap '("--no-repomap"))))
-         (args (append global-args
-                       (list "rewrite" "--prompt" prompt "--code-file" temp-file "--json")
-                       (when file-path (list "--file-path" file-path)))))
-    (doge-code--async-run
-     args
-     (lambda (output)
-       (unwind-protect
-           (if (not (buffer-live-p buffer))
-               (progn
-                 (doge-code--show-progress "Error occurred")
-                 (message "Doge-Code rewrite aborted: buffer closed"))
-             (with-current-buffer buffer
-               (condition-case err
-                   (let ((result (json-read-from-string output)))
-                     (if (and (assoc 'success result) (assoc-default 'success result))
-                         (let* ((rewritten-raw (assoc-default 'rewritten_code result))
-                                (rewritten (unless (eq rewritten-raw json-null) rewritten-raw))
-                                (tokens-raw (assoc-default 'tokens_used result))
-                                (tokens (if (or (null tokens-raw) (eq tokens-raw json-null)) 0 tokens-raw))
-                                (display-path-raw (assoc-default 'display_path result))
-                                (display-path (when (and display-path-raw (not (eq display-path-raw json-null)))
-                                                display-path-raw)))
-                            (if (not rewritten)
-                                (progn
-                                  (doge-code--show-progress "Error occurred")
-                                  (message "Doge-Code Error: rewrite result missing rewritten_code"))
-                              (let ((beg (marker-position start-marker))
-                                    (end (marker-position end-marker)))
-                                (if (and beg end)
-                                    (let ((current-snippet (buffer-substring-no-properties beg end)))
-                                      (if (not (string= current-snippet original-snippet))
-                                          (progn
-                                            (doge-code--show-progress "Error occurred")
-                                            (message "Doge-Code rewrite aborted: region changed during rewrite"))
-                                        (progn
-                                          (save-excursion
-                                            (let ((inhibit-read-only t))
-                                              (goto-char beg)
-                                              (delete-region beg end)
-                                              (insert rewritten)))
-                                          (doge-code--show-progress "Completed")
-                                          (if display-path
-                                              (message "Doge-Code rewrite applied to %s (tokens: %d)" display-path tokens)
-                                            (message "Doge-Code rewrite applied (tokens: %d)" tokens)))))
-                                  (progn
-                                    (doge-code--show-progress "Error occurred")
-                                    (message "Doge-Code rewrite aborted: region changed"))))))
-                      (doge-code--show-progress "Error occurred")
-                      (message "Doge-Code Error: %s"
-                               (or (assoc-default 'error result) "Rewrite failed"))))
-                 (error
-                 (doge-code--show-progress "Error occurred")
-                  (message "Doge-Code Error: %s\nResponse: %s" err output)))))
-         (ignore-errors (delete-file temp-file))
-         (set-marker start-marker nil)
-         (set-marker end-marker nil))))))
 
 ;;;###autoload
 (defun doge-code-analyze-region (start end)
@@ -359,30 +264,6 @@ ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying th
   (interactive "r")
   (deactivate-mark)
   (doge-code--exec "Analyze this code and suggest improvements" (cons start end) t #'doge-code--handle-response))
-
-;;;###autoload
-(defun doge-code-refactor-region (start end)
-  "Rewrite the active region (or entire buffer) with a custom Doge-Code prompt."
-  (interactive "r")
-  (let* ((has-region (use-region-p))
-         (beg (if has-region start (point-min)))
-         (end (if has-region end (point-max)))
-         (prompt (read-string "Rewrite prompt: " nil 'doge-code--prompt-history)))
-    (when (string-empty-p prompt)
-      (user-error "Rewrite prompt cannot be empty"))
-    (let* ((snippet (buffer-substring-no-properties beg end))
-           (temp-file (make-temp-file "doge-code-snippet" nil ".txt"))
-           (target-buffer (current-buffer))
-           (start-marker (copy-marker beg))
-           (end-marker (copy-marker end t))
-           (file-path (when buffer-file-name (expand-file-name buffer-file-name))))
-      (when (string-empty-p snippet)
-        (user-error "Selected region is empty"))
-      (with-temp-file temp-file
-        (insert snippet))
-      (doge-code--rewrite-snippet prompt temp-file target-buffer start-marker end-marker file-path snippet)
-      (when has-region
-        (deactivate-mark)))))
 
 ;;;###autoload
 (defun doge-code-explain-region (start end)
@@ -405,33 +286,6 @@ ORIGINAL-SNIPPET is used to ensure the buffer has not changed before applying th
 
 ;;;###autoload
 (defalias 'doge-code-exec 'doge-code-exec-interactive)
-
-;;;###autoload
-(defalias 'doge-code-rewrite-region 'doge-code-refactor-region)
-
-;;;###autoload
-(defun doge-code-fix ()
-  "Attempt to fix the last failed command (default: compile-command).
-Runs the command via 'dgc fix' and displays output in a buffer."
-  (interactive)
-  (let ((cmd (read-string "Command to fix: " compile-command)))
-    (let ((buffer (get-buffer-create "*doge-code-fix*")))
-      (with-current-buffer buffer
-        (erase-buffer)
-        (insert (format "Running: %s fix \"%s\"\n\n" doge-code-executable cmd)))
-      (display-buffer buffer)
-      (make-process
-       :name "doge-code-fix"
-       :buffer buffer
-       :command (append (list doge-code-executable)
-                        (when doge-code-model (list "--model" doge-code-model))
-                        (when doge-code-disable-repomap '("--no-repomap"))
-                        (list "fix" cmd "--retry" (number-to-string doge-code-fix-retry)))
-       :sentinel (lambda (proc event)
-                   (when (string= event "finished\n")
-                     (with-current-buffer (process-buffer proc)
-                       (insert "\n[Done]"))
-                     (message "Doge-Code: Fix attempt finished.")))))))
 
 ;; Remove manual initialization as it's handled by doge-code-setup
 
