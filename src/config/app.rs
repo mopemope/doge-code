@@ -67,7 +67,6 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     /// Local MCP HTTP listener config (`[mcp_server]`).
     pub local_mcp_server: LocalMcpServerConfig,
-    pub rewrite_timeout_sec: u64,
     /// Tool routing policy (`[tool_routing]`). Token-efficiency layer only;
     /// never a substitute for execution/filesystem policy.
     pub tool_routing: ToolRoutingConfig,
@@ -111,7 +110,6 @@ impl Default for AppConfig {
             execution_configured: false,
             mcp_servers: vec![McpServerConfig::default()],
             local_mcp_server: LocalMcpServerConfig::default(),
-            rewrite_timeout_sec: 30,
             tool_routing: ToolRoutingConfig::default(),
             reasoning: ReasoningConfig::default(),
             context_budget: ContextBudgetConfig::default(),
@@ -259,7 +257,8 @@ impl AppConfig {
                         } else {
                             "OPENAI_API_KEY"
                         })
-                        .ok(),
+                        .ok()
+                        .filter(|key| !key.trim().is_empty()),
                         ConfigOrigin::Environment,
                     )
                 })
@@ -492,10 +491,6 @@ impl AppConfig {
             execution_configured,
             mcp_servers,
             local_mcp_server,
-            rewrite_timeout_sec: project_cfg
-                .rewrite_timeout_sec
-                .or(file_cfg.rewrite_timeout_sec)
-                .unwrap_or(30),
             tool_routing,
             reasoning,
             context_budget,

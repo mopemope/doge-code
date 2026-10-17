@@ -81,6 +81,8 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 記載するが、実際の SessionStore と最新 README は JSON チェックポイントである。
 同一情報の重複を整理し、言語レジストリとドキュメントの一致を検証する小さなチェックが有用。
 
+> 解決済み：現行の `architecture.md` は `src/session/` を JSON チェックポイントと記載している。
+
 ### 3. RepoMap の解析器更新に伴うキャッシュ無効化（設計上の不足）
 
 [analyzer.rs](../../src/analysis/analyzer.rs) の本番経路 `build_with_cache` は
@@ -88,6 +90,8 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 [cache.rs](../../src/analysis/cache.rs) の `is_cache_valid` にもバージョン比較の TODO が残る。
 この判定には grammar / collector / 解析スキーマの版が含まれない。
 解析器だけ更新しソースが変わらない場合に、古い解析結果を再利用する経路が残る。
+
+> 解決済み：現行の `is_cache_valid` は解析 revision とソースファイルハッシュを確認し、TODO は残っていない。
 
 提案は分析フォーマットと collector の明示的リビジョンによる fingerprint。
 変更時には rebuildable な RepoMap だけを無効化し、セッションと provenance は維持する。

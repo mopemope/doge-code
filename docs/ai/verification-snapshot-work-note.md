@@ -1,5 +1,8 @@
 # 検証実行時 snapshot の作業記録
 
+> 履歴資料：実装時点の記録です。現行の provenance wire は v8（`PROVENANCE_SCHEMA_VERSION`）で、
+> 本文の wire v5・テスト件数・`/tmp` 成果物は当時のものです。
+
 - 受け入れ条件: 実行前後の project 内 Git 対象と provenance 参照ファイルを記録し、現在との比較を独立表示する。
 - 成否・帰属・coverage は維持。新しい wire v5 を追加し、v1〜v4 は移行しない。
 - 対象境界: features/verification_snapshot、provenance store/wire、execute_process、TUI test/lint、provenance_read、evidence report。

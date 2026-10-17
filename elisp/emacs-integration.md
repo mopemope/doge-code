@@ -5,10 +5,10 @@
 Doge-Code is an interactive CLI/TUI coding agent built in Rust that uses OpenAI-compatible LLMs to assist with code reading, analysis, searching, and editing. This document explains the integration features between Doge-Code and Emacs, allowing seamless use of AI assistance within Emacs.
 
 The integration consists of two main components:
-1. **CLI-based Minimum Viable Integration (MVI)**: Calling Doge-Code's `--exec` subcommand as a subprocess from Emacs for code analysis and refactoring.
+1. **CLI-based Minimum Viable Integration (MVI)**: Calling Doge-Code's `--exec` subcommand as a subprocess from Emacs for code analysis and explanation.
 2. **MCP Server Mode**: Running Doge-Code as an HTTP server and calling tools (e.g., `search_repomap`, `fs_read`) in real-time from the Emacs client.
 
-After installation you can enable the minor mode wherever you want (e.g. by adding it to `prog-mode-hook`). The keybindings described below become available whenever `doge-code-mode` is active. The integration leverages Doge-Code's tool system (static code analysis, file operations, etc.) to assist with code analysis, explanation, and refactoring.
+After installation you can enable the minor mode wherever you want (e.g. by adding it to `prog-mode-hook`). The keybindings described below become available whenever `doge-code-mode` is active. The integration leverages Doge-Code's tool system (static code analysis, file operations, etc.) to assist with code analysis and explanation.
 
 ## Requirements
 
@@ -26,7 +26,7 @@ After installation you can enable the minor mode wherever you want (e.g. by addi
 2. Ensure the binary (default: `dgc`) is in your `PATH`.
 
 ### 2. Emacs Configuration (Quick Start)
-Add the following to your `init.el`. This single setup function automatically detects and enables available extensions (MCP, Flymake, HUD, etc.).
+Add the following to your `init.el`. This single setup function automatically detects and enables available extensions (MCP, HUD, etc.).
 
 ```elisp
 ;; Add doge-code elisp directory to load-path
@@ -56,7 +56,6 @@ When `doge-code-setup` is called, it automatically enables `doge-code-mode` in p
 
 ### Core CLI Features
 - `C-c d a`: **Analyze Region** - Get improvement suggestions.
-- `C-c d r`: **Rewrite/Refactor Snippet** - Replace region with AI-generated code.
 - `C-c d e`: **Explain Region** - Get plain text explanation.
 - `C-c d b`: **Analyze Buffer** - Analyze the entire file.
 - `C-c d c`: **Cancel** - Stop the current Doge-Code process.
@@ -66,10 +65,12 @@ If dependencies are met, these become available:
 - `C-c d m s`: **MCP Search** - Search repository map symbols.
 - `C-c d m f`: **MCP Read** - Read file content via MCP server.
 
-### Auto-Fix and Refactoring
-- `C-c d f`: **Fix Flymake** - Attempt to fix Flymake diagnostic at point.
-- `C-c d R`: **Global Refactor** - Perform large-scale codebase refactoring.
-- **Compilation Fix**: Automatically prompts to fix failed compilations.
+### Refactoring
+- `C-c d R`: **Global Refactor** - Perform large-scale codebase refactoring (via `exec`).
+
+The former inline rewrite (`C-c d r`), Flymake fix (`C-c d f`) and compilation
+auto-fix helpers were removed together with the `dgc rewrite` and `dgc fix`
+subcommands.
 
 ### Semantic HUD (Optional)
 Set `(setq doge-code-enable-hud t)` before setup to enable ghost-text overlays showing symbol info.
@@ -83,8 +84,6 @@ You can control which features are enabled by setting these variables **before**
 | `doge-code-enable-auto-mode` | `t` | Auto-enable `doge-code-mode` in `prog-mode`. |
 | `doge-code-enable-mcp` | `t` | Enable MCP tools integration. |
 | `doge-code-enable-hud` | `nil` | Enable Semantic HUD overlays. |
-| `doge-code-enable-flymake` | `t` | Enable Flymake auto-fix command. |
-| `doge-code-enable-compile` | `t` | Enable compilation finish hook for fixing. |
 | `doge-code-enable-refactor` | `t` | Enable git-aware refactoring tools. |
 
 ## Dependencies
@@ -98,19 +97,12 @@ Doge-Code intelligently handles missing packages. If an optional dependency is m
 ## Detailed Features
 
 ### 1. CLI-based Integration (MVI)
-Asynchronously calls Doge-Code's CLI from Emacs: analysis/explanation flows use the `exec` subcommand, while inline rewrites invoke the dedicated `rewrite` subcommand. Results are parsed from JSON (`--json`) and either displayed or applied directly in the buffer as appropriate.
-
-When a rewrite is requested, Doge-Code now normalizes the reported file path relative to the configured project root before it is sent to the LLM and echoed back in JSON responses. This avoids leaking absolute paths while still grounding the model in the correct file context and gives Emacs enough information to show which buffer was rewritten.
+Asynchronously calls Doge-Code's CLI from Emacs: analysis and explanation flows use the `exec` subcommand. Results are parsed from JSON (`--json`) and displayed.
 
 #### Commands
 - **doge-code-analyze-region** (`C-c d a`):
   - Analyze selected region and display improvement suggestions.
   - Example: Select a function and analyze → Display "Code improvements: ..." in popup.
-- **doge-code-refactor-region** (`C-c d r`):
-  - Prompt for a rewrite instruction, send the selected region (or whole buffer if no region) to Doge-Code, and replace the text with the rewritten snippet returned from the CLI.
-  - The Emacs helper now verifies that the buffer has not changed while the LLM request is in-flight; if the user edits the region, the rewrite is aborted with a clear message.
-  - Success messages include the relative project path reported by the Rust CLI (e.g. `src/lib.rs`) so you can confirm the rewrite scope.
-  - Example: Highlight a function, supply "Convert to async/await" as the prompt, and the region is replaced with the rewritten implementation.
 - **doge-code-explain-region** (`C-c d e`):
   - Explain selected region (plain text output).
 - **doge-code-analyze-buffer** (`C-c d b`):
@@ -122,9 +114,7 @@ When a rewrite is requested, Doge-Code now normalizes the reported file path rel
 1. Open a Rust file.
 2. Select a function.
 3. Execute `C-c d a` → Display analysis results in *doge-output* buffer or popup.
-4. Execute `C-c d r`, enter an instruction such as "Replace indexing with iterator APIs", and the region is rewritten inline when the CLI returns `rewritten_code`.
-5. JSON response for rewrites: `{"success": true, "mode": "rewrite", "rewritten_code": "...", "tokens_used": 98}`.
-6. On error: Display "Doge-Code Error: ..." in message bar.
+4. On error: Display "Doge-Code Error: ..." in message bar.
 
 #### Customization
 - `doge-code-executable`: Binary path (default: "dgc").
@@ -181,21 +171,7 @@ Ghost-text overlays showing symbol information.
 2.  `(require 'doge-hud)`.
 3.  Enable with `(doge-hud-mode 1)`.
 
-### 5. Self-Healing Flymake
-Automatic error fixing integration.
-
-1.  Add `doge-flymake.el` to load path.
-2.  `(require 'doge-flymake)`.
-3.  Bind the fix command to a convenient key:
-    ```elisp
-    (with-eval-after-load 'flymake
-      (define-key flymake-mode-map (kbd "C-c d f") 'doge-flymake-fix-at-point))
-    ```
-
-#### Usage
-Move cursor to a Flymake error and press `C-c d f`. Doge will attempt to rewrite the code to fix the specific error message.
-
-### 6. Usage Example
+### 5. Usage Example
 1. Start the MCP server.
 2. In Emacs: `M-x doge-mcp-search-repomap` → Enter keywords → Display symbols/code in result buffer.
 3. Response: JSON format search results (file paths, symbols).

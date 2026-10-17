@@ -53,7 +53,7 @@ pub fn handle_stack(_executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) {
         }
         _ => {
             ui.push_log(format!("[Stack] Unknown subcommand: {}", subcommand));
-            ui.push_log("Usage: /stack [add <task>|next|list]");
+            ui.push_log("Usage: /stack [add <task>|next|list|clear]");
         }
     }
 }
