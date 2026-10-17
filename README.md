@@ -276,17 +276,30 @@ and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-
 
 ### OpenCode Go / Zen (API key)
 
+Quick start: save your key once, then pick a route. One key serves both Go and Zen.
+
+```sh
+dgc auth login opencode     # paste the key (hidden input); stored owner-only (0600)
+dgc --provider go           # subscription; or: dgc --provider zen (pay-as-you-go)
+```
+
+Inside the TUI, `/provider go` or `/provider zen` (and `/models`) switches route
+and model from the picker without restarting. `dgc auth status opencode` shows
+whether a key is present (not whether it is valid) and `dgc auth logout opencode`
+removes it. The key is stored at `~/.config/doge-code/opencode_api_key` (next to
+`DOGE_CODE_CONFIG` when that is set). Piped input also works:
+`echo "$KEY" | dgc auth login opencode`.
+
 Choose `--provider go` (`opencode-go`) for subscription usage or `--provider zen`
-(`opencode-zen`) for pay-as-you-go Zen. Export `OPENCODE_API_KEY` in your calling
-shell, then start `dgc --provider go`; no configuration file or OAuth login is
-needed. These select different endpoints; dgc never falls back from Go to Zen and
-rejects HTTP redirects that could change routes. Supply a key through `OPENCODE_API_KEY`, `--api-key`, or the existing
-`api_key` config field. `OPENAI_API_KEY` is reserved for the existing compatible
-provider.
+(`opencode-zen`) for pay-as-you-go Zen. These select different endpoints; dgc
+never falls back from Go to Zen and rejects HTTP redirects that could change
+routes. Key precedence is `--api-key`, `OPENCODE_API_KEY`, the stored key, then
+the existing `api_key` config field. `OPENAI_API_KEY` is reserved for the existing
+compatible provider.
 
 ```sh
 dgc --provider go --model gpt-6-luna exec "Explain this project"
-dgc --provider go --model kimi-k2.6
+dgc --provider go --model kimi-k2.7-code
 dgc --provider zen --model qwen3.8-max
 ```
 
@@ -312,7 +325,7 @@ model = "gpt-6-luna"
 
 Endpoint bases follow the current [Go](https://opencode.ai/v2/docs/console/go/)
 and [model endpoint](https://opencode.ai/v2/docs/console/models/) tables checked on
-2026-10-15. The offline model/protocol catalog remains the dated 2026-10-09
+2026-10-15. The offline model/protocol catalog is the dated 2026-10-17
 snapshot; it does not establish current model availability.
 Supported Chat Completions models include GLM, Kimi and DeepSeek; GPT 6 Luna uses
 API-key Responses. Messages, Google, System One and unknown models fail before
@@ -348,14 +361,14 @@ selected. Enter key repeats are ignored.
 
 On Go/Zen, `/models` opens the same offline picker; `/models glm` searches it.
 Go/Zen selections deliberately reuse the already selected OpenCode key. Entering
-from another provider uses only `OPENCODE_API_KEY`; OpenAI keys and OAuth
-credentials are never carried across. No key is requested, saved or displayed by
-the picker. With no key, selection is still available offline; export
-`OPENCODE_API_KEY` and restart to make requests. Authentication failures identify
+from another provider uses only `OPENCODE_API_KEY` or the key stored by `dgc auth login opencode`; OpenAI keys and OAuth
+credentials are never carried across. No key is requested or displayed by
+the picker. With no key, selection is still available offline; run
+`dgc auth login opencode` (or export `OPENCODE_API_KEY`) and retry. Authentication failures identify
 the selected route and suggest checking its key/subscription or billing in the
 OpenCode Console. Keys are not verified merely by opening the picker.
 
-Selection is session-local: no config or key is saved. Each conversation's
+Selection is session-local: no config is saved. Each conversation's
 provider/billing route stays fixed; switching Go/Zen starts a new conversation.
 The new session stores non-secret provider/model metadata;
 `/session switch` and `--resume=<id>` restore it before loading that conversation.

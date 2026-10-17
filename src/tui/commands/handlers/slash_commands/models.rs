@@ -34,7 +34,7 @@ fn open_picker(executor: &TuiExecutor, ui: &mut TuiApp, provider: ProviderKind, 
             &executor.cfg,
             provider,
             &executor.cfg.model,
-            std::env::var("OPENCODE_API_KEY").ok(),
+            opencode::key_store::available_key(),
         )?;
         picker.key_available = cfg.api_key.is_some();
         if query.is_empty() {

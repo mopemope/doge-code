@@ -4,6 +4,7 @@ use crate::llm::capabilities::ApiKind;
 use anyhow::{Result, bail};
 
 pub(crate) mod catalog;
+pub mod key_store;
 pub use catalog::{catalog, lookup, print_catalog};
 
 pub const GO_BASE: &str = "https://opencode.ai/inference/go/v1";
@@ -40,10 +41,10 @@ pub(crate) fn billing_label(provider: ProviderKind) -> &'static str {
 pub(crate) fn auth_guidance(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::OpencodeGo => {
-            "OpenCode Go: check OPENCODE_API_KEY and your Go subscription in the OpenCode Console. Export the key in your shell and restart dgc; no key is saved by /provider. No Zen fallback is used."
+            "OpenCode Go: check OPENCODE_API_KEY and your Go subscription in the OpenCode Console. Run `dgc auth login opencode` (or export OPENCODE_API_KEY) and restart dgc. No Zen fallback is used."
         }
         ProviderKind::OpencodeZen => {
-            "OpenCode Zen: check OPENCODE_API_KEY and your Zen billing/access in the OpenCode Console. Export the key in your shell and restart dgc; no key is saved by /provider. No Go fallback is used."
+            "OpenCode Zen: check OPENCODE_API_KEY and your Zen billing/access in the OpenCode Console. Run `dgc auth login opencode` (or export OPENCODE_API_KEY) and restart dgc. No Go fallback is used."
         }
         _ => "Check the selected provider API key and access.",
     }
@@ -85,13 +86,13 @@ pub(crate) fn config_value<T>(
 pub(crate) fn missing_auth_message(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::OpencodeGo => {
-            "OpenCode Go API key not set. Export OPENCODE_API_KEY in your shell and restart dgc --provider go (or use --api-key). Keys are not saved by /provider."
+            "OpenCode Go API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider go."
         }
         ProviderKind::OpencodeZen => {
-            "OpenCode Zen API key not set. Export OPENCODE_API_KEY in your shell and restart dgc --provider zen (or use --api-key). Keys are not saved by /provider."
+            "OpenCode Zen API key not set. Run `dgc auth login opencode` (or export OPENCODE_API_KEY), then start dgc --provider zen."
         }
         _ => {
-            "OPENAI_API_KEY not set; cannot call LLM. For OpenCode, export OPENCODE_API_KEY and choose --provider go or --provider zen."
+            "OPENAI_API_KEY not set; cannot call LLM. For OpenCode, run `dgc auth login opencode` and choose --provider go or --provider zen."
         }
     }
 }
@@ -143,7 +144,7 @@ pub fn model_id(provider: ProviderKind, model: &str) -> Result<&str> {
 
 /// Verified endpoint table, not a family-prefix guess. Unknown IDs fail before
 /// sending a key or accidentally selecting a billable alternative route.
-/// Sources (2026-10-09): https://docs.opencode.ai/docs/go/ and /zen/.
+/// Sources (2026-10-17): https://docs.opencode.ai/docs/go/ and /zen/.
 pub fn api(provider: ProviderKind, model: &str) -> Result<ApiKind> {
     let spec = lookup(provider, model)?;
     spec.api.adapter().ok_or_else(|| {

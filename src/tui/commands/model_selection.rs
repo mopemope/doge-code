@@ -77,7 +77,7 @@ impl TuiExecutor {
             &self.cfg,
             provider,
             model.id,
-            std::env::var("OPENCODE_API_KEY").ok(),
+            opencode::key_store::available_key(),
         )?;
         let selection = SessionModelSelection {
             provider,

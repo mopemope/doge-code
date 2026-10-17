@@ -265,6 +265,15 @@ impl AppConfig {
                 })
                 .or_else(|| {
                     sourced(
+                        opencode_base
+                            .is_some()
+                            .then(crate::features::opencode::key_store::stored_key)
+                            .flatten(),
+                        ConfigOrigin::Global,
+                    )
+                })
+                .or_else(|| {
+                    sourced(
                         crate::features::opencode::config_value(
                             provider,
                             project_cfg.provider,
