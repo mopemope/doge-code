@@ -142,6 +142,7 @@ pub enum DirectiveOrigin {
     TuiCustomCommand,
     ExecRun,
     ExecAsk,
+    /// Legacy: recorded by the removed `dgc rewrite`; kept to read stored data.
     ExecRewrite,
     SemanticEdit,
 }

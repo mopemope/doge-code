@@ -11,9 +11,7 @@ use crate::llm::{self, OpenAIClient};
 use crate::tools::FsTools;
 use anyhow::{Context, Result};
 use notify_rust::Notification;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -781,286 +779,6 @@ impl Executor {
         })
     }
 
-    /// Runs the executor in rewrite mode, returning the rewritten snippet.
-    pub async fn run_rewrite(
-        &mut self,
-        prompt: &str,
-        snippet: &str,
-        file_path: Option<&str>,
-        json: bool,
-    ) -> Result<()> {
-        if self.client.is_none() {
-            if json {
-                let output = serde_json::json!({
-                    "success": false,
-                    "error": crate::features::opencode::missing_auth_message(self.cfg.provider),
-                    "tokens_used": 0
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                        r#"{"error": "JSON serialization failed"}"#.to_string()
-                    })
-                );
-            } else {
-                eprintln!(
-                    "{}",
-                    crate::features::opencode::missing_auth_message(self.cfg.provider)
-                );
-            }
-            return Ok(());
-        }
-
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Client not initialized"))?;
-        let model = self.cfg.model.clone();
-        let fs_tools = self.tools.clone();
-        let original_file_path = file_path.map(|path| path.to_string());
-        let display_path = original_file_path
-            .as_deref()
-            .map(|path| format_location_hint(path, &self.cfg.project_root));
-        let request = build_rewrite_prompt(prompt, snippet, display_path.as_deref());
-
-        let mut msgs = Vec::new();
-        let sys_prompt = crate::features::agent_prompt::build_system_prompt(&self.cfg);
-        msgs.push(llm::types::ChatMessage {
-            reasoning: Default::default(),
-            provider_state: None,
-            role: "system".into(),
-            content: Some(sys_prompt),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-
-        msgs.push(llm::types::ChatMessage {
-            reasoning: Default::default(),
-            provider_state: None,
-            role: "user".into(),
-            content: Some(request.clone()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-
-        // Rewrite: raw_input is the user-supplied prompt; effective is the
-        // generated rewrite request. Never store the generated request alone
-        // as the user input.
-        let attribution = match crate::tools::provenance::record_directive_observed(
-            &self.tools,
-            crate::provenance::DirectiveOrigin::ExecRewrite,
-            prompt,
-            &request,
-        ) {
-            Ok(env) => crate::provenance::ProvenanceAttribution::with_directive(env.event_id),
-            Err(e) => {
-                tracing::warn!(error = %e, "provenance.directive_record_failed");
-                let _ = self.tools.mark_current_session_provenance_failure();
-                crate::provenance::ProvenanceAttribution::none()
-            }
-        };
-
-        let res = tokio::time::timeout(
-            std::time::Duration::from_secs(self.cfg.rewrite_timeout_sec),
-            llm::run_agent_loop(
-                client,
-                &model,
-                &fs_tools,
-                msgs,
-                None,
-                None,
-                &self.cfg,
-                attribution,
-            ),
-        )
-        .await;
-
-        let tokens_used = client.get_total_prompt_tokens_used() as u32;
-
-        match res {
-            Ok(Ok(run)) => {
-                let outcome = ExecOutcome::from(&run);
-                let updated_messages = run.messages;
-                let final_msg = run.final_message;
-                let tools_called = collect_tools_called(&updated_messages);
-                // Execute hooks after the agent loop completes
-                let final_assistant_msg = crate::llm::types::ChatMessage {
-                    reasoning: Default::default(),
-                    provider_state: None,
-                    role: "assistant".into(),
-                    content: Some(final_msg.content.clone()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                };
-
-                if let Err(e) = self
-                    .hook_manager
-                    .execute_hooks(
-                        &updated_messages,
-                        &final_assistant_msg,
-                        &self.cfg,
-                        &fs_tools,
-                        &self.repomap,
-                    )
-                    .await
-                {
-                    tracing::error!("Error executing hooks: {}", e);
-                }
-
-                if !outcome.is_completed() {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "success": false, "status": "partial", "stop_reason": outcome.stop_reason,
-                                "mode": "rewrite", "response": final_msg.content,
-                                "tokens_used": tokens_used, "file_path": original_file_path,
-                                "display_path": display_path,
-                            }))?
-                        );
-                    } else {
-                        eprintln!("{}", IncompleteExecution(outcome));
-                    }
-                    return outcome.require_completed();
-                }
-                let raw_response = final_msg.content.clone();
-                if let Some(rewritten) = extract_rewritten_code(&raw_response, snippet) {
-                    // Security check: Ensure the rewritten code does not contain malicious patterns
-                    if rewritten.contains("rm -rf")
-                        || rewritten.contains("drop table")
-                        || rewritten.contains("exec(")
-                    {
-                        tracing::error!(
-                            "Security check failed: Rewritten code contains potentially malicious patterns"
-                        );
-                        if json {
-                            let output = serde_json::json!({
-                                "success": false,
-                                "error": "Security check failed: Rewritten code contains potentially malicious patterns",
-                                "tokens_used": tokens_used,
-                                "file_path": original_file_path,
-                                "display_path": display_path,
-                            });
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                                    r#"{"error": "JSON serialization failed"}"#.to_string()
-                                })
-                            );
-                        } else {
-                            eprintln!(
-                                "Security check failed: Rewritten code contains potentially malicious patterns"
-                            );
-                            eprintln!("Total prompt tokens used: {}", tokens_used);
-                        }
-                        return Ok(());
-                    }
-                    if json {
-                        let output = serde_json::json!({
-                            "success": true,
-                            "mode": "rewrite",
-                            "rewritten_code": rewritten,
-                            "tokens_used": tokens_used,
-                            "tools_called": tools_called,
-                            "raw_response": raw_response,
-                            "file_path": original_file_path,
-                            "display_path": display_path,
-                        });
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                                r#"{"error": "JSON serialization failed"}"#.to_string()
-                            })
-                        );
-                    } else {
-                        println!("{}", rewritten);
-                        eprintln!("Total prompt tokens used: {}", tokens_used);
-                    }
-
-                    // Send desktop notification on successful rewrite
-                    let file_description = display_path.as_deref().unwrap_or("the file");
-                    if notifications_enabled()
-                        && let Err(e) = Notification::new()
-                            .summary("Doge-Code Rewrite Completed")
-                            .body(&format!(
-                                "Successfully rewrote code in {}",
-                                file_description
-                            ))
-                            .show()
-                    {
-                        tracing::warn!("Failed to send desktop notification: {}", e);
-                    }
-                } else {
-                    let parse_error = "Failed to parse rewritten code from model response";
-                    if json {
-                        let output = serde_json::json!({
-                            "success": false,
-                            "error": parse_error,
-                            "raw_response": raw_response,
-                            "tokens_used": tokens_used,
-                            "file_path": original_file_path,
-                            "display_path": display_path,
-                        });
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                                r#"{"error": "JSON serialization failed"}"#.to_string()
-                            })
-                        );
-                    } else {
-                        eprintln!("{}", parse_error);
-                        eprintln!("{}", raw_response);
-                        eprintln!("Total prompt tokens used: {}", tokens_used);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                // Inner error from the agent loop
-                if json {
-                    let output = serde_json::json!({
-                        "success": false,
-                        "error": e.to_string(),
-                        "tokens_used": tokens_used,
-                        "file_path": original_file_path,
-                        "display_path": display_path,
-                    });
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                            r#"{"error": "JSON serialization failed"}"#.to_string()
-                        })
-                    );
-                } else {
-                    eprintln!("LLM error: {}", e);
-                    eprintln!("Total prompt tokens used: {}", tokens_used);
-                }
-            }
-            Err(e) => {
-                // Timeout error
-                if json {
-                    let output = serde_json::json!({
-                        "success": false,
-                        "error": format!("Timeout error: {}", e),
-                        "tokens_used": tokens_used,
-                        "file_path": original_file_path,
-                        "display_path": display_path,
-                    });
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&output).unwrap_or_else(|_| {
-                            r#"{"error": "JSON serialization failed"}"#.to_string()
-                        })
-                    );
-                } else {
-                    eprintln!("Timeout error: {}", e);
-                    eprintln!("Total prompt tokens used: {}", tokens_used);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Sends an instruction to the LLM and returns the response content.
     /// Does NOT print to stdout.
     pub async fn ask(&mut self, instruction: &str) -> Result<String> {
@@ -1157,92 +875,12 @@ fn collect_tools_called(messages: &[crate::llm::types::ChatMessage]) -> Vec<Stri
         .collect()
 }
 
-const REWRITE_MARKER_START: &str = "<REWRITTEN_CODE>";
-const REWRITE_MARKER_END: &str = "</REWRITTEN_CODE>";
-const SNIPPET_MARKER_START: &str = "<ORIGINAL_SNIPPET>";
-const SNIPPET_MARKER_END: &str = "</ORIGINAL_SNIPPET>";
-
-fn format_location_hint(file_path: &str, project_root: &Path) -> String {
-    let file_path = Path::new(file_path);
-
-    if let Ok(relative) = file_path.strip_prefix(project_root)
-        && relative.components().count() > 0
-    {
-        return relative.display().to_string();
-    }
-
-    file_path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| file_path.display().to_string())
-}
-
-fn build_rewrite_prompt(prompt: &str, snippet: &str, file_path: Option<&str>) -> String {
-    let location_hint = file_path.unwrap_or("the current buffer");
-    format!(
-        "You are an expert software engineer helping to rewrite a code snippet for a user editing a file inside Emacs.\n\
-Only work with the provided snippet; do not assume or modify code outside it.\n\
-User request (natural language):\n{}\n\
-Original snippet (from {}), wrapped between {} and {} markers:\n{}\n\
-Rewrite the snippet so it satisfies the request.\n\
-Return only the rewritten snippet enclosed between {} and {} markers.\n\
-Do not include explanations, commentary, code fences, or additional text outside the markers.",
-        prompt.trim(),
-        location_hint,
-        SNIPPET_MARKER_START,
-        SNIPPET_MARKER_END,
-        wrap_with_snippet_markers(snippet),
-        REWRITE_MARKER_START,
-        REWRITE_MARKER_END
-    )
-}
-
-fn wrap_with_snippet_markers(snippet: &str) -> String {
-    format!(
-        "{}\n{}\n{}",
-        SNIPPET_MARKER_START, snippet, SNIPPET_MARKER_END
-    )
-}
-
-fn extract_rewritten_code(response: &str, original_snippet: &str) -> Option<String> {
-    let start = response.find(REWRITE_MARKER_START)? + REWRITE_MARKER_START.len();
-    let rest = &response[start..];
-    let end = rest.find(REWRITE_MARKER_END)?;
-    let snippet = &rest[..end];
-    Some(adjust_rewrite_payload(snippet, original_snippet))
-}
-
-fn adjust_rewrite_payload(payload: &str, original_snippet: &str) -> String {
-    let trimmed_start = payload.trim_start_matches(['\r', '\n']);
-    let mut trimmed = trimmed_start.trim_end_matches(['\r', '\n']).to_string();
-    if original_snippet.ends_with('\n') && !trimmed.ends_with('\n') {
-        trimmed.push('\n');
-    }
-    trimmed
-}
-
-pub async fn run_rewrite(
-    cfg: AppConfig,
-    prompt: &str,
-    code_file: &Path,
-    file_path: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let snippet = fs::read_to_string(code_file)
-        .await
-        .with_context(|| format!("Failed to read snippet from {}", code_file.display()))?;
-    let mut executor = Executor::new(cfg).await?;
-    executor
-        .run_rewrite(prompt, &snippet, file_path, json)
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::types::{ChatMessage, ToolCall, ToolCallFunction};
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1279,7 +917,6 @@ mod tests {
             execution_configured: false,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             local_mcp_server: crate::config::LocalMcpServerConfig::default(),
-            rewrite_timeout_sec: 30,
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
@@ -1329,7 +966,6 @@ mod tests {
             execution_configured: false,
             mcp_servers: vec![crate::config::McpServerConfig::default()], // Add mcp_servers field
             local_mcp_server: crate::config::LocalMcpServerConfig::default(),
-            rewrite_timeout_sec: 30,
             tool_routing: crate::config::ToolRoutingConfig::default(),
             reasoning: crate::config::ReasoningConfig::default(),
             context_budget: crate::config::ContextBudgetConfig::default(),
@@ -1349,64 +985,6 @@ mod tests {
         // Ideally, we would check the output (stderr) for "OPENAI_API_KEY not set"
         // but capturing stdout/stderr in tests is non-trivial.
         // This test at least ensures the code path is executed without panic.
-    }
-
-    #[test]
-    fn test_extract_rewritten_code_preserves_trailing_newline() {
-        let snippet = "fn main() { println(\"hi\"); }";
-        let response = format!(
-            "{}\n{}\n{}",
-            super::REWRITE_MARKER_START,
-            snippet,
-            super::REWRITE_MARKER_END
-        );
-        let original = format!("{}\n", snippet);
-        let rewritten = super::extract_rewritten_code(&response, &original)
-            .expect("Failed to extract rewritten code");
-        assert!(rewritten.ends_with('\n'));
-        assert!(rewritten.starts_with("fn main()"));
-    }
-
-    #[test]
-    fn test_extract_rewritten_code_trims_padding() {
-        let snippet = "fn add(a: i32, b: i32) -> i32 { a + b }";
-        let response = format!(
-            "{}\n\n{}\n\n{}",
-            super::REWRITE_MARKER_START,
-            snippet,
-            super::REWRITE_MARKER_END
-        );
-        let original = "fn add(a: i32, b: i32) -> i32 { a + b }";
-        let rewritten = super::extract_rewritten_code(&response, original)
-            .expect("Failed to extract rewritten code");
-        assert_eq!(rewritten, snippet);
-    }
-
-    #[test]
-    fn test_format_location_hint_relative_path() {
-        let root = PathBuf::from("/tmp/doge_project");
-        let file_path = root.join("src").join("lib.rs");
-        let hint = super::format_location_hint(
-            file_path
-                .to_str()
-                .expect("File path contains invalid UTF-8"),
-            &root,
-        );
-        let expected = format!("src{}lib.rs", std::path::MAIN_SEPARATOR);
-        assert_eq!(hint, expected);
-    }
-
-    #[test]
-    fn test_format_location_hint_outside_project() {
-        let root = PathBuf::from("/tmp/doge_project");
-        let file_path = PathBuf::from("/var/tmp/other.rs");
-        let hint = super::format_location_hint(
-            file_path
-                .to_str()
-                .expect("File path contains invalid UTF-8"),
-            &root,
-        );
-        assert_eq!(hint, "other.rs");
     }
 
     #[test]
@@ -1640,20 +1218,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_directive_origins_and_hashes() {
-        // Exec run/ask: raw == effective. Rewrite: raw (user prompt) !=
-        // effective (generated request). Hashes are exact-byte BLAKE3.
+        // Exec run/ask: raw == effective. Hashes are exact-byte BLAKE3.
         let run_raw = "Add cache";
         let run_effective = "Add cache";
         assert_eq!(
             crate::provenance::directive_content_hash(run_raw),
             crate::provenance::directive_content_hash(run_effective)
-        );
-        let rewrite_raw = "Optimize this";
-        let rewrite_effective = build_rewrite_prompt(rewrite_raw, "fn f() {}", Some("src/lib.rs"));
-        assert_ne!(rewrite_raw, rewrite_effective);
-        assert_ne!(
-            crate::provenance::directive_content_hash(rewrite_raw),
-            crate::provenance::directive_content_hash(&rewrite_effective)
         );
         // Record helper works for exec origins without network.
         let temp_dir = TempDir::new().unwrap();
@@ -1736,41 +1306,6 @@ mod tests {
                 .notification(100, 4)
                 .1
                 .contains("Agent response completed")
-        );
-    }
-
-    #[tokio::test]
-    async fn partial_rewrite_does_not_publish_code_as_completed() {
-        use httptest::{Expectation, matchers::*, responders::*};
-        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
-        let root = TempDir::new().expect("tempdir");
-        let path = root.path().join("input.rs");
-        std::fs::write(&path, "fn old() {}\n").expect("fixture");
-        let read = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"reading","tool_calls":[{"id":"read","type":"function","function":{"name":"fs_read","arguments":serde_json::json!({"path":path}).to_string()}}]}}]});
-        let partial = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"```rust\nfn candidate() {}\n```"}}]});
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
-                .times(2)
-                .respond_with(cycle![json_encoded(read), json_encoded(partial)]),
-        );
-        let mut cfg = exec_cfg_with_server(root.path(), &server);
-        cfg.agent_budget.max_iterations = 1;
-        let mut executor = Executor::new(cfg).await.expect("executor");
-        let error = executor
-            .run_rewrite("fix", "fn old() {}", None, true)
-            .await
-            .expect_err("partial rewrite");
-        assert_eq!(
-            error
-                .downcast_ref::<IncompleteExecution>()
-                .expect("typed")
-                .0
-                .stop_reason,
-            Some(crate::llm::tool_execution::AgentStopReason::IterationBudget)
-        );
-        assert_eq!(
-            std::fs::read_to_string(path).expect("fixture"),
-            "fn old() {}\n"
         );
     }
 

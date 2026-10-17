@@ -63,8 +63,9 @@ the command's exit code and a bounded diagnostic tail with the full log path.
 Rust test mode rejects empty filters, zero matches, and ignored-only results;
 guidance also rejects Python unittest discovery with zero executed tests. The
 wrapper supports standard Rust and unittest result formats; unsupported formats fail
-verification rather than guessing a pass. A compile/startup failure does not
-count as a test failure or pass. Do not commit logs or user/environment values.
+verification rather than guessing a pass. A compile or startup failure is reported as
+`FAIL (<code>)` like a test failure (the wrapper does not distinguish them) and
+never counts as a pass. Do not commit logs or user/environment values.
 
 CI owns platform-specific gates. Reuse passing checks until their inputs change;
 guidance-only work does not require rebuilding unrelated Rust code. For Rust

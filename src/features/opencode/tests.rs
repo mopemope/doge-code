@@ -212,6 +212,40 @@ fn api_key_configuration_never_loads_oauth_and_rejects_mismatched_bases() {
     assert!(selection_config(&current, ProviderKind::OpencodeZen, "gpt-6-luna", None).is_err());
 }
 
+#[test]
+fn keyless_opencode_session_picks_up_a_key_stored_later() {
+    let temp = tempfile::tempdir().expect("project");
+    let mut current = crate::config::AppConfig {
+        project_root: temp.path().into(),
+        provider: ProviderKind::OpencodeGo,
+        base_url: GO_BASE.into(),
+        api_key: None,
+        ..Default::default()
+    };
+    let cfg = selection_config(
+        &current,
+        ProviderKind::OpencodeZen,
+        "qwen3.8-max",
+        Some("OPENCODE_FIXTURE".into()),
+    )
+    .expect("keyless session may adopt the available key");
+    assert_eq!(cfg.api_key.as_deref(), Some("OPENCODE_FIXTURE"));
+    assert_eq!(
+        cfg.api_key_origin,
+        Some(crate::config::ConfigOrigin::Environment)
+    );
+
+    current.api_key = Some("SESSION_KEY".into());
+    let kept = selection_config(
+        &current,
+        ProviderKind::OpencodeZen,
+        "qwen3.8-max",
+        Some("OPENCODE_FIXTURE".into()),
+    )
+    .expect("existing key is kept");
+    assert_eq!(kept.api_key.as_deref(), Some("SESSION_KEY"));
+}
+
 #[tokio::test]
 async fn responses_flat_tools_opaque_reasoning_and_session_round_trip() {
     let server = crate::test_support::HTTP_SERVER_POOL.get_server();
