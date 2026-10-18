@@ -916,14 +916,24 @@ pub(crate) async fn infer_api_key(
     .map_err(|error| {
         if error
             .downcast_ref::<ProviderError>()
+            .is_some_and(|error| matches!(error.status, Some(401 | 403)))
+        {
+            match error.downcast::<ProviderError>() {
+                Ok(mut error) => {
+                    error.recovery = crate::features::opencode::access_guidance(
+                        client.provider,
+                        error.status.unwrap_or_default(),
+                        error.error_type.as_deref(),
+                    );
+                    error.into()
+                }
+                Err(error) => error,
+            }
+        } else if error
+            .downcast_ref::<ProviderError>()
             .is_some_and(|e| crate::llm::retry::is_context_length_exceeded_code(&e.code))
         {
             error.context(crate::llm::LlmErrorKind::ContextLengthExceeded)
-        } else if error
-            .downcast_ref::<ProviderError>()
-            .is_some_and(|error| matches!(error.status, Some(401 | 403)))
-        {
-            error.context(crate::features::opencode::auth_guidance(client.provider))
         } else {
             error
         }
@@ -1008,17 +1018,22 @@ async fn execute_infer_request(
                 .map_err(|_| {
                     anyhow::anyhow!("Responses connection failed; no automatic replay was made")
                 })?;
-            let request_id = response
-                .headers()
-                .get("x-request-id")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let request_id = crate::llm::telemetry::extract_request_id(response.headers());
             if !response.status().is_success() {
                 let retry_after = crate::llm::retry::parse_retry_after(response.headers());
-                let error = match super::auth::json_response(response).await {
+                let mut error = match super::auth::json_response(response).await {
                     Err(e) => e,
                     Ok(_) => anyhow::anyhow!("unexpected Responses HTTP status"),
                 };
+                if let Some(error) = error.downcast_mut::<ProviderError>()
+                    && crate::features::opencode::is_free_tier_rejection(
+                        client.provider,
+                        error.status.unwrap_or_default(),
+                        error.error_type.as_deref(),
+                    )
+                {
+                    error.retryable = false;
+                }
                 if error
                     .downcast_ref::<ProviderError>()
                     .is_some_and(|e| e.retryable)

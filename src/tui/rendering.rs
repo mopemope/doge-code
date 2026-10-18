@@ -172,7 +172,7 @@ impl TuiApp {
         let parts = Layout::vertical([
             Constraint::Length(4),
             Constraint::Min(1),
-            Constraint::Length(7),
+            Constraint::Length(10),
         ])
         .split(inner);
         f.render_widget(
@@ -226,10 +226,13 @@ impl TuiApp {
             error.clone()
         } else if let Some(spec) = results.get(picker.selected) {
             format!(
-                "{}\n{}\n{}\nOffline snapshot {}; no live check",
+                "{}\n{}\n{}\nAdapter support does not guarantee access.\n{}Offline snapshot {}; no live check",
                 spec.id,
                 spec.api.name(),
                 spec.api.reason(),
+                spec.access_warning()
+                    .map(|warning| format!("{warning}\n"))
+                    .unwrap_or_default(),
                 crate::features::opencode::catalog::SNAPSHOT
             )
         } else {
@@ -1581,6 +1584,42 @@ fn clip_status_label(label: &str, width: usize) -> String {
         output.push('…');
     }
     output
+}
+
+#[cfg(test)]
+mod model_picker_tests {
+    #[test]
+    fn free_model_picker_displays_warning_and_adapter_access_distinction() {
+        use crate::features::{model_selection::ModelPicker, openai_subscription::ProviderKind};
+        use crate::tui::state::TuiApp;
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = TuiApp::new_for_test("models", None, "default");
+        app.model_picker =
+            Some(ModelPicker::new(ProviderKind::OpencodeZen, "glm-5.3-flash-free").unwrap());
+        for key_available in [false, true] {
+            app.model_picker.as_mut().unwrap().key_available = key_available;
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal
+                .draw(|frame| app.render_model_picker(frame, frame.area()))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Free-tier access"), "{text}");
+            assert!(text.contains("403 FreeTierError"), "{text}");
+            assert!(text.contains("Adapter support does not guarantee access."));
+            assert!(
+                app.model_picker.as_ref().unwrap().results()[0]
+                    .api
+                    .adapter()
+                    .is_some()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

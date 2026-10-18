@@ -50,6 +50,26 @@ pub(crate) fn auth_guidance(provider: ProviderKind) -> &'static str {
     }
 }
 
+pub(crate) fn access_guidance(
+    provider: ProviderKind,
+    status: u16,
+    error_type: Option<&str>,
+) -> &'static str {
+    if is_free_tier_rejection(provider, status, error_type) {
+        "OpenCode rejected this request under its free-tier access conditions (FreeTierError). Free models may be restricted to use within OpenCode. Check the current conditions in the OpenCode Console, then explicitly select another model if needed. No automatic retry, model change or Go/Zen switch was made."
+    } else {
+        auth_guidance(provider)
+    }
+}
+
+pub(crate) fn is_free_tier_rejection(
+    provider: ProviderKind,
+    status: u16,
+    error_type: Option<&str>,
+) -> bool {
+    default_base(provider).is_some() && status == 403 && error_type == Some("FreeTierError")
+}
+
 pub fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::OpencodeGo => "opencode-go",

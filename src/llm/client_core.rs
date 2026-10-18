@@ -227,11 +227,17 @@ impl OpenAIClient {
         &self,
         status: reqwest::StatusCode,
         context: &str,
+        meta: &crate::llm::telemetry::ProviderErrorMetadata,
     ) -> anyhow::Error {
         let message = if crate::features::opencode::default_base(self.provider).is_some() {
             format!(
-                "HTTP {status}. {}",
-                crate::features::opencode::auth_guidance(self.provider)
+                "{}. {}",
+                crate::llm::telemetry::provider_error_message(status.as_u16(), meta),
+                crate::features::opencode::access_guidance(
+                    self.provider,
+                    status.as_u16(),
+                    meta.error_type.as_deref()
+                )
             )
         } else {
             format!("{context}: {status}")

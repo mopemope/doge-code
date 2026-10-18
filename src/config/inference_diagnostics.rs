@@ -55,6 +55,11 @@ impl AppConfig {
                 None => "unknown/unsupported",
             }
         )];
+        if let Ok(spec) = opencode::lookup(self.provider, &self.model)
+            && let Some(warning) = spec.access_warning()
+        {
+            lines.push(warning.into());
+        }
         lines.push(format!(
             "Configuration sources: provider={:?}, endpoint={:?}, API key={}",
             self.provider_origin,
@@ -122,6 +127,21 @@ fn safe_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostics_free_tier_warning_resolves_alias_without_verifying_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().into(),
+            provider: ProviderKind::OpencodeZen,
+            base_url: opencode::ZEN_BASE.into(),
+            model: "opencode/glm-5.3-flash-free".into(),
+            api_key: Some("SECRET_KEY".into()),
+            ..Default::default()
+        };
+        let text = cfg.inference_diagnostics().join("\n");
+        assert!(text.contains("Free-tier access") && text.contains("403 FreeTierError"));
+        assert!(!text.contains("SECRET_KEY"));
+    }
     #[test]
     fn diagnostics_unknown_manual_and_threshold_share_runtime_limit() {
         let dir = tempfile::tempdir().unwrap();
