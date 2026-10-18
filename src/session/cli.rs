@@ -192,14 +192,26 @@ pub async fn run(cfg: AppConfig, command: SessionCommands) -> Result<()> {
         }
         SessionCommands::List => {
             let summaries = store.list_with_stats()?;
-            println!("{}", format::format_summary_list(&summaries, None));
+            println!(
+                "{}",
+                crate::features::safe_display::redact_known(
+                    format::format_summary_list(&summaries, None),
+                    cfg.api_key.as_deref()
+                )
+            );
         }
         SessionCommands::Show { id } => {
             let id = resolve(&store, &id)?;
             let data = store
                 .load(&id)
                 .with_context(|| format!("load session {}", id))?;
-            println!("{}", format::format_detail(&data));
+            println!(
+                "{}",
+                crate::features::safe_display::redact_known(
+                    format::format_detail(&data),
+                    cfg.api_key.as_deref()
+                )
+            );
         }
         SessionCommands::Delete { id, yes } => {
             let id = resolve(&store, &id)?;

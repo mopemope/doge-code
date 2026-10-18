@@ -7,7 +7,9 @@ use std::sync::LazyLock;
 const MASK: &str = "[REDACTED]";
 static CONTROLS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?s)(?:\x1b\]|\x{009d}).*?(?:\x07|\x1b\\|\x{009c}|$)",
+        // Line-bounded so an unterminated string sequence cannot swallow the
+        // rest of the text; the lone introducer is dropped by the control filter.
+        r"(?m)(?:\x1b\]|\x{009d}).*?(?:\x07|\x1b\\|\x{009c}|$)",
         r"|\x1b[P^_X].*?(?:\x1b\\|$)",
         r"|(?:\x1b\[|\x{009b})[0-?]*[ -/]*[@-~]",
     ))
@@ -48,19 +50,20 @@ pub(crate) fn terminal_text(input: &str) -> String {
         .collect()
 }
 
-fn sensitive(name: &str) -> bool {
-    let name: String = name
-        .chars()
+fn normalize(name: &str) -> String {
+    name.chars()
         .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)
-        .collect();
-    name == "token"
+        .collect()
+}
+
+fn sensitive(name: &str) -> bool {
+    let name = normalize(name);
+    // Any `*token` key (`session_token`, `csrf_token`, ...) is a credential;
+    // plural counters such as `max_tokens` do not end in `token`.
+    name.ends_with("token")
         || [
             "apikey",
-            "accesstoken",
-            "refreshtoken",
-            "idtoken",
-            "authtoken",
             "password",
             "passwd",
             "secret",
@@ -98,6 +101,15 @@ fn plain(input: &str, known_secret: Option<&str>) -> String {
     FLAG.replace_all(&output, "${1}[REDACTED]").into_owned()
 }
 
+/// Masks the exact configured credential in already-projected output, for
+/// callers (CLI listings) that format text without access to the config.
+pub(crate) fn redact_known(output: String, known_secret: Option<&str>) -> String {
+    match known_secret.filter(|secret| !secret.trim().is_empty()) {
+        Some(secret) => output.replace(secret, MASK),
+        None => output,
+    }
+}
+
 pub(crate) fn text(input: &str, known_secret: Option<&str>) -> String {
     project_text(input, known_secret, 0)
 }
@@ -108,7 +120,13 @@ fn project_text(input: &str, secret: Option<&str>, depth: usize) -> String {
         && let Ok(mut json) = serde_json::from_str::<Value>(input)
     {
         visit(&mut json, secret, depth + 1, "");
-        return json.to_string();
+        // Keep the layout of a multi-line document; strings embedded in JSON
+        // (depth > 0) must stay compact.
+        return if depth == 0 && input.trim().contains('\n') {
+            serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string())
+        } else {
+            json.to_string()
+        };
     }
     plain(input, secret)
 }
@@ -146,7 +164,7 @@ fn visit(value: &mut Value, secret: Option<&str>, depth: usize, parent: &str) {
                             .as_str()
                             .is_some_and(crate::features::human_review::valid_token))
                     && !value.is_null()
-                    && !(key == "token" && value.is_number())
+                    && !(value.is_number() && normalize(key).ends_with("token"))
                 {
                     *value = MASK.into();
                 } else {
@@ -193,5 +211,56 @@ mod tests {
         );
         assert!(rendered.contains("visible"));
         assert!(input.to_string().contains("FLAG_SECRET"));
+    }
+
+    #[test]
+    fn unterminated_string_sequences_stop_at_the_end_of_the_line() {
+        assert_eq!(
+            terminal_text("a\u{1b}]0;title\nsecond line\nthird"),
+            "a\nsecond line\nthird"
+        );
+        assert_eq!(terminal_text("x\u{1b}Ppayload\nkeep"), "x\nkeep");
+        assert_eq!(terminal_text("a\u{1b}]0;title\u{7}b"), "ab");
+    }
+
+    #[test]
+    fn json_text_keeps_its_line_layout_but_embedded_json_stays_compact() {
+        let pretty = text("{\n  \"a\": 1,\n  \"b\": [2]\n}", None);
+        assert!(pretty.contains("\n  \"a\": 1"), "{pretty}");
+        assert_eq!(text("{\"a\": 1}", None), "{\"a\":1}");
+        let nested = text("{\n  \"inner\": \"{\\n \\\"a\\\": 1\\n}\"\n}", None);
+        assert!(nested.contains("{\\\"a\\\":1}"), "{nested}");
+    }
+
+    #[test]
+    fn any_token_suffixed_json_key_is_masked_but_counters_are_not() {
+        let mut value = serde_json::json!({
+            "session_token": "SESSION_SECRET",
+            "csrf-token": "CSRF_SECRET",
+            "bearerToken": "BEARER_SECRET",
+            "token": 7,
+            "max_tokens": 4096,
+            "prompt_tokens": 12,
+            "next_page_token": 3,
+        });
+        visit(&mut value, None, 0, "");
+        let rendered = value.to_string();
+        for secret in ["SESSION_SECRET", "CSRF_SECRET", "BEARER_SECRET"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert_eq!(value["token"], 7);
+        assert_eq!(value["max_tokens"], 4096);
+        assert_eq!(value["prompt_tokens"], 12);
+        assert_eq!(value["next_page_token"], 3);
+    }
+
+    #[test]
+    fn redact_known_masks_only_the_exact_configured_secret() {
+        assert_eq!(
+            redact_known("a plain-key b".into(), Some("plain-key")),
+            "a [REDACTED] b"
+        );
+        assert_eq!(redact_known("a b".into(), None), "a b");
+        assert_eq!(redact_known("a b".into(), Some("  ")), "a b");
     }
 }

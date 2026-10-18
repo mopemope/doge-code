@@ -24,7 +24,6 @@ glob = "0.3"
 toml = "1.1.8"
 reqwest = { version = "0.13.5", features = ["json", "stream", "gzip", "brotli", "zstd", "form"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "process", "full"] }
-dotenvy = "0.15"
 dirs = "7.0"
 tempfile = "3"
 
@@ -54,7 +53,6 @@ ratatui = { version = "0.30.2", features = ["serde", "crossterm_0_29"] }
 tokio-util = { version = "0.7.20", features = ["compat", "rt"] }
 ignore = "0.4"
 rand = "0.10.3"
-humantime = "2.1"
 
 # SeaORM for SQLite persistence
 sea-orm = { version = "2.0.4", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }

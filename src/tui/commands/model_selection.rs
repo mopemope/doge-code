@@ -8,6 +8,16 @@ use crate::{
 };
 use anyhow::Result;
 
+/// Footer label for the active inference route. A ChatGPT subscription names
+/// its account, which every selection change (startup, session switch, new
+/// model session) must keep showing.
+pub(crate) fn selection_label(cfg: &AppConfig, account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("openai | {account} | {}", cfg.model),
+        None => cfg.inference_label(),
+    }
+}
+
 impl TuiExecutor {
     pub(crate) fn ensure_model_selection_idle(&self, ui: &TuiApp) -> Result<()> {
         anyhow::ensure!(
@@ -55,7 +65,12 @@ impl TuiExecutor {
     pub(crate) fn sync_selection_ui(&self, ui: &mut TuiApp) {
         ui.model = Some(self.cfg.model.clone());
         ui.cfg = Some(self.cfg.clone());
-        ui.inference_label = Some(self.cfg.inference_label());
+        ui.inference_label = Some(selection_label(
+            &self.cfg,
+            self.client
+                .as_ref()
+                .and_then(|client| client.account_label()),
+        ));
         ui.auto_compact_prompt_token_threshold = self.cfg.get_effective_compaction_limit();
         ui.tokens_used = 0;
         ui.tokens_prompt_used = 0;

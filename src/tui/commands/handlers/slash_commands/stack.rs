@@ -5,7 +5,12 @@ use crate::tui::view::TuiApp;
 /// Handle /stack command to manage ephemeral task queue
 pub fn handle_stack(_executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
-    let subcommand = parts.first().copied().unwrap_or("list");
+    // A bare `/stack` arrives as "" and means `list`.
+    let subcommand = parts
+        .first()
+        .copied()
+        .filter(|subcommand| !subcommand.is_empty())
+        .unwrap_or("list");
     let content = parts.get(1).copied().unwrap_or("").trim();
 
     match subcommand {
@@ -104,5 +109,22 @@ mod tests {
 
         // check logs if possible
         // assert!(app.shell_output_buffer.contains("Popped next task: Task1"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_stack_without_arguments_lists() {
+        let mut app = create_test_app();
+        let mut executor =
+            TuiExecutor::new(AppConfig::default()).expect("Failed to create executor");
+
+        handle_stack(&mut executor, &mut app, "");
+        let logged = |needle: &str| {
+            app.log.iter().any(|entry| match entry {
+                crate::tui::state::LogEntry::Plain(text)
+                | crate::tui::state::LogEntry::Markdown(text) => text.contains(needle),
+            })
+        };
+        assert!(logged("No tasks in stack."));
+        assert!(!logged("Unknown subcommand"));
     }
 }
