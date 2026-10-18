@@ -1,8 +1,10 @@
 use crate::llm::OpenAIClient;
 use crate::llm::observation::{
-    MIN_OBSERVABLE_TOOL_CHARS, OBSERVATION_READ_TOOL_NAME, OBSERVATION_STUB_PREFIX,
-    ObservationFootprint, ObservationGcReport, ObservationStore, SharedObservationStore,
-    fallback_stub, is_observation_stub, new_shared_store, observation_stub, stub_observation_id,
+    DEDUPABLE_TOOLS, MIN_DEDUP_CHARS, MIN_OBSERVABLE_TOOL_CHARS, OBSERVATION_READ_TOOL_NAME,
+    OBSERVATION_STUB_PREFIX, ObservationFootprint, ObservationGcReport, ObservationStore,
+    SharedObservationStore, duplicate_result_original, duplicate_result_stub, fallback_stub,
+    is_duplicate_result_stub, is_observation_stub, new_shared_store, observation_stub,
+    stub_observation_id,
 };
 use crate::llm::types::ChatMessage;
 use anyhow::{Result, anyhow};
@@ -252,6 +254,73 @@ impl HistoryManager {
         if let Some(id) = id_clone {
             self.unseen_tool_results.insert(id);
         }
+    }
+
+    /// Pointer for a repeated read-only result, or `None` to send it in full.
+    ///
+    /// Only the same tool with the same arguments and a byte-identical result
+    /// that is still inline in the conversation qualifies, so the model never
+    /// loses information: the original is either seen or part of the same
+    /// pending request. The tool already ran, so side effects and provenance
+    /// are unchanged. Offloaded stubs, other tools and small results never match.
+    pub fn duplicate_pointer_for(
+        &self,
+        tool_name: &str,
+        arguments: &str,
+        content: &str,
+    ) -> Option<String> {
+        if !DEDUPABLE_TOOLS.contains(&tool_name) || content.chars().count() < MIN_DEDUP_CHARS {
+            return None;
+        }
+        self.messages
+            .iter()
+            .rev()
+            .filter(|m| m.role == "tool" && m.content.as_deref() == Some(content))
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .find(|id| {
+                self.tool_signature_for_call_id(id)
+                    .is_some_and(|(name, args)| name == tool_name && args == arguments)
+            })
+            .map(duplicate_result_stub)
+    }
+
+    /// Restore every repeated-result pointer to the content it stands for.
+    ///
+    /// Local compaction may summarize the original while a pointer survives in
+    /// the exact tail, which would strand the pointer. Run before compaction;
+    /// pointers whose original is neither inline nor in the Observation Store
+    /// are left as they are.
+    fn materialize_duplicate_pointers(&mut self) -> usize {
+        let mut restored = 0;
+        for index in 0..self.messages.len() {
+            let Some(original) = self.messages[index]
+                .content
+                .as_deref()
+                .and_then(duplicate_result_original)
+            else {
+                continue;
+            };
+            let inline = self.messages.iter().find_map(|m| {
+                (m.role == "tool" && m.tool_call_id.as_deref() == Some(original.as_str()))
+                    .then(|| m.content.clone())
+                    .flatten()
+            });
+            let content = match inline {
+                Some(c) if is_observation_stub(&c) => stub_observation_id(&c).and_then(|id| {
+                    self.observations
+                        .read()
+                        .ok()
+                        .and_then(|store| store.get(&id).map(|o| o.content.clone()))
+                }),
+                Some(c) if !is_duplicate_result_stub(&c) => Some(c),
+                _ => None,
+            };
+            if let Some(content) = content {
+                self.messages[index].content = Some(content);
+                restored += 1;
+            }
+        }
+        restored
     }
 
     /// Mark every pending tool result as seen after a successful provider
@@ -865,6 +934,15 @@ impl HistoryManager {
         // Pass 1 (superseded): older duplicates of identical name+args.
         let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
         for &idx in &tool_indices {
+            // A repeated-result pointer is not a copy worth keeping inline: it
+            // must never make the original it points to look superseded.
+            if self.messages[idx]
+                .content
+                .as_deref()
+                .is_some_and(is_duplicate_result_stub)
+            {
+                continue;
+            }
             let call_id = match &self.messages[idx].tool_call_id {
                 Some(id) => id.clone(),
                 None => continue,
@@ -910,7 +988,9 @@ impl HistoryManager {
                 m.role == "tool"
                     && m.content.is_some()
                     && !m.content.as_deref().is_some_and(|c| {
-                        is_observation_stub(c) || c.starts_with("[cleared tool result")
+                        is_observation_stub(c)
+                            || is_duplicate_result_stub(c)
+                            || c.starts_with("[cleared tool result")
                     })
             })
             .map(|(i, _)| i)
@@ -1242,6 +1322,7 @@ impl HistoryManager {
         if self.native_compaction_owns_summarization() {
             return Ok(false);
         }
+        self.materialize_duplicate_pointers();
         let before_bytes = self.messages_json_bytes();
         let unseen = self.unseen_count();
         let protect_start = self.protected_suffix_start_for_unseen();
@@ -2283,6 +2364,187 @@ mod tests {
             .and_then(|m| m.content.clone())
             .unwrap();
         assert!(b.contains('B'));
+    }
+
+    const READ_ARGS: &str = "{\"path\":\"/x\"}";
+
+    fn read_call(id: &str) -> ChatMessage {
+        read_call_with(id, "fs_read", READ_ARGS)
+    }
+
+    fn read_call_with(id: &str, name: &str, arguments: &str) -> ChatMessage {
+        ChatMessage {
+            reasoning: Default::default(),
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some("read".into()),
+            tool_calls: vec![crate::llm::types::ToolCall {
+                id: Some(id.to_string()),
+                r#type: "function".into(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: name.into(),
+                    arguments: arguments.into(),
+                },
+            }],
+            tool_call_id: None,
+        }
+    }
+
+    fn big_result(fill: char) -> String {
+        format!("{{\"content\":\"{}\"}}", fill.to_string().repeat(2_000))
+    }
+
+    #[test]
+    fn repeated_identical_read_becomes_pointer_to_the_inline_original() {
+        let big = big_result('x');
+        let mgr = test_manager(vec![
+            make_msg("user", "u"),
+            read_call("call-a"),
+            make_tool_msg("call-a", &big),
+        ]);
+        let stub = mgr
+            .duplicate_pointer_for("fs_read", READ_ARGS, &big)
+            .expect("pointer");
+        let value: serde_json::Value = serde_json::from_str(&stub).expect("JSON stub");
+        assert_eq!(value["unchanged"], true);
+        assert_eq!(value["duplicate_of"], "call-a");
+        assert!(is_duplicate_result_stub(&stub));
+        assert!(stub.len() < big.len() / 5);
+    }
+
+    #[test]
+    fn dedupe_only_applies_to_same_call_exact_large_results_of_read_only_tools() {
+        let big = big_result('x');
+        let mgr = test_manager(vec![read_call("call-a"), make_tool_msg("call-a", &big)]);
+        // Different content (the file changed) is delivered in full.
+        assert!(
+            mgr.duplicate_pointer_for("fs_read", READ_ARGS, &big_result('y'))
+                .is_none()
+        );
+        // The same bytes from a different call (other arguments) are not a repeat.
+        assert!(
+            mgr.duplicate_pointer_for("fs_read", "{\"path\":\"/other\"}", &big)
+                .is_none()
+        );
+        // Commands and mutations are never deduplicated.
+        for tool in ["execute_process", "edit", "fs_write", "plan_write"] {
+            assert!(mgr.duplicate_pointer_for(tool, READ_ARGS, &big).is_none());
+        }
+        // The same arguments under another tool name do not match either.
+        assert!(
+            mgr.duplicate_pointer_for("search_text", READ_ARGS, &big)
+                .is_none()
+        );
+        // Small results are cheaper to repeat than to explain.
+        let small = "{\"content\":\"tiny\"}".to_string();
+        let mgr_small = test_manager(vec![read_call("c"), make_tool_msg("c", &small)]);
+        assert!(
+            mgr_small
+                .duplicate_pointer_for("fs_read", READ_ARGS, &small)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn offloaded_original_is_not_a_match_so_content_is_resent() {
+        let big = big_result('x');
+        let mut mgr = test_manager(vec![
+            make_msg("user", "u"),
+            read_call("call-a"),
+            make_tool_msg("call-a", &big),
+            make_msg("assistant", "done"),
+        ]);
+        mgr.mark_sent_tool_results_seen();
+        let report = mgr.offload_stale_tool_results_for_pressure(0);
+        assert_eq!(report.recoverable_offloads, 1);
+        // The original is now an observation stub; the repeat must carry content.
+        assert!(
+            mgr.duplicate_pointer_for("fs_read", READ_ARGS, &big)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pointer_never_makes_its_original_look_superseded() {
+        let big = big_result('x');
+        let mut mgr = test_manager(vec![
+            make_msg("user", "u"),
+            read_call("call-a"),
+            make_tool_msg("call-a", &big),
+            read_call("call-b"),
+        ]);
+        let stub = mgr
+            .duplicate_pointer_for("fs_read", READ_ARGS, &big)
+            .expect("pointer");
+        mgr.push_tool_result(Some("call-b".into()), stub.clone());
+        mgr.mark_sent_tool_results_seen();
+        mgr.offload_stale_tool_results_for_pressure(10);
+        let content_of = |mgr: &HistoryManager, id: &str| {
+            mgr.as_slice()
+                .iter()
+                .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(id))
+                .and_then(|m| m.content.clone())
+                .expect("tool result")
+        };
+        assert_eq!(content_of(&mgr, "call-a"), big);
+        assert_eq!(content_of(&mgr, "call-b"), stub);
+    }
+
+    #[test]
+    fn pointers_are_restored_from_inline_or_offloaded_originals_before_compaction() {
+        let big = big_result('x');
+        let mut mgr = test_manager(vec![
+            make_msg("user", "u"),
+            read_call("call-a"),
+            make_tool_msg("call-a", &big),
+            read_call("call-b"),
+            make_tool_msg("call-b", &duplicate_result_stub("call-a")),
+            read_call("call-c"),
+            make_tool_msg("call-c", &duplicate_result_stub("call-gone")),
+        ]);
+        mgr.mark_sent_tool_results_seen();
+        // Inline original: restored byte for byte.
+        // Unresolvable original: the pointer is left untouched.
+        assert_eq!(mgr.materialize_duplicate_pointers(), 1);
+        let content_of = |mgr: &HistoryManager, id: &str| {
+            mgr.as_slice()
+                .iter()
+                .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(id))
+                .and_then(|m| m.content.clone())
+                .expect("tool result")
+        };
+        assert_eq!(content_of(&mgr, "call-b"), big);
+        assert!(is_duplicate_result_stub(&content_of(&mgr, "call-c")));
+        // Offloaded original: restored from the Observation Store.
+        let report = mgr.offload_stale_tool_results_for_pressure(0);
+        assert!(report.recoverable_offloads >= 1);
+        let mut mgr2 = test_manager(vec![
+            make_msg("user", "u"),
+            read_call("call-a"),
+            make_tool_msg("call-a", &big),
+            read_call("call-b"),
+            make_tool_msg("call-b", &duplicate_result_stub("call-a")),
+            make_msg("assistant", "done"),
+        ]);
+        mgr2.mark_sent_tool_results_seen();
+        mgr2.offload_stale_tool_results_for_pressure(0);
+        assert!(is_observation_stub(&content_of(&mgr2, "call-a")));
+        assert_eq!(mgr2.materialize_duplicate_pointers(), 1);
+        assert_eq!(content_of(&mgr2, "call-b"), big);
+    }
+
+    #[test]
+    fn only_the_exact_pointer_shape_is_a_pointer() {
+        assert!(is_duplicate_result_stub(&duplicate_result_stub("call-a")));
+        // Foreign output that starts alike is not pinned or treated as a pointer.
+        let foreign = format!(
+            "{{\"ok\":true,\"unchanged\":true,\"payload\":\"{}\"}}",
+            "z".repeat(3_000)
+        );
+        assert!(!is_duplicate_result_stub(&foreign));
+        assert!(!is_duplicate_result_stub(
+            "{\"ok\":true,\"unchanged\":true,\"duplicate_of\":7}"
+        ));
     }
 
     #[test]

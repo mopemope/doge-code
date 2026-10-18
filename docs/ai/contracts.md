@@ -53,6 +53,10 @@ Seen historical results should be offloaded through the Observation Store
 before conversation compaction. Never replace an unseen tool result with a
 non-recoverable clearing stub merely to satisfy a local token estimate.
 
+A repeated read-only tool result may be replaced by a pointer only when its
+exact content is still inline in the conversation; the original is never made
+offloadable by the pointer. Never use this to shorten a result whose original was
+offloaded, cleared, compacted, or is not an exact match.
 Observation GC is reachability-based, never capacity eviction. After
 successful compaction and after Observation Store restore, retain only the
 observations still referenced by canonical messages (every role's content,
@@ -138,6 +142,12 @@ configs written by older versions still load, ignored, and reported with a warni
 - Native compaction never causes a second token charge for the same provider response.
 - Context-governor calibration is reset after a native compaction boundary.
 - Observation GC fails closed while opaque compaction state may reference prior observations.
+
+## Responses Cache Routing
+
+- ChatGPT-plan and OpenCode Responses requests carry `prompt_cache_key` equal to the conversation ID.
+- The key is routing only: it never changes input items, tools or ordering, and is never a credential.
+- Resume keeps the persisted conversation ID; a new conversation gets a new one.
 
 ## Responses Append-Only Tool Exposure Contract
 

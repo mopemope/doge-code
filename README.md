@@ -398,6 +398,10 @@ context_window_size` override, or unknown. For unknown capacity, the 128,000-tok
 fallback is only an estimate used to calculate the 80% compaction limit; it is
 never displayed as verified model capacity. The effective limit is the minimum of
 that safety limit and the configured model-specific compaction threshold.
+ChatGPT-plan and OpenCode Responses requests send the conversation ID as
+`prompt_cache_key` so one conversation's requests route to the same prompt cache.
+It is a random per-conversation ID (kept on resume), not a credential, and does not
+change request content or the cache-prefix stability rules.
 Reasoning diagnostics distinguish adaptive hints, explicit fixed effort overrides,
 provider defaults and adapter-forced `none` on applicable OpenAI tool requests.
 They describe the main-agent request policy, not measured server thinking;
@@ -1811,9 +1815,12 @@ matching endpoints are observations, not proof that no transient edit occurred.
   visible. Executed failures, compile errors and timeouts retain automatic
   analysis, while cancellation retains its existing behavior.
 - Successful file-edit tool results that report an actual change carry a
-  `verification_note` JSON field asking for readback and tests. The entire
-  model-bound result, including this note, stays parseable JSON within the
-  existing tool output limit; no-op and failed edits omit the note.
+  `verification_note` JSON field asking for tests. The result already carries the
+  applied `diff`, so the note says re-reading the file is unnecessary and asks for a
+  ranged readback only when the diff was shortened (`diff_truncated`, or the global
+  output cap cut it). The entire model-bound result, including this note, stays
+  parseable JSON within the existing tool output limit; no-op and failed edits omit
+  the note.
 - Rust default libtest failure summaries associate panic locations, messages and
   source frames with the matching per-test failure section, including current
   thread-ID output. Separate harness runs keep repeated names distinct. Missing
@@ -2289,6 +2296,18 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   `{"program":"echo","args":["echo","literal"]}` prints `echo literal`.
   Unknown parameter names are rejected before execution; use `args`, `cwd`,
   `env`, and `timeout_ms` rather than aliases such as `arguments` or `timeout`.
+  Repeating the same call (same tool and arguments) with a byte-identical result of at
+  least 1,000 characters that is still in the conversation returns `{"unchanged":true,"duplicate_of":<call id>}`
+  instead of a second copy (`fs_read`, `fs_read_many_files`, `search_text`,
+  `search_repomap`, `fs_list`, `find_file`); a modified file is returned in full.
+  Before the 6,000-character output budget is applied, a stream of at least 1,500
+  characters with at least eight
+  passing-test or build-progress lines (Rust `test … ... ok`, Cargo
+  `Compiling`/`Downloading`/`Downloaded`/`Checking`/`Fresh`, `go test -v` `=== RUN`/
+  `=== PAUSE`/`--- PASS`, `pytest -v` `PASSED`) has those lines removed and begins
+  with `[omitted N passing-test/build-progress lines]`. Failures, warnings, summaries,
+  `Running`/`Blocking` lines and anything unrecognized are kept, so the budget goes
+  to diagnostics. The same filter applies to `execute_bash` and `execute_shell`.
 - `mode = "allowlist"` matches executables exactly: `allowed_programs =
   ["cargo"]` allows `program = "cargo"` only — not `./cargo`, `/tmp/cargo`,
   or `cargo;rm`. Absolute paths must be listed explicitly to be allowed.

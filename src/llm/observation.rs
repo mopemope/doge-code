@@ -38,6 +38,50 @@ pub const OBSERVATION_STUB_PREFIX: &str = "(offloaded tool result:";
 /// Prefix identifying a legacy non-recoverable cleared stub.
 pub const CLEARED_STUB_PREFIX: &str = "[cleared tool result";
 
+/// Read-only tools whose repeated, byte-identical result is replaced by a
+/// pointer to the earlier copy that is still in the conversation.
+pub const DEDUPABLE_TOOLS: &[&str] = &[
+    "fs_read",
+    "fs_read_many_files",
+    "search_text",
+    "search_repomap",
+    "fs_list",
+    "find_file",
+];
+/// Smaller results are cheaper to repeat than to explain.
+pub const MIN_DEDUP_CHARS: usize = 1_000;
+/// Prefix identifying a repeated-result pointer in `role=tool` content.
+pub const DUPLICATE_STUB_PREFIX: &str = "{\"ok\":true,\"unchanged\":true,";
+
+/// Pointer sent instead of a repeated result. Valid JSON so every provider
+/// projection keeps treating tool content as a JSON object.
+pub fn duplicate_result_stub(original_call_id: &str) -> String {
+    // Built by hand: `json!` orders keys alphabetically, which would break the
+    // fixed prefix that identifies a pointer.
+    format!(
+        "{DUPLICATE_STUB_PREFIX}\"duplicate_of\":{},\"note\":\"Result identical to the earlier call above; reuse it. If it was offloaded, observation_read recovers it.\"}}",
+        serde_json::Value::from(original_call_id)
+    )
+}
+
+/// Call id a repeated-result pointer refers to. Requires the exact pointer
+/// shape (fixed prefix, small size, string `duplicate_of`) so unrelated tool
+/// output that merely starts alike is never mistaken for one.
+pub fn duplicate_result_original(content: &str) -> Option<String> {
+    if !content.starts_with(DUPLICATE_STUB_PREFIX) || content.len() > 512 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    let object = value.as_object()?;
+    (object.len() == 4 && object.get("unchanged") == Some(&serde_json::Value::Bool(true)))
+        .then(|| object.get("duplicate_of")?.as_str().map(str::to_owned))
+        .flatten()
+}
+
+pub fn is_duplicate_result_stub(content: &str) -> bool {
+    duplicate_result_original(content).is_some()
+}
+
 /// One preserved model-visible tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Observation {

@@ -1615,7 +1615,7 @@ mod mutation_result_wire_tests {
                     result["verification_note"]
                         .as_str()
                         .expect("note")
-                        .contains("Run tests")
+                        .contains("Run relevant tests")
                 );
             }
             assert_eq!(
@@ -1623,5 +1623,82 @@ mod mutation_result_wire_tests {
                 if changed { "new\n" } else { "old\n" }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod repeated_read_wire_tests {
+    use super::*;
+    use httptest::{Expectation, matchers::*, responders::*};
+
+    #[tokio::test]
+    async fn identical_repeat_read_is_sent_as_pointer_and_changed_file_is_resent() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("big.txt");
+        std::fs::write(
+            &path,
+            format!("FIRST-MARKER\n{}", "line of source text\n".repeat(200)),
+        )
+        .expect("source");
+        let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let requests = captured.clone();
+        let read = |id: &str| serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":id,"type":"function","function":{"name":"fs_read","arguments":serde_json::json!({"path":path}).to_string()}}]}}]});
+        let write = serde_json::json!({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"w1","type":"function","function":{"name":"edit","arguments":serde_json::json!({"file_path":path,"target_block":"FIRST-MARKER\n","new_block":"EDITED-MARKER\n"}).to_string()}}]}}]});
+        let stop = serde_json::json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(json_decoded(move |body: &serde_json::Value| {
+                    requests.lock().expect("requests").push(body.clone());
+                    true
+                }))
+            ])
+            .times(5)
+            .respond_with(cycle![
+                json_encoded(read("r1")),
+                json_encoded(read("r2")),
+                json_encoded(write),
+                json_encoded(read("r3")),
+                json_encoded(stop)
+            ]),
+        );
+        let cfg = crate::config::AppConfig {
+            project_root: root.path().into(),
+            no_repomap: true,
+            api_key: Some("offline-placeholder".into()),
+            base_url: server.url_str("/v1"),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        let mut executor = Executor::new(cfg).await.expect("executor");
+        executor
+            .run("Read the file repeatedly.", false)
+            .await
+            .expect("run")
+            .require_completed()
+            .expect("completed");
+        let requests = captured.lock().expect("requests");
+        let tool_content = |id: &str| {
+            requests.last().expect("request")["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+                .unwrap_or_else(|| panic!("tool result {id}"))["content"]
+                .as_str()
+                .expect("content")
+                .to_owned()
+        };
+        let first = tool_content("r1");
+        assert!(first.contains("line of source text"));
+        let repeat: serde_json::Value =
+            serde_json::from_str(&tool_content("r2")).expect("pointer JSON");
+        assert_eq!(repeat["unchanged"], true);
+        assert_eq!(repeat["duplicate_of"], "r1");
+        // After the file changed, the read carries real content again.
+        let after_edit = tool_content("r3");
+        assert!(after_edit.contains("EDITED-MARKER"));
+        assert!(!after_edit.contains("\"unchanged\""));
     }
 }

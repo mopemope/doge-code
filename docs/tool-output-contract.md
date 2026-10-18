@@ -30,8 +30,11 @@ JSON by the agent loop and handed to the LLM.
 
 Successful file mutations (`fs_write`, `edit`, `apply_patch`, `undo`) whose
 result reports `changed: true` add a `verification_note` string to the
-model-bound JSON object. The note asks for a content readback and regression
-checks. No-op and failed results do not add the note. The original handler
+model-bound JSON object. The note asks for regression checks. When the result
+carries a complete `diff` it says re-reading the file is unnecessary; a ranged
+readback is requested only when `diff_truncated` is set or the global cap would
+shorten the diff. `fs_write`/`undo` results have no diff and get the short
+tests-only note. No-op and failed results do not add the note. The original handler
 value and mutation/provenance outcome remain unchanged. Serialization and the
 global output budget apply to the complete object, including the note; there
 is no text suffix after the JSON. Aggregate budgeting accounts for escaped
@@ -59,6 +62,19 @@ parseable JSON. Non-JSON payloads are wrapped in a
 
 > The tool itself is responsible for keeping its output under the cap.
 > The global truncator is a safety net, not the budgeting mechanism.
+
+## Repeated read-only results
+
+When `fs_read`, `fs_read_many_files`, `search_text`, `search_repomap`, `fs_list` or
+`find_file` succeeds with a model-bound result of at least 1,000 characters that is
+byte-identical to a `role=tool` result of the same tool and arguments still inline in the conversation, the agent
+loop sends `{"ok":true,"unchanged":true,"duplicate_of":"<call id>","note":...}`
+instead (`HistoryManager::duplicate_pointer_for`); local compaction first restores every pointer
+to its content (`materialize_duplicate_pointers`) so none outlives its original. The tool still ran, so
+provenance and side effects are unchanged. Offloaded/cleared originals, other tools,
+mutations, commands and small results never match, and a changed file produces a
+different result that is sent in full. The superseded-result offload pass ignores
+pointers so an original is never offloaded merely because a pointer repeats it.
 
 ## Structured response conventions
 
@@ -102,6 +118,7 @@ the helpers in `src/tools/budget.rs` (`head_tail_truncate` for command output,
 |---|---|
 | `execute_process` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`); bounded capture (32KB head + 32KB tail per stream) so RAM stays flat; classified verification additionally returns a compact (<1000 chars) `verification_workspace` summary, with command success unchanged |
 | `execute_bash` / `execute_shell` | stdout+stderr combined 6,000 chars, head+tail preserved (`output_truncated` + `warnings`) |
+| passing-test / build-progress noise (all three process tools) | Applied before the budget, per stream, only for streams of at least 1,500 characters with at least 8 matching lines (`src/execution/output.rs::strip_progress_noise`): Rust libtest `... ok`, Cargo `Compiling`/`Downloading`/`Downloaded`/`Checking`/`Fresh`, `go test -v` `=== RUN`/`=== PAUSE`/`--- PASS`, `pytest -v` `PASSED`. A first-line `[omitted N passing-test/build-progress lines]` marks the removal; failures, `Running`/`Blocking`, summaries and unrecognized lines stay. Structured test observation reads the raw capture, not the filtered text. |
 | trusted `/test` / `/lint` diagnostics | raw managed capture is bounded per stream, then failure parsing runs before an internal ~32,000-character head+tail diagnostic budget; this is intentionally separate from the LLM 6,000-character tool budget |
 | `search_text` | `response_budget_chars` (default 6,000), per-match text capped at 500 chars; complete JSON records within 1 MiB total stdout (newlines counted), bounded stderr diagnostic prefix, explicit process/record errors; byte cap before any requested row is an error without a resumable offset |
 | `apply_patch` | unified diff only (no full-content echo), diff capped at 6,000 chars |
