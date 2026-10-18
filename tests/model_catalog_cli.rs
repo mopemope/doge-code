@@ -56,6 +56,27 @@ fn model_catalog_cli_alias_unknown_and_provider_specific_adapter() {
 }
 
 #[test]
+fn model_catalog_cli_warns_for_free_models_but_keeps_supported_ones_selectable() {
+    for model in [
+        "glm-5.3-flash-free",
+        "big-pickle",
+        "muse-spark-1.3-contributor-free",
+    ] {
+        let output = models("opencode-zen", Some(model));
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("Free-tier access"), "{text}");
+        assert!(text.contains("403 FreeTierError"), "{text}");
+        assert!(
+            text.contains("adapter support does not guarantee access"),
+            "{text}"
+        );
+    }
+    let output = models("opencode-zen", Some("glm-5.3-flash"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Free-tier access"));
+}
+
+#[test]
 fn model_diagnostics_cli_is_keyless_and_reports_unknown_or_manual_capacity() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("fixture.toml");

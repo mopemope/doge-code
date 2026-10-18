@@ -140,11 +140,12 @@ impl ProviderState {
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Provider request failed (HTTP {status:?}, code {code}, request {request_id:?}). {recovery}"
+    "Provider request failed (HTTP {status:?}, code {code}, type {error_type:?}, request {request_id:?}). {recovery}"
 )]
 pub struct ProviderError {
     pub status: Option<u16>,
     pub code: String,
+    pub error_type: Option<String>,
     pub param: Option<String>,
     pub request_id: Option<String>,
     pub recovery: &'static str,
@@ -208,6 +209,12 @@ impl ProviderError {
         Self {
             status,
             code: safe_identifier(&code),
+            error_type: body
+                .get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty() && safe_identifier(value) == *value)
+                .map(str::to_owned),
             param: error
                 .get("param")
                 .and_then(|v| v.as_str())

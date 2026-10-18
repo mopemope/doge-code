@@ -347,6 +347,22 @@ mismatched prefixes and unsupported selections exit with an error. A supported
 adapter does not establish live availability, subscription access or remaining
 allowance. `dgc models --provider openai` keeps the existing OAuth account catalog.
 
+Known free-tier models (including `big-pickle` and `glm-5.3-flash-free`) show an
+access warning in the CLI catalog, TUI selection details and `diagnostics`.
+They remain selectable when dgc implements their API adapter. Adapter support
+does not guarantee access: OpenCode may restrict free-tier usage to its own
+client, and its [free-model conditions](https://opencode.ai/v2/docs/console/models/#free-models)
+can change. An HTTP 403 with structured `error.type = "FreeTierError"` displays
+a dedicated access-conditions explanation instead of recommending key
+registration. Check the current conditions in the OpenCode Console; if needed,
+explicitly choose another model via `/provider zen <model-id>` or start dgc with
+`--provider zen --model <model-id>` after checking its pricing and access.
+dgc does not retry this rejection, select a paid model, or switch Go/Zen routes.
+Other 401/403 errors retain the key/subscription/billing guidance. Diagnostic
+request IDs prefer `x-request-id`, falling back to `x-opencode-log-id`; provider
+message bodies and API keys are not displayed. This diagnosis does not establish
+that free models are permanently unavailable or that inference will succeed.
+
 In the TUI, `/provider` opens the existing model picker from any provider.
 `/provider go` or `/provider zen` previews that billing route; add a model search,
 for example `/provider zen qwen3.8-max`. The picker labels Go as subscription and

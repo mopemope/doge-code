@@ -320,6 +320,8 @@ pub fn parse_provider_error_metadata(
         error_type = object
             .get("type")
             .and_then(|v| v.as_str())
+            // Do not turn an unknown type into a recognized one by stripping characters.
+            .filter(|value| safe_identifier(value) == *value)
             .map(safe_identifier)
             .filter(|s| !s.is_empty());
         param = object
@@ -359,13 +361,20 @@ pub fn provider_error_message(status: u16, meta: &ProviderErrorMetadata) -> Stri
     out
 }
 
-/// Extract a sanitized `x-request-id` header value, if present.
+/// Prefer x-request-id, falling back to OpenCode's diagnostic log ID.
 pub fn extract_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(safe_identifier)
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-opencode-log-id")
+                .and_then(|v| v.to_str().ok())
+                .map(safe_identifier)
+                .filter(|s| !s.is_empty())
+        })
 }
 
 /// Classify a `reqwest` transport error without retaining URL/body text.
@@ -383,6 +392,19 @@ pub fn summarize_transport_error(error: &reqwest::Error) -> TransportErrorSummar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_id_prefers_primary_header_and_sanitizes_opencode_fallback() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-opencode-log-id", "log/<fixture>".parse().unwrap());
+        assert_eq!(extract_request_id(&headers).as_deref(), Some("logfixture"));
+        headers.insert("x-request-id", "primary_id".parse().unwrap());
+        assert_eq!(extract_request_id(&headers).as_deref(), Some("primary_id"));
+        headers.insert("x-request-id", "///".parse().unwrap());
+        assert_eq!(extract_request_id(&headers).as_deref(), Some("logfixture"));
+        headers.insert("x-opencode-log-id", "<>/".parse().unwrap());
+        assert_eq!(extract_request_id(&headers), None);
+    }
 
     const SECRET_SYSTEM: &str = "SECRET_SYSTEM_PROMPT_8fb3";
     const SECRET_USER: &str = "SECRET_USER_PROMPT_019a";

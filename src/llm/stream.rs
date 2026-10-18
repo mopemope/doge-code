@@ -251,7 +251,7 @@ impl OpenAIClient {
                         );
                         let provider_code = extract_provider_code(&trimmed);
                         if status.as_u16() == 401 || status.as_u16() == 403 {
-                            return Err(self.authentication_error(status, "chat error"));
+                            return Err(self.authentication_error(status, "chat error", &meta));
                         }
                         if status.as_u16() == 400
                             && let Some(code) = provider_code.as_deref()
