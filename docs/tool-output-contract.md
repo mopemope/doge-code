@@ -314,7 +314,8 @@ to the child process; it never invokes a shell or parses a new command line.
 ## Observation Store (`obs-*`)
 
 Large historical tool results are offloaded recoverably via
-`src/llm/observation.rs` (`HistoryManager::offload_stale_tool_results`).
+the Observation Store in `src/llm/observation.rs`
+(`HistoryManager::offload_stale_tool_results` in `src/llm/tool_execution/history.rs`).
 The stub `(offloaded tool result: <tool>, <N> B, observation obs-000001; use
 observation_read if needed)` is recoverable with `observation_read`; the
 legacy `[cleared tool result; ...]` stub is only a store-full fallback and is

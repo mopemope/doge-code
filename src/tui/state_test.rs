@@ -235,6 +235,18 @@ fn test_get_all_commands_with_custom_commands() {
     assert!(all_commands.contains(&"/cancel".to_string()));
     assert!(all_commands.contains(&"/jobs".to_string()));
     assert!(all_commands.contains(&"/compact".to_string()));
+    for builtin in [
+        "/stack",
+        "/fix",
+        "/test",
+        "/reset",
+        "/quick",
+        "/edit-symbol",
+    ] {
+        assert!(all_commands.contains(&builtin.to_string()), "{builtin}");
+    }
+    // `/test` is both built-in and in the custom list but is completed once.
+    assert_eq!(all_commands.iter().filter(|c| *c == "/test").count(), 1);
 
     // カスタムコマンドが含まれていることを確認
     for custom_cmd in &custom_commands {

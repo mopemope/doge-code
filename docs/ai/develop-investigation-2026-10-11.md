@@ -68,14 +68,19 @@ TypeScript のサンプルだけを試すため、このケースを検出しな
 修正案は ts と tsx の文法登録を分け、JSXを含む関数抽出と意味編集の回帰を追加すること。
 `.jsx` も現在の拡張子マップには登録されていないため、対応範囲を明示して追加を検討する。
 
-再現用ファイル: `/tmp/dgc-tsx-probe-sf9b9mim/probe.rs`。
+再現用ファイル: `/tmp/dgc-tsx-probe-sf9b9mim/probe.rs`（一時ファイルで現在は残っていない）。
 一次資料: [tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript)。
+
+> 解決済み：現行の `language_config.rs` は `ts` に `LANGUAGE_TYPESCRIPT`、`tsx` に `LANGUAGE_TSX` を
+> 登録し、`.jsx` も JavaScript の拡張子に含む。
 
 ### 2. 言語・保存方式のドキュメント不一致（静的確認済み）
 
 README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml と
 `language_configs()` に Java はない。Java の構造解析を実装するか、対応表記を修正する。
 一般的なテキスト読み書きまで不可という意味ではない。
+
+> 解決済み（Java）：現行の README は Java を対応一覧に載せていない。
 
 `docs/ai/architecture.md` のモジュール表は `src/session/` を SQLite persistence と
 記載するが、実際の SessionStore と最新 README は JSON チェックポイントである。
@@ -112,7 +117,7 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 
 現状: `impact_analyze` は提案専用で、検証を実行しない。
 構造化した永続テスト結果の [ResultFormat](../../src/features/structured_test_results/mod.rs) は
-GoTestJson のみ。`/test` に Rust/Python 等の解析があっても、これは永続証跡の共通形式とは別。
+調査時点では GoTestJson のみ（現在は `PytestJunit` も追加済み）。`/test` に Rust/Python 等の解析があっても、これは永続証跡の共通形式とは別。
 [obligations.rs](../../src/provenance/obligations.rs) の observed_passing は、
 リンクした変更を観測したコマンドの成功で決まる。
 現行仕様も「正しさの証明」とはしておらず、それ自体を実装バグとは扱わない。

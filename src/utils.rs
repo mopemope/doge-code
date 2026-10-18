@@ -8,7 +8,6 @@ pub mod bounded_file;
 pub mod text_budget;
 
 use anyhow::{Context, Result};
-use fastrand;
 use std::path::{Path, PathBuf};
 
 /// Checks if the specified path is a Git repository.

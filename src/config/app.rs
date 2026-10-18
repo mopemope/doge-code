@@ -190,7 +190,7 @@ impl AppConfig {
             anyhow::bail!("--api-key cannot be combined with --provider openai");
         }
         let explicit_model = !cli.model.is_empty()
-            || std::env::var("OPENAI_MODEL").is_ok()
+            || std::env::var("OPENAI_MODEL").is_ok_and(|model| !model.trim().is_empty())
             || project_cfg.model.is_some()
             || file_cfg.model.is_some();
         if provider == crate::features::openai_subscription::ProviderKind::Openai && !explicit_model
@@ -198,7 +198,13 @@ impl AppConfig {
             anyhow::bail!("Select a ChatGPT model with --model. Run dgc models --provider openai.");
         }
         let opencode_base = crate::features::opencode::default_base(provider);
-        let sourced = |value: Option<String>, origin| value.map(|value| (value, origin));
+        // Blank values are unset everywhere (empty exported variables, `--api-key ""`,
+        // `api_key = ""`), so they never shadow a lower-precedence source.
+        let sourced = |value: Option<String>, origin| {
+            value
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (value, origin))
+        };
         let global_base = crate::features::opencode::config_value(
             provider,
             file_cfg.provider,
@@ -257,8 +263,7 @@ impl AppConfig {
                         } else {
                             "OPENAI_API_KEY"
                         })
-                        .ok()
-                        .filter(|key| !key.trim().is_empty()),
+                        .ok(),
                         ConfigOrigin::Environment,
                     )
                 })
@@ -301,6 +306,7 @@ impl AppConfig {
                 "OPENAI_MODEL"
             })
             .ok()
+            .filter(|model| !model.trim().is_empty())
             .or(crate::features::opencode::config_value(
                 provider,
                 project_cfg.provider,

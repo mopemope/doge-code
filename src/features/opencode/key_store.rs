@@ -136,9 +136,17 @@ pub fn stored_key() -> Option<String> {
 /// The current location wins; the legacy one is consulted only when it holds
 /// no key. An unusable file at either location is an error, never skipped.
 fn load_with_legacy(path: &Path, legacy: Option<&Path>) -> Result<Option<String>> {
-    match load_at(path)? {
-        Some(key) => Ok(Some(key)),
-        None => legacy.map_or(Ok(None), load_at),
+    Ok(load_located(path, legacy)?.map(|(key, _)| key))
+}
+
+/// Like [`load_with_legacy`], also returning the file the key was read from.
+fn load_located(path: &Path, legacy: Option<&Path>) -> Result<Option<(String, PathBuf)>> {
+    if let Some(key) = load_at(path)? {
+        return Ok(Some((key, path.to_path_buf())));
+    }
+    match legacy {
+        Some(legacy) => Ok(load_at(legacy)?.map(|key| (key, legacy.to_path_buf()))),
+        None => Ok(None),
     }
 }
 
@@ -213,11 +221,12 @@ pub fn login() -> Result<()> {
 pub fn status() -> Result<()> {
     let path = default_path()?;
     let env = std::env::var("OPENCODE_API_KEY").is_ok_and(|k| !k.trim().is_empty());
-    let stored = match load_with_legacy(&path, legacy_path().as_deref()) {
-        Ok(key) => key.is_some(),
+    let (stored, location) = match load_located(&path, legacy_path().as_deref()) {
+        Ok(Some((_, location))) => (true, location),
+        Ok(None) => (false, path),
         Err(error) => {
             println!("Stored key is unusable and ignored: {error:#}");
-            false
+            (false, path)
         }
     };
     println!(
@@ -226,20 +235,37 @@ pub fn status() -> Result<()> {
     );
     println!(
         "Stored key ({}): {}",
-        path.display(),
+        location.display(),
         if stored { "present" } else { "none" }
     );
     println!("Key presence does not verify authentication or Go/Zen access.");
     Ok(())
 }
 
+/// Removes every given location. A failure on one never leaves the others in
+/// place; failures are reported together once all were attempted.
+fn clear_all(paths: &[PathBuf]) -> Result<bool> {
+    let mut removed = false;
+    let mut failures = Vec::new();
+    for path in paths {
+        match clear_at(path) {
+            Ok(was_present) => removed |= was_present,
+            Err(error) => failures.push(format!("{error:#}")),
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "could not remove every stored OpenCode key file: {}",
+            failures.join("; ")
+        );
+    }
+    Ok(removed)
+}
+
 pub fn logout() -> Result<()> {
-    let removed = clear_at(&default_path()?)?;
-    let removed_legacy = match legacy_path() {
-        Some(legacy) => clear_at(&legacy)?,
-        None => false,
-    };
-    if removed || removed_legacy {
+    let mut paths = vec![default_path()?];
+    paths.extend(legacy_path());
+    if clear_all(&paths)? {
         println!("Removed the stored OpenCode API key.");
     } else {
         println!("No stored OpenCode API key.");
@@ -282,6 +308,47 @@ mod legacy_tests {
                 .as_deref(),
             Some("sk-current")
         );
+    }
+
+    #[test]
+    fn located_key_reports_the_file_it_was_read_from() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current = dir.path().join("new").join(FILE_NAME);
+        let legacy = dir.path().join("old").join(FILE_NAME);
+
+        assert_eq!(load_located(&current, Some(&legacy)).expect("none"), None);
+        save_at(&legacy, "sk-legacy").expect("save legacy");
+        let (key, from) = load_located(&current, Some(&legacy))
+            .expect("fallback")
+            .expect("present");
+        assert_eq!(
+            (key.as_str(), from.as_path()),
+            ("sk-legacy", legacy.as_path())
+        );
+        save_at(&current, "sk-current").expect("save current");
+        let (_, from) = load_located(&current, Some(&legacy))
+            .expect("current")
+            .expect("present");
+        assert_eq!(from, current);
+    }
+
+    #[test]
+    fn logout_clears_the_other_location_even_when_one_removal_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory cannot be removed with remove_file, standing in for any
+        // removal error on the current location.
+        let current = dir.path().join("new").join(FILE_NAME);
+        std::fs::create_dir_all(&current).expect("blocking directory");
+        let legacy = dir.path().join("old").join(FILE_NAME);
+        save_at(&legacy, "sk-legacy").expect("save legacy");
+
+        let error = clear_all(&[current.clone(), legacy.clone()]).expect_err("partial failure");
+        assert!(
+            format!("{error:#}").contains("could not remove"),
+            "{error:#}"
+        );
+        assert!(!legacy.exists(), "the other location is still cleared");
+        assert!(!clear_all(&[legacy]).expect("already gone"));
     }
 
     #[test]
