@@ -459,7 +459,7 @@ async fn chat_tools_once_attempt(
                 Some(status),
                 retry_after,
                 provider_code,
-                client.authentication_error(status, "chat (tools) auth error"),
+                client.authentication_error(status, "chat (tools) auth error", &meta),
             ));
         }
 

@@ -50,6 +50,177 @@ use httptest::{Expectation, matchers::*, responders::*};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+#[tokio::test]
+async fn opencode_free_tier_diagnosis_covers_all_inference_paths_without_replay() {
+    for provider in [ProviderKind::OpencodeGo, ProviderKind::OpencodeZen] {
+        for (model, endpoint) in [
+            ("glm-5.3-flash", "chat/completions"),
+            ("gpt-6-luna", "responses"),
+        ] {
+            for path in 0..3 {
+                let model = match (provider, endpoint) {
+                    (ProviderKind::OpencodeZen, "responses") => "muse-spark-1.3-contributor-free",
+                    (ProviderKind::OpencodeZen, _) => "glm-5.3-flash-free",
+                    _ => model,
+                };
+                let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+                let client = fixture_client(&server, provider);
+                let route = if provider == ProviderKind::OpencodeGo {
+                    "/inference/go/v1"
+                } else {
+                    "/inference/v1"
+                };
+                server.expect(Expectation::matching(all_of![
+                    request::method_path("POST", format!("{route}/{endpoint}")),
+                    request::body(json_decoded(move |body: &Value| body["model"] == model)),
+                ]).times(1).respond_with(status_code(403)
+                    .append_header("x-opencode-log-id", "log_fixture_123")
+                    .body(r#"{"error":{"type":"FreeTierError","code":"subscription_sharing_usage_unavailable","message":"SECRET_BODY_NEVER_SHOW"}}"#)));
+                let (error, logs) = recorded_inference_error(&client, model, path).await;
+                let text = format!("{error:#}");
+                assert!(text.contains("free-tier access conditions"), "{text}");
+                assert!(
+                    text.contains("FreeTierError") && text.contains("log_fixture_123"),
+                    "{text}"
+                );
+                assert!(
+                    !text.contains("auth login") && !text.contains("OPENCODE_API_KEY"),
+                    "{text}"
+                );
+                assert!(!text.contains("SECRET_BODY_NEVER_SHOW") && !text.contains("fixture-key"));
+                assert!(!logs.contains("SECRET_BODY_NEVER_SHOW") && !logs.contains("fixture-key"));
+                if let Some(error) =
+                    error.downcast_ref::<crate::features::openai_subscription::ProviderError>()
+                {
+                    assert!(
+                        !error.retryable,
+                        "free-tier rejection must remain nonretryable to callers"
+                    );
+                }
+                assert_eq!(client.usage_snapshot().attempts, 1);
+            }
+        }
+    }
+}
+
+async fn recorded_inference_error(
+    client: &OpenAIClient,
+    model: &str,
+    path: u8,
+) -> (anyhow::Error, String) {
+    use std::io::{Read, Seek, SeekFrom};
+    use tracing::instrument::WithSubscriber;
+    let mut log = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(log.try_clone().unwrap())
+        .finish();
+    let error = async {
+        let history = vec![message("user", "hi")];
+        match path {
+            0 => client
+                .chat_once(model, history, None)
+                .await
+                .expect_err("rejected"),
+            1 => infer(client, model, &history, &[])
+                .await
+                .expect_err("rejected"),
+            _ => client
+                .chat_stream(model, &history, None)
+                .await
+                .err()
+                .expect("rejected"),
+        }
+    }
+    .with_subscriber(subscriber)
+    .await;
+    log.seek(SeekFrom::Start(0)).unwrap();
+    let mut logs = String::new();
+    log.read_to_string(&mut logs).unwrap();
+    (error, logs)
+}
+
+#[tokio::test]
+async fn opencode_free_tier_diagnosis_preserves_auth_fallbacks_and_exact_type_matching() {
+    for (model, endpoint) in [
+        ("glm-5.3-flash-free", "chat/completions"),
+        ("muse-spark-1.3-contributor-free", "responses"),
+    ] {
+        for (status, body) in [
+            (
+                401,
+                r#"{"error":{"type":"FreeTierError","message":"SECRET_BODY_NEVER_SHOW"}}"#,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"UnknownError","message":"SECRET_BODY_NEVER_SHOW"}}"#,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"FreeTierError!","message":"SECRET_BODY_NEVER_SHOW"}}"#,
+            ),
+            (
+                403,
+                r#"{"type":"FreeTierError","message":"SECRET_BODY_NEVER_SHOW"}"#,
+            ),
+            (403, "FreeTierError SECRET_BODY_NEVER_SHOW"),
+            (403, "{SECRET_BODY_NEVER_SHOW"),
+        ] {
+            for path in 0..3 {
+                let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+                let client = fixture_client(&server, ProviderKind::OpencodeZen);
+                server.expect(
+                    Expectation::matching(request::method_path(
+                        "POST",
+                        format!("/inference/v1/{endpoint}"),
+                    ))
+                    .times(1)
+                    .respond_with(status_code(status).body(body)),
+                );
+                let (error, logs) = recorded_inference_error(&client, model, path).await;
+                let text = format!("{error:#}");
+                assert!(text.contains("auth login opencode"), "{text}");
+                assert!(!text.contains("free-tier access conditions"), "{text}");
+                for secret in ["SECRET_BODY_NEVER_SHOW", "fixture-key"] {
+                    assert!(!text.contains(secret) && !logs.contains(secret));
+                }
+                assert_eq!(client.usage_snapshot().attempts, 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn free_tier_guidance_is_scoped_to_opencode_and_explicit_catalog_ids() {
+    for provider in [ProviderKind::Openai, ProviderKind::OpenaiCompatible] {
+        assert!(
+            !access_guidance(provider, 403, Some("FreeTierError"))
+                .contains("free-tier access conditions")
+        );
+    }
+    for model in [
+        "big-pickle",
+        "glm-5.3-flash-free",
+        "muse-spark-1.3-contributor-free",
+        "jev-1.13-free",
+    ] {
+        assert!(
+            lookup(ProviderKind::OpencodeZen, model)
+                .unwrap()
+                .access_warning()
+                .is_some()
+        );
+    }
+    for id in ["unknown-free", "glm-5.3-flash", "gpt-6-luna"] {
+        let spec = catalog::ModelSpec {
+            id,
+            api: catalog::GatewayApi::ChatCompletions,
+        };
+        assert!(spec.access_warning().is_none());
+    }
+}
+
 fn fixture_client(server: &httptest::Server, provider: ProviderKind) -> OpenAIClient {
     let path = if provider == ProviderKind::OpencodeGo {
         "/inference/go/v1"

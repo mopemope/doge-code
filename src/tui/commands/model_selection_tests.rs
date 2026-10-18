@@ -66,6 +66,25 @@ fn preserve_history(executor: &TuiExecutor) {
         .unwrap();
 }
 #[test]
+fn model_selection_free_tier_is_selectable_and_restored_without_requests() {
+    let (mut executor, mut ui, _dir) = fixture(true);
+    let free_id = executor
+        .start_model_session(ProviderKind::OpencodeZen, "glm-5.3-flash-free", &mut ui)
+        .unwrap();
+    executor
+        .start_model_session(ProviderKind::OpencodeZen, "gpt-6-luna", &mut ui)
+        .unwrap();
+    executor
+        .handle_session_command(&format!("switch {free_id}"), &mut ui)
+        .unwrap();
+    assert_eq!(executor.cfg.model, "glm-5.3-flash-free");
+    assert_eq!(ui.cfg.as_ref().unwrap().model, "glm-5.3-flash-free");
+    assert_eq!(
+        executor.client.as_ref().unwrap().usage_snapshot().attempts,
+        0
+    );
+}
+#[test]
 fn model_selection_new_session_isolates_history_and_restores_selection() {
     let (mut executor, mut ui, _dir) = fixture(true);
     preserve_history(&executor);
