@@ -690,7 +690,9 @@ impl Executor {
         // (matches TUI busy/missing-key semantics).
         let client_ref = match self.client.as_ref() {
             Some(client) => client,
-            None => anyhow::bail!("OpenAI client not initialized"),
+            None => anyhow::bail!(crate::features::opencode::missing_auth_message(
+                self.cfg.provider
+            )),
         };
 
         // Record the observed user directive (exec run). A recording failure

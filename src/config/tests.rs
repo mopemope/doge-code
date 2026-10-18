@@ -622,6 +622,29 @@ fn legacy_exact_match_uses_current_defaults_without_mutation() {
     assert_eq!(llm.max_retries, 3);
 }
 
+/// The constant must keep matching the bytes older dgc versions wrote to disk.
+/// It is derived from nothing else, so the other legacy tests cannot notice an
+/// edit to it; this pins the historical content (including the since-removed
+/// `rewrite_timeout_sec` line).
+#[test]
+fn legacy_generated_default_matches_historical_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let legacy = crate::config::loading::legacy_generated_default_content();
+    assert!(
+        legacy.contains("resume = false\nrewrite_timeout_sec = 30\n# Managed finite-command"),
+        "legacy template must keep the rewrite_timeout_sec line older versions wrote"
+    );
+    let digest: String = Sha256::digest(legacy.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest, "846b94f4c8cd74dcb7ffb507160cdae82d1976af1c96a23f03e8ccac4998bbcd",
+        "LEGACY_GENERATED_DEFAULT must stay byte-identical to the historical template"
+    );
+}
+
 #[test]
 fn modified_legacy_invalid_config_is_error_without_mutation() {
     let temp_dir = TempDir::new().unwrap();

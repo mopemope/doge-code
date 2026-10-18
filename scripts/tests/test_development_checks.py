@@ -89,6 +89,12 @@ class VerificationTests(unittest.TestCase):
         code, _ = self.run_fixture("Ran 3 tests in 0.005s\n\nOK", require_tests="unittest")
         self.assertEqual(code, 0)
 
+    def test_python_discovery_does_not_count_skipped_tests(self):
+        code, _ = self.run_fixture("Ran 2 tests in 0.001s\n\nOK (skipped=2)", require_tests="unittest")
+        self.assertEqual(code, 2)
+        code, _ = self.run_fixture("Ran 3 tests in 0.001s\n\nOK (skipped=2)", require_tests="unittest")
+        self.assertEqual(code, 0)
+
     def test_guidance_includes_test_integrity_checker(self):
         commands = verify.commands("guidance", None, SCRIPTS.parent)
         labels = [" ".join(argv) for argv, _ in commands]
@@ -250,6 +256,10 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue(guidance.check_ci(self.root))
         self.write(".github/workflows/ci.yml", source.replace(f"@{toolchain}", "@0.0.0"))
         self.assertTrue(guidance.check_ci(self.root))
+        self.write(".github/workflows/ci.yml", source.replace(
+            "bash scripts/verify.sh macos", 'cargo test --locked tui::'))
+        errors = guidance.check_ci(self.root)
+        self.assertTrue(any("verify.sh macos" in error for error in errors), errors)
 
     def test_skill_description_rejects_invalid_yaml_scalar(self):
         self.write("AGENTS.md", "Guidance\n")

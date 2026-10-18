@@ -173,7 +173,15 @@ fn run_opencode(command: &AuthCommand) -> Option<Result<()>> {
         {
             Some(key_store::status())
         }
-        AuthCommand::Logout { provider, .. } if provider == "opencode" => Some(key_store::logout()),
+        AuthCommand::Logout { provider, account } if provider == "opencode" => {
+            Some(if account.is_some() {
+                Err(anyhow::anyhow!(
+                    "OpenCode has a single stored key; logout takes no account"
+                ))
+            } else {
+                key_store::logout()
+            })
+        }
         AuthCommand::Use { provider, .. } if provider == "opencode" => Some(Err(anyhow::anyhow!(
             "OpenCode has a single stored key; choose the route with --provider go|zen or /provider"
         ))),

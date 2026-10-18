@@ -645,3 +645,20 @@ fn session_operation_list_prefixes_resolve_switch_resume_and_render() {
         }
     }
 }
+
+#[test]
+fn selection_label_keeps_the_chatgpt_account_and_falls_back_to_the_route() {
+    let cfg = AppConfig {
+        provider: ProviderKind::OpencodeGo,
+        model: "gpt-6-luna".into(),
+        api_key: Some("SYNTHETIC_SECRET".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::model_selection::selection_label(&cfg, Some("work")),
+        "openai | work | gpt-6-luna"
+    );
+    let label = super::model_selection::selection_label(&cfg, None);
+    assert_eq!(label, cfg.inference_label());
+    assert!(!label.contains("SYNTHETIC_SECRET"));
+}

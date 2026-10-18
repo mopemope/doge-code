@@ -124,6 +124,8 @@ own decoding, symlink compatibility and complete-versus-historical failure polic
 Configuration is fail-closed.
 Unknown user/project keys and invalid policy values must fail startup.
 Do not silently clamp, ignore, rewrite, or fallback security/resource policy configuration.
+The one compatibility exception is the obsolete `rewrite_timeout_sec`: it is accepted so
+configs written by older versions still load, ignored, and reported with a warning.
 
 ## Responses Native Compaction Contract
 

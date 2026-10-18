@@ -15,6 +15,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 TEST_RESULT = re.compile(r"test result: \w+\. (\d+) passed; (\d+) failed;")
 UNITTEST_RESULT = re.compile(r"^Ran (\d+) tests? in ", re.M)
+UNITTEST_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
 
 
 def executed_tests(output):
@@ -34,7 +35,9 @@ def run_check(argv, root, log_path, require_tests=False):
             code = 127
     output = log_path.read_text(errors="replace")
     if require_tests == "unittest":
-        count = sum(int(value) for value in UNITTEST_RESULT.findall(output))
+        # Skipped tests are counted in "Ran N" but verified nothing.
+        count = sum(int(value) for value in UNITTEST_RESULT.findall(output)) - sum(
+            int(value) for value in UNITTEST_SKIPPED.findall(output))
     else:
         count = executed_tests(output) if require_tests else None
     if code == 0 and require_tests and count == 0:

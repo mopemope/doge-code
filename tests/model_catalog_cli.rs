@@ -96,3 +96,34 @@ fn model_diagnostics_cli_is_keyless_and_reports_unknown_or_manual_capacity() {
         }
     }
 }
+
+/// Blank values mean "unset" for every source, so they cannot shadow a
+/// lower-precedence value or fail startup on their own.
+#[test]
+fn blank_environment_and_file_values_are_treated_as_unset() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("fixture.toml");
+    std::fs::write(
+        &config,
+        "provider = \"opencode-go\"\nmodel = \"gpt-6-luna\"\napi_key = \"  \"\nmcp_servers = []\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dgc"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("DOGE_CODE_CONFIG", &config)
+        .env("OPENCODE_BASE_URL", "")
+        .env("OPENCODE_MODEL", " ")
+        .env("OPENCODE_API_KEY", "")
+        .current_dir(dir.path())
+        .args(["--api-key", "", "diagnostics"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("gpt-6-luna / NO KEY"), "{text}");
+    assert!(text.contains("API key=none"), "{text}");
+    assert!(text.contains("endpoint=Default"), "{text}");
+}
