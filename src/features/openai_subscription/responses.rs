@@ -28,6 +28,19 @@ pub struct Request {
     context_management: Option<Vec<ContextManagement>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<&'static str>>,
+    /// Stable per-conversation routing hint so successive requests of one
+    /// conversation reach the same prompt cache. Never a credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+}
+
+impl Request {
+    /// Attach the conversation's cache routing key. Observational for
+    /// billing: it changes which backend serves the request, not its content.
+    pub(crate) fn with_prompt_cache_key(mut self, key: &str) -> Self {
+        self.prompt_cache_key = Some(key.to_owned());
+        self
+    }
 }
 
 /// Server-side native compaction directive for `POST /responses`.
@@ -262,6 +275,7 @@ pub fn build(
             ]
         },
         include: None,
+        prompt_cache_key: None,
         store: false,
         stream: true,
         reasoning: effort.map(|e| json!({"effort":e.as_api_str()})),
@@ -551,6 +565,7 @@ pub fn build_with_activation(
             ]
         },
         include: None,
+        prompt_cache_key: None,
         store: false,
         stream: true,
         reasoning: effort.map(|e| json!({"effort":e.as_api_str()})),
@@ -882,7 +897,8 @@ pub(crate) async fn infer_api_key(
     cancel: CancellationToken,
 ) -> Result<ToolResponseWithUsage> {
     let identity = client.responses_identity();
-    let request = build_api_key(model, &identity, messages, tools, effort)?;
+    let request = build_api_key(model, &identity, messages, tools, effort)?
+        .with_prompt_cache_key(client.prompt_cache_key());
     execute_infer_request(client, None, &request, cancel, |response| {
         let output = response
             .get("output")
@@ -933,7 +949,8 @@ pub async fn infer(
         tools,
         effort,
         compact_threshold,
-    )?;
+    )?
+    .with_prompt_cache_key(client.prompt_cache_key());
     if tracing::enabled!(tracing::Level::DEBUG) {
         tracing::debug!(
             responses_native_compaction_enabled = compact_threshold.is_some(),
@@ -1135,7 +1152,8 @@ pub(crate) async fn infer_with_activation_and_usage(
         active_tools,
         effort,
         compact_threshold,
-    )?;
+    )?
+    .with_prompt_cache_key(client.prompt_cache_key());
     if tracing::enabled!(tracing::Level::DEBUG) {
         tracing::debug!(
             responses_native_compaction_enabled = compact_threshold.is_some(),

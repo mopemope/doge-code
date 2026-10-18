@@ -188,6 +188,13 @@ impl OpenAIClient {
         })
     }
 
+    /// Conversation-scoped key for Responses prompt-cache routing. It reuses
+    /// the conversation ID that already scopes OpenCode requests; resume keeps
+    /// it and a new conversation gets a new one.
+    pub(crate) fn prompt_cache_key(&self) -> &str {
+        &self.opencode_session
+    }
+
     /// Non-secret endpoint/protocol binding, independent of the API key.
     pub(crate) fn responses_identity(&self) -> String {
         format!(
