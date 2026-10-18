@@ -2012,6 +2012,66 @@ async fn native_inference_sends_context_management_on_wire() -> Result<()> {
 }
 
 #[tokio::test]
+async fn responses_requests_carry_the_conversation_scoped_cache_key() -> Result<()> {
+    use httptest::{Expectation, matchers::*, responders::*};
+    use std::sync::{Arc, Mutex};
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":response(vec![text_output()])})
+    );
+    let server = httptest::ServerBuilder::new()
+        .bind_addr(([127, 0, 0, 1], 0).into())
+        .run()
+        .expect("server");
+    let keys = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let seen = keys.clone();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/v1/responses"),
+            request::body(json_decoded(move |body: &serde_json::Value| {
+                seen.lock()
+                    .expect("keys")
+                    .push(body["prompt_cache_key"].as_str().map(str::to_owned));
+                true
+            }))
+        ])
+        .times(3)
+        .respond_with(
+            status_code(200)
+                .append_header("content-type", "text/event-stream")
+                .body(wire),
+        ),
+    );
+    let (_temp, store) = temp_store();
+    store.save(&registry()).expect("save");
+    let mut handle = auth::AuthHandle::selected(store).expect("auth");
+    handle.resource = server.url_str("/v1");
+    let mut client = crate::llm::OpenAIClient::new("https://api.openai.com/v1", "")?;
+    client.subscription = Some(handle);
+    let other = client.for_conversation("conversation-b")?;
+    for client in [&client, &client, &other] {
+        crate::llm::tool_execution::requests::chat_tools_once(
+            client,
+            "test-model",
+            &[user("hi")],
+            &[],
+            None,
+            crate::config::ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await?;
+    }
+    let keys = keys.lock().expect("keys");
+    let first = keys[0].as_deref().expect("cache key on first request");
+    assert!(!first.is_empty());
+    // Requests of one conversation share the key; another conversation differs.
+    assert_eq!(keys[1].as_deref(), Some(first));
+    assert_eq!(keys[2].as_deref(), Some("conversation-b"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn attempt_budget_responses_scoped_hook_gates_send_and_preserves_usage() {
     for native in [false, true] {
         let wire = format!(

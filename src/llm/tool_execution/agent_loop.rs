@@ -23,8 +23,82 @@ use super::ui_rendering::truncate_string_with_graphemes;
 use crate::features::agent_prompt::build_system_prompt;
 use crate::llm::message_utils::truncate_tool_output;
 
-const VERIFICATION_NOTE: &str = "File modification detected. Verify your changes:\n1. Read the file to confirm the content is correct.\n2. Run tests to ensure no regressions.";
-const REPAIR_VERIFICATION_NOTE: &str = "File modification detected. Read the file to confirm the content is correct. The controller runs the declared verifiers after your turn; do not execute commands. This mutation result does not establish verification success or acceptance.";
+// The mutation result already carries the applied diff (`edit`/`apply_patch`)
+// or echoes exactly what the model supplied (`fs_write`), so a readback only
+// costs a tool call and the file contents again. Ask for one only when the diff
+// was cut short.
+const VERIFICATION_NOTE: &str = "Change applied; `diff` is the full change, so re-reading the file is unnecessary. Run relevant tests to verify.";
+const VERIFICATION_NOTE_NO_DIFF: &str =
+    "Change applied; this result carries no diff. Run relevant tests to verify.";
+const VERIFICATION_NOTE_DIFF_TRUNCATED: &str = "Change applied, but `diff` was shortened. Read only the affected range if you need to confirm it, then run relevant tests.";
+const REPAIR_VERIFICATION_NOTE: &str = "Change applied; `diff` is the full change, so re-reading the file is unnecessary. The controller runs the declared verifiers after your turn; do not execute commands. This mutation result does not establish verification success or acceptance.";
+const REPAIR_VERIFICATION_NOTE_NO_DIFF: &str = "Change applied; this result carries no diff. The controller runs the declared verifiers after your turn; do not execute commands. This mutation result does not establish verification success or acceptance.";
+const REPAIR_VERIFICATION_NOTE_DIFF_TRUNCATED: &str = "Change applied, but `diff` was shortened. Read only the affected range if you need to confirm it. The controller runs the declared verifiers after your turn; do not execute commands. This mutation result does not establish verification success or acceptance.";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MutationDiff {
+    Complete,
+    Absent,
+    Truncated,
+}
+
+fn mutation_diff_state(value: &serde_json::Value) -> MutationDiff {
+    let has_diff = value
+        .get("diff")
+        .and_then(|diff| diff.as_str())
+        .is_some_and(|diff| !diff.is_empty());
+    if !has_diff {
+        return MutationDiff::Absent;
+    }
+    if value
+        .get("diff_truncated")
+        .and_then(|flag| flag.as_bool())
+        .unwrap_or(false)
+    {
+        MutationDiff::Truncated
+    } else {
+        MutationDiff::Complete
+    }
+}
+
+fn verification_note(diff: MutationDiff, repair_mode: bool) -> &'static str {
+    match (repair_mode, diff) {
+        (false, MutationDiff::Complete) => VERIFICATION_NOTE,
+        (false, MutationDiff::Absent) => VERIFICATION_NOTE_NO_DIFF,
+        (false, MutationDiff::Truncated) => VERIFICATION_NOTE_DIFF_TRUNCATED,
+        (true, MutationDiff::Complete) => REPAIR_VERIFICATION_NOTE,
+        (true, MutationDiff::Absent) => REPAIR_VERIFICATION_NOTE_NO_DIFF,
+        (true, MutationDiff::Truncated) => REPAIR_VERIFICATION_NOTE_DIFF_TRUNCATED,
+    }
+}
+
+fn serialize_with_note(value: &serde_json::Value, note: &str) -> Option<String> {
+    let mut annotated = value.clone();
+    annotated
+        .as_object_mut()?
+        .insert("verification_note".into(), note.into());
+    serde_json::to_string(&annotated).ok()
+}
+
+fn annotated_mutation_json(
+    value: &serde_json::Value,
+    tool_name: &str,
+    repair_mode: bool,
+) -> Option<String> {
+    let diff = mutation_diff_state(value);
+    let json = serialize_with_note(value, verification_note(diff, repair_mode))?;
+    // The global safety net may still shorten an escape-heavy diff, so a
+    // result that overflows its cap never claims the diff is complete.
+    if diff == MutationDiff::Complete
+        && json.chars().count() > crate::llm::max_output_chars(tool_name)
+    {
+        return serialize_with_note(
+            value,
+            verification_note(MutationDiff::Truncated, repair_mode),
+        );
+    }
+    Some(json)
+}
 
 /// Annotate only the model-bound copy, then budget the complete JSON result.
 fn mutation_result_content(
@@ -33,20 +107,11 @@ fn mutation_result_content(
     changed: bool,
     repair_mode: bool,
 ) -> String {
-    let annotated = changed.then(|| {
-        let mut annotated = value.clone();
-        if let Some(fields) = annotated.as_object_mut() {
-            let note = if repair_mode {
-                REPAIR_VERIFICATION_NOTE
-            } else {
-                VERIFICATION_NOTE
-            };
-            fields.insert("verification_note".into(), note.into());
-        }
-        annotated
-    });
-    let json = serde_json::to_string(annotated.as_ref().unwrap_or(value))
-        .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool result\"}".into());
+    let json = changed
+        .then(|| annotated_mutation_json(value, tool_name, repair_mode))
+        .flatten()
+        .or_else(|| serde_json::to_string(value).ok())
+        .unwrap_or_else(|| "{\"error\":\"failed to serialize tool result\"}".into());
     truncate_tool_output(json, tool_name)
 }
 
@@ -2387,6 +2452,29 @@ pub async fn run_agent_loop(
                 }
             }
 
+            // A byte-identical repeat of a read-only call's result that is
+            // still in the conversation is sent as a pointer, not a second copy.
+            let tool_message_content = match success
+                .then(|| {
+                    history.duplicate_pointer_for(
+                        tool_name,
+                        &tc.function.arguments,
+                        &tool_message_content,
+                    )
+                })
+                .flatten()
+            {
+                Some(pointer) => {
+                    debug!(
+                        tool = tool_name,
+                        saved_bytes = tool_message_content.len().saturating_sub(pointer.len()),
+                        "repeated tool result replaced by pointer"
+                    );
+                    pointer
+                }
+                None => tool_message_content,
+            };
+
             // tool message to feed back to the LLM
             history.push_tool_result(tc.id.clone(), tool_message_content);
             // Deferred activation sidecar: `tool_search` result's structured
@@ -3231,6 +3319,7 @@ mod mutation_result_content_tests {
         assert_eq!(result["changed"], true);
         assert_eq!(result["diff"], value["diff"]);
         assert_eq!(result["verification_note"], VERIFICATION_NOTE);
+        assert!(!VERIFICATION_NOTE.to_lowercase().contains("read the file"));
         assert_eq!(value, original);
         assert_eq!(
             mutation_result_content(&value, "edit", false, false),
@@ -3249,12 +3338,14 @@ mod mutation_result_content_tests {
                     serde_json::from_str(&content).expect("complete JSON");
                 assert_eq!(result["success"], true, "{content}");
                 assert_eq!(result["changed"], true);
+                // The global cap shortened the diff, so the note must not claim
+                // it is complete.
                 assert_eq!(
                     result["verification_note"],
                     if repair_mode {
-                        REPAIR_VERIFICATION_NOTE
+                        REPAIR_VERIFICATION_NOTE_DIFF_TRUNCATED
                     } else {
-                        VERIFICATION_NOTE
+                        VERIFICATION_NOTE_DIFF_TRUNCATED
                     }
                 );
                 assert!(result["diff"].as_str().expect("diff").contains("truncated"));
@@ -3262,6 +3353,67 @@ mod mutation_result_content_tests {
                     mutation_result_content(&value, "edit", false, repair_mode),
                     truncate_tool_output(serde_json::to_string(&value).expect("JSON"), "edit")
                 );
+            }
+        }
+    }
+    #[test]
+    fn mutation_note_follows_diff_completeness_without_demanding_readback() {
+        let note = |value: serde_json::Value, repair_mode| {
+            let content = mutation_result_content(&value, "edit", true, repair_mode);
+            let result: serde_json::Value = serde_json::from_str(&content).expect("JSON");
+            result["verification_note"]
+                .as_str()
+                .expect("note")
+                .to_owned()
+        };
+        let complete = serde_json::json!({"success":true,"changed":true,"diff":"-a\n+b"});
+        let no_diff = serde_json::json!({"success":true,"changed":true,"path":"/x"});
+        let empty_diff = serde_json::json!({"success":true,"changed":true,"diff":""});
+        let shortened =
+            serde_json::json!({"success":true,"changed":true,"diff":"-a","diff_truncated":true});
+        for (repair_mode, expected) in [
+            (
+                false,
+                [
+                    VERIFICATION_NOTE,
+                    VERIFICATION_NOTE_NO_DIFF,
+                    VERIFICATION_NOTE_NO_DIFF,
+                    VERIFICATION_NOTE_DIFF_TRUNCATED,
+                ],
+            ),
+            (
+                true,
+                [
+                    REPAIR_VERIFICATION_NOTE,
+                    REPAIR_VERIFICATION_NOTE_NO_DIFF,
+                    REPAIR_VERIFICATION_NOTE_NO_DIFF,
+                    REPAIR_VERIFICATION_NOTE_DIFF_TRUNCATED,
+                ],
+            ),
+        ] {
+            for (value, expected) in [
+                complete.clone(),
+                no_diff.clone(),
+                empty_diff.clone(),
+                shortened.clone(),
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                let actual = note(value, repair_mode);
+                assert_eq!(actual, expected);
+                // Only a shortened diff may ask for a (ranged) readback.
+                assert_eq!(
+                    actual.contains("Read only the affected range"),
+                    expected == VERIFICATION_NOTE_DIFF_TRUNCATED
+                        || expected == REPAIR_VERIFICATION_NOTE_DIFF_TRUNCATED
+                );
+                if repair_mode {
+                    assert!(actual.contains("controller runs"), "{actual}");
+                    assert!(!actual.to_lowercase().contains("relevant tests"));
+                } else {
+                    assert!(actual.to_lowercase().contains("run relevant tests"));
+                }
             }
         }
     }
