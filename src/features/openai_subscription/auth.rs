@@ -64,11 +64,7 @@ pub(crate) fn http_client() -> Result<reqwest::Client> {
 
 pub(crate) async fn json_response(resp: reqwest::Response) -> Result<serde_json::Value> {
     let status = resp.status();
-    let request_id = resp
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let request_id = crate::llm::telemetry::extract_request_id(resp.headers());
     let mut bytes = Vec::new();
     let mut resp = resp;
     while let Some(chunk) = resp

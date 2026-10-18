@@ -42,6 +42,33 @@ pub struct ModelSpec {
     pub id: &'static str,
     pub api: GatewayApi,
 }
+impl ModelSpec {
+    /// Explicit IDs from the official free-model tables, checked 2026-10-18.
+    /// https://opencode.ai/v2/docs/console/models/ (and the dated Zen snapshot).
+    /// A free price is not a guarantee of third-party client access.
+    pub fn access_warning(&self) -> Option<&'static str> {
+        match self.id {
+            "big-pickle"
+            | "glm-5.3-flash-free"
+            | "deepseek-v4.1-flash-free"
+            | "space-bunny-free"
+            | "beam-free"
+            | "ll-alpha-free"
+            | "longcat-2.5-preview-free"
+            | "exo-free"
+            | "mimo-v2.6-flash-free"
+            | "mimo-v2.5-free"
+            | "nemotron-3-ultra-free"
+            | "nemotron-3.5-lightning-free"
+            | "nemotron-3.5-super-vl-free"
+            | "jev-1.13-free"
+            | "muse-spark-1.3-contributor-free" => Some(
+                "Free-tier access may be restricted to OpenCode; dgc may receive 403 FreeTierError. Check current access conditions; selection remains available for supported adapters.",
+            ),
+            _ => None,
+        }
+    }
+}
 const OPENCODEGO: &[ModelSpec] = &[
     ModelSpec {
         id: "grok-4.7",
@@ -551,13 +578,14 @@ pub fn print_catalog(provider: ProviderKind, model: Option<&str>) -> Result<()> 
         "No config, credentials or network access; availability and account access are not checked."
     );
     println!("MODEL ID | API | DGC SUPPORT | REASON");
+    println!("DGC SUPPORT means implemented adapter; adapter support does not guarantee access.");
     let selected = model.map(|id| lookup(provider, id)).transpose()?;
     for entry in catalog(provider)
         .iter()
         .filter(|e| selected.is_none_or(|s| e.id == s.id))
     {
         println!(
-            "{} | {} | {} | {}",
+            "{} | {} | {} | {}{}",
             entry.id,
             entry.api.name(),
             if entry.api.adapter().is_some() {
@@ -565,7 +593,11 @@ pub fn print_catalog(provider: ProviderKind, model: Option<&str>) -> Result<()> 
             } else {
                 "no"
             },
-            entry.api.reason()
+            entry.api.reason(),
+            entry
+                .access_warning()
+                .map(|warning| format!("; {warning}"))
+                .unwrap_or_default()
         );
     }
     if let Some(spec) = selected {
