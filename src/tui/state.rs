@@ -349,11 +349,21 @@ impl TuiApp {
             "/lint".to_string(),
             "/git-worktree".to_string(),
             "/plan".to_string(),
+            "/stack".to_string(),
+            "/fix".to_string(),
+            "/test".to_string(),
+            "/reset".to_string(),
+            "/quick".to_string(),
+            "/edit-symbol".to_string(),
         ];
 
-        // Get custom commands
+        // Get custom commands; a name shadowed by a built-in is listed once.
         if let Some(handler) = &self.handler {
-            commands.extend(handler.get_custom_commands());
+            for command in handler.get_custom_commands() {
+                if !commands.contains(&command) {
+                    commands.push(command);
+                }
+            }
         }
 
         commands

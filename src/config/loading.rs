@@ -39,8 +39,8 @@ pub struct FileConfig {
     /// Local MCP HTTP listener (`[mcp_server]`). Separate from `[[mcp_servers]]`
     /// remote/outbound endpoints.
     pub mcp_server: Option<PartialLocalMcpServerConfig>,
-    /// Removed with `dgc rewrite`; still accepted so existing configs load.
-    #[allow(dead_code)]
+    /// Removed with `dgc rewrite`. The only key accepted and ignored for
+    /// compatibility, so existing configs load; `parse_config_str` warns.
     pub rewrite_timeout_sec: Option<u64>,
     pub command_timeout_ms: Option<u64>,
     pub execution: Option<PartialExecutionConfig>,
@@ -145,6 +145,7 @@ show_diff = true
 auto_compact_prompt_token_threshold = 250000
 # auto_compact_prompt_token_thresholds can be defined as a map of model names to thresholds
 resume = false
+rewrite_timeout_sec = 30
 # Managed finite-command timeout; 0 means unlimited (cancellation still works)
 command_timeout_ms = 300000
 
@@ -248,6 +249,12 @@ fn parse_config_str(raw: &str, source: &ConfigSource) -> Result<FileConfig> {
             normalize_path_for_error(&source.path)
         )
     })?;
+    if cfg.rewrite_timeout_sec.is_some() {
+        tracing::warn!(
+            path = %normalize_path_for_error(&source.path),
+            "`rewrite_timeout_sec` is obsolete and ignored; remove it from the config"
+        );
+    }
     if let Some(subagent) = &cfg.subagent {
         subagent.validate().with_context(|| {
             format!(

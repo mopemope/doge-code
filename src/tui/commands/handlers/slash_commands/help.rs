@@ -25,6 +25,7 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /test - Run tests for the project");
     ui.push_log("  /fix <file>:<start_line>-<end_line> <instruction> - Fix the given line range");
     ui.push_log("  /plan show - Display the current plan");
+    ui.push_log("  /quick <instruction> - Run an instruction without projecting the saved plan");
     ui.push_log("");
 
     ui.push_log("Repository Analysis:");

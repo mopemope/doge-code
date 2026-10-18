@@ -64,14 +64,6 @@
   "Automatically enable `doge-code-mode` in programming modes."
   :type 'boolean)
 
-(defcustom doge-code-enable-mcp t
-  "Enable MCP integration if `doge-mcp.el` and dependencies are available."
-  :type 'boolean)
-
-(defcustom doge-code-enable-hud nil
-  "Enable Semantic HUD if `doge-hud.el` is available."
-  :type 'boolean)
-
 (defcustom doge-code-enable-refactor t
   "Enable Refactoring tools if `doge-refactor.el` is available."
   :type 'boolean)
@@ -142,19 +134,6 @@
     
     ;; Try loading popup for better UI
     (doge-code--check-package 'popup 'doge-code)
-
-    ;; MCP
-    (when (and doge-code-enable-mcp
-               (doge-code--check-package 'request 'doge-mcp)
-               (doge-code--check-package 'deferred 'doge-mcp))
-      (when (require 'doge-mcp nil t)
-        (message "Doge-Code: MCP integration enabled.")))
-
-    ;; HUD (requires MCP)
-    (when (and doge-code-enable-hud (featurep 'doge-mcp))
-      (when (require 'doge-hud nil t)
-        (doge-hud-mode 1)
-        (message "Doge-Code: Semantic HUD enabled.")))
 
     ;; Refactor
     (when doge-code-enable-refactor

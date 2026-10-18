@@ -26,6 +26,12 @@ use crate::tui::commands::handlers::slash_commands::theme::handle_theme;
 use crate::tui::commands::handlers::slash_commands::tokens::handle_tokens;
 use crate::tui::commands::handlers::slash_commands::tools::handle_tools;
 
+/// True when the first word of `line` is exactly `name`, so a built-in never
+/// swallows a custom command that merely starts with its name (`/fix-cache`).
+fn is_command(line: &str, name: &str) -> bool {
+    line.split_whitespace().next() == Some(name)
+}
+
 // Refactored to delegate slash commands to dedicated modules for better modularity and maintainability.
 // This allows each command to be tested independently and keeps dispatch.rs focused on routing.
 
@@ -144,8 +150,8 @@ impl CommandHandler for TuiExecutor {
 
         // Quick Execute Command:
         // Skip saved-plan projection; shared scope/planning guidance still applies.
-        if let Some(rest) = line.strip_prefix("/quick") {
-            let args = rest.trim();
+        if is_command(line, "/quick") {
+            let args = line.strip_prefix("/quick").unwrap_or("").trim();
             if args.is_empty() {
                 ui.push_log("Usage: /quick <instruction>");
                 return;
@@ -226,11 +232,11 @@ impl CommandHandler for TuiExecutor {
                 handle_cancel_with_args(self, ui, Some(args));
             }
 
-            line if line.starts_with("/stack") => {
+            line if is_command(line, "/stack") => {
                 let args = line.strip_prefix("/stack").unwrap_or("").trim();
                 handle_stack(self, ui, args);
             }
-            line if line.starts_with("/fix") => {
+            line if is_command(line, "/fix") => {
                 let args = line.strip_prefix("/fix").unwrap_or("").trim();
                 handle_fix(self, ui, args);
             }
@@ -240,14 +246,18 @@ impl CommandHandler for TuiExecutor {
             }
             line if line.starts_with("/open ") => handle_open(self, line, ui),
             line if line.starts_with("/theme ") => handle_theme(line, ui),
-            line if line.starts_with("/plan") => {
+            line if is_command(line, "/plan") => {
                 let args = line.strip_prefix("/plan").unwrap_or("").trim();
-                let session_id = self
-                    .session_manager
-                    .lock()
-                    .unwrap()
-                    .get_current_session_id()
-                    .unwrap_or("default".to_string());
+                let session_id =
+                    match crate::utils::safe_std_lock(&self.session_manager, "session_manager") {
+                        Ok(manager) => manager
+                            .get_current_session_id()
+                            .unwrap_or("default".to_string()),
+                        Err(e) => {
+                            ui.push_log(format!("[ERROR] {e}"));
+                            return;
+                        }
+                    };
 
                 if let Err(e) = crate::tui::commands::handlers::slash_commands::plan::handle_plan(
                     args,
@@ -411,6 +421,50 @@ impl TuiExecutor {
                     name, command.description, scope_str
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::tui::state::LogEntry;
+
+    fn logged(app: &TuiApp, needle: &str) -> bool {
+        app.log.iter().any(|entry| match entry {
+            LogEntry::Plain(text) | LogEntry::Markdown(text) => text.contains(needle),
+        })
+    }
+
+    #[test]
+    fn is_command_matches_whole_words_only() {
+        assert!(is_command("/fix", "/fix"));
+        assert!(is_command("/fix cargo test", "/fix"));
+        assert!(!is_command("/fix-cache", "/fix"));
+        assert!(!is_command("/quickstart go", "/quick"));
+        assert!(!is_command("/stackable", "/stack"));
+        assert!(!is_command("/planning", "/plan"));
+    }
+
+    #[tokio::test]
+    async fn builtin_names_do_not_swallow_longer_custom_command_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut executor = TuiExecutor::new(cfg).unwrap();
+        let mut app = TuiApp::new("test", None, "dark").unwrap();
+
+        for line in ["/fix-cache", "/quickstart go", "/stackable", "/planning x"] {
+            executor.handle(line, &mut app);
+        }
+        for name in ["/fix-cache", "/quickstart", "/stackable", "/planning"] {
+            assert!(
+                logged(&app, &format!("Unknown command: {name}")),
+                "{name} must reach custom-command lookup"
+            );
         }
     }
 }

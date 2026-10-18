@@ -188,8 +188,9 @@ def check_ci(root):
         ("rustup", "run", version, "cargo", "check", "--locked", "--all-targets", "--all-features"),
         ("bash", "scripts/verify.sh", "guidance"),
         ("bash", "scripts/verify.sh", "tui-deps"),
+        # macOS focused tests run through the wrapper so zero-test filters fail.
+        ("bash", "scripts/verify.sh", "macos"),
     }
-    expected.update(("cargo", "test", "--locked", name) for name in ("tui::", "execution::", "jobs::"))
     for command in sorted(expected - commands):
         errors.append(f"CI missing expected verification command: {shlex.join(command)}")
     if f"dtolnay/rust-toolchain@{version}" not in source:

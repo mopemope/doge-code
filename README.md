@@ -43,7 +43,7 @@ warnings/errors. Tool successes, command arguments and routine context-maintenan
 logs are omitted; synthetic follow-ups use an `[auto]` purpose label rather than
 appearing as user messages. Provider/model and current work appear in the status
 line. Streams update one answer block, retaining partial answers on interruption.
-Usage remains available through `/tokens`, `/context` and the explicit Ctrl+D
+Usage remains available through `/tokens`, `/tokens context` and the explicit Ctrl+D
 dashboard, which also holds the plan list; `/jobs` shows job details. Exiting the TUI prints no session statistics.
 For retained tool calls/results, use `/session show <id>` or
 `dgc session show <id>` (redirect its text output to export it). The view resolves
@@ -1342,7 +1342,7 @@ pages can shift offsets; the directory walk itself has no hard memory/time cap.
 
 ### Claude Desktop Integration
 1. Start MCP server: `dgc mcp-server 127.0.0.1:8000`
-2. Configure Claude Desktop to connect to `http://127.0.0.1:8000`
+2. Configure Claude Desktop to connect to `http://127.0.0.1:8000/mcp`
 3. Access project tools directly from Claude Desktop chat interface
 
 ### Emacs Integration
@@ -1360,9 +1360,7 @@ Doge-Code provides a powerful Emacs integration. Setup is simple:
 
 This enables:
 - **Analyze/Explain**: `C-c d a` (Analyze region), `C-c d e` (Explain region), `C-c d b` (Analyze buffer)
-- **MCP Tools**: `C-c d m s` (Symbol Search), `C-c d m f` (Read File)
 - **Refactor**: `C-c d R` (Global refactor via `exec`)
-- **HUD**: Semantic info overlays (optional, set `doge-code-enable-hud` to t)
 
 See [elisp/emacs-integration.md](elisp/emacs-integration.md) for detailed configuration options.
 
@@ -2007,7 +2005,7 @@ an explicit value takes precedence over model defaults.
 ### Git Worktree Management
 - Create isolated worktrees for parallel development
 - Branch-based worktree creation
-- Automatic cleanup
+- Resources of a failed or cancelled creation are cleaned up; existing worktrees are never removed automatically
 
 ### Error Recovery System
 - Autonomous error detection and diagnosis
@@ -2041,6 +2039,8 @@ an explicit value takes precedence over model defaults.
 - `DOGE_CODE_CONFIG`: Explicit global config path. When set, that path alone
   is authoritative: a missing, unreadable, or invalid file is a startup error
   and no other config candidate is consulted.
+- `DOGE_SESSIONS_DIR`: Overrides the session store location (default:
+  `.doge/sessions` under the current directory). Mainly for tests and tooling.
 
 ### Configuration File (`.doge/config.toml`)
 ```toml
@@ -2116,7 +2116,9 @@ errors, as are invalid enum/policy values (for example `[tool_routing]`,
 `[context_budget]`, and `[reasoning]` modes/efforts) and
 `[tool_routing] search_result_limit` values outside `1..=10`. The config
 loader is read-only: invalid files are never auto-repaired or rewritten,
-and typos never silently fall back to defaults.
+and typos never silently fall back to defaults. The only exception is the
+obsolete `rewrite_timeout_sec` key from older versions: it still loads, is
+ignored, and logs a warning, so remove it when convenient.
 
 Repository `.env` files are no longer loaded automatically. Export variables
 explicitly in the calling shell or use your global/user TOML configuration;
@@ -2555,8 +2557,8 @@ and the limits of this local integrity guard.
 ### Adding New Languages
 1. Add tree-sitter parser dependency to `Cargo.toml`
 2. Implement `LanguageSpecificExtractor` trait
-3. Add to language detection in `src/analysis/mod.rs`
-4. Add tests in `src/analysis/tests/`
+3. Register the language in `src/analysis/language_config.rs`
+4. Add tests in `src/analysis/tests.rs`
 
 ### Adding New Tools
 
@@ -2567,10 +2569,12 @@ tests, and a README entry. Run the guidance check to detect missing wiring.
 
 ### Adding Custom Commands
 Create a Markdown file in `.doge/commands/` (project) or
-`~/.config/doge-code/commands/` (user). The file name is the command name
+`~/.config/doge-code/commands/` (user; always under `$HOME`, `XDG_CONFIG_HOME` is not consulted). The file name is the command name
 (`my-command.md` → `/my-command`), the first line is its description, and the
 rest is the prompt. `$ARGUMENTS` expands to all arguments and `$1`, `$2`, … to
 individual ones. Files with other extensions (for example `.toml`) are ignored.
+A built-in command with exactly the same name (for example `/fix` or `/plan`)
+takes precedence; longer names such as `/fix-cache` reach your custom command.
 ```markdown
 Description of my command
 Execute the following task: $ARGUMENTS
@@ -2609,7 +2613,7 @@ Execute the following task: $ARGUMENTS
 - **Memory Efficient**: Lazy loading and pagination for large codebases
 - **Extensible**: Plugin system for additional languages and tools
 - **Type Safe**: Rust's strong typing prevents common errors
-- **Cross-Platform**: Works on Linux, macOS, Windows
+- **Platforms**: Linux and macOS are supported and exercised in CI. Windows is untested; stored credentials (ChatGPT, the OpenCode key) and process lifecycle handling are Unix-first
 
 ## 🤝 Contributing
 

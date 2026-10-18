@@ -490,18 +490,6 @@ async fn run_tui(
         app.push_log(features::opencode::missing_auth_message(exec.cfg.provider));
     }
 
-    if let Some(account) = exec
-        .client
-        .as_ref()
-        .and_then(|client| client.account_label())
-    {
-        app.inference_label = Some(format!("openai | {account} | {}", exec.cfg.model));
-    }
-
-    if features::opencode::default_base(cfg.provider).is_some() {
-        app.inference_label = Some(exec.cfg.inference_label());
-    }
-
     let mut exec = exec;
     exec.set_ui_tx(app.sender());
     exec.publish_plan_list();
