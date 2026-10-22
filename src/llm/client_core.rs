@@ -30,6 +30,9 @@ pub struct UsageTotalsSnapshot {
 #[derive(Clone)]
 pub struct OpenAIClient {
     pub(crate) provider: crate::features::openai_subscription::ProviderKind,
+    /// Fixed API selection for generic API-key clients. OpenCode continues to
+    /// resolve model-catalog routes dynamically; `new()` remains Chat-first.
+    pub(crate) api_kind: crate::llm::capabilities::ApiKind,
     pub(crate) opencode_session: String,
     pub(crate) subscription: Option<crate::features::openai_subscription::auth::AuthHandle>,
     pub base_url: String,
@@ -115,21 +118,22 @@ impl OpenAIClient {
             Ok(Some(client))
         } else {
             crate::features::opencode::validate_base(cfg.provider, &cfg.base_url)?;
-            if crate::features::opencode::default_base(cfg.provider).is_some() {
-                crate::features::opencode::api(cfg.provider, &cfg.model)?;
-            }
+            let api_kind = cfg.resolved_api_for_model(&cfg.model)?;
             cfg.api_key
                 .as_ref()
                 .map(|key| {
-                    Self::new(
+                    let mut client = Self::new(
                         crate::features::opencode::default_base(cfg.provider)
                             .unwrap_or(&cfg.base_url),
                         key,
-                    )
-                    .map(|mut c| {
-                        c.provider = cfg.provider;
-                        c.with_llm_config(cfg.llm.clone())
-                    })
+                    )?;
+                    client.provider = cfg.provider;
+                    client.api_kind = api_kind;
+                    if client.uses_generic_api_key_responses() {
+                        client.with_llm_config_checked(cfg.llm.clone())
+                    } else {
+                        Ok(client.with_llm_config(cfg.llm.clone()))
+                    }
                 })
                 .transpose()
         }
@@ -145,10 +149,15 @@ impl OpenAIClient {
 
     pub(crate) fn api_key_responses(&self, model: &str) -> Result<bool> {
         if crate::features::opencode::default_base(self.provider).is_none() {
-            return Ok(false);
+            return Ok(self.uses_generic_api_key_responses());
         }
         Ok(crate::features::opencode::api(self.provider, model)?
             == crate::llm::capabilities::ApiKind::Responses)
+    }
+
+    pub(crate) fn uses_generic_api_key_responses(&self) -> bool {
+        self.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+            && self.api_kind == crate::llm::capabilities::ApiKind::Responses
     }
 
     /// A snapshot for one conversation/job; usage counters remain shared.
@@ -184,6 +193,12 @@ impl OpenAIClient {
                 crate::features::opencode::identity_base(self.provider, &self.base_url),
                 crate::features::opencode::api(self.provider, model)?
             ),
+            None if self.provider
+                == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+                && self.api_kind == crate::llm::capabilities::ApiKind::Responses =>
+            {
+                api_key_responses_identity(&self.base_url)
+            }
             None => "openai-compatible".into(),
         })
     }
@@ -197,11 +212,17 @@ impl OpenAIClient {
 
     /// Non-secret endpoint/protocol binding, independent of the API key.
     pub(crate) fn responses_identity(&self) -> String {
-        format!(
-            "{:?}:{}:responses",
-            self.provider,
-            crate::features::opencode::identity_base(self.provider, &self.base_url)
-        )
+        if self.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+            && self.api_kind == crate::llm::capabilities::ApiKind::Responses
+        {
+            api_key_responses_identity(&self.base_url)
+        } else {
+            format!(
+                "{:?}:{}:responses",
+                self.provider,
+                crate::features::opencode::identity_base(self.provider, &self.base_url)
+            )
+        }
     }
 
     pub fn is_subscription(&self) -> bool {
@@ -275,6 +296,7 @@ impl OpenAIClient {
         let inner = reqwest::Client::builder().build()?;
         Ok(Self {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: url,
@@ -299,23 +321,36 @@ impl OpenAIClient {
 
     pub fn with_llm_config(mut self, cfg: LlmConfig) -> Self {
         // Rebuild reqwest client with timeouts from cfg to ensure network layer reaches server in tests and prod.
+        if let Ok(client) = self.build_http_client(&cfg) {
+            self.inner = client;
+        }
+        self.llm_cfg = cfg;
+        self
+    }
+
+    fn with_llm_config_checked(mut self, cfg: LlmConfig) -> Result<Self> {
+        self.inner = self.build_http_client(&cfg)?;
+        self.llm_cfg = cfg;
+        Ok(self)
+    }
+
+    fn build_http_client(&self, cfg: &LlmConfig) -> Result<reqwest::Client> {
         let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(cfg.connect_timeout_ms))
             .timeout(Duration::from_millis(cfg.timeout_ms)) // Use timeout_ms for overall request timeout
             .read_timeout(Duration::from_millis(cfg.timeout_ms)); // Add timeout settings
         // OpenCode routes must not follow a redirect into another billing
         // endpoint. A redirect is surfaced as an HTTP failure, never fallback.
-        let builder = if crate::features::opencode::default_base(self.provider).is_some() {
+        let redirects_blocked = crate::features::opencode::default_base(self.provider).is_some()
+            || (self.provider
+                == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+                && self.api_kind == crate::llm::capabilities::ApiKind::Responses);
+        let builder = if redirects_blocked {
             builder.redirect(reqwest::redirect::Policy::none())
         } else {
             builder
         };
-        // If building fails, keep existing client to avoid panic; but in normal cases it should succeed.
-        if let Ok(c) = builder.build() {
-            self.inner = c;
-        }
-        self.llm_cfg = cfg;
-        self
+        Ok(builder.build()?)
     }
 
     pub(crate) fn endpoint(&self) -> String {
@@ -655,6 +690,12 @@ impl OpenAIClient {
     }
 }
 
+fn api_key_responses_identity(base_url: &str) -> String {
+    let base = crate::config::app::normalized_official_openai_base(base_url)
+        .unwrap_or_else(|| base_url.trim_end_matches('/').to_owned());
+    format!("OpenaiCompatible:api-key:{base}:responses")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,6 +791,7 @@ mod tests {
     fn endpoint_normalization() {
         let c = OpenAIClient {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/v1/".into(),
@@ -773,6 +815,7 @@ mod tests {
         assert_eq!(c.endpoint(), "https://api.example.com/v1/chat/completions");
         let c2 = OpenAIClient {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
+            api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/".into(),
