@@ -34,6 +34,7 @@ pub enum JobKind {
     Lint,
     SemanticEdit,
     Worktree,
+    ModelCatalog,
 }
 
 impl fmt::Display for JobKind {
@@ -47,6 +48,7 @@ impl fmt::Display for JobKind {
             JobKind::Test => write!(f, "test"),
             JobKind::Lint => write!(f, "lint"),
             JobKind::SemanticEdit => write!(f, "semantic_edit"),
+            JobKind::ModelCatalog => write!(f, "model_catalog"),
             JobKind::Worktree => write!(f, "worktree"),
         }
     }

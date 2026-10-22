@@ -18,7 +18,8 @@ pub async fn run_agent_streaming_once(
     cancel: Option<CancellationToken>,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
 ) -> Result<(Vec<ChatMessage>, Option<ChoiceMessage>)> {
-    if client.is_subscription()
+    if client.is_openrouter()
+        || client.is_subscription()
         || crate::features::opencode::default_base(client.provider).is_some()
     {
         return crate::llm::run_agent_loop(

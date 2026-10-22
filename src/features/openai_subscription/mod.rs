@@ -14,6 +14,7 @@ pub enum ProviderKind {
     #[default]
     OpenaiCompatible,
     Openai,
+    Openrouter,
     #[value(alias = "go")]
     #[serde(alias = "go")]
     OpencodeGo,

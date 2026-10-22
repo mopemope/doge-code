@@ -6,7 +6,7 @@ use crate::{
     tui::state::TuiApp,
 };
 
-fn fixture(key: bool) -> (TuiExecutor, TuiApp, tempfile::TempDir) {
+pub(super) fn fixture(key: bool) -> (TuiExecutor, TuiApp, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = AppConfig {
         project_root: dir.path().into(),
@@ -259,38 +259,44 @@ fn model_selection_validation_and_prepare_failures_keep_current_state() {
 }
 #[test]
 fn model_selection_save_failure_keeps_runtime_client_ui_and_old_checkpoint() {
-    let (mut executor, mut ui, dir) = fixture(true);
-    preserve_history(&executor);
-    let old = id(&executor);
-    let root = dir.path().join("sessions");
-    let backup = dir.path().join("preserved");
-    let before = std::fs::read(root.join(&old).join("session.json")).unwrap();
-    std::fs::rename(&root, &backup).unwrap();
-    std::fs::write(&root, "not a directory").unwrap();
-    assert!(
-        executor
-            .start_model_session(ProviderKind::OpencodeZen, "glm-5.3", &mut ui)
-            .is_err()
-    );
-    assert_eq!(id(&executor), old);
-    assert_eq!(executor.cfg.model, "gpt-6-luna");
-    assert_eq!(executor.cfg.provider, ProviderKind::OpencodeGo);
-    assert_eq!(
-        executor.client.as_ref().unwrap().provider,
-        ProviderKind::OpencodeGo
-    );
-    assert_eq!(ui.cfg.as_ref().unwrap().model, "gpt-6-luna");
-    assert_eq!(
-        history(&executor)[0].content.as_deref(),
-        Some("OLD TOOL HISTORY")
-    );
-    assert_eq!(
-        std::fs::read(backup.join(&old).join("session.json")).unwrap(),
-        before
-    );
-    std::fs::remove_file(&root).unwrap();
-    std::fs::rename(backup, root).unwrap();
+    for (provider, model) in [
+        (ProviderKind::OpencodeZen, "glm-5.3"),
+        (ProviderKind::Openrouter, "p/synthetic"),
+    ] {
+        let (mut executor, mut ui, dir) = fixture(true);
+        preserve_history(&executor);
+        let old = id(&executor);
+        let root = dir.path().join("sessions");
+        let backup = dir.path().join("preserved");
+        let before = std::fs::read(root.join(&old).join("session.json")).unwrap();
+        std::fs::rename(&root, &backup).unwrap();
+        std::fs::write(&root, "not a directory").unwrap();
+        assert!(
+            executor
+                .start_model_session(provider, model, &mut ui)
+                .is_err()
+        );
+        assert_eq!(id(&executor), old);
+        assert_eq!(executor.cfg.model, "gpt-6-luna");
+        assert_eq!(executor.cfg.provider, ProviderKind::OpencodeGo);
+        assert_eq!(
+            executor.client.as_ref().unwrap().provider,
+            ProviderKind::OpencodeGo
+        );
+        assert_eq!(ui.cfg.as_ref().unwrap().model, "gpt-6-luna");
+        assert_eq!(
+            history(&executor)[0].content.as_deref(),
+            Some("OLD TOOL HISTORY")
+        );
+        assert_eq!(
+            std::fs::read(backup.join(&old).join("session.json")).unwrap(),
+            before
+        );
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(backup, root).unwrap();
+    }
 }
+
 #[test]
 fn model_selection_keyless_resume_rejects_provider_and_binding_mismatch() {
     let (mut executor, mut ui, _dir) = fixture(false);
@@ -680,4 +686,228 @@ fn selection_label_keeps_the_chatgpt_account_and_falls_back_to_the_route() {
     let label = super::model_selection::selection_label(&cfg, None);
     assert_eq!(label, cfg.inference_label());
     assert!(!label.contains("SYNTHETIC_SECRET"));
+}
+
+#[test]
+fn openrouter_model_picker_loading_requires_new_enter() {
+    use crate::features::model_selection::{ModelPicker, ModelPickerState};
+    let mut picker = ModelPicker::new(ProviderKind::Openrouter, "").unwrap();
+    assert_eq!(picker.state, ModelPickerState::LoadingWithoutSnapshot);
+    assert!(!picker.can_select());
+    picker.cycle_provider(true);
+    assert_eq!(picker.provider, ProviderKind::OpencodeZen);
+    picker.cycle_provider(false);
+    assert_eq!(picker.provider, ProviderKind::Openrouter);
+    assert!(!picker.can_select());
+    let generation = picker.generation;
+    picker.apply_catalog(generation, Ok(synthetic_catalog()));
+    assert!(picker.can_select());
+    picker.state = ModelPickerState::RefreshingWithSnapshot;
+    assert!(!picker.can_select());
+    picker.apply_catalog(
+        generation,
+        Err(crate::features::openrouter::catalog::CatalogError::Network),
+    );
+    assert_eq!(picker.state, ModelPickerState::ReadyStale);
+    assert!(picker.can_select());
+    assert_eq!(picker.catalog_job, None);
+}
+
+pub(crate) fn synthetic_catalog() -> crate::features::openrouter::catalog::CatalogResult {
+    use crate::features::openrouter::{OpenRouterModel, catalog::*};
+    let models = [
+        (
+            "p/b",
+            Some("Friendly"),
+            Some(vec!["text".into()]),
+            Some(vec!["tools".into()]),
+        ),
+        (
+            "p/a",
+            None,
+            Some(vec!["image".into()]),
+            Some(vec!["tools".into()]),
+        ),
+        (
+            "P/Exact:free",
+            Some("EXACT display"),
+            Some(vec!["text".into()]),
+            Some(vec!["tools".into()]),
+        ),
+        ("p/unknown", None, None, None),
+        ("p/no-tools", None, Some(vec!["text".into()]), Some(vec![])),
+    ]
+    .into_iter()
+    .map(
+        |(id, name, output_modalities, supported_parameters)| OpenRouterModel {
+            id: id.into(),
+            name: name.map(str::to_owned),
+            output_modalities,
+            supported_parameters,
+            ..Default::default()
+        },
+    )
+    .collect();
+    CatalogResult {
+        snapshot: std::sync::Arc::new(CatalogSnapshot {
+            fetched_at: chrono::Utc::now(),
+            models,
+            excluded_entries: 0,
+        }),
+        freshness: CatalogFreshness::Fresh,
+        offline: false,
+        warning: None,
+    }
+}
+#[test]
+fn openrouter_model_picker_search_and_capabilities() {
+    use crate::features::model_selection::ModelPicker;
+    let mut picker = ModelPicker::new(ProviderKind::Openrouter, "").unwrap();
+    picker.prefer("p/b");
+    assert!(picker.apply_catalog(0, Ok(synthetic_catalog())));
+    assert_eq!(picker.results()[picker.selected].id, "p/b");
+    assert_eq!(
+        picker
+            .results()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["P/Exact:free", "p/a", "p/b", "p/no-tools", "p/unknown"]
+    );
+    for id in ["p/a", "p/no-tools", "p/unknown"] {
+        assert!(
+            picker
+                .entries
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .unavailable_reason
+                .is_some()
+        );
+    }
+    assert!(
+        picker
+            .entries
+            .iter()
+            .find(|e| e.id == "p/b")
+            .unwrap()
+            .unavailable_reason
+            .is_none()
+    );
+    picker.query = "friend".into();
+    assert_eq!(picker.results()[0].id, "p/b");
+    picker.query = "exact".into();
+    assert_eq!(picker.results()[0].id, "P/Exact:free");
+    let model = &picker.entries[0].metadata.as_ref().unwrap().model;
+    assert!(model.context_window.is_none());
+    assert!(model.prices.prompt.is_none());
+    let before = picker.entries.len();
+    picker.generation = 3;
+    assert!(!picker.apply_catalog(
+        2,
+        Err(crate::features::openrouter::catalog::CatalogError::Network)
+    ));
+    assert_eq!(picker.entries.len(), before);
+    assert!(picker.can_select());
+    let mut duplicate_case = picker
+        .entries
+        .iter()
+        .find(|entry| entry.id == "P/Exact:free")
+        .unwrap()
+        .clone();
+    duplicate_case.id = "p/Exact:free".into();
+    picker.entries.push(duplicate_case);
+    picker.query = "p/Exact:free".into();
+    assert_eq!(picker.results()[0].id, "p/Exact:free");
+}
+#[test]
+fn openrouter_model_selection_is_atomic_and_key_isolated() {
+    let (mut executor, mut ui, _dir) = fixture(true);
+    preserve_history(&executor);
+    let previous = id(&executor);
+    ui.textarea.insert_str("preserved draft");
+    let selected = executor
+        .start_model_session(ProviderKind::Openrouter, "Publisher/Model:free", &mut ui)
+        .unwrap();
+    assert_ne!(selected, previous);
+    assert!(history(&executor).is_empty());
+    assert_eq!(ui.textarea.lines(), ["preserved draft"]);
+    assert_ne!(executor.cfg.api_key.as_deref(), Some("SYNTHETIC_SECRET"));
+    assert_eq!(executor.cfg.model, "Publisher/Model:free");
+    executor.cfg.api_key = Some("SYNTHETIC_ROUTER_KEY".into());
+    executor.cfg.api_key_origin = Some(crate::config::ConfigOrigin::Cli);
+    executor
+        .start_model_session(ProviderKind::Openrouter, "Publisher/Other", &mut ui)
+        .unwrap();
+    assert_eq!(
+        executor.cfg.api_key.as_deref(),
+        Some("SYNTHETIC_ROUTER_KEY")
+    );
+    assert_eq!(
+        executor.cfg.api_key_origin,
+        Some(crate::config::ConfigOrigin::Cli)
+    );
+    assert_eq!(
+        executor.client.as_ref().unwrap().usage_snapshot().attempts,
+        0
+    );
+    let sm = executor.session_manager.lock().unwrap();
+    assert!(
+        !sm.store
+            .load(&previous)
+            .unwrap()
+            .conversation_messages()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn openrouter_model_selection_lock_failure_keeps_checkpoint_and_runtime() {
+    for poison_queue in [false, true] {
+        let (mut executor, mut ui, _dir) = fixture(true);
+        preserve_history(&executor);
+        let old = id(&executor);
+        let path = executor
+            .session_manager
+            .lock()
+            .unwrap()
+            .store
+            .session_dir(&old)
+            .join("session.json");
+        let before = std::fs::read(&path).unwrap();
+        ui.textarea.insert_str("unsubmitted draft");
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if poison_queue {
+                let _guard = executor.verification_queue.lock().unwrap();
+                panic!("synthetic queue poison");
+            } else {
+                let _guard = executor.conversation_history.lock().unwrap();
+                panic!("synthetic history poison");
+            }
+        }));
+        assert!(poisoned.is_err());
+        assert!(
+            executor
+                .start_model_session(ProviderKind::Openrouter, "p/model", &mut ui)
+                .is_err()
+        );
+        assert_eq!(id(&executor), old);
+        assert_eq!(executor.cfg.provider, ProviderKind::OpencodeGo);
+        assert_eq!(
+            executor.client.as_ref().unwrap().provider,
+            ProviderKind::OpencodeGo
+        );
+        assert_eq!(ui.cfg.as_ref().unwrap().provider, ProviderKind::OpencodeGo);
+        assert_eq!(ui.textarea.lines(), ["unsubmitted draft"]);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let history = executor
+            .conversation_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            history.snapshot()[0].content.as_deref(),
+            Some("OLD TOOL HISTORY")
+        );
+    }
 }

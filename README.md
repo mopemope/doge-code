@@ -281,6 +281,84 @@ Protected credential storage for Windows is not implemented yet.
 See the official [OSS integration](https://developers.openai.com/siwc/token-sharing-open-source)
 and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
 
+### OpenRouter (dedicated API key)
+
+Select `--provider openrouter` explicitly. This route uses Chat Completions at
+`https://openrouter.ai/api/v1` with redirects disabled. There is no default model:
+use the exact publisher/model ID, including its suffix. `OPENROUTER_MODEL` and
+`OPENROUTER_API_KEY` are dedicated to this provider; setting them alone does not
+change the provider. No OpenAI, OpenCode or OAuth credential is inherited.
+
+```sh
+# Public metadata only: no key or inference request is required.
+dgc models --provider openrouter
+dgc models --provider openrouter --refresh
+dgc models --provider openrouter --offline
+dgc models --provider openrouter --offline --model 'publisher/model:variant'
+
+# Replace the placeholder with your explicit catalog/model choice.
+export OPENROUTER_API_KEY='<your-openrouter-key>'
+dgc --provider openrouter --model 'publisher/model:variant'
+dgc --provider openrouter --model 'publisher/model:variant' exec 'Explain this project'
+dgc --provider openrouter --resume=latest
+dgc --provider openrouter exec --resume=latest 'Continue'
+```
+
+Keys and models resolve in this order: CLI option, dedicated OpenRouter environment
+variable, project config explicitly selecting `provider = "openrouter"`, then user
+config explicitly selecting that provider. Blank values are unset. The fixed URL
+cannot be replaced on this route; use the existing `openai-compatible` provider
+for a custom endpoint. `OPENROUTER_BASE_URL` is not supported. Keys are never saved
+by model selection. A displayed “key set” means presence only, without verifying
+validity or balance.
+
+In the TUI, `/provider openrouter [search]` opens the picker; `/models [search]`
+does the same while using OpenRouter. Search matches ID and display name locally.
+Tab/Shift+Tab cycles Go, Zen and OpenRouter previews; Ctrl+R refreshes OpenRouter.
+Esc, Ctrl+C or Ctrl+G cancels. Enter starts a **new conversation**, retaining the
+previous saved history and the unsent draft. Loading/refreshing disables Enter;
+press Enter again after completion. Busy work, queued instructions and diff
+review block session switching. Browsing, previewing and selecting never send
+inference requests or modify global settings.
+
+Only models with confirmed text output and tools support are selectable in the
+picker. A direct CLI ID is allowed when capability metadata is unknown; known
+unsupported requests are rejected. Switching from another provider uses only the
+process's `OPENROUTER_API_KEY`; switching models within OpenRouter retains the
+current key and its source. Without a key you can browse and select; inference
+asks you to set the key and restart.
+
+The anonymous public catalog is cached for 24 hours under the OS user cache
+`doge-code/openrouter/models-v1.json`. Fresh cache is used immediately; stale
+cache remains usable with a warning after a failed refresh. `--offline` forbids
+catalog networking and requires usable cache; `--refresh` forces one fetch. These
+flags conflict and are only supported for OpenRouter. `--model` on `models`
+performs an exact, case-sensitive lookup. Startup, resume and inference only read
+existing cache metadata and never fetch the catalog implicitly.
+
+OpenRouter uses metered billing. Displayed USD prices are reference values, not a
+bill estimate or a promise of free access; request fees, conditional prices and
+unknown fields are shown separately. Unknown usage, price and model capacity are
+not reported as zero. Manual context capacity overrides exact catalog metadata;
+unknown capacity uses the existing internal fallback estimate. No model or billing
+fallback is selected automatically. Explicit routing model IDs retain their
+server-side semantics.
+
+Initial OpenRouter responses are validated and displayed after completion, without
+token streaming. Tool batches are validated before any tool runs; reasoning and
+opaque reasoning details survive tool round trips and session resume. Cancellation
+does not guarantee that provider-side generation or charges stop. Tests use local
+fixtures and synthetic keys; live service availability and model quality remain
+unverified.
+
+Resume restores the saved OpenRouter model before creating a client, even when a
+different startup model was supplied. Provider/binding mismatches and explicit
+missing resume targets fail before changing the session. Sessions created through
+the older generic OpenRouter URL keep their original compatible route; they are
+not migrated automatically. Retain session files when rolling back: older binaries
+may not understand dedicated OpenRouter sessions. Deleting catalog cache does not
+delete conversations.
+
 ### OpenCode Go / Zen (API key)
 
 Quick start: save your key once, then pick a route. One key serves both Go and Zen.

@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    pub openrouter_metadata:
+        Option<std::sync::Arc<crate::features::openrouter::SelectedModelMetadata>>,
     /// Resolution provenance, retained independently of the credential value.
     pub api_key_origin: Option<super::ConfigOrigin>,
     pub base_url_origin: super::ConfigOrigin,
@@ -88,6 +90,7 @@ impl Default for AppConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o-mini".to_string(),
             api_key: None,
+            openrouter_metadata: None,
             api_key_origin: None,
             base_url_origin: super::ConfigOrigin::Default,
             provider_origin: super::ConfigOrigin::Default,
@@ -144,6 +147,7 @@ impl AppConfig {
                 }
             }
             ProviderKind::Openai => Ok(ApiKind::Responses),
+            ProviderKind::Openrouter => Ok(ApiKind::ChatCompletions),
             provider => opencode::api(provider, model),
         }
     }
@@ -171,6 +175,16 @@ impl AppConfig {
             return Some(size);
         }
 
+        if self.provider == crate::features::openai_subscription::ProviderKind::Openrouter {
+            return self
+                .openrouter_metadata
+                .as_ref()
+                .filter(|metadata| {
+                    metadata.provider == self.provider && metadata.model.id == self.model
+                })
+                .and_then(|metadata| metadata.model.context_window)
+                .filter(|size| *size > 0);
+        }
         let api = self.resolved_api_for_model(&self.model).ok()?;
         let resolve = crate::llm::capabilities::resolve;
         resolve(self.provider, &self.base_url, api, &self.model, false).context_window
@@ -190,6 +204,12 @@ impl AppConfig {
     }
 
     pub fn from_cli(cli: crate::Cli) -> Result<Self> {
+        let explicit_resume = match &cli.command {
+            Some(crate::Commands::Exec { resume, .. }) => {
+                resume.clone().or_else(|| cli.resume.clone())
+            }
+            _ => cli.resume.clone(),
+        };
         let project_root = std::env::current_dir().context("resolve current dir")?;
         let git_root = get_git_repository_root(&project_root);
 
@@ -238,7 +258,7 @@ impl AppConfig {
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| (value, origin))
         };
-        let global_base = crate::features::opencode::config_value(
+        let global_base = crate::features::model_selection::config_value(
             provider,
             file_cfg.provider,
             file_cfg.base_url.clone(),
@@ -248,7 +268,24 @@ impl AppConfig {
                 .unwrap_or("https://api.openai.com/v1")
                 .to_owned()
         });
-        let (base_url, base_url_origin) = if !cli.base_url.is_empty() {
+        let is_openrouter =
+            provider == crate::features::openai_subscription::ProviderKind::Openrouter;
+        let (base_url, base_url_origin) = if is_openrouter {
+            openrouter_value(
+                Some(cli.base_url.clone()),
+                None,
+                project_cfg.provider,
+                project_cfg.base_url.clone(),
+                file_cfg.provider,
+                file_cfg.base_url.clone(),
+            )
+            .unwrap_or_else(|| {
+                (
+                    crate::features::openrouter::BASE_URL.to_owned(),
+                    ConfigOrigin::Default,
+                )
+            })
+        } else if !cli.base_url.is_empty() {
             (cli.base_url, ConfigOrigin::Cli)
         } else {
             sourced(
@@ -262,7 +299,7 @@ impl AppConfig {
             )
             .or_else(|| {
                 sourced(
-                    crate::features::opencode::config_value(
+                    crate::features::model_selection::config_value(
                         provider,
                         project_cfg.provider,
                         project_cfg.base_url.clone(),
@@ -287,6 +324,15 @@ impl AppConfig {
         }
         let key = if provider == crate::features::openai_subscription::ProviderKind::Openai {
             None
+        } else if is_openrouter {
+            openrouter_value(
+                cli.api_key,
+                std::env::var("OPENROUTER_API_KEY").ok(),
+                project_cfg.provider,
+                project_cfg.api_key.clone(),
+                file_cfg.provider,
+                file_cfg.api_key.clone(),
+            )
         } else {
             sourced(cli.api_key, ConfigOrigin::Cli)
                 .or_else(|| {
@@ -311,7 +357,7 @@ impl AppConfig {
                 })
                 .or_else(|| {
                     sourced(
-                        crate::features::opencode::config_value(
+                        crate::features::model_selection::config_value(
                             provider,
                             project_cfg.provider,
                             project_cfg.api_key.clone(),
@@ -321,7 +367,7 @@ impl AppConfig {
                 })
                 .or_else(|| {
                     sourced(
-                        crate::features::opencode::config_value(
+                        crate::features::model_selection::config_value(
                             provider,
                             file_cfg.provider,
                             file_cfg.api_key.clone(),
@@ -332,7 +378,18 @@ impl AppConfig {
         };
         let api_key_origin = key.as_ref().map(|(_, origin)| *origin);
         let api_key = key.map(|(key, _)| key);
-        let model = if cli.model.is_empty() {
+        let model = if is_openrouter {
+            openrouter_value(
+                Some(cli.model),
+                std::env::var("OPENROUTER_MODEL").ok(),
+                project_cfg.provider,
+                project_cfg.model.clone(),
+                file_cfg.provider,
+                file_cfg.model.clone(),
+            )
+            .map(|(model, _)| model)
+            .unwrap_or_default()
+        } else if cli.model.is_empty() {
             std::env::var(if opencode_base.is_some() {
                 "OPENCODE_MODEL"
             } else {
@@ -340,12 +397,12 @@ impl AppConfig {
             })
             .ok()
             .filter(|model| !model.trim().is_empty())
-            .or(crate::features::opencode::config_value(
+            .or(crate::features::model_selection::config_value(
                 provider,
                 project_cfg.provider,
                 project_cfg.model,
             ))
-            .or(crate::features::opencode::config_value(
+            .or(crate::features::model_selection::config_value(
                 provider,
                 file_cfg.provider,
                 file_cfg.model,
@@ -470,7 +527,25 @@ impl AppConfig {
         } else {
             base_url
         };
-        let model = crate::features::opencode::model_id(provider, &model)?.to_owned();
+        let model = if is_openrouter {
+            crate::features::openrouter::validate_base(&base_url)?;
+            if model.is_empty() && explicit_resume.is_some() {
+                model
+            } else {
+                anyhow::ensure!(
+                    !model.is_empty(),
+                    "Select an OpenRouter model explicitly with --model publisher/model. Run dgc models --provider openrouter to list models."
+                );
+                crate::features::openrouter::model_id(&model)?.to_owned()
+            }
+        } else {
+            crate::features::opencode::model_id(provider, &model)?.to_owned()
+        };
+        let base_url = if is_openrouter {
+            crate::features::openrouter::BASE_URL.to_owned()
+        } else {
+            base_url
+        };
         crate::features::opencode::validate_base(provider, &base_url)?;
         let base_url = opencode_base.map(str::to_owned).unwrap_or(base_url);
         if opencode_base.is_some() {
@@ -479,6 +554,11 @@ impl AppConfig {
         let config = Self {
             provider,
             base_url,
+            openrouter_metadata: if is_openrouter {
+                crate::features::openrouter::cached_metadata(&model)
+            } else {
+                None
+            },
             model,
             api_key,
             api_key_origin,
@@ -507,7 +587,7 @@ impl AppConfig {
                 || file_cfg.no_repomap.unwrap_or(false),
             // CLI flag wins; otherwise honor `resume = true` in the config
             // files (previously this file-based setting was ignored).
-            resume: cli.resume.or_else(|| {
+            resume: explicit_resume.or_else(|| {
                 project_cfg
                     .resume
                     .or(file_cfg.resume)
@@ -750,6 +830,37 @@ fn resolve_provider(
         };
     }
     Ok(project.or(user).unwrap_or_default())
+}
+
+/// OpenRouter never inherits values from another provider or an unscoped source.
+pub(super) fn openrouter_value(
+    cli: Option<String>,
+    environment: Option<String>,
+    project_provider: Option<crate::features::openai_subscription::ProviderKind>,
+    project: Option<String>,
+    global_provider: Option<crate::features::openai_subscription::ProviderKind>,
+    global: Option<String>,
+) -> Option<(String, super::ConfigOrigin)> {
+    use super::ConfigOrigin;
+    use crate::features::{model_selection, openai_subscription::ProviderKind};
+    [
+        (cli, ConfigOrigin::Cli),
+        (environment, ConfigOrigin::Environment),
+        (
+            model_selection::config_value(ProviderKind::Openrouter, project_provider, project),
+            ConfigOrigin::Project,
+        ),
+        (
+            model_selection::config_value(ProviderKind::Openrouter, global_provider, global),
+            ConfigOrigin::Global,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(value, origin)| {
+        value
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (value, origin))
+    })
 }
 
 #[cfg(test)]

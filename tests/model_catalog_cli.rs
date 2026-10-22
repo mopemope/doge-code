@@ -148,3 +148,125 @@ fn blank_environment_and_file_values_are_treated_as_unset() {
     assert!(text.contains("API key=none"), "{text}");
     assert!(text.contains("endpoint=Default"), "{text}");
 }
+
+fn openrouter_models(arguments: &[&str], cached: bool) -> Output {
+    let dir = tempfile::tempdir().expect("isolated CLI root");
+    let config = dir.path().join("invalid.toml");
+    let invalid = "invalid TOML [ SYNTHETIC_PRIVATE_CONFIG";
+    std::fs::write(&config, invalid).unwrap();
+    if cached {
+        let path = dir.path().join("doge-code/openrouter/models-v1.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::json!({
+            "schema_version":1,"source":"https://openrouter.ai/api/v1/models", "fetched_at":chrono::Utc::now(),"excluded_entries":0,
+            "models":[{"id":"Publisher/Model:free","name":"Fixture model", "input_modalities":["text"], "output_modalities":["text"],"supported_parameters":["tools"],"context_window":8192,
+            "prices":{"prompt":null,"completion":null,"request":null,"conditional":null},"reasoning":{"supported_efforts":"Unknown","mandatory":null}}]
+        }).to_string()).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_dgc"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("XDG_CACHE_HOME", dir.path())
+        .env("DOGE_CODE_CONFIG", &config)
+        .env("OPENAI_API_KEY", "SYNTHETIC_OPENAI_PRIVATE")
+        .env("OPENCODE_API_KEY", "SYNTHETIC_OPENCODE_PRIVATE")
+        .current_dir(dir.path())
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), invalid);
+    for secret in [
+        "SYNTHETIC_PRIVATE_CONFIG",
+        "SYNTHETIC_OPENAI_PRIVATE",
+        "SYNTHETIC_OPENCODE_PRIVATE",
+    ] {
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(secret));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains(secret));
+    }
+    out
+}
+#[test]
+fn openrouter_model_catalog_cli_is_keyless_and_config_independent() {
+    let output = openrouter_models(&["models", "--provider", "openrouter", "--offline"], true);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Publisher/Model:free"));
+    assert!(text.contains("offline"));
+}
+#[test]
+fn openrouter_model_catalog_cli_flags_and_exact_lookup() {
+    for args in [
+        vec![
+            "models",
+            "--provider",
+            "openrouter",
+            "--offline",
+            "--refresh",
+        ],
+        vec!["models", "--provider", "go", "--offline"],
+        vec!["models", "--provider", "zen", "--refresh"],
+    ] {
+        assert!(!openrouter_models(&args, true).status.success());
+    }
+    assert!(
+        openrouter_models(
+            &[
+                "models",
+                "--provider",
+                "openrouter",
+                "--offline",
+                "--model",
+                "Publisher/Model:free"
+            ],
+            true
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !openrouter_models(
+            &[
+                "models",
+                "--provider",
+                "openrouter",
+                "--offline",
+                "--model",
+                "publisher/model:free"
+            ],
+            true
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !openrouter_models(
+            &[
+                "models",
+                "--provider",
+                "openrouter",
+                "--offline",
+                "--model",
+                "Publisher/Model"
+            ],
+            true
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !openrouter_models(&["models", "--provider", "openrouter", "--offline"], false)
+            .status
+            .success()
+    );
+}
+#[test]
+fn openrouter_model_catalog_cli_help_explains_scope_and_selection() {
+    let out = openrouter_models(&["models", "--help"], false);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for term in ["openrouter", "--offline", "--refresh", "--model"] {
+        assert!(text.contains(term), "{text}");
+    }
+}
