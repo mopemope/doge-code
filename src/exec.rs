@@ -301,6 +301,12 @@ impl Executor {
             } else {
                 Some(resume_id.into())
             };
+            anyhow::ensure!(
+                target.is_some()
+                    || cfg.provider
+                        != crate::features::openai_subscription::ProviderKind::Openrouter,
+                "No previous OpenRouter session exists; start a new conversation with --model publisher/model"
+            );
             target
                 .map(|id| {
                     manager
@@ -337,7 +343,7 @@ impl Executor {
                 let client = OpenAIClient::from_config(&cfg)?;
                 let mut manager = crate::utils::safe_std_lock(&session_manager, "session_manager")?;
                 let (id, outcome) =
-                    if crate::features::opencode::default_base(cfg.provider).is_some() {
+                    if crate::features::model_selection::records_selection(cfg.provider) {
                         manager.create_session_with_model(
                             None,
                             crate::session::data::SessionModelSelection {
@@ -690,7 +696,7 @@ impl Executor {
         // (matches TUI busy/missing-key semantics).
         let client_ref = match self.client.as_ref() {
             Some(client) => client,
-            None => anyhow::bail!(crate::features::opencode::missing_auth_message(
+            None => anyhow::bail!(crate::features::model_selection::missing_auth_message(
                 self.cfg.provider
             )),
         };
@@ -786,7 +792,7 @@ impl Executor {
     pub async fn ask(&mut self, instruction: &str) -> Result<String> {
         if self.client.is_none() {
             return Err(anyhow::anyhow!(
-                crate::features::opencode::missing_auth_message(self.cfg.provider)
+                crate::features::model_selection::missing_auth_message(self.cfg.provider)
             ));
         }
 
@@ -896,6 +902,7 @@ mod tests {
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
+            openrouter_metadata: None,
             api_key_origin: None,
             base_url_origin: Default::default(),
             provider_origin: Default::default(),
@@ -945,6 +952,7 @@ mod tests {
             base_url: "http://localhost:8080".to_string(),
             model: "test-model".to_string(),
             api_key: None, // No API key
+            openrouter_metadata: None,
             api_key_origin: None,
             base_url_origin: Default::default(),
             provider_origin: Default::default(),

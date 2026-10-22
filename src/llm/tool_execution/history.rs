@@ -2946,6 +2946,49 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_compaction_preserves_unseen_reasoning_tool_block() {
+        let details = serde_json::json!([{"type":"reasoning.encrypted","data":"opaque","index":0},{"text":"ordered"}]);
+        let mut assistant = make_assistant_with_tool_calls("call-a", "reading");
+        assistant.reasoning.reasoning_content = Some("thinking".into());
+        assistant.reasoning.reasoning_details = Some(details.clone());
+        let mut mgr = test_manager(vec![
+            make_msg("system", "sys"),
+            make_msg("user", "old task"),
+            make_msg("assistant", "old answer"),
+            make_msg("user", "continue"),
+            assistant,
+            make_tool_msg("call-a", "unseen exact body"),
+        ]);
+        mgr.unseen_tool_results.insert("call-a".into());
+        let start = mgr
+            .protected_suffix_start_for_unseen()
+            .expect("protected block");
+        let suffix = mgr.as_slice()[start..].to_vec();
+        let merged = HistoryManager::merge_compacted_with_protected_suffix(
+            &mgr.as_slice()[..start],
+            &suffix,
+            make_msg("user", "Summary"),
+        );
+        crate::llm::history::validate_tool_blocks(&merged, false).expect("whole block");
+        let restored: Vec<ChatMessage> =
+            serde_json::from_value(serde_json::to_value(&merged).expect("serialize"))
+                .expect("restore");
+        let kept = restored
+            .iter()
+            .find(|m| !m.tool_calls.is_empty())
+            .expect("assistant invocation");
+        assert_eq!(kept.reasoning.reasoning_details, Some(details));
+        assert_eq!(
+            kept.reasoning.reasoning_content.as_deref(),
+            Some("thinking")
+        );
+        assert_eq!(
+            restored.last().and_then(|m| m.content.as_deref()),
+            Some("unseen exact body")
+        );
+    }
+
+    #[test]
     fn test_unseen_compaction_keeps_exact_content() {
         let big = "UNSEEN-EXACT-".repeat(300);
         let mut mgr = test_manager(vec![

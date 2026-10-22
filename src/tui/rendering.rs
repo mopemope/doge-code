@@ -162,32 +162,27 @@ impl TuiApp {
         let Some(picker) = &self.model_picker else {
             return;
         };
+        let clean = |value: &str| {
+            value
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>()
+        };
         f.render_widget(Clear, area);
         let block = Block::default().borders(Borders::ALL).title(format!(
             "Models: {}",
-            crate::features::opencode::provider_name(picker.provider)
+            crate::features::model_selection::provider_name(picker.provider)
         ));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        let detail_height = inner.height.saturating_sub(6).min(12);
         let parts = Layout::vertical([
             Constraint::Length(4),
             Constraint::Min(1),
-            Constraint::Length(10),
+            Constraint::Length(detail_height),
         ])
         .split(inner);
-        f.render_widget(
-            Paragraph::new(format!(
-                "Search: {}\n{} | {}\nTab: Go/Zen | Enter: NEW session\nEsc: cancel (no change)",
-                picker.query,
-                crate::features::opencode::billing_label(picker.provider),
-                if picker.key_available {
-                    "key set"
-                } else {
-                    "NO KEY"
-                }
-            )),
-            parts[0],
-        );
+        f.render_widget(Paragraph::new(format!("Search: {}\n{:?} | {} | {} | excluded: {}\nTab/Shift+Tab: Go/Zen/OpenRouter | Ctrl+R: refresh\nEnter: NEW session | Esc/Ctrl+C/Ctrl+G: cancel", clean(&picker.query), picker.state, crate::features::model_selection::billing_label(picker.provider), if picker.key_available { "key set (presence only)" } else { "NO KEY" }, picker.excluded_entries)), parts[0]);
         if inner.width > 0 && inner.height > 0 {
             use unicode_width::UnicodeWidthStr;
             let column =
@@ -197,12 +192,12 @@ impl TuiApp {
         let results = picker.results();
         let items: Vec<ListItem> = results
             .iter()
-            .map(|spec| {
+            .map(|entry| {
                 ListItem::new(format!(
                     "{} | {} | {}",
-                    spec.id,
-                    spec.api.name(),
-                    if spec.api.adapter().is_some() {
+                    clean(&entry.id),
+                    clean(&entry.api_label),
+                    if entry.unavailable_reason.is_none() {
                         "yes"
                     } else {
                         "NO"
@@ -211,7 +206,10 @@ impl TuiApp {
             })
             .collect();
         if items.is_empty() {
-            f.render_widget(Paragraph::new("No matching models"), parts[1]);
+            f.render_widget(
+                Paragraph::new(format!("No matching models ({:?})", picker.state)),
+                parts[1],
+            );
         } else {
             let mut state = ListState::default().with_selected(Some(picker.selected));
             f.render_stateful_widget(
@@ -222,30 +220,52 @@ impl TuiApp {
                 &mut state,
             );
         }
-        let mut detail = if let Some(error) = &picker.error {
-            error.clone()
-        } else if let Some(spec) = results.get(picker.selected) {
-            format!(
-                "{}\n{}\n{}\nAdapter support does not guarantee access.\n{}Offline snapshot {}; no live check",
-                spec.id,
-                spec.api.name(),
-                spec.api.reason(),
-                spec.access_warning()
-                    .map(|warning| format!("{warning}\n"))
-                    .unwrap_or_default(),
-                crate::features::opencode::catalog::SNAPSHOT
-            )
-        } else {
-            "Edit search or Esc to cancel".into()
-        };
-        detail = format!(
-            "{}\n{detail}",
-            if picker.key_available {
-                "Uses the selected OpenCode key."
-            } else {
-                "NO KEY: run `dgc auth login opencode` in a shell, then retry."
+        let mut detail = String::new();
+        if let Some(entry) = results.get(picker.selected) {
+            detail = format!(
+                "{}\n{}\n{}",
+                clean(&entry.id),
+                entry
+                    .name
+                    .as_deref()
+                    .map(clean)
+                    .unwrap_or_else(|| entry.api_label.clone()),
+                entry
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("Text + tools available")
+            );
+            if let Some(metadata) = &entry.metadata {
+                let model = &metadata.model;
+                let price = |value: &Option<String>| {
+                    value
+                        .as_deref()
+                        .filter(|value| {
+                            value
+                                .parse::<f64>()
+                                .is_ok_and(|n| n.is_finite() && n >= 0.0)
+                        })
+                        .unwrap_or("unknown")
+                        .to_owned()
+                };
+                detail.push_str(&format!("\nContext: {} | text: {:?} | tools: {:?}\nUSD reference prompt/completion/request: {}/{}/{}\nConditional pricing: {} (reference only)\nFetched: {} | {:?}{}", model.context_window.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), model.text_support(), model.tools_support(), price(&model.prices.prompt), price(&model.prices.completion), price(&model.prices.request), model.prices.conditional.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), metadata.fetched_at, picker.state, if picker.offline { " | offline" } else { "" }));
+            } else if let Ok(spec) = crate::features::opencode::lookup(picker.provider, &entry.id) {
+                detail.push_str(&format!("\n{}\nAdapter support does not guarantee access.\n{}Offline snapshot {}; no live check", spec.api.reason(), spec.access_warning().map(|v| format!("{v}\n")).unwrap_or_default(), crate::features::opencode::catalog::SNAPSHOT));
             }
-        );
+        }
+        if let Some(error) = &picker.error {
+            detail = format!("{}\n{detail}", clean(error));
+        }
+        if !picker.key_available {
+            detail.push_str(
+                if picker.provider == crate::features::openai_subscription::ProviderKind::Openrouter
+                {
+                    "\nNO KEY: export OPENROUTER_API_KEY and restart dgc."
+                } else {
+                    "\nNO KEY: run `dgc auth login opencode` in a shell, then retry."
+                },
+            );
+        }
         f.render_widget(
             Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: false }),
             parts[2],
@@ -1614,9 +1634,8 @@ mod model_picker_tests {
             assert!(text.contains("Adapter support does not guarantee access."));
             assert!(
                 app.model_picker.as_ref().unwrap().results()[0]
-                    .api
-                    .adapter()
-                    .is_some()
+                    .unavailable_reason
+                    .is_none()
             );
         }
     }
@@ -1668,5 +1687,44 @@ mod search_preview_tests {
         assert!(!preview.chars().any(char::is_control));
         assert!(preview.ends_with("… ↵"));
         assert!(unicode_width::UnicodeWidthStr::width(preview.as_str()) <= 20);
+    }
+}
+
+#[cfg(test)]
+mod openrouter_picker_render_tests {
+    #[test]
+    fn openrouter_model_picker_narrow_screen_sanitizes_metadata() {
+        use crate::features::{model_selection::ModelPicker, openai_subscription::ProviderKind};
+        use crate::tui::commands::model_selection_tests::synthetic_catalog;
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = crate::tui::state::TuiApp::new_for_test("models", None, "default");
+        let mut result = synthetic_catalog();
+        std::sync::Arc::make_mut(&mut result.snapshot).excluded_entries = 2;
+        std::sync::Arc::make_mut(&mut result.snapshot).models[0].name =
+            Some("Friendly\u{001b}[31m\r\nName".into());
+        let mut picker = ModelPicker::new(ProviderKind::Openrouter, "Friendly").unwrap();
+        picker.apply_catalog(0, Ok(result));
+        app.model_picker = Some(picker);
+        for (width, height) in [(100, 30), (35, 20), (12, 8), (2, 2)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| app.render_model_picker(frame, frame.area()))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(!text.contains('\u{001b}'));
+            assert!(!text.contains('\r'));
+            if width == 100 {
+                assert!(text.contains("excluded: 2"));
+                assert!(text.contains("Context: unknown"));
+                assert!(text.contains("USD reference"));
+                assert!(text.contains("Search: Friendly"));
+            }
+        }
     }
 }

@@ -1286,3 +1286,233 @@ fn response_context_metadata_uses_the_same_default_route_and_keeps_overrides() {
     cfg.base_url = "https://custom.invalid/v1".into();
     assert_eq!(cfg.get_context_window_size(), Some(24_000));
 }
+
+#[test]
+fn openrouter_config_isolates_sources_and_has_no_default_model() {
+    use super::ConfigOrigin;
+    use super::app::openrouter_value;
+    use crate::features::openai_subscription::ProviderKind;
+    for source in [
+        None,
+        Some(ProviderKind::OpenaiCompatible),
+        Some(ProviderKind::OpencodeGo),
+    ] {
+        assert!(
+            openrouter_value(
+                None,
+                None,
+                source,
+                Some("project".into()),
+                source,
+                Some("global".into())
+            )
+            .is_none()
+        );
+    }
+    let or = Some(ProviderKind::Openrouter);
+    let cases = [
+        (
+            Some("cli"),
+            Some("env"),
+            Some("project"),
+            Some("global"),
+            "cli",
+            ConfigOrigin::Cli,
+        ),
+        (
+            Some("  "),
+            Some("env"),
+            Some("project"),
+            Some("global"),
+            "env",
+            ConfigOrigin::Environment,
+        ),
+        (
+            None,
+            Some(" "),
+            Some("project"),
+            Some("global"),
+            "project",
+            ConfigOrigin::Project,
+        ),
+        (
+            None,
+            None,
+            Some(""),
+            Some("global"),
+            "global",
+            ConfigOrigin::Global,
+        ),
+    ];
+    for (cli, env, project, global, expected, origin) in cases {
+        assert_eq!(
+            openrouter_value(
+                cli.map(str::to_owned),
+                env.map(str::to_owned),
+                or,
+                project.map(str::to_owned),
+                or,
+                global.map(str::to_owned)
+            ),
+            Some((expected.to_owned(), origin))
+        );
+    }
+    assert!(openrouter_value(None, None, or, None, or, None).is_none());
+    assert_eq!(
+        openrouter_value(
+            None,
+            None,
+            None,
+            Some("foreign".into()),
+            or,
+            Some("global".into())
+        ),
+        Some(("global".into(), ConfigOrigin::Global))
+    );
+    assert_eq!(
+        openrouter_value(
+            None,
+            None,
+            or,
+            Some("project".into()),
+            None,
+            Some("foreign".into())
+        ),
+        Some(("project".into(), ConfigOrigin::Project))
+    );
+}
+
+#[test]
+fn openrouter_context_metadata_is_identity_scoped() {
+    use crate::features::{
+        openai_subscription::ProviderKind,
+        openrouter::{OpenRouterModel, SelectedModelMetadata},
+    };
+    use std::sync::Arc;
+    let temp = tempfile::tempdir().unwrap();
+    let metadata = Arc::new(SelectedModelMetadata {
+        provider: ProviderKind::Openrouter,
+        fetched_at: chrono::Utc::now(),
+        model: OpenRouterModel {
+            id: "publisher/model".into(),
+            context_window: Some(50_000),
+            ..Default::default()
+        },
+    });
+    let mut cfg = AppConfig {
+        project_root: temp.path().into(),
+        provider: ProviderKind::Openrouter,
+        model: "publisher/model".into(),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        openrouter_metadata: Some(metadata.clone()),
+        ..Default::default()
+    };
+    assert_eq!(cfg.get_context_window_size(), Some(50_000));
+    let snapshot = cfg.clone();
+    cfg.model = "publisher/other".into();
+    assert_eq!(cfg.get_context_window_size(), None);
+    assert_eq!(snapshot.get_context_window_size(), Some(50_000));
+    cfg.llm.context_window_size = Some(70_000);
+    assert_eq!(cfg.get_context_window_size(), Some(70_000));
+    cfg.llm.context_window_size = None;
+    cfg.model = "publisher/model".into();
+    cfg.openrouter_metadata = Some(Arc::new(SelectedModelMetadata {
+        provider: ProviderKind::OpencodeGo,
+        ..(*metadata).clone()
+    }));
+    assert_eq!(cfg.get_context_window_size(), None);
+    cfg.openrouter_metadata = Some(Arc::new(SelectedModelMetadata {
+        model: OpenRouterModel {
+            context_window: Some(0),
+            ..metadata.model.clone()
+        },
+        ..(*metadata).clone()
+    }));
+    assert_eq!(cfg.get_context_window_size(), None);
+    assert!(
+        cfg.inference_diagnostics()
+            .iter()
+            .any(|line| line.contains("fallback estimate; NOT model capacity"))
+    );
+}
+
+#[test]
+fn openrouter_config_cli_and_exec_resume_are_isolated() {
+    use crate::features::openai_subscription::ProviderKind;
+    use clap::Parser;
+    if let Ok(case) = std::env::var("DGC_OPENROUTER_CONFIG_TEST_CASE") {
+        let mut args = vec!["dgc", "--provider", "openrouter"];
+        match case.as_str() {
+            "exec-resume" => args.extend(["exec", "--resume=missing", "instruction"]),
+            "tui-resume" => args.push("--resume=missing"),
+            "environment" => {}
+            "missing-model" => {}
+            "unselected" => args = vec!["dgc"],
+            _ => unreachable!(),
+        }
+        let result = AppConfig::from_cli(crate::Cli::parse_from(args));
+        if case == "missing-model" {
+            assert!(result.is_err());
+            return;
+        }
+        let cfg = result.unwrap();
+        if case == "unselected" {
+            assert_eq!(cfg.provider, ProviderKind::OpenaiCompatible);
+            assert_eq!(cfg.model, "openai-model");
+            return;
+        }
+        assert_eq!(cfg.provider, ProviderKind::Openrouter);
+        assert_eq!(cfg.base_url, "https://openrouter.ai/api/v1");
+        assert!(cfg.openrouter_metadata.is_none());
+        if case == "environment" {
+            assert_eq!(cfg.model, "publisher/model:free");
+            assert_eq!(cfg.api_key_origin, Some(ConfigOrigin::Environment));
+            assert_eq!(cfg.api_key.as_deref(), Some("SYNTHETIC_OR_KEY"));
+        } else {
+            assert!(cfg.model.is_empty());
+            assert!(cfg.api_key.is_none());
+            assert_eq!(cfg.resume.as_deref(), Some("missing"));
+        }
+        return;
+    }
+    for case in [
+        "exec-resume",
+        "tui-resume",
+        "environment",
+        "missing-model",
+        "unselected",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("config.toml"), "").unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "config::tests::openrouter_config_cli_and_exec_resume_are_isolated",
+                "--nocapture",
+            ])
+            .current_dir(temp.path())
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .env("DOGE_CODE_CONFIG", temp.path().join("config.toml"))
+            .env("DGC_OPENROUTER_CONFIG_TEST_CASE", case)
+            .env("OPENAI_MODEL", "openai-model")
+            .env("OPENAI_API_KEY", "SYNTHETIC_OTHER_KEY")
+            .env("OPENAI_BASE_URL", "https://other.example.invalid/v1")
+            .env("OPENCODE_API_KEY", "SYNTHETIC_OPENCODE_KEY");
+        if case == "environment" || case == "unselected" {
+            command
+                .env("OPENROUTER_MODEL", "publisher/model:free")
+                .env("OPENROUTER_API_KEY", "SYNTHETIC_OR_KEY");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "case {case}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

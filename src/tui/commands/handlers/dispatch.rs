@@ -36,6 +36,17 @@ fn is_command(line: &str, name: &str) -> bool {
 // This allows each command to be tested independently and keeps dispatch.rs focused on routing.
 
 impl CommandHandler for TuiExecutor {
+    fn start_model_catalog(
+        &mut self,
+        ui: &mut TuiApp,
+        policy: crate::features::openrouter::catalog::CatalogPolicy,
+    ) -> anyhow::Result<()> {
+        TuiExecutor::start_model_catalog(self, ui, policy)
+    }
+    fn cancel_model_catalog(&mut self, ui: &mut TuiApp) {
+        TuiExecutor::cancel_model_catalog(self, ui);
+    }
+
     fn select_model_for_new_session(
         &mut self,
         provider: crate::features::openai_subscription::ProviderKind,
@@ -319,6 +330,16 @@ impl CommandHandler for TuiExecutor {
     }
 
     fn handle_job_completed(&mut self, producer: &str, ui: &mut TuiApp) {
+        if let Some(id) = crate::jobs::JobId::parse_arg(producer) {
+            match self.finish_model_catalog(ui, id) {
+                Ok(true) => return,
+                Err(error) => {
+                    ui.push_log(format!("Catalog completion failed: {error}"));
+                    return;
+                }
+                Ok(false) => {}
+            }
+        }
         if let Some(id) = crate::jobs::JobId::parse_arg(producer)
             && let Some(job) = self.jobs.get_snapshot(id)
             && job.status.is_terminal()

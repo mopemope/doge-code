@@ -1,6 +1,11 @@
 //! Validate a persisted selection before publishing a session or initializing
 //! its client. Shared by CLI resume and TUI transitions.
-use crate::{config::AppConfig, features::opencode, llm::OpenAIClient, session::SessionData};
+use crate::{
+    config::AppConfig,
+    features::{model_selection, openai_subscription::ProviderKind, opencode, openrouter},
+    llm::OpenAIClient,
+    session::SessionData,
+};
 use anyhow::Result;
 
 /// Guidance uses explicit checkpoint metadata only. Bindings are opaque and
@@ -9,9 +14,9 @@ fn recovery_hint(session: &SessionData) -> String {
     let selection = match &session.model_selection {
         Some(selection) => format!(
             "Recorded provider/model: {} / {:?}. Use --provider={} and --model=<recorded-model> with the original account.",
-            opencode::provider_name(selection.provider),
+            model_selection::provider_name(selection.provider),
             selection.model,
-            opencode::provider_name(selection.provider),
+            model_selection::provider_name(selection.provider),
         ),
         None => "Provider/model selection was not recorded (legacy). Use the original account, --provider and --model from your startup configuration; no model is inferred from the binding.".into(),
     };
@@ -41,12 +46,25 @@ pub(crate) fn config_for_session(
             "Session uses another provider; restart with its original provider (no billing route change). {}",
             recovery_hint(session)
         );
-        cfg.model = opencode::model_id(selection.provider, &selection.model)
-            .map_err(|error| with_recovery(error, session))?
-            .into();
-        opencode::api(selection.provider, &cfg.model)
-            .map_err(|error| with_recovery(error, session))?;
+        if selection.provider == ProviderKind::Openrouter {
+            cfg.model = openrouter::model_id(&selection.model)
+                .map_err(|error| with_recovery(error, session))?
+                .into();
+            openrouter::validate_base(&cfg.base_url)
+                .map_err(|error| with_recovery(error, session))?;
+        } else {
+            cfg.model = opencode::model_id(selection.provider, &selection.model)
+                .map_err(|error| with_recovery(error, session))?
+                .into();
+            opencode::api(selection.provider, &cfg.model)
+                .map_err(|error| with_recovery(error, session))?;
+        }
     }
+    cfg.openrouter_metadata = if cfg.provider == ProviderKind::Openrouter {
+        openrouter::cached_metadata(&cfg.model)
+    } else {
+        None
+    };
     // OpenCode bindings need no key or account lookup. Reject them before
     // client construction, including keyless startup.
     validate_binding(session, &cfg, None)?;
@@ -67,7 +85,13 @@ pub(crate) fn validate_binding(
     cfg: &AppConfig,
     client: Option<&OpenAIClient>,
 ) -> Result<()> {
-    let expected = if opencode::default_base(cfg.provider).is_some() {
+    let expected = if cfg.provider == ProviderKind::Openrouter {
+        openrouter::validate_base(&cfg.base_url).map_err(|error| with_recovery(error, session))?;
+        Some(
+            openrouter::inference_binding(&cfg.model)
+                .map_err(|error| with_recovery(error, session))?,
+        )
+    } else if opencode::default_base(cfg.provider).is_some() {
         Some(format!(
             "{:?}:{}:{:?}:{}",
             cfg.provider,

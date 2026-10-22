@@ -12,9 +12,9 @@ pub fn handle_help(executor: &mut TuiExecutor, ui: &mut TuiApp) {
     ui.push_log("  /theme <name> - Switch theme (dark/light)");
     ui.push_log("  /tools - List available tools");
     ui.push_log("  /tokens - Show token usage; /tokens context opens the last preflight estimate");
-    ui.push_log("  /provider [go|zen] [search] - Choose OpenCode Go/Zen for a NEW conversation");
+    ui.push_log("  /provider [go|zen|openrouter] [search] - Choose OpenCode Go/Zen/OpenRouter for a NEW conversation");
     ui.push_log(
-        "  /models [search] - Select a model; Tab switches Go/Zen, Enter starts a NEW session",
+        "  /models [search] - Select a model; Tab switches Go/Zen/OpenRouter, Enter starts a NEW session",
     );
     ui.push_log("  /compact - Compact conversation history to reduce token usage");
     ui.push_log("  /cancel [job-id] - Cancel the current foreground job or a specific job");

@@ -11,7 +11,7 @@ pub struct SessionManager {
 }
 
 /// Process-local state only; never added to the session wire format.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) enum SessionSaveState {
     #[default]
     Durable,
@@ -227,9 +227,8 @@ impl SessionManager {
         initial_prompt: Option<String>,
         selection: super::data::SessionModelSelection,
     ) -> Result<(String, crate::session::store::SessionSaveOutcome)> {
-        if self.has_unsaved_current_session() {
-            self.flush_current_session_policy(true)?;
-        }
+        use crate::session::store::SessionSaveOutcome;
+        let previous_state = self.save_state.clone();
         let mut candidate = SessionData::new();
         if let Some(prompt) = initial_prompt {
             candidate.set_initial_prompt(&prompt);
@@ -237,7 +236,57 @@ impl SessionManager {
         }
         candidate.model_selection = Some(selection);
         let lease = self.store.try_lease(&candidate.meta.id)?;
-        let outcome = self.store.save_preserving_sessions(&candidate, &lease)?;
+        // Prepare the candidate before flushing the old checkpoint: a candidate
+        // failure must not make an unsaved old checkpoint durable. Neither the
+        // runtime selection nor its ownership lease is published yet.
+        let candidate_outcome = self.store.save_preserving_sessions(&candidate, &lease)?;
+        let previous_outcome = if self.has_unsaved_current_session() {
+            match self.flush_current_session_policy(true) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // Store errors occur before replacement; a post-rename fsync
+                    // failure is an Ok durability warning and never reaches here.
+                    self.save_state = previous_state;
+                    let cleanup = self.store.delete_with_lease(&candidate.meta.id, &lease);
+                    let error = if let SessionSaveOutcome::DurabilityUnconfirmed { message } =
+                        &candidate_outcome
+                    {
+                        error.context(format!("new session checkpoint had unconfirmed durability before cleanup: {message}"))
+                    } else {
+                        error
+                    };
+                    return Err(match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup_error) => error.context(format!(
+                            "failed to remove unpublished new session: {cleanup_error}"
+                        )),
+                    });
+                }
+            }
+        } else {
+            self.checkpoint_warning()
+                .map_or(SessionSaveOutcome::Durable, |message| {
+                    SessionSaveOutcome::DurabilityUnconfirmed {
+                        message: message.into(),
+                    }
+                })
+        };
+        let mut warnings = Vec::new();
+        for (context, outcome) in [
+            ("previous session", previous_outcome),
+            ("new session", candidate_outcome),
+        ] {
+            if let SessionSaveOutcome::DurabilityUnconfirmed { message } = outcome {
+                warnings.push(format!("{context}: {message}"));
+            }
+        }
+        let outcome = if warnings.is_empty() {
+            SessionSaveOutcome::Durable
+        } else {
+            SessionSaveOutcome::DurabilityUnconfirmed {
+                message: warnings.join("; "),
+            }
+        };
         let id = candidate.meta.id.clone();
         self.current_session = Some(candidate);
         self.current_lease = Some(lease);
@@ -1370,5 +1419,119 @@ mod tests {
         assert_eq!(reloaded.usage.as_ref().unwrap().total_tokens, 150);
         assert_eq!(reloaded.token_count, 150);
         assert_eq!(reloaded.requests, 1);
+    }
+}
+
+#[cfg(test)]
+mod model_transition_transaction_tests {
+    use super::*;
+    use crate::{
+        features::openai_subscription::ProviderKind, session::data::SessionModelSelection,
+    };
+
+    fn dirty_manager(root: &std::path::Path) -> SessionManager {
+        let mut manager =
+            SessionManager::with_store(SessionStore::new(root.join("sessions")).unwrap());
+        manager.create_session(None).unwrap();
+        let id = manager.current_session_id().unwrap();
+        manager.current_session.as_mut().unwrap().meta.title = "unsaved old title".into();
+        manager.save_state = SessionSaveState::Unsaved { session_id: id };
+        manager
+    }
+    fn selection() -> SessionModelSelection {
+        SessionModelSelection {
+            provider: ProviderKind::Openrouter,
+            model: "publisher/model".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_transition_candidate_save_failure_preserves_dirty_old_checkpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = dirty_manager(temp.path());
+        let id = manager.current_session_id().unwrap();
+        let old_path = manager.store.session_dir(&id).join("session.json");
+        let before = std::fs::read(&old_path).unwrap();
+        let permissions = std::fs::metadata(&manager.store.root)
+            .unwrap()
+            .permissions();
+        std::fs::set_permissions(&manager.store.root, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let result = manager.create_session_with_model(None, selection());
+        std::fs::set_permissions(&manager.store.root, permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&old_path).unwrap(), before);
+        assert_eq!(manager.current_session_id().as_deref(), Some(id.as_str()));
+        assert!(manager.has_unsaved_current_session());
+        assert_eq!(
+            manager.current_session.as_ref().unwrap().meta.title,
+            "unsaved old title"
+        );
+        manager
+            .current_lease
+            .as_ref()
+            .unwrap()
+            .validate(&manager.store.root, &id)
+            .unwrap();
+        assert_eq!(manager.store.list_with_stats().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn model_transition_old_flush_failure_cleans_candidate_and_preserves_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = dirty_manager(temp.path());
+        let id = manager.current_session_id().unwrap();
+        let old_path = manager.store.session_dir(&id).join("session.json");
+        let before = std::fs::read(&old_path).unwrap();
+        let permissions = std::fs::metadata(&old_path).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&old_path, readonly).unwrap();
+        let result = manager.create_session_with_model(None, selection());
+        std::fs::set_permissions(&old_path, permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&old_path).unwrap(), before);
+        assert_eq!(manager.current_session_id().as_deref(), Some(id.as_str()));
+        assert!(manager.has_unsaved_current_session());
+        manager
+            .current_lease
+            .as_ref()
+            .unwrap()
+            .validate(&manager.store.root, &id)
+            .unwrap();
+        assert_eq!(manager.store.list_with_stats().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn model_transition_retains_both_post_rename_durability_warnings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = dirty_manager(temp.path());
+        let old_id = manager.current_session_id().unwrap();
+        manager.store.fail_directory_sync = true;
+        let (new_id, outcome) = manager
+            .create_session_with_model(None, selection())
+            .unwrap();
+        let crate::session::store::SessionSaveOutcome::DurabilityUnconfirmed { message } = outcome
+        else {
+            panic!("must preserve warnings")
+        };
+        assert!(
+            message.contains("previous session") && message.contains("new session"),
+            "{message}"
+        );
+        assert_ne!(new_id, old_id);
+        assert_eq!(
+            manager.current_session_id().as_deref(),
+            Some(new_id.as_str())
+        );
+        assert!(!manager.has_unsaved_current_session());
+        assert_eq!(
+            manager.store.load(&old_id).unwrap().meta.title,
+            "unsaved old title"
+        );
+        assert_eq!(manager.store.list_with_stats().unwrap().len(), 2);
+        assert_eq!(manager.checkpoint_warning(), Some(message.as_str()));
     }
 }

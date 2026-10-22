@@ -51,11 +51,11 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub base_url: String,
 
-    /// Model ID (OpenCode uses OPENCODE_MODEL; other providers use OPENAI_MODEL)
+    /// Explicit model ID (OpenRouter: OPENROUTER_MODEL; OpenCode: OPENCODE_MODEL; compatible: OPENAI_MODEL)
     #[arg(long, default_value = "")]
     pub model: String,
 
-    /// API key (prefer OPENCODE_API_KEY for OpenCode; OPENAI_API_KEY for compatible APIs)
+    /// API key (OpenRouter: OPENROUTER_API_KEY; OpenCode: OPENCODE_API_KEY; compatible: OPENAI_API_KEY)
     #[arg(long)]
     pub api_key: Option<String>,
 
@@ -91,13 +91,19 @@ pub enum Commands {
         #[command(subcommand)]
         command: features::openai_subscription::cli::AuthCommand,
     },
-    /// List ChatGPT account models or an offline OpenCode gateway catalog
+    /// List ChatGPT, static OpenCode or public OpenRouter models without inference
     Models {
         #[arg(long, value_enum, default_value = "openai")]
         provider: features::openai_subscription::ProviderKind,
-        /// Diagnose one canonical ID or matching provider alias (OpenCode only)
+        /// Exact OpenRouter publisher/model ID, or OpenCode ID/provider alias
         #[arg(long)]
         model: Option<String>,
+        /// Fetch the public catalog once (OpenRouter only; conflicts with --offline)
+        #[arg(long, conflicts_with = "offline")]
+        refresh: bool,
+        /// Read cached catalog only (OpenRouter only; no network)
+        #[arg(long, conflicts_with = "refresh")]
+        offline: bool,
     },
     /// Explain selected connection, context and reasoning policy without inference
     Diagnostics,
@@ -213,7 +219,36 @@ async fn run_cli() -> Result<()> {
             _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await }
         };
     }
-    if let Some(Commands::Models { provider, model }) = &cli.command {
+    if let Some(Commands::Models {
+        provider,
+        model,
+        refresh,
+        offline,
+    }) = &cli.command
+    {
+        if *provider == features::openai_subscription::ProviderKind::Openrouter {
+            use features::openrouter::catalog::{
+                CatalogClient, CatalogPolicy, default_cache_path, format_catalog,
+            };
+            let policy = if *offline {
+                CatalogPolicy::Offline
+            } else if *refresh {
+                CatalogPolicy::Refresh
+            } else {
+                CatalogPolicy::PreferCache
+            };
+            let client = CatalogClient::new(default_cache_path())?;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let operation = client.load(policy, cancel.clone());
+            tokio::pin!(operation);
+            let result = tokio::select! { result = &mut operation => result, _ = tokio::signal::ctrl_c() => { cancel.cancel(); operation.await } }?;
+            println!("{}", format_catalog(&result, model.as_deref())?);
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !refresh && !offline,
+            "--refresh and --offline are supported for OpenRouter catalogs only"
+        );
         if features::opencode::default_base(*provider).is_some() {
             return features::opencode::print_catalog(*provider, model.as_deref());
         }
@@ -487,7 +522,9 @@ async fn run_tui(
 
     exec.sync_selection_ui(&mut app);
     if exec.client.is_none() {
-        app.push_log(features::opencode::missing_auth_message(exec.cfg.provider));
+        app.push_log(features::model_selection::missing_auth_message(
+            exec.cfg.provider,
+        ));
     }
 
     let mut exec = exec;

@@ -32,6 +32,7 @@ pub struct OpenAIClient {
     pub(crate) provider: crate::features::openai_subscription::ProviderKind,
     /// Fixed API selection for generic API-key clients. OpenCode continues to
     /// resolve model-catalog routes dynamically; `new()` remains Chat-first.
+    pub(crate) openrouter_metadata: Option<Arc<crate::features::openrouter::SelectedModelMetadata>>,
     pub(crate) api_kind: crate::llm::capabilities::ApiKind,
     pub(crate) opencode_session: String,
     pub(crate) subscription: Option<crate::features::openai_subscription::auth::AuthHandle>,
@@ -117,6 +118,10 @@ impl OpenAIClient {
             );
             Ok(Some(client))
         } else {
+            if cfg.provider == ProviderKind::Openrouter {
+                crate::features::openrouter::validate_base(&cfg.base_url)?;
+                crate::features::openrouter::model_id(&cfg.model)?;
+            }
             crate::features::opencode::validate_base(cfg.provider, &cfg.base_url)?;
             let api_kind = cfg.resolved_api_for_model(&cfg.model)?;
             cfg.api_key
@@ -129,7 +134,8 @@ impl OpenAIClient {
                     )?;
                     client.provider = cfg.provider;
                     client.api_kind = api_kind;
-                    if client.uses_generic_api_key_responses() {
+                    client.openrouter_metadata = cfg.openrouter_metadata.clone();
+                    if client.is_openrouter() || client.uses_generic_api_key_responses() {
                         client.with_llm_config_checked(cfg.llm.clone())
                     } else {
                         Ok(client.with_llm_config(cfg.llm.clone()))
@@ -139,7 +145,14 @@ impl OpenAIClient {
         }
     }
 
+    pub(crate) fn is_openrouter(&self) -> bool {
+        self.provider == crate::features::openai_subscription::ProviderKind::Openrouter
+    }
+
     pub(crate) fn wire_model<'a>(&self, model: &'a str) -> Result<&'a str> {
+        if self.is_openrouter() {
+            return crate::features::openrouter::model_id(model);
+        }
         let id = crate::features::opencode::model_id(self.provider, model)?;
         if crate::features::opencode::default_base(self.provider).is_some() {
             crate::features::opencode::api(self.provider, id)?;
@@ -185,6 +198,9 @@ impl OpenAIClient {
     }
 
     pub(crate) fn inference_binding(&self, model: &str) -> Result<String> {
+        if self.is_openrouter() {
+            return crate::features::openrouter::inference_binding(model);
+        }
         Ok(match self.account_label() {
             Some(account) => format!("openai:{account}:{model}"),
             None if crate::features::opencode::default_base(self.provider).is_some() => format!(
@@ -244,13 +260,59 @@ impl OpenAIClient {
         self.prompt_cache_counters = previous.prompt_cache_counters.clone();
     }
 
+    pub(crate) fn error_metadata(
+        &self,
+        body: &str,
+        request_id: Option<&str>,
+    ) -> crate::llm::telemetry::ProviderErrorMetadata {
+        let mut meta = crate::llm::telemetry::parse_provider_error_metadata(body, request_id);
+        if self.is_openrouter() {
+            meta.code = meta.code.filter(|code| {
+                matches!(
+                    code.as_str(),
+                    "context_length_exceeded"
+                        | "rate_limit_exceeded"
+                        | "slow_down"
+                        | "invalid_request"
+                        | "invalid_request_error"
+                ) || crate::llm::retry::is_permanent_quota_code(code)
+            });
+            meta.error_type = None;
+            meta.param = None;
+        }
+        meta
+    }
+
+    pub(crate) fn http_error_message(
+        &self,
+        status: reqwest::StatusCode,
+        meta: &crate::llm::telemetry::ProviderErrorMetadata,
+    ) -> String {
+        if self.is_openrouter() {
+            let category = match status.as_u16() {
+                401 => "authentication failed",
+                402 => "balance or budget unavailable",
+                403 => "access denied",
+                404 => "model or capability unavailable",
+                429 => "rate limited",
+                500..=599 => "service error",
+                _ => "request failed",
+            };
+            format!("OpenRouter {category} (HTTP {})", status.as_u16())
+        } else {
+            crate::llm::telemetry::provider_error_message(status.as_u16(), meta)
+        }
+    }
+
     pub(crate) fn authentication_error(
         &self,
         status: reqwest::StatusCode,
         context: &str,
         meta: &crate::llm::telemetry::ProviderErrorMetadata,
     ) -> anyhow::Error {
-        let message = if crate::features::opencode::default_base(self.provider).is_some() {
+        let message = if self.is_openrouter() {
+            self.http_error_message(status, meta)
+        } else if crate::features::opencode::default_base(self.provider).is_some() {
             format!(
                 "{}. {}",
                 crate::llm::telemetry::provider_error_message(status.as_u16(), meta),
@@ -297,6 +359,7 @@ impl OpenAIClient {
         Ok(Self {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
             api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
+            openrouter_metadata: None,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: url,
@@ -339,9 +402,17 @@ impl OpenAIClient {
             .connect_timeout(Duration::from_millis(cfg.connect_timeout_ms))
             .timeout(Duration::from_millis(cfg.timeout_ms)) // Use timeout_ms for overall request timeout
             .read_timeout(Duration::from_millis(cfg.timeout_ms)); // Add timeout settings
+        // All OpenRouter attempts belong to our bounded cancellation-aware
+        // retry loop, including transport/protocol failures.
+        let builder = if self.is_openrouter() {
+            builder.retry(reqwest::retry::never())
+        } else {
+            builder
+        };
         // OpenCode routes must not follow a redirect into another billing
         // endpoint. A redirect is surfaced as an HTTP failure, never fallback.
-        let redirects_blocked = crate::features::opencode::default_base(self.provider).is_some()
+        let redirects_blocked = self.is_openrouter()
+            || crate::features::opencode::default_base(self.provider).is_some()
             || (self.provider
                 == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
                 && self.api_kind == crate::llm::capabilities::ApiKind::Responses);
@@ -792,6 +863,7 @@ mod tests {
         let c = OpenAIClient {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
             api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
+            openrouter_metadata: None,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/v1/".into(),
@@ -816,6 +888,7 @@ mod tests {
         let c2 = OpenAIClient {
             provider: crate::features::openai_subscription::ProviderKind::OpenaiCompatible,
             api_kind: crate::llm::capabilities::ApiKind::ChatCompletions,
+            openrouter_metadata: None,
             opencode_session: uuid::Uuid::new_v4().to_string(),
             subscription: None,
             base_url: "https://api.example.com/".into(),

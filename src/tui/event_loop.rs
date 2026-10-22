@@ -662,7 +662,7 @@ impl TuiApp {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             if key.kind == event::KeyEventKind::Press {
-                self.model_picker = None;
+                crate::tui::event_handlers::model_picker::close_model_picker(self);
                 self.dirty = true;
                 *last_ctrl_c_at = None;
             }

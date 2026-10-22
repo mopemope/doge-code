@@ -13,4 +13,6 @@ mod review_feedback_tests;
 pub(crate) mod model_selection;
 
 #[cfg(test)]
-mod model_selection_tests;
+pub(crate) mod model_selection_tests;
+
+pub(crate) mod model_catalog;

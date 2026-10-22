@@ -1,7 +1,7 @@
 //! Pure diagnostics: no credential/config loading, network calls or history mutation.
 use super::app::FALLBACK_CONTEXT_WINDOW;
 use super::{AppConfig, ReasoningMode};
-use crate::features::{openai_subscription::ProviderKind, opencode};
+use crate::features::{model_selection, openai_subscription::ProviderKind, opencode};
 use crate::llm::capabilities::{self, ApiKind, ReasoningSupport};
 
 impl AppConfig {
@@ -19,7 +19,7 @@ impl AppConfig {
         };
         format!(
             "{} / {} / {auth}",
-            opencode::provider_name(self.provider),
+            model_selection::provider_name(self.provider),
             safe_text(&self.model)
         )
     }
@@ -27,20 +27,24 @@ impl AppConfig {
     pub fn inference_diagnostics(&self) -> Vec<String> {
         let api = self.resolved_api_for_model(&self.model).ok();
         // Custom URL paths/query/userinfo may contain credentials: display host only.
-        let endpoint = opencode::default_base(self.provider)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                if self.provider == ProviderKind::Openai {
-                    return "ChatGPT OAuth endpoint".into();
-                }
-                reqwest::Url::parse(&self.base_url)
-                    .ok()
-                    .and_then(|url| {
-                        url.host_str()
-                            .map(|host| format!("{host} (URL path omitted)"))
-                    })
-                    .unwrap_or_else(|| "custom endpoint (invalid URL)".into())
-            });
+        let endpoint = (if self.provider == ProviderKind::Openrouter {
+            Some(crate::features::openrouter::BASE_URL)
+        } else {
+            opencode::default_base(self.provider)
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if self.provider == ProviderKind::Openai {
+                return "ChatGPT OAuth endpoint".into();
+            }
+            reqwest::Url::parse(&self.base_url)
+                .ok()
+                .and_then(|url| {
+                    url.host_str()
+                        .map(|host| format!("{host} (URL path omitted)"))
+                })
+                .unwrap_or_else(|| "custom endpoint (invalid URL)".into())
+        });
         let mut lines = vec![format!(
             "Connection: {} | Endpoint: {} | API: {}",
             self.inference_label(),
@@ -51,6 +55,9 @@ impl AppConfig {
                 None => "unknown/unsupported",
             }
         )];
+        if self.provider == ProviderKind::Openrouter {
+            lines.push("OpenRouter uses metered billing; key presence does not verify validity or balance.".into());
+        }
         if let Ok(spec) = opencode::lookup(self.provider, &self.model)
             && let Some(warning) = spec.access_warning()
         {
@@ -70,7 +77,7 @@ impl AppConfig {
                 .as_ref()
                 .is_none_or(|key| key.trim().is_empty())
         {
-            lines.push(opencode::missing_auth_message(self.provider).into());
+            lines.push(model_selection::missing_auth_message(self.provider).into());
         }
         let capacity = match (self.llm.context_window_size, self.get_context_window_size()) {
             (Some(size), _) => {
@@ -92,7 +99,23 @@ impl AppConfig {
         let support = caps
             .map(|caps| caps.reasoning)
             .unwrap_or(ReasoningSupport::Unknown);
-        let behavior = if caps.is_some_and(|caps| caps.chat_tools_require_reasoning_none) {
+        let behavior = if self.provider == ProviderKind::Openrouter {
+            let applied = |effort| match crate::features::openrouter::resolve_effort(
+                self.openrouter_metadata.as_deref(),
+                &self.model,
+                self.reasoning.mode,
+                Some(effort),
+            ) {
+                Ok(Some(value)) => value.as_api_str(),
+                Ok(None) => "omitted",
+                Err(_) => "unsupported (request will be rejected)",
+            };
+            match self.reasoning.mode {
+                ReasoningMode::Off => "no reasoning effort hint; provider default (thinking is NOT guaranteed disabled)".into(),
+                ReasoningMode::Fixed => format!("explicit hint={}; provider acceptance not guaranteed", applied(self.reasoning.fixed_effort)),
+                ReasoningMode::Auto => format!("adaptive hints from exact OpenRouter metadata: initial={}, routine={}, deliberative={}, recovery={}", applied(self.reasoning.initial_effort), applied(self.reasoning.routine_effort), applied(self.reasoning.deliberative_effort), applied(self.reasoning.recovery_effort)),
+            }
+        } else if caps.is_some_and(|caps| caps.chat_tools_require_reasoning_none) {
             "tool requests force reasoning_effort=none for this adapter".into()
         } else {
             match self.reasoning.mode {
@@ -238,6 +261,53 @@ mod tests {
                 .inference_diagnostics()
                 .join("\n")
                 .contains("API: Chat Completions")
+        );
+    }
+    #[test]
+    fn openrouter_diagnostics_match_exact_effort_metadata() {
+        use crate::features::openrouter::{
+            BASE_URL, EffortSupport, OpenRouterModel, ReasoningMetadata, SelectedModelMetadata,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig {
+            provider: ProviderKind::Openrouter,
+            base_url: BASE_URL.into(),
+            model: "p/model".into(),
+            project_root: dir.path().into(),
+            ..Default::default()
+        };
+        cfg.openrouter_metadata = Some(std::sync::Arc::new(SelectedModelMetadata {
+            provider: ProviderKind::Openrouter,
+            fetched_at: chrono::Utc::now(),
+            model: OpenRouterModel {
+                id: cfg.model.clone(),
+                reasoning: ReasoningMetadata {
+                    supported_efforts: EffortSupport::Listed(vec!["medium".into()]),
+                    mandatory: None,
+                },
+                ..Default::default()
+            },
+        }));
+        let text = cfg.inference_diagnostics().join("\n");
+        assert!(text.contains("initial=medium"), "{text}");
+        assert!(text.contains("routine=omitted"), "{text}");
+        cfg.model = "p/other".into();
+        assert!(
+            cfg.inference_diagnostics()
+                .join("\n")
+                .contains("initial=omitted")
+        );
+        cfg.reasoning.mode = ReasoningMode::Fixed;
+        assert!(
+            cfg.inference_diagnostics()
+                .join("\n")
+                .contains("explicit hint=medium")
+        );
+        cfg.reasoning.mode = ReasoningMode::Off;
+        assert!(
+            cfg.inference_diagnostics()
+                .join("\n")
+                .contains("NOT guaranteed disabled")
         );
     }
 }

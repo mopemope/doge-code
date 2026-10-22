@@ -69,6 +69,12 @@ impl OpenAIClient {
         cancel: Option<CancellationToken>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let model = self.wire_model(model)?;
+        if self.is_openrouter() {
+            let response = self.chat_once(model, messages.to_vec(), cancel).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok(response.content)
+            })));
+        }
         if self.api_key_responses(model)? {
             let response = crate::features::openai_subscription::responses::infer_api_key(
                 self,

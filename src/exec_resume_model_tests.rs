@@ -364,3 +364,65 @@ async fn cli_resume_model_rejects_cross_provider_before_auth_and_preserves_disk(
         );
     }
 }
+
+#[tokio::test]
+async fn openrouter_explicit_resume_missing_does_not_create_session() {
+    for resume in ["latest", "missing-id"] {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            provider: ProviderKind::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: String::new(),
+            resume: Some(resume.into()),
+            project_root: temp.path().into(),
+            no_repomap: true,
+            ..Default::default()
+        };
+        assert!(Executor::new(cfg).await.is_err());
+        let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+        assert!(store.list_with_stats().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn openrouter_resume_restores_saved_model_before_client() {
+    for startup_model in ["", "publisher/other", "publisher/model:free"] {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            provider: ProviderKind::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: startup_model.into(),
+            project_root: temp.path().into(),
+            no_repomap: true,
+            ..Default::default()
+        };
+        let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+        let mut data = SessionData::new();
+        data.model_selection = Some(SessionModelSelection {
+            provider: cfg.provider,
+            model: "publisher/model:free".into(),
+        });
+        data.inference_binding = Some(
+            "Openrouter:https://openrouter.ai/api/v1:ChatCompletions:publisher/model:free".into(),
+        );
+        store.save(&data).unwrap();
+        let before = std::fs::read(store.session_dir(&data.meta.id).join("session.json")).unwrap();
+        let cfg = AppConfig {
+            resume: Some(data.meta.id.clone()),
+            ..cfg
+        };
+        let executor = Executor::new(cfg.clone()).await.unwrap();
+        assert_eq!(executor.cfg.model, "publisher/model:free");
+        assert_eq!(executor.tools.config.model, "publisher/model:free");
+        assert!(executor.client.is_none());
+        assert_eq!(
+            std::fs::read(store.session_dir(&data.meta.id).join("session.json")).unwrap(),
+            before
+        );
+        drop(executor);
+        data.inference_binding =
+            Some("Openrouter:https://openrouter.ai/api/v1:ChatCompletions:publisher/wrong".into());
+        store.save(&data).unwrap();
+        assert!(Executor::new(cfg).await.is_err());
+    }
+}

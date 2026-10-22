@@ -1,7 +1,7 @@
 use super::core::TuiExecutor;
 use crate::{
     config::AppConfig,
-    features::opencode,
+    features::{model_selection, opencode, openrouter},
     llm::OpenAIClient,
     session::{SessionData, data::SessionModelSelection},
     tui::state::TuiApp,
@@ -37,7 +37,7 @@ impl TuiExecutor {
     ) -> Result<(AppConfig, Option<OpenAIClient>)> {
         let cfg =
             crate::session::selection::config_for_session(session, startup, &self.initial_model)?;
-        let client = if opencode::default_base(cfg.provider).is_some() {
+        let client = if model_selection::records_selection(cfg.provider) {
             // Validate/build before committing; keep process usage shared by existing clones.
             let mut ready = OpenAIClient::from_config(&cfg)?;
             if let (Some(next), Some(previous)) = (ready.as_mut(), self.client.as_ref()) {
@@ -86,22 +86,69 @@ impl TuiExecutor {
         ui: &mut TuiApp,
     ) -> Result<String> {
         self.ensure_model_selection_idle(ui)?;
-        let model = opencode::lookup(provider, model)?;
-        opencode::api(provider, model.id)?;
-        let cfg = opencode::selection_config(
-            &self.cfg,
-            provider,
-            model.id,
-            opencode::key_store::available_key(),
-        )?;
+        let (model, cfg) =
+            if provider == crate::features::openai_subscription::ProviderKind::Openrouter {
+                openrouter::model_id(model)?;
+                let metadata = ui
+                    .model_picker
+                    .as_ref()
+                    .and_then(|picker| {
+                        picker
+                            .entries
+                            .iter()
+                            .find(|entry| entry.provider == provider && entry.id == model)
+                    })
+                    .and_then(|entry| entry.metadata.clone());
+                if let Some(picker) = ui.model_picker.as_ref() {
+                    anyhow::ensure!(picker.can_select(), "Catalog is still loading");
+                    if let Some(entry) = picker
+                        .entries
+                        .iter()
+                        .find(|entry| entry.provider == provider && entry.id == model)
+                    {
+                        anyhow::ensure!(
+                            entry.unavailable_reason.is_none(),
+                            "{}",
+                            entry.unavailable_reason.as_deref().unwrap_or("Unavailable")
+                        );
+                    }
+                }
+                let cfg = openrouter::selection_config(
+                    &self.cfg,
+                    model,
+                    std::env::var("OPENROUTER_API_KEY").ok(),
+                    metadata,
+                )?;
+                (model.to_owned(), cfg)
+            } else {
+                let spec = opencode::lookup(provider, model)?;
+                opencode::api(provider, spec.id)?;
+                (
+                    spec.id.to_owned(),
+                    opencode::selection_config(
+                        &self.cfg,
+                        provider,
+                        spec.id,
+                        opencode::key_store::available_key(),
+                    )?,
+                )
+            };
         let selection = SessionModelSelection {
             provider,
-            model: model.id.into(),
+            model: model.clone(),
         };
         let mut candidate = SessionData::new();
         candidate.model_selection = Some(selection.clone());
-        let prepared = self.prepare_session_selection(&candidate, &cfg)?;
+        let mut prepared = self.prepare_session_selection(&candidate, &cfg)?;
+        if provider == crate::features::openai_subscription::ProviderKind::Openrouter {
+            prepared.0.openrouter_metadata = cfg.openrouter_metadata.clone();
+            if let Some(client) = prepared.1.as_mut() {
+                client.openrouter_metadata = cfg.openrouter_metadata.clone();
+            }
+        }
         // Acquire every fallible lock before saving, then publish infallibly.
+        let mut verification_queue =
+            crate::utils::safe_std_lock(&self.verification_queue, "verification_queue")?;
         let mut history =
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (id, outcome) = {
@@ -110,12 +157,14 @@ impl TuiExecutor {
             manager.create_session_with_model(
                 Some(format!(
                     "{}: {}",
-                    opencode::billing_label(provider),
-                    model.id
+                    model_selection::billing_label(provider),
+                    model
                 )),
                 selection,
             )?
         };
+        verification_queue.invalidate_selection();
+        drop(verification_queue);
         history.clear();
         drop(history);
         self.apply_session_selection(prepared, &id);
@@ -129,11 +178,11 @@ impl TuiExecutor {
             ui.push_log(format!("Warning: {message}"));
         }
         if self.client.is_none() {
-            ui.push_log(opencode::missing_auth_message(self.cfg.provider));
+            ui.push_log(model_selection::missing_auth_message(self.cfg.provider));
         }
         ui.push_log(format!(
             "New session: {} / {} ({id})",
-            opencode::billing_label(provider),
+            model_selection::billing_label(provider),
             self.cfg.model
         ));
         Ok(id)

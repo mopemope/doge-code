@@ -317,13 +317,45 @@ async fn chat_tools_once_attempt(
         reasoning_effort,
         reasoning_mode,
     );
-    let reasoning_effort_str = req.reasoning_effort;
+    let mut value = serde_json::to_value(&req).map_err(|_| {
+        RequestAttemptFailure::new(
+            LlmErrorKind::Client,
+            None,
+            None,
+            None,
+            anyhow!(LlmErrorKind::Client),
+        )
+    })?;
+    if client.is_openrouter() {
+        crate::features::openrouter::adapt_request_value(
+            &mut value,
+            client.openrouter_metadata.as_deref(),
+            model,
+            reasoning_mode,
+            reasoning_effort,
+            !tools.is_empty(),
+        )
+        .map_err(|e| RequestAttemptFailure::new(LlmErrorKind::Client, None, None, None, e))?;
+    }
+    let reasoning_effort_str = if client.is_openrouter() {
+        match value
+            .pointer("/reasoning/effort")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("low") => Some("low"),
+            Some("medium") => Some("medium"),
+            Some("high") => Some("high"),
+            _ => None,
+        }
+    } else {
+        req.reasoning_effort
+    };
     let hint_sent = reasoning_effort_str.is_some();
     if tracing::enabled!(tracing::Level::DEBUG) {
         let summary = telemetry::summarize_chat_request(
             messages,
             tools.len(),
-            telemetry::measure_bytes(&req),
+            telemetry::measure_bytes(&value),
             reasoning_effort_str,
         );
         debug!(
@@ -366,7 +398,7 @@ async fn chat_tools_once_attempt(
     headers.insert(AUTHORIZATION, auth_value);
 
     let cancel_token = cancel.unwrap_or_default();
-    let req_builder = client.request_headers(client.inner.post(&url).headers(headers).json(&req));
+    let req_builder = client.request_headers(client.inner.post(&url).headers(headers).json(&value));
 
     let timeout_duration = Duration::from_millis(client.llm_cfg.timeout_ms);
     let resp_fut = tokio::time::timeout(timeout_duration, async {
@@ -440,8 +472,12 @@ async fn chat_tools_once_attempt(
             res = resp.text() => res.unwrap_or_default(),
         };
         let trimmed = text.trim().to_owned();
-        let meta = telemetry::parse_provider_error_metadata(&trimmed, request_id.as_deref());
-        let provider_code = extract_provider_code(&trimmed);
+        let meta = client.error_metadata(&trimmed, request_id.as_deref());
+        let provider_code = if client.is_openrouter() {
+            meta.code.clone()
+        } else {
+            extract_provider_code(&trimmed)
+        };
         // Never log full bodies or prompts; status + structured code only.
         error!(
             status = status.as_u16(),
@@ -478,7 +514,7 @@ async fn chat_tools_once_attempt(
         }
 
         let kind = kind_for_status(status);
-        let message = telemetry::provider_error_message(status.as_u16(), &meta);
+        let message = client.http_error_message(status, &meta);
         return Err(RequestAttemptFailure::new(
             kind.clone(),
             Some(status),
@@ -528,6 +564,30 @@ async fn chat_tools_once_attempt(
             }
         }
     };
+
+    if client.is_openrouter() {
+        let validated = (|| -> Result<_> {
+            let value =
+                serde_json::from_str(&response_text).map_err(|_| LlmErrorKind::Deserialize)?;
+            let decoded = crate::features::openrouter::decode_response(value)?;
+            validate_tool_message(&decoded.message, tools)?;
+            Ok(decoded)
+        })()
+        .map_err(|e| {
+            let kind = e
+                .downcast_ref::<LlmErrorKind>()
+                .cloned()
+                .unwrap_or(LlmErrorKind::Client);
+            RequestAttemptFailure::new(kind, None, None, None, e)
+        })?;
+        if let Some(usage) = &validated.usage {
+            client.record_usage(usage);
+        }
+        return Ok(ToolResponseWithUsage {
+            message: validated.message,
+            prompt_tokens: validated.prompt_tokens,
+        });
+    }
 
     let response_bytes = response_text.len();
 
@@ -619,7 +679,10 @@ async fn chat_tools_once_attempt(
 }
 
 /// One preflight for both provider protocols, before any batch sibling executes.
-fn validate_tool_message(message: &ChoiceMessageWithTools, tools: &[ToolDef]) -> Result<()> {
+pub(crate) fn validate_tool_message(
+    message: &ChoiceMessageWithTools,
+    tools: &[ToolDef],
+) -> Result<()> {
     validate_tool_message_with_activation(message, tools, tools)
 }
 
