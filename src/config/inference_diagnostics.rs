@@ -25,11 +25,7 @@ impl AppConfig {
     }
 
     pub fn inference_diagnostics(&self) -> Vec<String> {
-        let api = match self.provider {
-            ProviderKind::OpenaiCompatible => Some(ApiKind::ChatCompletions),
-            ProviderKind::Openai => Some(ApiKind::Responses),
-            provider => opencode::api(provider, &self.model).ok(),
-        };
+        let api = self.resolved_api_for_model(&self.model).ok();
         // Custom URL paths/query/userinfo may contain credentials: display host only.
         let endpoint = opencode::default_base(self.provider)
             .map(str::to_owned)
@@ -193,6 +189,8 @@ mod tests {
             project_root: dir.path().into(),
             base_url: "https://custom.invalid/v1".into(),
             model: "unknown".into(),
+            // This test exercises the explicit Chat Completions opt-out.
+            provider_origin: crate::config::ConfigOrigin::Cli,
             ..Default::default()
         };
         cfg.reasoning.mode = ReasoningMode::Off;
@@ -213,6 +211,33 @@ mod tests {
             cfg.inference_diagnostics()
                 .join("\n")
                 .contains("force reasoning_effort=none")
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_default_responses_route_and_redact_endpoint_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            project_root: dir.path().into(),
+            api_key: Some("SYNTHETIC_API_KEY_SENTINEL".into()),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+        let output = cfg.inference_diagnostics().join("\n");
+        assert!(output.contains("API: Responses"));
+        assert!(output.contains("128000 tokens (known metadata"));
+        assert!(!output.contains("SYNTHETIC_API_KEY_SENTINEL"));
+        assert!(output.contains("Endpoint: api.openai.com (URL path omitted)"));
+
+        let explicit = AppConfig {
+            provider_origin: crate::config::ConfigOrigin::Cli,
+            ..cfg
+        };
+        assert!(
+            explicit
+                .inference_diagnostics()
+                .join("\n")
+                .contains("API: Chat Completions")
         );
     }
 }

@@ -120,6 +120,45 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Resolve the wire API once from the selected provider, its provenance,
+    /// endpoint and model catalog. Provider selection remains independent of
+    /// authentication: an explicitly selected compatible provider preserves
+    /// Chat Completions even when it points at api.openai.com.
+    pub(crate) fn resolved_api_for_model(
+        &self,
+        model: &str,
+    ) -> Result<crate::llm::capabilities::ApiKind> {
+        use crate::{
+            features::{openai_subscription::ProviderKind, opencode},
+            llm::capabilities::ApiKind,
+        };
+
+        match self.provider {
+            ProviderKind::OpenaiCompatible => {
+                if self.provider_origin == super::ConfigOrigin::Default
+                    && normalized_official_openai_base(&self.base_url).is_some()
+                {
+                    Ok(ApiKind::Responses)
+                } else {
+                    Ok(ApiKind::ChatCompletions)
+                }
+            }
+            ProviderKind::Openai => Ok(ApiKind::Responses),
+            provider => opencode::api(provider, model),
+        }
+    }
+
+    /// Stable, non-secret identity for the API-key Responses protocol. The
+    /// endpoint can only be selected by the strict official-host resolver.
+    pub(crate) fn api_key_responses_identity(&self) -> Option<String> {
+        (self.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible
+            && self.resolved_api_for_model(&self.model).ok()
+                == Some(crate::llm::capabilities::ApiKind::Responses))
+        .then(|| normalized_official_openai_base(&self.base_url))
+        .flatten()
+        .map(|base| format!("OpenaiCompatible:api-key:{base}:responses"))
+    }
+
     pub fn auto_compact_prompt_token_threshold_for_model(&self, model: &str) -> u32 {
         self.auto_compact_prompt_token_threshold_overrides
             .get(model)
@@ -132,14 +171,8 @@ impl AppConfig {
             return Some(size);
         }
 
-        use crate::llm::capabilities::{ApiKind, resolve};
-        let api = match self.provider {
-            crate::features::openai_subscription::ProviderKind::OpenaiCompatible => {
-                ApiKind::ChatCompletions
-            }
-            crate::features::openai_subscription::ProviderKind::Openai => ApiKind::Responses,
-            provider => crate::features::opencode::api(provider, &self.model).ok()?,
-        };
+        let api = self.resolved_api_for_model(&self.model).ok()?;
+        let resolve = crate::llm::capabilities::resolve;
         resolve(self.provider, &self.base_url, api, &self.model, false).context_window
     }
 
@@ -512,6 +545,25 @@ impl AppConfig {
         }
         Ok(config)
     }
+}
+
+/// Return the canonical identity for the one official API-key Responses base.
+/// Do not treat a domain substring, proxy, custom path, or URL decoration as
+/// authorization to change wire protocol.
+pub(crate) fn normalized_official_openai_base(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("api.openai.com")
+        || url.port().is_some_and(|port| port != 443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "/v1" | "/v1/")
+    {
+        return None;
+    }
+    Some("https://api.openai.com/v1".into())
 }
 
 pub fn merge_mcp_servers(
