@@ -888,6 +888,26 @@ pub(crate) fn build_api_key(
     Ok(request)
 }
 
+/// Read-only preflight for a canonical API-key Responses history. This runs
+/// before session binding or transport so an incompatible checkpoint remains
+/// unchanged and no user tool can be dispatched from a lossy projection.
+pub(crate) fn validate_api_key_history(
+    model: &str,
+    identity: &str,
+    messages: &[ChatMessage],
+) -> Result<()> {
+    anyhow::ensure!(
+        messages.iter().all(|message| {
+            message.reasoning.reasoning_content.is_none()
+                && message.reasoning.reasoning_details.is_none()
+        }),
+        "Chat Completions reasoning fields cannot be replayed by Responses; resume with --provider openai-compatible or start a new Responses conversation"
+    );
+    crate::llm::validate_tool_blocks(messages, false)?;
+    build_api_key(model, identity, messages, &[], None)?;
+    Ok(())
+}
+
 pub(crate) async fn infer_api_key(
     client: &crate::llm::OpenAIClient,
     model: &str,
