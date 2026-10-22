@@ -50,6 +50,15 @@ pub(crate) fn config_for_session(
     // OpenCode bindings need no key or account lookup. Reject them before
     // client construction, including keyless startup.
     validate_binding(session, &cfg, None)?;
+    if let Some(identity) = cfg.api_key_responses_identity() {
+        let messages = session
+            .conversation_messages()
+            .map_err(|error| with_recovery(error, session))?;
+        crate::features::openai_subscription::responses::validate_api_key_history(
+            &cfg.model, &identity, &messages,
+        )
+        .map_err(|error| with_recovery(error, session))?;
+    }
     Ok(cfg)
 }
 
@@ -67,12 +76,22 @@ pub(crate) fn validate_binding(
                 .map_err(|error| with_recovery(error, session))?,
             cfg.model
         ))
+    } else if cfg.provider == crate::features::openai_subscription::ProviderKind::OpenaiCompatible {
+        Some(
+            cfg.api_key_responses_identity()
+                .unwrap_or_else(|| "openai-compatible".into()),
+        )
     } else {
         client
             .map(|client| client.inference_binding(&cfg.model))
             .transpose()?
     };
     if let (Some(binding), Some(expected)) = (&session.inference_binding, expected) {
+        if binding == "openai-compatible" && cfg.api_key_responses_identity().is_some() {
+            anyhow::bail!(
+                "This session is bound to Chat Completions, while the default official OpenAI route uses Responses. Resume with --provider openai-compatible to keep using Chat Completions, or start a new Responses conversation."
+            );
+        }
         anyhow::ensure!(
             binding == &expected,
             "Session belongs to another inference account/provider/model; restore its original selection. {}",
@@ -160,5 +179,218 @@ mod tests {
             crate::session::format::format_detail(&data)
                 .contains("legacy (startup selection not recorded)")
         );
+    }
+
+    fn compatible_config(root: &std::path::Path) -> AppConfig {
+        AppConfig {
+            project_root: root.into(),
+            api_key: Some("SYNTHETIC_KEY_NEVER_PRINT".into()),
+            ..Default::default()
+        }
+    }
+
+    fn user_message(content: &str) -> crate::llm::types::ChatMessage {
+        crate::llm::types::ChatMessage {
+            reasoning: Default::default(),
+            provider_state: None,
+            role: "user".into(),
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn old_chat_binding_is_rejected_with_explicit_resume_guidance_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = compatible_config(temp.path());
+        let mut data = SessionData::new();
+        data.inference_binding = Some("openai-compatible".into());
+        data.replace_conversation_messages(&[user_message("preserve this history")])
+            .unwrap();
+        let before = serde_json::to_vec(&data).unwrap();
+
+        let error = config_for_session(&data, &cfg, &cfg.model).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("Chat Completions"), "{text}");
+        assert!(text.contains("--provider openai-compatible"), "{text}");
+        assert!(
+            text.contains("start a new Responses conversation"),
+            "{text}"
+        );
+        assert!(!text.contains("SYNTHETIC_KEY_NEVER_PRINT"));
+        assert_eq!(serde_json::to_vec(&data).unwrap(), before);
+
+        let explicit_chat = AppConfig {
+            provider_origin: crate::config::ConfigOrigin::Cli,
+            ..cfg
+        };
+        assert_eq!(
+            explicit_chat
+                .resolved_api_for_model(&explicit_chat.model)
+                .unwrap(),
+            crate::llm::capabilities::ApiKind::ChatCompletions
+        );
+        config_for_session(&data, &explicit_chat, &explicit_chat.model)
+            .expect("explicit compatible selection resumes its Chat Completions binding");
+    }
+
+    #[test]
+    fn unbound_legacy_responses_preflight_accepts_text_tools_and_rejects_lost_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = compatible_config(temp.path());
+        let mut valid = SessionData::new();
+        valid
+            .replace_conversation_messages(&[
+                user_message("read a file"),
+                crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
+                    provider_state: None,
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: vec![crate::llm::types::ToolCall {
+                        id: Some("call-1".into()),
+                        r#type: "function".into(),
+                        function: crate::llm::types::ToolCallFunction {
+                            name: "fs_read".into(),
+                            arguments: "{}".into(),
+                        },
+                    }],
+                    tool_call_id: None,
+                },
+                crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
+                    provider_state: None,
+                    role: "tool".into(),
+                    content: Some("file contents".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("call-1".into()),
+                },
+            ])
+            .unwrap();
+        config_for_session(&valid, &cfg, &cfg.model)
+            .expect("canonical text/tool history can be projected");
+
+        let mut lost_reasoning = SessionData::new();
+        lost_reasoning
+            .replace_conversation_messages(&[crate::llm::types::ChatMessage {
+                reasoning: crate::llm::types::ReasoningPayload {
+                    reasoning_content: Some("PRIVATE_REASONING_SENTINEL".into()),
+                    reasoning_details: Some(
+                        serde_json::json!({"opaque":"PRIVATE_DETAIL_SENTINEL"}),
+                    ),
+                },
+                provider_state: None,
+                role: "assistant".into(),
+                content: Some("answer".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }])
+            .unwrap();
+        let before = serde_json::to_vec(&lost_reasoning).unwrap();
+        let error = config_for_session(&lost_reasoning, &cfg, &cfg.model).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("reasoning fields"), "{text}");
+        assert!(!text.contains("PRIVATE_REASONING_SENTINEL"));
+        assert!(!text.contains("PRIVATE_DETAIL_SENTINEL"));
+        assert_eq!(serde_json::to_vec(&lost_reasoning).unwrap(), before);
+    }
+
+    #[test]
+    fn responses_preflight_rejects_invalid_pairs_and_foreign_provider_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = compatible_config(temp.path());
+        let mut malformed = SessionData::new();
+        malformed
+            .replace_conversation_messages(&[
+                crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
+                    provider_state: None,
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: vec![crate::llm::types::ToolCall {
+                        id: Some("duplicate".into()),
+                        r#type: "function".into(),
+                        function: crate::llm::types::ToolCallFunction {
+                            name: "fs_read".into(),
+                            arguments: "{}".into(),
+                        },
+                    }],
+                    tool_call_id: None,
+                },
+                crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
+                    provider_state: None,
+                    role: "tool".into(),
+                    content: Some("result".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("wrong-id".into()),
+                },
+            ])
+            .unwrap();
+        assert!(config_for_session(&malformed, &cfg, &cfg.model).is_err());
+
+        let mut foreign_state = SessionData::new();
+        foreign_state
+            .replace_conversation_messages(&[crate::llm::types::ChatMessage {
+                reasoning: Default::default(),
+                provider_state: Some(crate::features::openai_subscription::ProviderState {
+                    version: 1,
+                    account: "FOREIGN_ACCOUNT_SENTINEL".into(),
+                    model: cfg.model.clone(),
+                    output: vec![serde_json::json!({
+                        "type":"reasoning", "encrypted_content":"OPAQUE_STATE_SENTINEL"
+                    })],
+                    additional_tool_names: Vec::new(),
+                }),
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }])
+            .unwrap();
+        let before = serde_json::to_vec(&foreign_state).unwrap();
+        let error = config_for_session(&foreign_state, &cfg, &cfg.model).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("different account or model"), "{text}");
+        assert!(!text.contains("FOREIGN_ACCOUNT_SENTINEL"));
+        assert!(!text.contains("OPAQUE_STATE_SENTINEL"));
+        assert_eq!(serde_json::to_vec(&foreign_state).unwrap(), before);
+
+        let identity = cfg.api_key_responses_identity().unwrap();
+        for (version, account, model, role) in [
+            (2, identity.as_str(), cfg.model.as_str(), "assistant"),
+            (1, identity.as_str(), "different-model", "assistant"),
+            (1, identity.as_str(), cfg.model.as_str(), "user"),
+        ] {
+            let mut invalid = SessionData::new();
+            invalid
+                .replace_conversation_messages(&[crate::llm::types::ChatMessage {
+                    reasoning: Default::default(),
+                    provider_state: Some(crate::features::openai_subscription::ProviderState {
+                        version,
+                        account: account.into(),
+                        model: model.into(),
+                        output: vec![serde_json::json!({
+                            "type":"reasoning", "encrypted_content":"STATE_SENTINEL"
+                        })],
+                        additional_tool_names: Vec::new(),
+                    }),
+                    role: role.into(),
+                    content: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                }])
+                .unwrap();
+            let before = serde_json::to_vec(&invalid).unwrap();
+            let error = config_for_session(&invalid, &cfg, &cfg.model).unwrap_err();
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("different account or model") || text.contains("provider state"),
+                "{text}"
+            );
+            assert!(!text.contains("STATE_SENTINEL"));
+            assert_eq!(serde_json::to_vec(&invalid).unwrap(), before);
+        }
     }
 }

@@ -46,6 +46,7 @@ fn routes_are_provider_specific_and_fail_closed() {
 
 use crate::config::{LlmConfig, ReasoningMode};
 use crate::llm::{ChatMessage, ChoiceMessageWithTools, OpenAIClient, ToolDef};
+use futures::StreamExt;
 use httptest::{Expectation, matchers::*, responders::*};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -1139,6 +1140,161 @@ async fn opencode_redirects_do_not_switch_billing_routes() {
     assert!(
         client
             .chat_once("gpt-6-luna", vec![message("user", "hi")], None)
+            .await
+            .is_err()
+    );
+    assert_eq!(client.usage_snapshot().attempts, 1);
+}
+
+#[tokio::test]
+async fn implicit_official_api_key_route_uses_responses_for_all_request_shapes() {
+    let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+    let cfg = crate::config::AppConfig {
+        api_key: Some("SYNTHETIC_API_KEY_SENTINEL".into()),
+        ..Default::default()
+    };
+    let mut client = OpenAIClient::from_config(&cfg)
+        .expect("valid default config")
+        .expect("synthetic key creates client");
+    assert!(
+        client
+            .api_key_responses(&cfg.model)
+            .expect("resolved route")
+    );
+    let binding = client.inference_binding(&cfg.model).expect("route binding");
+    assert!(binding.contains("api-key:https://api.openai.com/v1:responses"));
+    assert_eq!(
+        binding,
+        client
+            .inference_binding("gpt-4.1-mini")
+            .expect("binding is independent of model")
+    );
+    assert!(!binding.contains("SYNTHETIC_API_KEY_SENTINEL"));
+    client.base_url = server.url_str("/v1"); // Test-only loopback transport injection.
+    let client = client
+        .for_conversation("conversation-a")
+        .expect("conversation");
+
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/v1/responses"),
+            request::headers(contains((
+                "authorization",
+                "Bearer SYNTHETIC_API_KEY_SENTINEL"
+            ))),
+            request::body(json_decoded(|body: &Value| {
+                body["model"] == "gpt-4o-mini"
+                    && body["store"] == false
+                    && body["stream"] == true
+                    && body["prompt_cache_key"] == "conversation-a"
+                    && body["tools"].as_array().is_some_and(Vec::is_empty)
+            }))
+        ])
+        .times(2)
+        .respond_with(
+            status_code(200)
+                .append_header("content-type", "text/event-stream")
+                .body(completed(vec![text_output()])),
+        ),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/v1/responses"),
+            request::body(json_decoded(|body: &Value| {
+                body["store"] == false
+                    && body["stream"] == true
+                    && body["prompt_cache_key"] == "conversation-a"
+                    && body["tools"][0]["type"] == "function"
+                    && body["tools"][0]["name"] == "tool_search"
+                    && body["tools"][0]["function"].is_null()
+            }))
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200)
+                .append_header("content-type", "text/event-stream")
+                .body(completed(vec![text_output()])),
+        ),
+    );
+
+    let once = client
+        .chat_once("gpt-4o-mini", vec![message("user", "one")], None)
+        .await
+        .expect("chat_once uses Responses");
+    assert_eq!(once.content, "done");
+    let stream = client
+        .chat_stream("gpt-4o-mini", &[message("user", "two")], None)
+        .await
+        .expect("chat_stream uses Responses");
+    let streamed: Vec<_> = stream.collect().await;
+    assert_eq!(streamed.len(), 1);
+    assert_eq!(streamed[0].as_ref().unwrap(), "done");
+    let tool_reply = crate::llm::tool_execution::requests::chat_tools_once(
+        &client,
+        "gpt-4o-mini",
+        &[message("user", "three")],
+        &[crate::tools::tool_search::tool_def()],
+        None,
+        ReasoningMode::Off,
+        None,
+        None,
+    )
+    .await
+    .expect("tool request uses flat Responses tools");
+    assert_eq!(tool_reply.content.as_deref(), Some("done"));
+    assert_eq!(client.usage_snapshot().usage_records, 3);
+
+    let request = client
+        .request_headers(client.inner.post(server.url_str("/v1/responses")))
+        .build()
+        .expect("build test request");
+    assert!(!request.headers().contains_key("x-opencode-session"));
+
+    let explicit_chat = crate::config::AppConfig {
+        provider_origin: crate::config::ConfigOrigin::Cli,
+        ..cfg
+    };
+    let explicit_client = OpenAIClient::from_config(&explicit_chat).unwrap().unwrap();
+    assert!(
+        !explicit_client
+            .api_key_responses(&explicit_chat.model)
+            .unwrap()
+    );
+    assert_eq!(
+        explicit_client
+            .inference_binding(&explicit_chat.model)
+            .unwrap(),
+        "openai-compatible"
+    );
+    assert!(
+        !OpenAIClient::new("https://api.openai.com/v1", "fixture")
+            .unwrap()
+            .api_key_responses("gpt-4o-mini")
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn implicit_official_responses_route_does_not_follow_redirects_or_fallback() {
+    let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+    let cfg = crate::config::AppConfig {
+        api_key: Some("SYNTHETIC_REDIRECT_KEY".into()),
+        ..Default::default()
+    };
+    let mut client = OpenAIClient::from_config(&cfg).unwrap().unwrap();
+    client.base_url = server.url_str("/v1"); // Test-only loopback transport injection.
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/v1/responses"))
+            .times(1)
+            .respond_with(
+                status_code(307)
+                    .append_header("location", server.url_str("/v1/chat/completions"))
+                    .body("{\"error\":{\"code\":\"redirect_fixture\"}}"),
+            ),
+    );
+    assert!(
+        client
+            .chat_once("gpt-4o-mini", vec![message("user", "redirect")], None)
             .await
             .is_err()
     );

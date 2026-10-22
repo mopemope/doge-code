@@ -67,6 +67,7 @@ pub fn resolve(
     let route_matches = matches!(
         (provider, api),
         (ProviderKind::OpenaiCompatible, ApiKind::ChatCompletions)
+            | (ProviderKind::OpenaiCompatible, ApiKind::Responses)
             | (ProviderKind::Openai, ApiKind::Responses)
     );
     let reasoning = if matches!(
@@ -89,29 +90,30 @@ pub fn resolve(
             _ => ReasoningSupport::Unknown,
         }
     };
-    let context_window =
-        if provider == ProviderKind::OpenaiCompatible && api == ApiKind::ChatCompletions {
-            match endpoint {
-                Endpoint::Openai => openai_context(openai_id),
-                Endpoint::Openrouter => match model.strip_prefix("openai/") {
-                    Some(id) => openai_context(id),
-                    None => match model {
-                        "anthropic/claude-3-5-sonnet"
-                        | "anthropic/claude-3-opus"
-                        | "anthropic/claude-3-haiku" => Some(200_000),
-                        "anthropic/claude-2" => Some(100_000),
-                        "kwaipilot/kat-coder-pro" => Some(128_000),
-                        "qwen/qwen3-coder" => Some(32_768),
-                        "deepseek/deepseek-chat-v3.1" => Some(64_000),
-                        _ => None,
-                    },
+    let context_window = if provider == ProviderKind::OpenaiCompatible
+        && matches!(api, ApiKind::ChatCompletions | ApiKind::Responses)
+    {
+        match endpoint {
+            Endpoint::Openai => openai_context(openai_id),
+            Endpoint::Openrouter => match model.strip_prefix("openai/") {
+                Some(id) => openai_context(id),
+                None => match model {
+                    "anthropic/claude-3-5-sonnet"
+                    | "anthropic/claude-3-opus"
+                    | "anthropic/claude-3-haiku" => Some(200_000),
+                    "anthropic/claude-2" => Some(100_000),
+                    "kwaipilot/kat-coder-pro" => Some(128_000),
+                    "qwen/qwen3-coder" => Some(32_768),
+                    "deepseek/deepseek-chat-v3.1" => Some(64_000),
+                    _ => None,
                 },
-                Endpoint::Unknown => None,
-            }
-        } else {
-            // Subscription slugs have no capacity metadata in the current catalog.
-            None
-        };
+            },
+            Endpoint::Unknown => None,
+        }
+    } else {
+        // Subscription slugs have no capacity metadata in the current catalog.
+        None
+    };
     Capabilities {
         reasoning,
         chat_tools_require_reasoning_none: provider == ProviderKind::OpenaiCompatible
@@ -217,17 +219,19 @@ mod tests {
             Some(ReasoningEffort::High)
         );
         assert_eq!(native.context_window, None);
-        for (provider, api) in [
-            (ProviderKind::Openai, ApiKind::ChatCompletions),
-            (ProviderKind::OpenaiCompatible, ApiKind::Responses),
-        ] {
-            let caps = resolve(
-                provider,
+        for (provider, url, api) in [
+            (
+                ProviderKind::Openai,
                 "https://api.openai.com/v1",
-                api,
-                "gpt-6-luna",
-                true,
-            );
+                ApiKind::ChatCompletions,
+            ),
+            (
+                ProviderKind::OpenaiCompatible,
+                "https://custom.invalid/v1",
+                ApiKind::Responses,
+            ),
+        ] {
+            let caps = resolve(provider, url, api, "gpt-6-luna", true);
             assert_eq!(caps.reasoning, ReasoningSupport::Unknown);
             assert!(!caps.chat_tools_require_reasoning_none);
             assert_eq!(caps.context_window, None);
@@ -271,5 +275,29 @@ mod tests {
                 "{url} {model}"
             );
         }
+    }
+
+    #[test]
+    fn api_key_responses_metadata_does_not_expand_the_chat_only_luna_rule() {
+        let responses = resolve(
+            ProviderKind::OpenaiCompatible,
+            "https://api.openai.com/v1",
+            ApiKind::Responses,
+            "gpt-6-luna",
+            true,
+        );
+        assert_eq!(responses.reasoning, ReasoningSupport::Supported);
+        assert!(!responses.chat_tools_require_reasoning_none);
+        assert_eq!(responses.context_window, None);
+
+        let known = resolve(
+            ProviderKind::OpenaiCompatible,
+            "https://api.openai.com/v1",
+            ApiKind::Responses,
+            "gpt-4o-mini",
+            true,
+        );
+        assert_eq!(known.reasoning, ReasoningSupport::Unsupported);
+        assert_eq!(known.context_window, Some(128_000));
     }
 }

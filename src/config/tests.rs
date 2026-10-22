@@ -1175,3 +1175,114 @@ fn capability_native_unknown_capacity_preserves_threshold_validation() {
             .is_err()
     );
 }
+
+#[test]
+fn api_route_uses_responses_only_for_implicit_official_compatible_provider() {
+    use crate::features::openai_subscription::ProviderKind;
+    use crate::llm::capabilities::ApiKind;
+
+    let mut normalized_identity = None;
+    for base_url in [
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com:443/v1",
+        "HTTPS://API.OPENAI.COM:443/v1/",
+    ] {
+        let cfg = AppConfig {
+            base_url: base_url.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_api_for_model("gpt-4o-mini").unwrap(),
+            ApiKind::Responses,
+            "{base_url}"
+        );
+        let identity = cfg
+            .api_key_responses_identity()
+            .expect("API-key route identity");
+        if let Some(expected) = &normalized_identity {
+            assert_eq!(&identity, expected, "normalized identity for {base_url}");
+        } else {
+            normalized_identity = Some(identity);
+        }
+    }
+
+    let explicit_endpoint = AppConfig {
+        base_url_origin: ConfigOrigin::Cli,
+        ..Default::default()
+    };
+    assert_eq!(
+        explicit_endpoint
+            .resolved_api_for_model("gpt-4o-mini")
+            .unwrap(),
+        ApiKind::Responses,
+        "endpoint provenance does not override an implicit provider selection"
+    );
+
+    for origin in [
+        ConfigOrigin::Cli,
+        ConfigOrigin::Environment,
+        ConfigOrigin::Project,
+        ConfigOrigin::Global,
+    ] {
+        let cfg = AppConfig {
+            provider_origin: origin,
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_api_for_model("gpt-4o-mini").unwrap(),
+            ApiKind::ChatCompletions,
+            "explicit provider origin {origin:?}"
+        );
+    }
+
+    for base_url in [
+        "http://api.openai.com/v1",
+        "https://api.openai.com/v2",
+        "https://api.openai.com/v1?key=sentinel",
+        "https://api.openai.com/v1?",
+        "https://api.openai.com/v1#fragment",
+        "https://api.openai.com/v1#",
+        "https://user@api.openai.com/v1",
+        "https://user:password@api.openai.com/v1",
+        "https://api.openai.com:8443/v1",
+        "https://api.openai.com/v1/responses",
+        "https://api.openai.com.example/v1",
+        "https://openrouter.ai/api/v1",
+        "http://127.0.0.1:3000/v1",
+    ] {
+        let cfg = AppConfig {
+            base_url: base_url.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_api_for_model("gpt-4o-mini").unwrap(),
+            ApiKind::ChatCompletions,
+            "non-official endpoint {base_url}"
+        );
+    }
+
+    let mut oauth = AppConfig {
+        provider: ProviderKind::Openai,
+        ..Default::default()
+    };
+    assert_eq!(
+        oauth.resolved_api_for_model("gpt-4o-mini").unwrap(),
+        ApiKind::Responses
+    );
+    // The new API-key default does not change OpenAI OAuth's context metadata.
+    oauth.model = "gpt-4.1-mini".into();
+    assert_eq!(oauth.get_context_window_size(), None);
+}
+
+#[test]
+fn response_context_metadata_uses_the_same_default_route_and_keeps_overrides() {
+    let (_root, mut cfg) = model_context_fixture("gpt-4o-mini");
+    assert_eq!(cfg.get_context_window_size(), Some(128_000));
+    cfg.provider_origin = ConfigOrigin::Cli;
+    assert_eq!(cfg.get_context_window_size(), Some(128_000));
+    cfg.llm.context_window_size = Some(24_000);
+    assert_eq!(cfg.get_context_window_size(), Some(24_000));
+    cfg.base_url = "https://custom.invalid/v1".into();
+    assert_eq!(cfg.get_context_window_size(), Some(24_000));
+}

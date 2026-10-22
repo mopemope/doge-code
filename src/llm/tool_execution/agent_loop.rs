@@ -507,6 +507,13 @@ pub async fn run_agent_loop(
     let client = &conversation_client;
     debug!("run_agent_loop called");
     crate::llm::history::validate_tool_blocks(&messages, false)?;
+    if client.uses_generic_api_key_responses() {
+        crate::features::openai_subscription::responses::validate_api_key_history(
+            model,
+            &client.responses_identity(),
+            &messages,
+        )?;
+    }
     if let Some(manager) = fs.get_session_manager_wrapper().get_session_manager() {
         let binding = client.inference_binding(model)?;
         crate::utils::safe_std_lock(manager, "session_manager")?.bind_inference(binding)?;
@@ -2663,6 +2670,77 @@ pub async fn run_agent_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn api_key_responses_history_is_rejected_before_session_binding_or_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::config::AppConfig {
+            project_root: dir.path().to_path_buf(),
+            api_key: Some("SYNTHETIC_PREFLIGHT_KEY".into()),
+            ..Default::default()
+        };
+        let mut client = crate::llm::OpenAIClient::from_config(&cfg)
+            .expect("valid config")
+            .expect("synthetic key creates client");
+        // If preflight regresses, this address makes an accidental request fail
+        // locally without contacting an external service.
+        client.base_url = "http://127.0.0.1:1/v1".into();
+
+        let store = crate::session::SessionStore::new(dir.path().join(".doge/sessions"))
+            .expect("session store");
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::session::SessionManager::with_store(store),
+        ));
+        manager
+            .lock()
+            .expect("session lock")
+            .create_session(None)
+            .expect("create session");
+        let fs = FsTools::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(cfg.clone()),
+        )
+        .with_session_manager(manager);
+        let before = fs.get_current_session().expect("current session");
+        let before = serde_json::to_vec(&before).expect("serialize session");
+        let messages = vec![ChatMessage {
+            reasoning: crate::llm::types::ReasoningPayload {
+                reasoning_content: Some("legacy hidden reasoning".into()),
+                reasoning_details: None,
+            },
+            provider_state: None,
+            role: "assistant".into(),
+            content: Some("answer".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }];
+
+        let error = match run_agent_loop(
+            &client,
+            &cfg.model,
+            &fs,
+            messages,
+            None,
+            None,
+            &cfg,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        {
+            Ok(_) => panic!("lossy history must be rejected before inference"),
+            Err(error) => error,
+        };
+        let text = format!("{error:#}");
+        assert!(text.contains("--provider openai-compatible"), "{text}");
+        assert!(!text.contains("SYNTHETIC_PREFLIGHT_KEY"));
+        assert_eq!(client.usage_snapshot().attempts, 0);
+        let after = fs.get_current_session().expect("current session");
+        assert!(after.inference_binding.is_none());
+        assert_eq!(
+            serde_json::to_vec(&after).expect("serialize session"),
+            before
+        );
+    }
 
     #[tokio::test]
     async fn test_runtime_context_sent_only_on_first_request() {

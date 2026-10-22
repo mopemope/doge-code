@@ -203,13 +203,22 @@ identity sign-in without plan usage permission is shown separately and cannot
 make inference requests.
 Ordinary exec, watch and workflow commands never open a sign-in browser.
 
-Login does not change your existing provider configuration. The default remains
-`openai-compatible` and uses your API key. Select `openai` with `--provider`,
-`DGC_PROVIDER`, or a top-level `provider = "openai"` configuration key
-(CLI > environment > project > user > default). Always choose a model explicitly;
-the API-key default model is not reused for this provider. `--api-key` cannot be
-combined with the ChatGPT provider, and its requests always use the official
-Responses endpoint even if another base URL is configured.
+Login does not change your existing provider configuration. With no provider
+selected by CLI, `DGC_PROVIDER`, project config or user config, the provider
+remains `openai-compatible` and uses `OPENAI_API_KEY`. That implicit selection
+uses the API-key Responses API when the final endpoint is exactly the official
+`https://api.openai.com/v1` base: HTTPS, exact host, path `/v1` or `/v1/`, no
+username/password, query or fragment, and no non-default port (a trailing slash
+and explicit port 443 are accepted). Explicitly select
+`openai-compatible` to keep using Chat Completions; this preserves existing
+Chat Completions behavior even at the official URL.
+OpenRouter, proxies and custom endpoints also keep Chat Completions. Select
+`openai` with `--provider`, `DGC_PROVIDER`, or a top-level
+`provider = "openai"` configuration key (CLI > environment > project > user >
+default) to use the separate OAuth provider. Always choose a model explicitly;
+the API-key default model is not reused for the OAuth provider. `--api-key`
+cannot be combined with the ChatGPT provider, and its requests always use the
+official Responses endpoint even if another base URL is configured.
 
 ```bash
 dgc auth list openai
@@ -224,6 +233,10 @@ sessions retain ordered output and encrypted reasoning items locally so tool
 calls and their results can be replayed after `--resume`. A saved provider/account
 binding also survives history compaction. These sessions cannot be continued
 through another billing provider. Existing API-key sessions remain readable.
+Older sessions bound to Chat Completions do not silently change protocol: resume
+them with `--provider openai-compatible`, or start a new conversation for the
+Responses route. Unbound legacy text and tool history is checked before resume;
+Chat-only reasoning fields require the explicit Chat Completions selection.
 For catalog models whose context capacity dgc does not recognize, set
 `context_window_size` in the `[llm]` section to the documented model capacity.
 Local context estimates are approximate; encrypted reasoning is preserved as
@@ -414,10 +427,11 @@ context_window_size` override, or unknown. For unknown capacity, the 128,000-tok
 fallback is only an estimate used to calculate the 80% compaction limit; it is
 never displayed as verified model capacity. The effective limit is the minimum of
 that safety limit and the configured model-specific compaction threshold.
-ChatGPT-plan and OpenCode Responses requests send the conversation ID as
-`prompt_cache_key` so one conversation's requests route to the same prompt cache.
-It is a random per-conversation ID (kept on resume), not a credential, and does not
-change request content or the cache-prefix stability rules.
+ChatGPT-plan, default official OpenAI API-key Responses, and OpenCode Responses
+requests send the conversation ID as `prompt_cache_key` so one conversation's
+requests route to the same prompt cache. It is a random per-conversation ID (kept
+on resume), not a credential, and does not change request content or the
+cache-prefix stability rules.
 Reasoning diagnostics distinguish adaptive hints, explicit fixed effort overrides,
 provider defaults and adapter-forced `none` on applicable OpenAI tool requests.
 They describe the main-agent request policy, not measured server thinking;
@@ -430,14 +444,17 @@ persisted ID; a new TUI conversation gets a new ID. Standalone clients use one
 process-local ID. Keys are not part of persisted provider bindings.
 
 API-key Responses sends standard flat function tools and retains opaque reasoning
-items through tool round trips and session resume. Chat Completions retains optional
-`reasoning_content` / `reasoning_details` in assistant history without displaying
-it. Automatic reasoning hints use verified support metadata; models with unknown
-support use provider defaults. An explicit `fixed` mode sends the configured effort
-even with unknown support; provider acceptance is not guaranteed. This does not guarantee that `reasoning.mode = "off"` disables provider
-thinking. Local compaction summarizes completed historical text/tool data and
-retains unseen tool-result batches exactly; it does not send OAuth-only namespaces,
-activation items or unverified native compaction controls to OpenCode. Set
+items through tool round trips and session resume. API-key Responses and OpenCode
+use local compaction; they do not use OAuth-only namespaces or native compaction
+controls. Chat Completions retains optional `reasoning_content` /
+`reasoning_details` in assistant history without displaying it. Automatic
+reasoning hints use verified support metadata; models with unknown support use
+provider defaults. An explicit `fixed` mode sends the configured effort even with
+unknown support; provider acceptance is not guaranteed. This does not guarantee
+that `reasoning.mode = "off"` disables provider thinking. Local compaction
+summarizes completed historical text/tool data and retains unseen tool-result
+batches exactly; it does not send OAuth-only namespaces, activation items or
+unverified native compaction controls to OpenCode. Set
 `[llm] context_window_size` explicitly when needed: OpenCode capacity is currently
 unknown to dgc. Quota exhaustion fails without changing billing routes.
 
