@@ -11,14 +11,17 @@ pub fn handle_provider(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) 
     let (name, query) = args.split_once(' ').unwrap_or((args, ""));
     let provider = match name {
         "" => match executor.cfg.provider {
-            ProviderKind::OpencodeGo | ProviderKind::OpencodeZen => executor.cfg.provider,
+            ProviderKind::OpencodeGo | ProviderKind::OpencodeZen | ProviderKind::Openrouter => {
+                executor.cfg.provider
+            }
             _ => ProviderKind::OpencodeGo,
         },
         "go" | "opencode-go" => ProviderKind::OpencodeGo,
         "zen" | "opencode-zen" => ProviderKind::OpencodeZen,
+        "openrouter" => ProviderKind::Openrouter,
         _ => {
             ui.push_log(
-                "Usage: /provider [go|zen] [model search]; Enter starts a NEW conversation",
+                "Usage: /provider [go|zen|openrouter] [model search]; Enter starts a NEW conversation",
             );
             return;
         }
@@ -26,10 +29,19 @@ pub fn handle_provider(executor: &mut TuiExecutor, ui: &mut TuiApp, args: &str) 
     open_picker(executor, ui, provider, query.trim());
 }
 
-fn open_picker(executor: &TuiExecutor, ui: &mut TuiApp, provider: ProviderKind, query: &str) {
+fn open_picker(executor: &mut TuiExecutor, ui: &mut TuiApp, provider: ProviderKind, query: &str) {
     let result = (|| {
         executor.ensure_model_selection_idle(ui)?;
         let mut picker = crate::features::model_selection::ModelPicker::new(provider, query)?;
+        if provider == ProviderKind::Openrouter {
+            picker.key_available = if executor.cfg.provider == provider {
+                executor.cfg.api_key.is_some()
+            } else {
+                std::env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+            };
+            picker.prefer(&executor.cfg.model);
+            return Ok(picker);
+        }
         let cfg = opencode::selection_config(
             &executor.cfg,
             provider,
@@ -53,7 +65,16 @@ fn open_picker(executor: &TuiExecutor, ui: &mut TuiApp, provider: ProviderKind, 
     })();
     match result {
         Ok(picker) => {
+            executor.cancel_model_catalog(ui);
             ui.model_picker = Some(picker);
+            if provider == ProviderKind::Openrouter
+                && let Err(error) = executor.start_model_catalog(
+                    ui,
+                    crate::features::openrouter::catalog::CatalogPolicy::PreferCache,
+                )
+            {
+                ui.push_log(format!("Cannot load models: {error}"));
+            }
             ui.dirty = true;
         }
         Err(error) => ui.push_log(format!("Cannot open models: {error}")),

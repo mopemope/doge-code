@@ -13,6 +13,15 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 pub trait CommandHandler {
+    fn start_model_catalog(
+        &mut self,
+        _ui: &mut TuiApp,
+        _policy: crate::features::openrouter::catalog::CatalogPolicy,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn cancel_model_catalog(&mut self, _ui: &mut TuiApp) {}
+
     fn select_model_for_new_session(
         &mut self,
         _provider: crate::features::openai_subscription::ProviderKind,
@@ -89,6 +98,7 @@ pub trait CommandHandler {
 }
 
 pub struct TuiExecutor {
+    pub(crate) catalog_results: super::model_catalog::CatalogResultStore,
     pub(crate) cfg: crate::config::AppConfig,
     pub(crate) initial_model: String,
     pub(crate) tools: FsTools,
@@ -142,7 +152,9 @@ impl TuiExecutor {
         if let Some(tx) = ui_tx {
             let hook: crate::jobs::manager::JobCompletionHook =
                 std::sync::Arc::new(move |completion: crate::jobs::JobCompletion| {
-                    if completion.scope == crate::jobs::JobScope::Foreground {
+                    if completion.scope == crate::jobs::JobScope::Foreground
+                        || completion.kind == crate::jobs::JobKind::ModelCatalog
+                    {
                         let _ = tx.send(format!("::job_completed:{}", completion.id));
                     }
                 });

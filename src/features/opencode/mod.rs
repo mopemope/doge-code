@@ -75,6 +75,7 @@ pub fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::OpencodeGo => "opencode-go",
         ProviderKind::OpencodeZen => "opencode-zen",
         ProviderKind::Openai => "openai",
+        ProviderKind::Openrouter => "openrouter",
         ProviderKind::OpenaiCompatible => "openai-compatible",
     }
 }

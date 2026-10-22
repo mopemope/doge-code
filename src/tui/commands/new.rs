@@ -96,7 +96,14 @@ impl TuiExecutor {
         tools: FsTools,
         session_manager: Arc<Mutex<SessionManager>>,
     ) -> Result<Self> {
-        let mut client = OpenAIClient::from_config(&cfg)?;
+        let mut client = if cfg.provider
+            == crate::features::openai_subscription::ProviderKind::Openrouter
+            && cfg.resume.is_some()
+        {
+            None
+        } else {
+            OpenAIClient::from_config(&cfg)?
+        };
         // The durable conversation buffer owns no system prompt and no token
         // budget: `run_agent_loop` injects the default system prompt per turn,
         // and context reduction lives in HistoryManager / the governor.
@@ -105,7 +112,7 @@ impl TuiExecutor {
         {
             let mut session_mgr = session_manager.lock().unwrap();
             if cfg.resume.is_none() && session_mgr.current_session.is_none() {
-                if crate::features::opencode::default_base(cfg.provider).is_some() {
+                if crate::features::model_selection::records_selection(cfg.provider) {
                     session_mgr.create_session_with_model(
                         None,
                         crate::session::data::SessionModelSelection {
@@ -136,6 +143,7 @@ impl TuiExecutor {
             client,
             ui_tx: None, // This will be set by TuiApp later
             jobs: JobManager::new(),
+            catalog_results: Default::default(),
             verification_queue: Default::default(),
             last_user_prompt: None,
             feedback_submissions: Default::default(),

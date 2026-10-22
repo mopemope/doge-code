@@ -144,7 +144,7 @@ pub(crate) fn spawn_agent_turn(
     let client = match executor.client.clone() {
         Some(client) => client,
         None => {
-            ui.push_log(crate::features::opencode::missing_auth_message(
+            ui.push_log(crate::features::model_selection::missing_auth_message(
                 executor.cfg.provider,
             ));
             return Err(JobStartError::ShuttingDown);
@@ -1173,5 +1173,54 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("valid JSON");
         assert_eq!(persisted["requests"], 0);
+    }
+}
+
+#[cfg(test)]
+mod openrouter_keyless_tests {
+    #[test]
+    fn openrouter_keyless_inference_guidance_has_dedicated_key_and_no_job() {
+        use crate::features::openai_subscription::ProviderKind;
+        use crate::tui::{
+            commands::{
+                agent_job::{AgentTurnProvenance, spawn_agent_turn},
+                model_selection_tests::fixture,
+            },
+            state::LogEntry,
+        };
+        let (mut executor, mut ui, _dir) = fixture(false);
+        executor.cfg.provider = ProviderKind::Openrouter;
+        executor.cfg.model = "synthetic/model".into();
+        executor.client = None;
+        assert!(
+            spawn_agent_turn(
+                &mut executor,
+                &mut ui,
+                "prompt",
+                "prompt".into(),
+                true,
+                AgentTurnProvenance::Internal
+            )
+            .is_err()
+        );
+        let logs = ui
+            .log
+            .iter()
+            .map(|entry| match entry {
+                LogEntry::Plain(text) | LogEntry::Markdown(text) => text.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(logs.contains("OPENROUTER_API_KEY"), "{logs}");
+        assert!(!logs.contains("OPENAI_API_KEY"));
+        assert_eq!(executor.jobs.active_count(), 0);
+        assert!(
+            executor
+                .conversation_history
+                .lock()
+                .unwrap()
+                .snapshot()
+                .is_empty()
+        );
     }
 }

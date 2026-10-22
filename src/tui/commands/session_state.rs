@@ -146,9 +146,11 @@ impl TuiExecutor {
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (new_id, previous_outcome, new_outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let opencode = crate::features::opencode::default_base(self.cfg.provider).is_some();
+            let opencode = crate::features::model_selection::records_selection(self.cfg.provider);
             let previous_outcome = if opencode {
-                sm.flush_before_model_transition()?
+                // The model transition stages its new checkpoint before flushing
+                // the current one, and returns both durability warnings together.
+                crate::session::store::SessionSaveOutcome::Durable
             } else {
                 sm.flush_before_transition()?
             };
@@ -217,7 +219,8 @@ impl TuiExecutor {
             crate::utils::safe_std_lock(&self.conversation_history, "conversation_history")?;
         let (session, messages, prepared, outcome) = {
             let mut sm = crate::utils::safe_std_lock(&self.session_manager, "session_manager")?;
-            let outcome = if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+            let outcome = if crate::features::model_selection::records_selection(self.cfg.provider)
+            {
                 sm.flush_before_model_transition()?
             } else {
                 sm.flush_before_transition()?
@@ -259,8 +262,13 @@ impl TuiExecutor {
                     self.prepare_session_selection(session, &self.cfg)
                 })?)
             } else {
+                anyhow::ensure!(
+                    self.cfg.provider
+                        != crate::features::openai_subscription::ProviderKind::Openrouter,
+                    "No previous OpenRouter session exists; start a new conversation with --model publisher/model"
+                );
                 if sm.current_session.is_none() {
-                    if crate::features::opencode::default_base(self.cfg.provider).is_some() {
+                    if crate::features::model_selection::records_selection(self.cfg.provider) {
                         sm.create_session_with_model(
                             None,
                             crate::session::data::SessionModelSelection {
@@ -1627,5 +1635,158 @@ mod tests {
                 .selection(&old, &Some(first), &snapshot)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod openrouter_resume_tests {
+    use super::*;
+    use crate::{
+        config::AppConfig,
+        features::openai_subscription::ProviderKind,
+        session::{SessionManager, SessionStore, data::SessionModelSelection},
+        tools::FsTools,
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn executor_for_resume(root: &std::path::Path, model: &str) -> TuiExecutor {
+        let cfg = AppConfig {
+            project_root: root.into(),
+            provider: ProviderKind::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: model.into(),
+            resume: Some("latest".into()),
+            no_repomap: true,
+            ..Default::default()
+        };
+        let repomap = Arc::new(tokio::sync::RwLock::new(None));
+        let tools = FsTools::new(repomap.clone(), Arc::new(cfg.clone()));
+        let store = SessionStore::new(root.join(".doge/sessions")).unwrap();
+        TuiExecutor::construct_with_session_manager(
+            cfg,
+            repomap,
+            tools,
+            Arc::new(Mutex::new(SessionManager::with_store(store))),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_transition_new_failure_preserves_dirty_old_checkpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor_for_resume(temp.path(), "publisher/model");
+        let (id, before, root, permissions) = {
+            let mut manager = executor.session_manager.lock().unwrap();
+            manager.create_session(None).unwrap();
+            let id = manager.current_session_id().unwrap();
+            manager.current_session.as_mut().unwrap().meta.title = "unsaved title".into();
+            manager.save_state = crate::session::manager::SessionSaveState::Unsaved {
+                session_id: id.clone(),
+            };
+            let root = temp.path().join(".doge/sessions");
+            let before = std::fs::read(root.join(&id).join("session.json")).unwrap();
+            let permissions = std::fs::metadata(&root).unwrap().permissions();
+            (id, before, root, permissions)
+        };
+        executor.replace_conversation_from_messages(vec![ChatMessage {
+            role: "user".into(),
+            content: Some("old history".into()),
+            reasoning: Default::default(),
+            provider_state: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }]);
+        let mut ui = TuiApp::new_for_test("test", None, "default");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = executor.start_new_session(&mut ui, None);
+        std::fs::set_permissions(&root, permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(root.join(&id).join("session.json")).unwrap(),
+            before
+        );
+        let manager = executor.session_manager.lock().unwrap();
+        assert_eq!(manager.current_session_id().as_deref(), Some(id.as_str()));
+        assert!(manager.has_unsaved_current_session());
+        assert_eq!(
+            executor.conversation_history.lock().unwrap().snapshot()[0]
+                .content
+                .as_deref(),
+            Some("old history")
+        );
+    }
+
+    #[test]
+    fn openrouter_tui_explicit_resume_missing_does_not_create_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor_for_resume(temp.path(), "");
+        assert!(executor.client.is_none());
+        assert!(executor.resume_session("latest").is_err());
+        assert!(executor.resume_session("missing").is_err());
+        assert!(
+            executor
+                .session_manager
+                .lock()
+                .unwrap()
+                .store
+                .list_with_stats()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn openrouter_tui_resume_restores_saved_model_before_client() {
+        for model in ["", "publisher/other", "publisher/model:free"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = SessionStore::new(temp.path().join(".doge/sessions")).unwrap();
+            let mut data = SessionData::new();
+            data.model_selection = Some(SessionModelSelection {
+                provider: ProviderKind::Openrouter,
+                model: "publisher/model:free".into(),
+            });
+            data.inference_binding = Some(
+                "Openrouter:https://openrouter.ai/api/v1:ChatCompletions:publisher/model:free"
+                    .into(),
+            );
+            store.save(&data).unwrap();
+            let mut executor = executor_for_resume(temp.path(), model);
+            executor.resume_session(&data.meta.id).unwrap();
+            assert_eq!(executor.cfg.model, "publisher/model:free");
+            assert_eq!(executor.tools.config.model, "publisher/model:free");
+            assert!(executor.client.is_none());
+            drop(executor);
+            for provider_mismatch in [false, true] {
+                let mut invalid = data.clone();
+                if provider_mismatch {
+                    invalid.model_selection.as_mut().unwrap().provider = ProviderKind::OpencodeGo;
+                } else {
+                    invalid.inference_binding = Some(
+                        "Openrouter:https://openrouter.ai/api/v1:ChatCompletions:publisher/wrong"
+                            .into(),
+                    );
+                }
+                store.save(&invalid).unwrap();
+                let before =
+                    std::fs::read(store.session_dir(&data.meta.id).join("session.json")).unwrap();
+                let mut fresh = executor_for_resume(temp.path(), model);
+                assert!(fresh.resume_session(&data.meta.id).is_err());
+                assert_eq!(fresh.cfg.model, model);
+                assert!(
+                    fresh
+                        .session_manager
+                        .lock()
+                        .unwrap()
+                        .current_session
+                        .is_none()
+                );
+                assert_eq!(
+                    std::fs::read(store.session_dir(&data.meta.id).join("session.json")).unwrap(),
+                    before
+                );
+            }
+        }
     }
 }

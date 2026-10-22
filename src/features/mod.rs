@@ -36,3 +36,5 @@ pub mod session_recovery;
 pub mod repair_workflow;
 
 pub(crate) mod safe_display;
+
+pub mod openrouter;

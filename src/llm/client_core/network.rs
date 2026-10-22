@@ -36,7 +36,22 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
     req: &T,
     cancel: Option<CancellationToken>,
 ) -> Result<ChoiceMessage> {
-    let value = serde_json::to_value(req)?;
+    let mut value = serde_json::to_value(req)?;
+    if client.is_openrouter() {
+        let model = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(LlmErrorKind::Client)?
+            .to_owned();
+        crate::features::openrouter::adapt_request_value(
+            &mut value,
+            client.openrouter_metadata.as_deref(),
+            &model,
+            crate::config::ReasoningMode::Off,
+            None,
+            false,
+        )?;
+    }
     anyhow::ensure!(
         !value
             .get("messages")
@@ -87,8 +102,13 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
     let mut last_failure: Option<RequestAttemptFailure> = None;
 
     for attempt in 1..=total_attempts {
-        let req_builder =
-            client.request_headers(client.inner.post(&url).headers(headers.clone()).json(req));
+        let req_builder = client.request_headers(
+            client
+                .inner
+                .post(&url)
+                .headers(headers.clone())
+                .json(&value),
+        );
 
         let resp_res = tokio::select! {
             biased;
@@ -177,8 +197,12 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 res = resp.text() => res.unwrap_or_default(),
             };
             let trimmed = text.trim().to_owned();
-            let meta = telemetry::parse_provider_error_metadata(&trimmed, request_id.as_deref());
-            let provider_code = extract_provider_code(&trimmed);
+            let meta = client.error_metadata(&trimmed, request_id.as_deref());
+            let provider_code = if client.is_openrouter() {
+                meta.code.clone()
+            } else {
+                extract_provider_code(&trimmed)
+            };
             error!(
                 attempt,
                 total_attempts,
@@ -201,7 +225,7 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 return Err(anyhow::anyhow!(LlmErrorKind::ContextLengthExceeded));
             }
             let kind = kind_for_status(status);
-            let message = telemetry::provider_error_message(status.as_u16(), &meta);
+            let message = client.http_error_message(status, &meta);
             let failure = RequestAttemptFailure::new(
                 kind.clone(),
                 Some(status),
@@ -299,6 +323,20 @@ pub(crate) async fn chat_once_request<T: Serialize + ?Sized>(
                 continue;
             }
         };
+
+        if client.is_openrouter() {
+            let value =
+                serde_json::from_str(&response_text).map_err(|_| LlmErrorKind::Deserialize)?;
+            let decoded = crate::features::openrouter::decode_response(value)?;
+            super::super::tool_execution::requests::validate_tool_message(&decoded.message, &[])?;
+            if let Some(usage) = &decoded.usage {
+                client.record_usage(usage);
+            }
+            return Ok(ChoiceMessage {
+                role: decoded.message.role,
+                content: decoded.message.content.unwrap_or_default(),
+            });
+        }
 
         let response_bytes = response_text.len();
         let response_summary_placeholder = response_bytes;
@@ -1017,5 +1055,374 @@ And the JSON:
         for (input, expected) in cases {
             assert_eq!(extract_json_from_text(input), expected, "Input: {}", input);
         }
+    }
+
+    #[tokio::test]
+    async fn openrouter_network_error_is_nonretryable_and_redacted() {
+        for status in [200, 401, 402, 403, 404] {
+            for tools in [false, true] {
+                let counter = Arc::new(AtomicUsize::new(0));
+                let url = spawn_scripted_chat_server(
+                    vec![ScriptedChatResponse {
+                        status,
+                        body: serde_json::json!({"error":{"message":"SENTINEL_PRIVATE_RESPONSE", "code":"SENTINEL_PRIVATE_RESPONSE", "type":"SENTINEL_PRIVATE_RESPONSE", "param":"SENTINEL_PRIVATE_RESPONSE"}}),
+                        retry_after: None,
+                    }],
+                    counter.clone(),
+                )
+                .await;
+                let mut client = chat_test_client(url, 3);
+                client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+                let e = if tools {
+                    crate::llm::tool_execution::requests::chat_tools_once(
+                        &client,
+                        "pub/model",
+                        &chat_messages(),
+                        &[],
+                        None,
+                        crate::config::ReasoningMode::Off,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_err()
+                } else {
+                    client
+                        .chat_once("pub/model", chat_messages(), None)
+                        .await
+                        .unwrap_err()
+                };
+                assert_eq!(
+                    counter.load(Ordering::SeqCst),
+                    1,
+                    "status {status}, tools {tools}"
+                );
+                assert!(!format!("{e:#?}").contains("SENTINEL_PRIVATE_RESPONSE"));
+            }
+        }
+    }
+    #[tokio::test]
+    async fn openrouter_network_buffered_text_and_tools_validate_whole_response() {
+        use futures::StreamExt;
+        for entry in [0, 1, 2] {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let url=spawn_scripted_chat_server(vec![ScriptedChatResponse {status:200,body:serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"verified"}}],"usage":{"prompt_tokens":7}}),retry_after:None}],counter.clone()).await;
+            let mut client = chat_test_client(url, 0);
+            client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+            if entry == 0 {
+                assert_eq!(
+                    client
+                        .chat_once("pub/model:free", chat_messages(), None)
+                        .await
+                        .unwrap()
+                        .content,
+                    "verified"
+                );
+            } else if entry == 1 {
+                let mut stream = client
+                    .chat_stream("pub/model:free", &chat_messages(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(stream.next().await.unwrap().unwrap(), "verified");
+                assert!(stream.next().await.is_none());
+            } else {
+                let r=crate::llm::tool_execution::requests::chat_tools_once_with_activation_and_usage(&client,"pub/model:free",&chat_messages(),&[],&[],None,crate::config::ReasoningMode::Off,None,None).await.unwrap();
+                assert_eq!(r.prompt_tokens, Some(7));
+            }
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            assert_eq!(client.usage_totals_snapshot().record_count, 0);
+        }
+    }
+    #[tokio::test]
+    async fn openrouter_network_rejects_invalid_sibling_before_returning_batch() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url=spawn_scripted_chat_server(vec![ScriptedChatResponse {status:200,body:serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"first","type":"function","function":{"name":"find_file","arguments":"{}"}},{"id":"second","type":"function","function":{"name":"PRIVATE_UNKNOWN_TOOL","arguments":"PRIVATE_ARGUMENTS"}}]}}]}),retry_after:None}],counter.clone()).await;
+        let mut client = chat_test_client(url, 3);
+        client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+        let e = crate::llm::tool_execution::requests::chat_tools_once(
+            &client,
+            "pub/model",
+            &chat_messages(),
+            &[crate::tools::find_file::tool_def()],
+            None,
+            crate::config::ReasoningMode::Off,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(!format!("{e:#?}").contains("PRIVATE_"));
+        assert!(
+            e.to_string()
+                .contains("No tools in this batch were executed")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn openrouter_network_wire_snapshot_has_no_foreign_headers_or_fallback() {
+        use axum::{Router, http::HeaderMap, routing::post};
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let capture = observed.clone();
+        let app=Router::new().route("/v1/chat/completions",post(move |headers:HeaderMap,axum::Json(body):axum::Json<serde_json::Value>| { let capture=capture.clone(); async move {
+            *capture.lock().unwrap()=Some((headers,body));
+            axum::Json(serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}))
+        }}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut client = chat_test_client(format!("http://{address}/"), 0);
+        client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+        crate::llm::tool_execution::requests::chat_tools_once(
+            &client,
+            "publisher/model:free",
+            &chat_messages(),
+            &[crate::tools::find_file::tool_def()],
+            Some(crate::config::ReasoningEffort::Low),
+            crate::config::ReasoningMode::Fixed,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (headers, body) = observed.lock().unwrap().take().unwrap();
+        assert_eq!(body["model"], "publisher/model:free");
+        assert_eq!(body["provider"]["require_parameters"], true);
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["stream"], false);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("models").is_none());
+        assert!(body.pointer("/reasoning/mode").is_none());
+        for header in ["x-opencode-session", "chatgpt-account-id", "openai-beta"] {
+            assert!(!headers.contains_key(header));
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn openrouter_client_keeps_fixed_endpoint_and_snapshot_binding() {
+        let mut client =
+            OpenAIClient::new("https://openrouter.ai/api/v1/", "synthetic-key").unwrap();
+        client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+        assert_eq!(
+            client.endpoint(),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(
+            client.wire_model("publisher/model:free").unwrap(),
+            "publisher/model:free"
+        );
+        assert!(!client.api_key_responses("publisher/model:free").unwrap());
+        assert_eq!(
+            client.inference_binding("publisher/model:free").unwrap(),
+            "Openrouter:https://openrouter.ai/api/v1:ChatCompletions:publisher/model:free"
+        );
+        let meta=client.error_metadata(r#"{"error":{"code":"PRIVATE_SENTINEL","type":"PRIVATE_SENTINEL","param":"PRIVATE_SENTINEL"}}"#,None);
+        assert!(!format!("{meta:?}").contains("PRIVATE_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn openrouter_network_does_not_follow_inference_redirects() {
+        use httptest::{Expectation, matchers::request, responders::status_code};
+        let target = crate::test_support::HTTP_SERVER_POOL.get_server();
+        target.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(0)
+                .respond_with(status_code(200)),
+        );
+        let source = crate::test_support::HTTP_SERVER_POOL.get_server();
+        source.expect(
+            Expectation::matching(request::method_path("POST", "/v1/chat/completions"))
+                .times(2)
+                .respond_with(
+                    status_code(307)
+                        .append_header("Location", target.url_str("/v1/chat/completions")),
+                ),
+        );
+        let mut client = chat_test_client(source.url_str("/"), 3);
+        client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+        let config = client.llm_cfg.clone();
+        client = client.with_llm_config_checked(config).unwrap();
+        assert!(
+            client
+                .chat_once("pub/model", chat_messages(), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::llm::tool_execution::requests::chat_tools_once(
+                &client,
+                "pub/model",
+                &chat_messages(),
+                &[],
+                None,
+                crate::config::ReasoningMode::Off,
+                None,
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
+    #[test]
+    fn openrouter_keyless_client_validates_identity_before_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig {
+            provider: crate::features::openai_subscription::ProviderKind::Openrouter,
+            base_url: crate::features::openrouter::BASE_URL.into(),
+            model: "pub/model".into(),
+            api_key: None,
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert!(OpenAIClient::from_config(&config).unwrap().is_none());
+        config.model = "invalid".into();
+        assert!(OpenAIClient::from_config(&config).is_err());
+        config.model = "pub/model".into();
+        config.base_url = "https://openrouter.ai.evil.invalid/api/v1".into();
+        assert!(OpenAIClient::from_config(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn openrouter_network_preserves_shared_transient_retry_policy() {
+        for status in [429, 503] {
+            for tools in [false, true] {
+                let counter = Arc::new(AtomicUsize::new(0));
+                let url=spawn_scripted_chat_server(vec![ScriptedChatResponse {status,body:serde_json::json!({"error":{"message":"PRIVATE_RETRY"}}),retry_after:Some("0".into())},ScriptedChatResponse {status:200,body:serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}),retry_after:None}],counter.clone()).await;
+                let mut client = chat_test_client(url, 1);
+                client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+                if tools {
+                    crate::llm::tool_execution::requests::chat_tools_once(
+                        &client,
+                        "pub/model",
+                        &chat_messages(),
+                        &[],
+                        None,
+                        crate::config::ReasoningMode::Off,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    client
+                        .chat_once("pub/model", chat_messages(), None)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(counter.load(Ordering::SeqCst), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_main_streaming_agent_and_subagent_use_validated_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_owned(),
+            provider: crate::features::openai_subscription::ProviderKind::Openrouter,
+            base_url: crate::features::openrouter::BASE_URL.into(),
+            model: "pub/model:free".into(),
+            no_repomap: true,
+            show_diff: false,
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            Arc::new(tokio::sync::RwLock::new(None)),
+            Arc::new(config.clone()),
+        );
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url=spawn_scripted_chat_server(vec![ScriptedChatResponse {status:200,body:serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}),retry_after:None}],counter.clone()).await;
+        let mut client = chat_test_client(url, 0);
+        client.provider = config.provider;
+        let run = crate::llm::run_agent_loop(
+            &client,
+            &config.model,
+            &fs,
+            chat_messages(),
+            None,
+            None,
+            &config,
+            crate::provenance::ProvenanceAttribution::none(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.final_message.content, "done");
+        let (_, final_message) = crate::llm::run_agent_streaming_once(
+            &client,
+            &config.model,
+            &fs,
+            chat_messages(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(final_message.unwrap().content, "done");
+        let runtime = crate::llm::tool_runtime::ToolRuntime::build(
+            &fs,
+            Some(client.clone()),
+            config.model.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let worker = crate::llm::tool_execution::run_subagent(
+            &client,
+            &config.model,
+            &runtime,
+            "Research",
+            "Explain only",
+            None,
+            dir.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(worker.summary, "done");
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+    #[tokio::test]
+    async fn openrouter_invalid_sibling_cannot_mutate_workspace_in_agent_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("must-not-exist.txt");
+        let config = crate::config::AppConfig {
+            project_root: dir.path().to_owned(),
+            provider: crate::features::openai_subscription::ProviderKind::Openrouter,
+            base_url: crate::features::openrouter::BASE_URL.into(),
+            model: "pub/model".into(),
+            no_repomap: true,
+            show_diff: false,
+            tool_routing: crate::config::ToolRoutingConfig {
+                mode: crate::config::ToolRoutingMode::Eager,
+                search_result_limit: 5,
+            },
+            ..Default::default()
+        };
+        let fs = crate::tools::FsTools::new(
+            Arc::new(tokio::sync::RwLock::new(None)),
+            Arc::new(config.clone()),
+        );
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url=spawn_scripted_chat_server(vec![ScriptedChatResponse {status:200,body:serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"write","type":"function","function":{"name":"fs_write","arguments":serde_json::json!({"path":target,"content":"must not write"}).to_string()}},{"id":"invalid","type":"function","function":{"name":"PRIVATE_UNKNOWN_TOOL","arguments":"{}"}}]}}]}),retry_after:None}],counter.clone()).await;
+        let mut client = chat_test_client(url, 0);
+        client.provider = config.provider;
+        assert!(
+            crate::llm::run_agent_loop(
+                &client,
+                &config.model,
+                &fs,
+                chat_messages(),
+                None,
+                None,
+                &config,
+                crate::provenance::ProvenanceAttribution::none()
+            )
+            .await
+            .is_err()
+        );
+        assert!(!target.exists());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }
