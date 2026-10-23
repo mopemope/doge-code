@@ -281,7 +281,7 @@ pub struct TuiApp {
     pub cfg: Option<crate::config::AppConfig>,
     // PTY Shell session
     pub shell_session: Option<ShellSession>,
-    pub shell_output_buffer: String,
+    pub(crate) shell_output_buffer: crate::tui::shell_output::ShellOutput,
     // Ephemeral task stack
     pub task_queue: VecDeque<String>,
     // Last time we received a signal from the backend
@@ -560,7 +560,7 @@ impl TuiApp {
             last_elapsed_time: None,
             cfg: None,
             shell_session: None,
-            shell_output_buffer: String::new(),
+            shell_output_buffer: Default::default(),
             task_queue: VecDeque::new(),
             last_heartbeat: None,
             diff_review: None,
@@ -598,9 +598,7 @@ impl TuiApp {
         if let Some(warning) = warning {
             app.push_log(warning);
         }
-        if let Some(tx) = app.inbox_tx.clone() {
-            app.shell_session = ShellSession::new(tx).ok();
-        }
+        app.shell_session = ShellSession::new().ok();
         Ok(app)
     }
 
