@@ -51,11 +51,16 @@ impl Mailbox {
 pub(crate) struct ShellOutput {
     text: String,
     truncated: bool,
+    decoder: Utf8Decoder,
 }
 impl ShellOutput {
     pub(crate) fn feed(&mut self, chunk: ShellChunk) {
         self.truncated |= chunk.dropped;
-        self.text.push_str(&String::from_utf8_lossy(&chunk.bytes));
+        if chunk.dropped {
+            self.decoder.pending.clear();
+        }
+        self.text
+            .push_str(&self.decoder.decode(&chunk.bytes, chunk.eof));
         if self.text.len() > RETAINED_BYTES {
             let start = tail_start(&self.text, RETAINED_BYTES);
             self.text.drain(..start);
@@ -82,6 +87,45 @@ impl ShellOutput {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+}
+
+#[derive(Default)]
+struct Utf8Decoder {
+    pending: Vec<u8>,
+}
+impl Utf8Decoder {
+    fn decode(&mut self, bytes: &[u8], eof: bool) -> String {
+        let mut input = std::mem::take(&mut self.pending);
+        input.extend_from_slice(bytes);
+        let mut rest = input.as_slice();
+        let mut text = String::new();
+        while !rest.is_empty() {
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    text.push_str(&String::from_utf8_lossy(&rest[..valid]));
+                    rest = &rest[valid..];
+                    if let Some(invalid) = error.error_len() {
+                        text.push('�');
+                        rest = &rest[invalid..];
+                    } else {
+                        // A valid UTF-8 prefix can leave at most three bytes.
+                        self.pending.extend_from_slice(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        if eof && !self.pending.is_empty() {
+            text.push('�');
+            self.pending.clear();
+        }
+        text
     }
 }
 
@@ -139,5 +183,65 @@ mod tests {
         assert!(output.context().len() <= CONTEXT_BYTES);
         assert!(output.context().lines().count() <= 51); // notice + fifty retained lines
         assert!(output.context().ends_with("日本語"));
+    }
+}
+
+#[cfg(test)]
+mod utf8_regressions {
+    use super::*;
+    #[test]
+    fn every_utf8_split_and_eof_preserve_valid_text() {
+        let text = "日本語🙂\u{1b}[31m赤\u{1b}[0m";
+        for split in 0..=text.len() {
+            let mut output = ShellOutput::default();
+            output.feed(ShellChunk {
+                bytes: text.as_bytes()[..split].to_vec(),
+                ..Default::default()
+            });
+            output.feed(ShellChunk {
+                bytes: text.as_bytes()[split..].to_vec(),
+                eof: true,
+                ..Default::default()
+            });
+            assert_eq!(output.text, text, "split={split}");
+        }
+        let mut output = ShellOutput::default();
+        for byte in text.bytes() {
+            output.feed(ShellChunk {
+                bytes: vec![byte],
+                ..Default::default()
+            });
+        }
+        output.feed(ShellChunk {
+            eof: true,
+            ..Default::default()
+        });
+        assert_eq!(output.text, text);
+    }
+    #[test]
+    fn invalid_bytes_incomplete_eof_and_dropped_prefix_are_explicit() {
+        let mut output = ShellOutput::default();
+        output.feed(ShellChunk {
+            bytes: vec![b'a', 0xff, 0xe6],
+            ..Default::default()
+        });
+        assert_eq!(output.text, "a�");
+        output.feed(ShellChunk {
+            eof: true,
+            ..Default::default()
+        });
+        assert_eq!(output.text, "a��");
+        let mut output = ShellOutput::default();
+        output.feed(ShellChunk {
+            bytes: vec![0xe6],
+            ..Default::default()
+        });
+        output.feed(ShellChunk {
+            bytes: b"suffix".to_vec(),
+            dropped: true,
+            eof: true,
+        });
+        assert_eq!(output.text, "suffix");
+        assert!(output.context().starts_with("[shell output truncated]"));
     }
 }

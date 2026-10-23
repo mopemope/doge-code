@@ -64,7 +64,9 @@ The direct `!command` PTY transport keeps a 64 KiB pending byte tail and a
 context is limited independently to 50 lines and 16 KiB of text, with an explicit
 truncation notice; JSON envelope overhead is separate. Each UI tick processes at
 most 128 general messages before polling terminal input. These limits concern
-shell recall, not canonical tool results or recovery observations.
+shell recall, not canonical tool results or recovery observations. UTF-8 decoding
+carries incomplete characters across PTY chunks; invalid bytes or incomplete EOF
+sequences are replaced, and truncation clears any incomplete prefix.
 
 Project input recall (`.doge/sessions/input_history.json`) retains at most 1,000
 entries with a 1 MiB serialized/read limit. New files are private (`0600` on Unix)
