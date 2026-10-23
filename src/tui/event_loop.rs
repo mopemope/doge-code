@@ -23,6 +23,11 @@ pub(crate) fn log_terminal_event(event: &Event) {
     tracing::debug!(event_kind, "Terminal event captured");
 }
 
+const INBOX_MESSAGES_PER_TICK: usize = 128;
+fn drain_inbox_tick(rx: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+    rx.try_iter().take(INBOX_MESSAGES_PER_TICK).collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -80,12 +85,12 @@ impl TuiApp {
                 last_spinner_update = Instant::now();
             }
 
+            self.poll_shell_output();
+
+            // Keep terminal input responsive even under a busy producer.
             // Drain inbox; mark dirty on any state change
             if let Some(rx) = self.inbox_rx.as_ref() {
-                let mut drained = Vec::new();
-                while let Ok(msg) = rx.try_recv() {
-                    drained.push(msg);
-                }
+                let drained = drain_inbox_tick(rx);
 
                 if !drained.is_empty() {
                     self.last_heartbeat = Some(Instant::now());
@@ -108,16 +113,6 @@ impl TuiApp {
                         } else {
                             (raw_message, false)
                         };
-                    // Shell command outputs (bin)
-                    if let Some(encoded) = msg.strip_prefix("::shell_output_bin:") {
-                        use base64::{Engine as _, engine::general_purpose};
-                        if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
-                            let text = String::from_utf8_lossy(&decoded);
-                            self.shell_output_buffer.push_str(&text);
-                            self.dirty = true;
-                        }
-                        continue;
-                    }
                     // Legacy shell output handling
                     if let Some(output) = msg.strip_prefix("::shell_output:") {
                         for line in output.lines() {
@@ -2362,5 +2357,21 @@ mod context_usage_tests {
             assert_eq!(ui.textarea.lines(), draft);
             assert_eq!(ui.diff_review, review);
         }
+    }
+}
+
+#[cfg(test)]
+mod inbox_fairness {
+    #[test]
+    fn flood_leaves_messages_for_another_tick() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 0..1000 {
+            tx.send(n.to_string()).expect("send");
+        }
+        assert_eq!(
+            super::drain_inbox_tick(&rx).len(),
+            super::INBOX_MESSAGES_PER_TICK
+        );
+        assert_eq!(rx.try_iter().count(), 1000 - super::INBOX_MESSAGES_PER_TICK);
     }
 }
