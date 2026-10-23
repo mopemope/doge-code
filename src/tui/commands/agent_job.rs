@@ -191,8 +191,7 @@ pub(crate) fn spawn_agent_turn(
         msgs.extend(history.build_messages());
     }
     if !ui.shell_output_buffer.is_empty() {
-        let lines: Vec<&str> = ui.shell_output_buffer.lines().rev().take(50).collect();
-        let context = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+        let context = ui.shell_output_buffer.context();
         msgs.push(crate::llm::runtime_context::advisory_context_message(
             "recent_shell_output",
             serde_json::json!({"last_50_lines": context}),

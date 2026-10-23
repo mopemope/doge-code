@@ -23,6 +23,11 @@ pub(crate) fn log_terminal_event(event: &Event) {
     tracing::debug!(event_kind, "Terminal event captured");
 }
 
+const INBOX_MESSAGES_PER_TICK: usize = 128;
+fn drain_inbox_tick(rx: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+    rx.try_iter().take(INBOX_MESSAGES_PER_TICK).collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct DiffReviewError {
     error: String,
@@ -80,12 +85,12 @@ impl TuiApp {
                 last_spinner_update = Instant::now();
             }
 
+            self.poll_shell_output();
+
+            // Keep terminal input responsive even under a busy producer.
             // Drain inbox; mark dirty on any state change
-            if let Some(rx) = self.inbox_rx.as_ref() {
-                let mut drained = Vec::new();
-                while let Ok(msg) = rx.try_recv() {
-                    drained.push(msg);
-                }
+            {
+                let drained = self.take_inbox_tick();
 
                 if !drained.is_empty() {
                     self.last_heartbeat = Some(Instant::now());
@@ -108,16 +113,6 @@ impl TuiApp {
                         } else {
                             (raw_message, false)
                         };
-                    // Shell command outputs (bin)
-                    if let Some(encoded) = msg.strip_prefix("::shell_output_bin:") {
-                        use base64::{Engine as _, engine::general_purpose};
-                        if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
-                            let text = String::from_utf8_lossy(&decoded);
-                            self.shell_output_buffer.push_str(&text);
-                            self.dirty = true;
-                        }
-                        continue;
-                    }
                     // Legacy shell output handling
                     if let Some(output) = msg.strip_prefix("::shell_output:") {
                         for line in output.lines() {
@@ -992,10 +987,21 @@ impl TuiApp {
             .is_some_and(|handler| handler.foreground_busy())
     }
 
+    fn take_inbox_tick(&mut self) -> Vec<String> {
+        let drained = self
+            .inbox_rx
+            .as_ref()
+            .map(drain_inbox_tick)
+            .unwrap_or_default();
+        self.inbox_backlog = drained.len() == INBOX_MESSAGES_PER_TICK;
+        drained
+    }
+
     /// Called after draining completion messages. Ownership, not a cosmetic
     /// status notice, determines when an accepted instruction may be consumed.
     pub(crate) fn dispatch_pending_instruction(&mut self) {
         if self.exit_requested_at.is_some()
+            || self.inbox_backlog
             || self.foreground_busy()
             || (self.handler.is_none() && !matches!(self.status, Status::Ready | Status::Error))
         {
@@ -1833,6 +1839,59 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn completion_backlog_review_regression() {
+        let jobs = JobManager::new();
+        let id = jobs
+            .spawn(
+                JobSpec::new(
+                    JobKind::AgentTurn,
+                    JobScope::Foreground,
+                    WorkspaceAccess::None,
+                    "terminal producer",
+                ),
+                |_| async { JobRunOutcome::Completed },
+            )
+            .expect("job");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while jobs.foreground_id().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut ui = TuiApp::new_for_test("backlog", None, "default");
+        ui.handler = Some(Box::new(QueueHandler {
+            jobs,
+            calls: calls.clone(),
+            reject_once: false,
+        }));
+        ui.latest_agent_job_id = Some(id);
+        ui.pending_instructions.push_back("successor".into());
+        let tx = ui.sender().expect("sender");
+        for _ in 0..129 {
+            tx.send(format!("::job_message:{id}:::append:retained tail"))
+                .expect("message");
+        }
+        tx.send(format!("::job_completed:{id}"))
+            .expect("completion");
+        assert_eq!(ui.take_inbox_tick().len(), 128);
+        ui.dispatch_pending_instruction();
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "must consume the terminal producer's tail/completion before a successor"
+        );
+        assert_eq!(ui.pending_instructions.len(), 1);
+        assert!(ui.accept_job_message(id));
+        let remaining = ui.take_inbox_tick();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining[1].starts_with("::job_completed:"));
+        assert!(ui.accept_job_message(id));
+        ui.dispatch_pending_instruction();
+        assert_eq!(*calls.lock().expect("calls"), ["successor"]);
+    }
+
+    #[tokio::test]
     async fn queue_waits_for_cancel_cleanup_and_save_barriers_then_fifo_once() {
         for outcome in [
             JobRunOutcome::Completed,
@@ -2362,5 +2421,21 @@ mod context_usage_tests {
             assert_eq!(ui.textarea.lines(), draft);
             assert_eq!(ui.diff_review, review);
         }
+    }
+}
+
+#[cfg(test)]
+mod inbox_fairness {
+    #[test]
+    fn flood_leaves_messages_for_another_tick() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 0..1000 {
+            tx.send(n.to_string()).expect("send");
+        }
+        assert_eq!(
+            super::drain_inbox_tick(&rx).len(),
+            super::INBOX_MESSAGES_PER_TICK
+        );
+        assert_eq!(rx.try_iter().count(), 1000 - super::INBOX_MESSAGES_PER_TICK);
     }
 }

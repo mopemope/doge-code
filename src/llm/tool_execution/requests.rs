@@ -2541,4 +2541,44 @@ mod tests {
         assert!(!format!("{error:#}").contains("PRIVATE_"));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
+    #[tokio::test]
+    async fn retry_logs_review_regression() {
+        use tracing::instrument::WithSubscriber;
+        for status in [429, 500] {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let url = spawn_scripted_tool_server(
+                vec![ScriptedToolResponse {
+                    status,
+                    body: error_body("SYNTHETIC_AUTH_SECRET"),
+                    retry_after: None,
+                }],
+                counter.clone(),
+            )
+            .await;
+            let client = tool_retry_client(url, 1);
+            let capture = crate::test_support::DiagnosticCapture::default();
+            let subscriber = crate::test_support::diagnostic_subscriber(&capture);
+            let error = chat_tools_once(
+                &client,
+                "fixture",
+                &user_message(),
+                &[],
+                None,
+                ReasoningMode::Off,
+                None,
+                None,
+            )
+            .with_subscriber(subscriber)
+            .await
+            .expect_err("fixture error");
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+            let log = capture.text();
+            assert!(
+                log.contains("Retrying chat_tools_once"),
+                "must capture actual retry diagnostics"
+            );
+            assert!(!log.contains("SYNTHETIC_AUTH_SECRET"), "{log}");
+            assert!(!format!("{error:?} {error:#}").contains("SYNTHETIC_AUTH_SECRET"));
+        }
+    }
 }

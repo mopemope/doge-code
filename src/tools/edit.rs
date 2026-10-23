@@ -61,6 +61,15 @@ pub struct EditResult {
     pub warnings: Vec<String>,
 }
 
+// A partial current line is not a completed preceding line.
+pub(crate) fn line_at(content: &str, byte: usize) -> usize {
+    content.as_bytes()[..byte]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
+}
+
 /// Pure mutation with receipt (no session/undo/provenance side effects).
 ///
 /// Flow: validate path -> exact before snapshot -> find target -> generate
@@ -99,7 +108,7 @@ pub async fn edit_with_receipt(
     // 2. Find matches
     let mut matches = Vec::new();
     for (start_byte, _) in original_content.match_indices(&target_block) {
-        let line_num = original_content[..start_byte].lines().count() + 1;
+        let line_num = line_at(&original_content, start_byte);
         // Check if the match falls within the specified line range
         if line_num >= start_line && line_num <= end_line {
             matches.push((start_byte, line_num));
@@ -114,7 +123,7 @@ pub async fn edit_with_receipt(
             let already_applied_lines: Vec<usize> = original_content
                 .match_indices(&new_block)
                 .filter_map(|(start_byte, _)| {
-                    let line_num = original_content[..start_byte].lines().count() + 1;
+                    let line_num = line_at(&original_content, start_byte);
                     (line_num >= start_line && line_num <= end_line).then_some(line_num)
                 })
                 .collect();
@@ -635,6 +644,61 @@ mod tests {
             Ok(exec) => {
                 // Root: the write went through as a real mutation.
                 assert!(exec.result.changed);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod line_range_regressions {
+    use super::*;
+    #[tokio::test]
+    async fn inline_matches_and_idempotency_respect_actual_lines() {
+        for (prefix, newline) in [("let x = ", "\n"), ("日本語 = ", "\r\n"), ("", "\n")] {
+            let dir = tempfile::tempdir().expect("fixture");
+            let path = dir.path().join("fixture.rs");
+            let cfg = AppConfig {
+                project_root: dir.path().into(),
+                ..Default::default()
+            };
+            let original = format!("{prefix}old;{newline}{prefix}old;{newline}");
+            for line in [1, 2] {
+                std::fs::write(&path, &original).expect("fixture");
+                let params = |target: &str, new: &str, start, end| EditParams {
+                    file_path: path.to_str().expect("path").into(),
+                    target_block: target.into(),
+                    new_block: new.into(),
+                    start_line: Some(start),
+                    end_line: Some(end),
+                    allow_multiple: None,
+                };
+                let ambiguous = edit_with_receipt(params("old", "new", 1, 2), &cfg)
+                    .await
+                    .expect("edit");
+                assert_eq!(ambiguous.result.candidate_lines, Some(vec![1, 2]));
+                assert!(ambiguous.receipt.is_none());
+                let edited = edit_with_receipt(params("old", "new", line, line), &cfg)
+                    .await
+                    .expect("edit");
+                assert!(edited.result.success && edited.result.changed);
+                assert!(edited.receipt.is_some());
+                let expected = if line == 1 {
+                    format!("{prefix}new;{newline}{prefix}old;{newline}")
+                } else {
+                    format!("{prefix}old;{newline}{prefix}new;{newline}")
+                };
+                assert_eq!(std::fs::read_to_string(&path).expect("read"), expected);
+                let again = edit_with_receipt(params("absent", "new", line, line), &cfg)
+                    .await
+                    .expect("idempotent");
+                assert!(again.result.success && !again.result.changed);
+                assert_eq!(again.result.candidate_lines, Some(vec![line]));
+                let other = 3 - line;
+                let outside = edit_with_receipt(params("absent", "new", other, other), &cfg)
+                    .await
+                    .expect("outside");
+                assert!(!outside.result.success);
+                assert!(outside.receipt.is_none());
             }
         }
     }

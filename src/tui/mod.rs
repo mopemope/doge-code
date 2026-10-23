@@ -53,3 +53,5 @@ mod review_feedback_tests;
 
 #[cfg(test)]
 mod input_logging_tests;
+
+mod shell_output;

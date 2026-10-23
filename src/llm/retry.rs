@@ -80,13 +80,11 @@ pub(crate) fn max_attempts(max_retries: usize) -> usize {
 
 /// Extract `error.code` from an OpenAI-compatible error body, when present.
 /// Only structured `error.code` strings are used; no substring heuristics.
-/// The returned code is passed through the shared safe-identifier filter so
-/// it can appear in diagnostic logs without injection or content leakage.
+/// Only recognized machine codes can reach retry diagnostics or Debug output.
 pub(crate) fn extract_provider_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let code = value.get("error")?.get("code")?.as_str()?;
-    let safe = crate::logging::safe_identifier(code);
-    if safe.is_empty() { None } else { Some(safe) }
+    crate::llm::telemetry::known_provider_code(code).map(str::to_owned)
 }
 
 /// True for the provider signal that must reach the agent loop untouched so
@@ -502,5 +500,25 @@ mod tests {
         assert_eq!(extract_provider_code("not json"), None);
         assert_eq!(extract_provider_code(r#"{"error":{}}"#), None);
         assert_eq!(extract_provider_code(r#"{"error":{"code":123}}"#), None);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_review_regressions {
+    #[test]
+    fn retry_provider_code_review_regression() {
+        assert_eq!(
+            super::extract_provider_code(r#"{"error":{"code":"SYNTHETIC_AUTH_SECRET"}}"#),
+            None
+        );
+        assert_eq!(
+            super::extract_provider_code(r#"{"error":{"code":"slow_down"}}"#).as_deref(),
+            Some("slow_down")
+        );
+        assert_eq!(
+            super::extract_provider_code(r#"{"error":{"code":"invalid_function_parameters"}}"#)
+                .as_deref(),
+            Some("invalid_function_parameters")
+        );
     }
 }

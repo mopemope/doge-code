@@ -93,3 +93,35 @@ fn input_logging_paste_keeps_text_without_logging_event_payload() {
     assert!(!logs.is_empty(), "must capture actual debug events");
     assert!(!logs.contains(secret), "paste event leaked input: {logs}");
 }
+
+#[test]
+fn input_history_failure_keeps_submitted_input_and_warns_without_content() {
+    let dir = tempfile::tempdir().expect("fixture");
+    std::fs::write(dir.path().join(".doge"), "blocked directory").expect("block");
+    let mut app = TuiApp::new_for_test("history", None, "default");
+    app.cfg = Some(crate::config::AppConfig {
+        project_root: dir.path().into(),
+        ..Default::default()
+    });
+    let text = "HISTORY_PRIVATE_INPUT";
+    app.textarea.insert_str(text);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    handle_normal_mode_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut terminal,
+    )
+    .expect("enter");
+    assert_eq!(
+        app.pending_instructions.front().map(String::as_str),
+        Some(text)
+    );
+    assert_eq!(app.input_history, [text]);
+    let messages = format!("{:?}", app.log);
+    assert!(messages.contains("history][warning"));
+    assert!(!messages.contains(text));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".doge")).expect("unchanged"),
+        "blocked directory"
+    );
+}

@@ -106,9 +106,7 @@ async fn run_test_job(
         return JobRunOutcome::Completed;
     }
 
-    let mut all_failed_tests = Vec::new();
-    let mut all_command_outputs = Vec::new();
-    let mut has_any_failures = false;
+    let mut failure_evidence = TestFailureEvidence::default();
     let mut summary = crate::features::test_summary::TestRunSummary::default();
 
     let test_configs = testing::get_test_configs(&project_root);
@@ -238,34 +236,7 @@ async fn run_test_job(
 
             // Only confirmed executions provide code-repair evidence. Other
             // diagnostics remain visible below, without becoming repair targets.
-            if result.execution_observed {
-                all_command_outputs.push(format!(
-                    "Command: {} {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-                    test_cmd.command,
-                    test_cmd.args.join(" "),
-                    result
-                        .exit_code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| {
-                            if result.timed_out {
-                                "timeout".to_string()
-                            } else {
-                                "none".to_string()
-                            }
-                        }),
-                    testing::budget_diagnostic_output(
-                        result
-                            .diagnostic_stdout
-                            .as_deref()
-                            .unwrap_or(&result.stdout)
-                    ),
-                    testing::budget_diagnostic_output(&result.stderr)
-                ));
-
-                if !result.success {
-                    has_any_failures = true;
-                }
-            } else {
+            if !result.execution_observed {
                 ui_tx.send_logged(format!(
                     "::shell_output:Test execution was not confirmed: {}. Inspect the diagnostic and workspace. If the checker could not start, restore the selected checker, environment or PATH. Retry /test when ready; automatic code repair was not requested for this command.",
                     test_cmd.command
@@ -332,7 +303,7 @@ async fn run_test_job(
                 ));
             }
 
-            all_failed_tests.extend(failed_tests);
+            failure_evidence.observe(&result);
         }
     }
 
@@ -347,21 +318,7 @@ async fn run_test_job(
     // this job terminalizes and releases foreground ownership; nothing is
     // dispatched from inside the producer. Cancellation is never treated
     // as a failure.
-    if has_any_failures {
-        let all_outputs =
-            testing::budget_diagnostic_output(&all_command_outputs.join("\n\n---\n\n"));
-
-        let prompt =
-            crate::tui::followup::build_test_followup_prompt(&all_outputs, &all_failed_tests);
-        ui_tx
-            .send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
-        deferred.stage(crate::tui::followup::DeferredFollowup {
-            producer,
-            kind: JobKind::Test,
-            display: crate::tui::followup::TEST_FOLLOWUP_DISPLAY.to_string(),
-            prompt,
-        });
-    } else {
+    if !failure_evidence.stage(producer, &deferred, &ui_tx) {
         ui_tx.send_logged(format!("::shell_output:\n{}", summary.completion_message()));
     }
 
@@ -378,6 +335,63 @@ async fn run_test_job(
     ui_tx.send_logged("::status:idle");
     // `cargo test` exit 1 is a domain failure, not infrastructure failure.
     JobRunOutcome::Completed
+}
+
+/// Result-to-recovery boundary, independent of subprocess startup scheduling.
+#[derive(Default)]
+struct TestFailureEvidence {
+    outputs: Vec<String>,
+    failed_tests: Vec<testing::FailedTest>,
+    has_failures: bool,
+}
+impl TestFailureEvidence {
+    fn observe(&mut self, result: &testing::TestResult) {
+        if !result.execution_observed || result.cancelled {
+            return;
+        }
+        self.has_failures |= !result.success;
+        self.outputs.push(format!(
+            "Command: {}\nExit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+            result.command,
+            result
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| if result.timed_out {
+                    "timeout".into()
+                } else {
+                    "none".into()
+                }),
+            testing::budget_diagnostic_output(
+                result
+                    .diagnostic_stdout
+                    .as_deref()
+                    .unwrap_or(&result.stdout)
+            ),
+            testing::budget_diagnostic_output(&result.stderr)
+        ));
+        self.failed_tests
+            .extend(result.failed_tests.iter().cloned());
+    }
+    fn stage(
+        &self,
+        producer: crate::jobs::JobId,
+        deferred: &crate::tui::followup::DeferredFollowupStore,
+        tx: &Sender<String>,
+    ) -> bool {
+        if !self.has_failures {
+            return false;
+        }
+        let outputs = testing::budget_diagnostic_output(&self.outputs.join("\n\n---\n\n"));
+        let prompt = crate::tui::followup::build_test_followup_prompt(&outputs, &self.failed_tests);
+        tx.send_logged("::shell_output:\nSending test failures to LLM for analysis and fixes...");
+        deferred.stage(crate::tui::followup::DeferredFollowup {
+            producer,
+            kind: JobKind::Test,
+            display: crate::tui::followup::TEST_FOLLOWUP_DISPLAY.into(),
+            prompt,
+        });
+        true
+    }
 }
 
 #[cfg(test)]

@@ -179,6 +179,7 @@ pub struct TuiApp {
     pub(crate) model_picker: Option<crate::features::model_selection::ModelPicker>,
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
+    pub(crate) inbox_backlog: bool,
     pub(crate) inbox_tx: Option<Sender<String>>,
     pub max_log_lines: usize,
     pub status: Status,
@@ -187,6 +188,7 @@ pub struct TuiApp {
     pub inference_label: Option<String>,
     // input history and navigation index; index==history.len() means current (editing) buffer
     pub input_history: Vec<String>,
+    input_history_root: Option<std::path::PathBuf>,
     pub history_index: usize,
     pub draft: String,
 
@@ -280,7 +282,7 @@ pub struct TuiApp {
     pub cfg: Option<crate::config::AppConfig>,
     // PTY Shell session
     pub shell_session: Option<ShellSession>,
-    pub shell_output_buffer: String,
+    pub(crate) shell_output_buffer: crate::tui::shell_output::ShellOutput,
     // Ephemeral task stack
     pub task_queue: VecDeque<String>,
     // Last time we received a signal from the backend
@@ -498,6 +500,7 @@ impl TuiApp {
             model_picker: None,
             handler: None,
             inbox_rx: Some(rx),
+            inbox_backlog: false,
             inbox_tx: Some(tx),
             max_log_lines: 10000,
             status: Status::Ready,
@@ -505,6 +508,7 @@ impl TuiApp {
             inference_label: None,
             model,
             input_history,
+            input_history_root: None,
             history_index,
             draft: String::new(),
 
@@ -558,7 +562,7 @@ impl TuiApp {
             last_elapsed_time: None,
             cfg: None,
             shell_session: None,
-            shell_output_buffer: String::new(),
+            shell_output_buffer: Default::default(),
             task_queue: VecDeque::new(),
             last_heartbeat: None,
             diff_review: None,
@@ -578,13 +582,51 @@ impl TuiApp {
         }
     }
 
-    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
-        let (input_history, history_index) = load_input_history();
-        let mut app = Self::from_parts(title, model, theme_name, input_history, history_index);
-        if let Some(tx) = app.inbox_tx.clone() {
-            app.shell_session = ShellSession::new(tx).ok();
+    pub fn for_project(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+        root: &std::path::Path,
+    ) -> Result<Self> {
+        let mut app = Self::load_project_history(title, model, theme_name, root)?;
+        app.shell_session = ShellSession::new().ok();
+        Ok(app)
+    }
+
+    fn load_project_history(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+        root: &std::path::Path,
+    ) -> Result<Self> {
+        let root = root.canonicalize()?;
+        let loaded = crate::features::input_history::InputHistoryStore::at(&root).load();
+        let (history, warning) = match loaded {
+            Ok(history) => (history, None),
+            Err(_) => (
+                Vec::new(),
+                Some(
+                    "[history][warning] Input history could not be loaded safely; the existing file was preserved.",
+                ),
+            ),
+        };
+        let index = history.len();
+        let mut app = Self::from_parts(title, model, theme_name, history, index);
+        app.input_history_root = Some(root);
+        if let Some(warning) = warning {
+            app.push_log(warning);
         }
         Ok(app)
+    }
+
+    // Legacy test constructors remain filesystem-free; production supplies its selected root.
+    #[cfg(test)]
+    pub(crate) fn new(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+    ) -> Result<Self> {
+        Ok(Self::new_for_test(title, model, theme_name))
     }
 
     #[cfg(test)]
@@ -1110,31 +1152,50 @@ impl TuiApp {
     }
 }
 
-fn history_store_path() -> std::path::PathBuf {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let base = project_dir.join(".doge/sessions");
-    std::fs::create_dir_all(&base).ok();
-    base.join("input_history.json")
-}
-
-fn load_input_history() -> (Vec<String>, usize) {
-    let path = history_store_path();
-    let s = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
-    let mut v: Vec<String> = serde_json::from_str(&s).unwrap_or_default();
-    if v.len() > 1000 {
-        let start = v.len() - 1000;
-        v = v[start..].to_vec();
+impl TuiApp {
+    pub(crate) fn save_input_history(&mut self) {
+        // Tests without an explicit project root never access the process CWD.
+        let root = self
+            .input_history_root
+            .as_ref()
+            .or_else(|| self.cfg.as_ref().map(|cfg| &cfg.project_root));
+        if let Some(root) = root
+            && crate::features::input_history::InputHistoryStore::at(root)
+                .save(&self.input_history)
+                .is_err()
+        {
+            self.push_log("[history][warning] Input history was not saved (unsafe path, capacity or I/O error); your submitted input is retained in memory.");
+        }
     }
-    let idx = v.len();
-    (v, idx)
 }
 
-pub(crate) fn save_input_history(hist: &[String]) {
-    let path = history_store_path();
-    let slice: Vec<&String> = hist.iter().rev().take(1000).collect();
-    let out: Vec<String> = slice.into_iter().rev().cloned().collect();
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".to_string()),
-    );
+#[cfg(test)]
+mod history_root_review_regressions {
+    #[test]
+    fn input_history_root_review_regression() {
+        let selected = tempfile::tempdir().expect("selected");
+        let other = tempfile::tempdir().expect("other");
+        let store = crate::features::input_history::InputHistoryStore::at(selected.path());
+        let other_store = crate::features::input_history::InputHistoryStore::at(other.path());
+        store.save(&["selected history".into()]).expect("selected");
+        other_store.save(&["other history".into()]).expect("other");
+        let mut app =
+            super::TuiApp::load_project_history("history", None, "default", selected.path())
+                .expect("selected root");
+        assert_eq!(app.input_history, ["selected history"]);
+        app.cfg = Some(crate::config::AppConfig {
+            project_root: other.path().into(),
+            ..Default::default()
+        });
+        app.input_history.push("new input".into());
+        app.save_input_history();
+        assert_eq!(
+            other_store.load().expect("other preserved"),
+            ["other history"]
+        );
+        assert_eq!(
+            store.load().expect("selected saved"),
+            ["selected history", "new input"]
+        );
+    }
 }

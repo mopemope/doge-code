@@ -293,11 +293,73 @@ pub fn text_size(value: &str) -> TextSize {
     }
 }
 
-/// Parse a provider error body into safe metadata.
-///
-/// Only structured `code` / `type` / `param` identifiers survive
-/// (sanitized). The human-readable `message` is always discarded because
-/// providers may echo submitted prompts or secrets there.
+// Provider body fields are untrusted text, even when their spelling resembles
+// an identifier. Keep a closed vocabulary; request IDs come from headers.
+pub(crate) fn known_provider_code(value: &str) -> Option<&str> {
+    (crate::llm::retry::is_permanent_quota_code(value)
+        || matches!(
+            value,
+            "context_length_exceeded"
+                | "invalid_function_parameters"
+                | "slow_down"
+                | "server_error"
+                | "invalid_api_key"
+                | "invalid_request_error"
+                | "model_not_found"
+                | "rate_limit_exceeded"
+                | "invalid_grant"
+                | "invalid_client"
+                | "invalid_request"
+                | "invalid_scope"
+                | "unauthorized_client"
+                | "unsupported_grant_type"
+                | "access_denied"
+                | "invalid_token"
+                | "invalid_refresh_token"
+                | "token_expired"
+                | "refresh_token_expired"
+                | "refresh_token_invalidated"
+                | "refresh_token_reused"
+                | "subscription_sharing_usage_limit_exceeded"
+                | "subscription_sharing_user_not_eligible"
+                | "subscription_sharing_unsupported_capability"
+                | "subscription_sharing_route_not_supported"
+                | "subscription_sharing_usage_unavailable"
+        ))
+    .then_some(value)
+}
+pub(crate) fn known_provider_type(value: &str) -> Option<&str> {
+    matches!(
+        value,
+        "FreeTierError"
+            | "invalid_request_error"
+            | "authentication_error"
+            | "permission_error"
+            | "rate_limit_error"
+            | "server_error"
+            | "api_error"
+    )
+    .then_some(value)
+}
+pub(crate) fn known_provider_param(value: &str) -> Option<&str> {
+    matches!(
+        value,
+        "model"
+            | "messages"
+            | "input"
+            | "tools"
+            | "tool_choice"
+            | "temperature"
+            | "max_tokens"
+            | "max_output_tokens"
+            | "reasoning"
+            | "stream"
+            | "response_format"
+    )
+    .then_some(value)
+}
+
+/// Parse only recognized machine identifiers; arbitrary body text is discarded.
 pub fn parse_provider_error_metadata(
     body: &str,
     request_id: Option<&str>,
@@ -315,20 +377,18 @@ pub fn parse_provider_error_metadata(
         code = object
             .get("code")
             .and_then(|v| v.as_str())
-            .map(safe_identifier)
-            .filter(|s| !s.is_empty());
+            .and_then(known_provider_code)
+            .map(str::to_owned);
         error_type = object
             .get("type")
             .and_then(|v| v.as_str())
-            // Do not turn an unknown type into a recognized one by stripping characters.
-            .filter(|value| safe_identifier(value) == *value)
-            .map(safe_identifier)
-            .filter(|s| !s.is_empty());
+            .and_then(known_provider_type)
+            .map(str::to_owned);
         param = object
             .get("param")
             .and_then(|v| v.as_str())
-            .map(safe_identifier)
-            .filter(|s| !s.is_empty());
+            .and_then(known_provider_param)
+            .map(str::to_owned);
     }
     ProviderErrorMetadata {
         code,
@@ -573,5 +633,19 @@ mod tests {
         let rendered = format!("{state:?}");
         assert!(!rendered.contains(SECRET_ENCRYPTED));
         assert!(rendered.contains("output_items"));
+    }
+}
+
+#[cfg(test)]
+mod provider_metadata_privacy_regression {
+    #[test]
+    fn unknown_error_fields_are_not_diagnostic_identifiers() {
+        let secret = "SYNTHETIC_AUTH_SECRET";
+        let body =
+            serde_json::json!({"error":{"code":secret,"type":secret,"param":secret}}).to_string();
+        let meta = super::parse_provider_error_metadata(&body, Some("req_fixture"));
+        assert!(
+            !format!("{meta:?} {}", super::provider_error_message(401, &meta)).contains(secret)
+        );
     }
 }

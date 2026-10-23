@@ -59,6 +59,26 @@ share those raw files externally. No duplicate raw log, new storage policy or
 file-permission change is introduced.
 These display choices do not change `exec --json`, MCP or tool result formats.
 
+The direct `!command` PTY transport keeps a 64 KiB pending byte tail and a
+64 KiB retained text tail instead of enqueuing every output chunk. Recent shell
+context is limited independently to 50 lines and 16 KiB of text, with an explicit
+truncation notice; JSON envelope overhead is separate. Each UI tick processes at
+most 128 general messages before polling terminal input. These limits concern
+shell recall, not canonical tool results or recovery observations. UTF-8 decoding
+carries incomplete characters across PTY chunks; invalid bytes or incomplete EOF
+sequences are replaced, and truncation clears any incomplete prefix.
+
+Project input recall (`.doge/sessions/input_history.json`) retains at most 1,000
+entries with a 1 MiB serialized/read limit. New files are private (`0600` on Unix)
+and replaced atomically. Unsafe paths, symlinks, special files and capacity/I/O
+failures produce a warning while keeping the submitted input in memory and
+preserving the previous file before replacement. A directory-sync failure after
+replacement reports unconfirmed durability. Unix operations hold directory
+handles without following `.doge`/`sessions` links; other platforms rely on
+preflight checks and require a trusted project directory. Canonical session
+checkpoints and their exact recovery contents are independent of input recall.
+
+
 ```bash
 cargo run --release
 # or
