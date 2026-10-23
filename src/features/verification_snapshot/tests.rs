@@ -355,7 +355,6 @@ async fn cumulative_bytes_and_serialized_path_limits_are_explicit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn submodules_and_non_utf8_paths_cannot_establish_complete_match() {
-    use std::os::unix::ffi::OsStringExt;
     let root = project();
     git(root.path(), &["hash-object", "-w", "source.rs"]);
     // Use a valid object as the gitlink target; the observer does not recurse.
@@ -382,8 +381,21 @@ async fn submodules_and_non_utf8_paths_cannot_establish_complete_match() {
             .iter()
             .any(|f| f.path == "module" && f.kind == FileKind::Submodule)
     );
-    let name = std::ffi::OsString::from_vec(vec![b'f', 0xff]);
-    fs::write(root.path().join(name), "input").expect("non UTF8 file");
+    crate::test_support::git_index_path(root.path(), &[b'f', 0xff]);
+    let snapshot = capture(root.path(), BTreeSet::new(), None).await;
+    assert_ne!(snapshot.status, CaptureStatus::Complete);
+    assert!(
+        snapshot
+            .diagnostics
+            .contains(&Diagnostic::UnsupportedEncoding)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacement_character_path_cannot_establish_complete_match() {
+    let root = project();
+    fs::write(root.path().join("f\u{fffd}"), "ambiguous path").expect("UTF-8 path");
     let snapshot = capture(root.path(), BTreeSet::new(), None).await;
     assert_ne!(snapshot.status, CaptureStatus::Complete);
     assert!(
