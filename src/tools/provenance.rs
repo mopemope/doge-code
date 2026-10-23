@@ -1994,6 +1994,68 @@ mod provenance_extra_tests {
         }
     }
 
+    #[tokio::test]
+    async fn oversized_provenance_write_warns_preserves_source_and_undo() {
+        let (_project, fs, sid) = setup_project_with_session();
+        let root = fs.config.project_root.clone();
+        let path = root.join("large.txt");
+        std::fs::write(&path, "original\n").expect("original");
+        let ctx = fs.current_session_storage_context().expect("session");
+        let history = ProvenanceStore::new(ctx.session_dir);
+        let content = format!("SYNTHETIC_PRIVATE_DIFF{}", "\u{0001}".repeat(1_500_000));
+        let result = fs
+            .fs_write(path.to_str().expect("path"), &content)
+            .await
+            .expect("write");
+        assert!(result.success && result.changed);
+        assert_eq!(std::fs::read_to_string(&path).expect("committed"), content);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("provenance recording failed"))
+        );
+        assert!(
+            history
+                .load_complete(&sid)
+                .expect("no unreadable event")
+                .events
+                .is_empty()
+        );
+        let sessions = crate::session::SessionStore::open_existing(root.join(".doge/sessions"))
+            .expect("store");
+        let saved = sessions.load(&sid).expect("saved session");
+        assert!(saved.provenance_incomplete);
+        assert_eq!(saved.provenance_record_failures, 1);
+        let undone = crate::tools::undo::undo(&fs).await.expect("undo");
+        assert!(undone.success && undone.changed && !undone.conflict);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("restored"),
+            "original\n"
+        );
+        assert!(
+            undone
+                .warnings
+                .iter()
+                .any(|w| w.contains("provenance recording failed"))
+        );
+        assert!(undone.change_id.is_none());
+        assert!(
+            history
+                .load_complete(&sid)
+                .expect("still readable")
+                .events
+                .is_empty()
+        );
+        assert_eq!(
+            sessions
+                .load(&sid)
+                .expect("saved undo")
+                .provenance_record_failures,
+            2
+        );
+    }
+
     #[test]
     fn test_provenance_failure_keeps_source_and_marks_session() {
         let (_proj, fs, _sid) = setup_project_with_session();
