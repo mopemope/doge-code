@@ -179,6 +179,7 @@ pub struct TuiApp {
     pub(crate) model_picker: Option<crate::features::model_selection::ModelPicker>,
     pub(crate) handler: Option<Box<dyn crate::tui::commands::CommandHandler + Send>>,
     pub(crate) inbox_rx: Option<Receiver<String>>,
+    pub(crate) inbox_backlog: bool,
     pub(crate) inbox_tx: Option<Sender<String>>,
     pub max_log_lines: usize,
     pub status: Status,
@@ -499,6 +500,7 @@ impl TuiApp {
             model_picker: None,
             handler: None,
             inbox_rx: Some(rx),
+            inbox_backlog: false,
             inbox_tx: Some(tx),
             max_log_lines: 10000,
             status: Status::Ready,
@@ -580,8 +582,24 @@ impl TuiApp {
         }
     }
 
-    pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
-        let root = std::env::current_dir()?;
+    pub fn for_project(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+        root: &std::path::Path,
+    ) -> Result<Self> {
+        let mut app = Self::load_project_history(title, model, theme_name, root)?;
+        app.shell_session = ShellSession::new().ok();
+        Ok(app)
+    }
+
+    fn load_project_history(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+        root: &std::path::Path,
+    ) -> Result<Self> {
+        let root = root.canonicalize()?;
         let loaded = crate::features::input_history::InputHistoryStore::at(&root).load();
         let (history, warning) = match loaded {
             Ok(history) => (history, None),
@@ -598,8 +616,17 @@ impl TuiApp {
         if let Some(warning) = warning {
             app.push_log(warning);
         }
-        app.shell_session = ShellSession::new().ok();
         Ok(app)
+    }
+
+    // Legacy test constructors remain filesystem-free; production supplies its selected root.
+    #[cfg(test)]
+    pub(crate) fn new(
+        title: impl Into<String>,
+        model: Option<String>,
+        theme_name: &str,
+    ) -> Result<Self> {
+        Ok(Self::new_for_test(title, model, theme_name))
     }
 
     #[cfg(test)]
@@ -1129,10 +1156,9 @@ impl TuiApp {
     pub(crate) fn save_input_history(&mut self) {
         // Tests without an explicit project root never access the process CWD.
         let root = self
-            .cfg
+            .input_history_root
             .as_ref()
-            .map(|cfg| &cfg.project_root)
-            .or(self.input_history_root.as_ref());
+            .or_else(|| self.cfg.as_ref().map(|cfg| &cfg.project_root));
         if let Some(root) = root
             && crate::features::input_history::InputHistoryStore::at(root)
                 .save(&self.input_history)
@@ -1140,5 +1166,36 @@ impl TuiApp {
         {
             self.push_log("[history][warning] Input history was not saved (unsafe path, capacity or I/O error); your submitted input is retained in memory.");
         }
+    }
+}
+
+#[cfg(test)]
+mod history_root_review_regressions {
+    #[test]
+    fn input_history_root_review_regression() {
+        let selected = tempfile::tempdir().expect("selected");
+        let other = tempfile::tempdir().expect("other");
+        let store = crate::features::input_history::InputHistoryStore::at(selected.path());
+        let other_store = crate::features::input_history::InputHistoryStore::at(other.path());
+        store.save(&["selected history".into()]).expect("selected");
+        other_store.save(&["other history".into()]).expect("other");
+        let mut app =
+            super::TuiApp::load_project_history("history", None, "default", selected.path())
+                .expect("selected root");
+        assert_eq!(app.input_history, ["selected history"]);
+        app.cfg = Some(crate::config::AppConfig {
+            project_root: other.path().into(),
+            ..Default::default()
+        });
+        app.input_history.push("new input".into());
+        app.save_input_history();
+        assert_eq!(
+            other_store.load().expect("other preserved"),
+            ["other history"]
+        );
+        assert_eq!(
+            store.load().expect("selected saved"),
+            ["selected history", "new input"]
+        );
     }
 }

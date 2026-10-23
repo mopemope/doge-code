@@ -1091,3 +1091,35 @@ fn repair_saved_turn_budget_must_be_known_and_within_allowance() {
     write_json(&path, &record).expect("unknown");
     assert!(inspect(&root).is_err());
 }
+
+#[test]
+fn protected_inline_range_review_regression() {
+    let dir = tempfile::tempdir().expect("root");
+    let root = dir.path().canonicalize().expect("canonical fixture");
+    let source = "let x = same;\nx\n#[cfg(test)]\nlet y = same;\n";
+    fs::write(root.join("value.txt"), source).expect("source");
+    let mut p = plan();
+    p.protected_suffixes
+        .insert("value.txt".into(), "#[cfg(test)]".into());
+    let gate = guard::Guard {
+        budget: None,
+        root: root.clone(),
+        baseline: workspace::manifest(&root).expect("manifest"),
+        suffixes: BTreeMap::from([(
+            "value.txt".into(),
+            workspace::suffix(source, "#[cfg(test)]")
+                .expect("suffix")
+                .into(),
+        )]),
+        plan: p,
+    };
+    let call = crate::llm::types::ToolCall {
+        id:Some("edit".into()), r#type:"function".into(), function:crate::llm::types::ToolCallFunction {
+            name:"edit".into(), arguments:serde_json::json!({"file_path":root.join("value.txt"),"target_block":"same","new_block":"updated","start_line":4,"end_line":4}).to_string(),
+        },
+    };
+    assert!(
+        gate.preflight(&[call]).is_err(),
+        "the actual inline match is protected on line four"
+    );
+}

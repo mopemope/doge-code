@@ -77,7 +77,7 @@ impl Guard {
                                 !target.is_empty()
                                     && data.match_indices(target).all(|(start, _)| {
                                         // Use edit's exact match and line-range semantics.
-                                        let line = data[..start].lines().count() as u64 + 1;
+                                        let line = crate::tools::edit::line_at(&data, start) as u64;
                                         line < start_line
                                             || line > end_line
                                             || start + target.len() <= boundary

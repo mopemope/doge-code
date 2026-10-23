@@ -81,6 +81,20 @@ impl ShellOutput {
             .join("\n");
         let clipped =
             self.truncated || lines.len() > CONTEXT_BYTES || self.text.lines().count() > 50;
+        // The notice counts toward both the line and byte limits.
+        let lines = if clipped {
+            lines
+                .lines()
+                .rev()
+                .take(49)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            lines
+        };
         let budget = CONTEXT_BYTES - if clipped { NOTICE.len() } else { 0 };
         let start = tail_start(&lines, budget);
         format!("{}{}", if clipped { NOTICE } else { "" }, &lines[start..])
@@ -181,7 +195,7 @@ mod tests {
         }
         assert!(output.text.len() <= RETAINED_BYTES);
         assert!(output.context().len() <= CONTEXT_BYTES);
-        assert!(output.context().lines().count() <= 51); // notice + fifty retained lines
+        assert!(output.context().lines().count() <= 50); // notice is included in the line limit
         assert!(output.context().ends_with("日本語"));
     }
 }

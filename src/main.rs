@@ -471,10 +471,11 @@ async fn run_tui(
     repomap: std::sync::Arc<tokio::sync::RwLock<Option<crate::analysis::RepoMap>>>,
     status_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
-    let mut app = TuiApp::new(
+    let mut app = TuiApp::for_project(
         "🦮 doge-code 🐕‍🦺 /help",
         Some(cfg.model.clone()),
         &cfg.theme, // pass theme name
+        &cfg.project_root,
     )?;
     // Set auto-compact threshold in the UI from configuration
     app.auto_compact_prompt_token_threshold = cfg.get_effective_compaction_limit();

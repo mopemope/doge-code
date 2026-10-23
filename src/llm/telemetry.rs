@@ -300,6 +300,8 @@ pub(crate) fn known_provider_code(value: &str) -> Option<&str> {
         || matches!(
             value,
             "context_length_exceeded"
+                | "invalid_function_parameters"
+                | "slow_down"
                 | "server_error"
                 | "invalid_api_key"
                 | "invalid_request_error"

@@ -29,57 +29,83 @@
 ### Task 1: Edit line ranges
 
 Files: `src/tools/edit.rs` tests and both match-position calculations.
-- [ ] Add real edit-with-receipt regressions for inline matches, range 1/2, LF/CRLF/Unicode, reported candidates and out-of-scope idempotency. Observe RED.
-- [ ] Count preceding LF bytes plus one through one shared helper; retain existing match-start range semantics and commit path.
-- [ ] Run `bash scripts/verify.sh test tools::edit::`, inspect receipts/content and commit the coherent fix.
+- [x] Add real edit-with-receipt regressions for inline matches, range 1/2, LF/CRLF/Unicode, reported candidates and out-of-scope idempotency. Observe RED.
+- [x] Count preceding LF bytes plus one through one shared helper; retain existing match-start range semantics and commit path.
+- [x] Run `bash scripts/verify.sh test tools::edit::`, inspect receipts/content and commit the coherent fix.
 
 ### Task 2: Input history store
 
 Files: new `src/features/input_history.rs`, feature registration, `src/tui/state.rs`, `src/tui/event_handlers/normal.rs`, README.
 Interface: `InputHistoryStore::at(project_root)`, `load() -> Result<Vec<String>>`, `save(&[String]) -> Result<()>`; UI retains project-root identity and surfaces failures without losing submitted input.
-- [ ] Add regressions reproducing linked-file overwrite, unsafe parent/FIFO, size/entry bounds, private new files and old-content preservation. Observe RED at the public store boundary.
-- [ ] Cap serialized history at 1 MiB and 1,000 entries; bounded regular-file reads. On Unix hold nofollow directory descriptors, create 0600 exclusive siblings and rename relative to the held directory. Reject unsafe/foreign/multiply linked targets. On other platforms use explicit path checks and document trusted-directory limitation.
-- [ ] Load/save only the selected project root, never test process CWD; report safe structural warnings, preserve in-memory input and old history on failure.
-- [ ] Run focused store/input tests; document limits and failure behavior; commit.
+- [x] Add regressions reproducing linked-file overwrite, unsafe parent/FIFO, size/entry bounds, private new files and old-content preservation. Observe RED at the public store boundary.
+- [x] Cap serialized history at 1 MiB and 1,000 entries; bounded regular-file reads. On Unix hold nofollow directory descriptors, create 0600 exclusive siblings and rename relative to the held directory. Reject unsafe/foreign/multiply linked targets. On other platforms use explicit path checks and document trusted-directory limitation.
+- [x] Load/save only the selected project root, never test process CWD; report safe structural warnings, preserve in-memory input and old history on failure.
+- [x] Run focused store/input tests; document limits and failure behavior; commit.
 
 ### Task 3: Provider diagnostics
 
 Files: `src/features/openai_subscription/mod.rs`, related provider tests.
-- [ ] Add sentinel regressions for string error/top-level string and object fields; observe RED.
-- [ ] Discard free-text string errors; preserve only recognized machine codes/types/params and sanitized request identifiers. Keep known quota, context-length and FreeTierError classifications.
-- [ ] Run provider focused tests including mock HTTP failures and assert Display/Debug/log privacy; commit.
+- [x] Add sentinel regressions for string error/top-level string and object fields; observe RED.
+- [x] Discard free-text string errors; preserve only recognized machine codes/types/params and sanitized request identifiers. Keep known quota, context-length and FreeTierError classifications.
+- [x] Run provider focused tests including mock HTTP failures and assert Display/Debug/log privacy; commit.
 
 ### Task 4: Deterministic timeout recovery coverage
 
 Files: `src/tui/commands/handlers/slash_commands/test.rs`, `test_start_recovery_tests.rs`, narrowly scoped test support if needed.
-- [ ] Preserve the observed failing 100ms regression evidence. Separate the recovery decision from OS startup timing via an internal result-processing boundary or a test-only started-process synchronization seam.
-- [ ] Feed a real timed-out `TestResult` with retained marker through the same recovery path, assert staged follow-up, timeout label, marker and no success claim. Keep runner integration timeout/partial-output tests and startup-failure exclusion.
-- [ ] Run test-start-recovery and runner focused checks, including repeated runs; commit without weakening assertions or raising timeouts as the fix.
+- [x] Preserve the observed failing 100ms regression evidence. Separate the recovery decision from OS startup timing via an internal result-processing boundary or a test-only started-process synchronization seam.
+- [x] Feed a real timed-out `TestResult` with retained marker through the same recovery path, assert staged follow-up, timeout label, marker and no success claim. Keep runner integration timeout/partial-output tests and startup-failure exclusion.
+- [x] Run test-start-recovery and runner focused checks, including repeated runs; commit without weakening assertions or raising timeouts as the fix.
 
 ### Task 5: Bounded PTY output
 
 Files: `src/tui/shell.rs`, `state.rs`, `event_loop.rs`, `commands/agent_job.rs`, README.
 Interface: shell session owns a fixed-capacity byte mailbox; UI drains it once per tick into a bounded tail buffer. General inbox is not the PTY data transport.
-- [ ] Add finite 10MiB/newline-free and flood regressions; observe missing capacity invariant RED.
-- [ ] Aggregate shell bytes in a mutex-protected 64 KiB mailbox (retain newest bytes with explicit truncation state), eliminate per-chunk unbounded general-channel sends, cap retained output at 64 KiB, and independently cap shell model context at 16 KiB and 50 lines including truncation notice.
-- [ ] Bound general inbox drain to 128 messages per tick. Preserve shell startup/status behavior, cancellation ownership, and other job messages; avoid extending lifecycle scope speculatively.
-- [ ] Run shell/context/event-loop focused tests; document retention; commit.
+- [x] Add finite 10MiB/newline-free and flood regressions; observe missing capacity invariant RED.
+- [x] Aggregate shell bytes in a mutex-protected 64 KiB mailbox (retain newest bytes with explicit truncation state), eliminate per-chunk unbounded general-channel sends, cap retained output at 64 KiB, and independently cap shell model context at 16 KiB and 50 lines including truncation notice.
+- [x] Bound general inbox drain to 128 messages per tick. Preserve shell startup/status behavior, cancellation ownership, and other job messages; avoid extending lifecycle scope speculatively.
+- [x] Run shell/context/event-loop focused tests; document retention; commit.
 
 ### Task 6: Streaming UTF-8
 
 Files: shell output decoder at the Task 5 byte boundary and tests.
-- [ ] Test Japanese/emoji at every split, invalid sequences, dropped prefix after mailbox overflow, and incomplete EOF; observe RED.
-- [ ] Carry incomplete suffix bytes (at most three), replace genuinely invalid sequences, flush at EOF, and reset partial decoder state when bytes were dropped. Keep retained buffer UTF-8 boundaries intact.
-- [ ] Run focused tests and commit.
+- [x] Test Japanese/emoji at every split, invalid sequences, dropped prefix after mailbox overflow, and incomplete EOF; observe RED.
+- [x] Carry incomplete suffix bytes (at most three), replace genuinely invalid sequences, flush at EOF, and reset partial decoder state when bytes were dropped. Keep retained buffer UTF-8 boundaries intact.
+- [x] Run focused tests and commit.
 
 ### Final validation and publication
 
-- [ ] Self-review requirement coverage and shared interfaces before runtime edits; record any rulings in task-local audit notes.
-- [ ] `cargo fmt --all`; `bash scripts/verify.sh rust`, `guidance`, `tui-deps`, native `macos` focused, and MSRV if affected. Run manual isolated PTY smoke and preserve a terminal recording.
-- [ ] Independent whole-branch review; reproduce and fix material findings; repeat affected gates.
+- [x] Self-review requirement coverage and shared interfaces before runtime edits; record any rulings in task-local audit notes.
+- [x] `cargo fmt --all`; `bash scripts/verify.sh rust`, `guidance`, `tui-deps`, native `macos` focused, and MSRV if affected. Run manual isolated PTY smoke and preserve a terminal recording.
+- [x] Independent whole-branch review; reproduce and fix material findings; repeat affected gates.
 - [ ] Inspect effective push URL/refspecs/upstream/defaults/pushRemote with secret-safe output. Dry-run only `refs/heads/fix/audit-correctness-and-tui-bounds:refs/heads/fix/audit-correctness-and-tui-bounds`, reject other destinations, then publish that exact mapping without `-u`/force.
 - [ ] Verify exact feature head and unchanged develop; create PR against develop, attach it to this task and monitor exact-head CI to completion. No merge.
 
 ## Plan self-review
 
 All six authorized defects map to tasks with regression gates. Tasks 5–6 share the byte mailbox/decoder boundary and run sequentially. Other tasks share no runtime interfaces. Task 2 owns persistence only, not canonical sessions; Task 4 changes testability, not production timeout policy. Existing isolation and known baseline test failure were revalidated; user explicitly authorized fixing it. Proceed without another approval gate because the follow-up request authorizes implementation and PR delivery.
+
+
+## Validation and review checkpoint
+
+All six task regressions were observed failing before their fixes. Independent
+whole-branch review found retry diagnostic bypass, mismatched history load/save
+roots, queued successor ordering under inbox backlog, and a 51-line notice case.
+Their regressions and fixes passed; repair's protected-range guard now shares the
+correct edit line calculation, and the existing invalid-function-schema machine
+code remains recognized. Real retry logs are captured by owned localhost mocks.
+
+Native macOS: fmt and warning-free Clippy passed; unit suite 2,377 passed with
+three existing filesystem-fixture failures (non-UTF-8 names in evidence_report and
+verification_snapshot, and an overlong path in read_pagination). The identical
+three fail on the original develop binary. Integration binaries total 41 passed
+and two existing OpenRouter offline-cache fixture failures; the same CLI cache
+lookup failure reproduces on original develop. No skips or relaxed assertions
+were introduced for these limitations.
+
+With canonical temporary paths, macOS focused checks passed: TUI 339, execution
+351, jobs 34. Guidance passed 191 tests; TUI dependency check passed. Release
+native PTY recording with owned HOME/config/project verified Japanese history,
+10 MiB shell output followed by /jobs and /quit, private history and exit 0,
+without inference or credentials. Host rust-objcopy emitted a debug stripping
+warning, but the release binary built and ran successfully. Exact-head CI is the
+remaining platform gate after publication.
