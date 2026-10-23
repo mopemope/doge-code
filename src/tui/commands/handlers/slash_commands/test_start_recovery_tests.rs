@@ -111,31 +111,50 @@ async fn checker_start_failure_is_excluded_from_mixed_compile_failure_repair() {
         source
     );
 }
-#[cfg(unix)]
-#[tokio::test]
-async fn checker_started_timeout_still_requests_analysis() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().expect("root");
-    python_project(root.path());
-    let interpreter = root.path().join(".venv/bin/python");
-    std::fs::write(
-        &interpreter,
-        "#!/bin/sh\nprintf 'STARTED_TIMEOUT_MARKER\\n'\nwhile :; do :; done\n",
-    )
-    .expect("local checker stand-in");
-    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).expect("mode");
-    let (_, deferred) = run(root.path(), 100).await;
-    let followup = deferred
-        .take(crate::jobs::JobId(1))
-        .expect("started timeout");
+// Process timeout/partial-output integration is covered by execution::runner
+// and features::testing. Recovery must not assume a child starts within 100ms.
+#[test]
+fn checker_started_timeout_still_requests_analysis() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (observed, cancelled, expected) in [
+        (true, false, true),
+        (false, false, false),
+        (true, true, false),
+    ] {
+        let result = testing::TestResult {
+            command: "fixture-python -m pytest -v".into(),
+            stdout: "STARTED_TIMEOUT_MARKER\n".into(),
+            stderr: String::new(),
+            success: false,
+            exit_code: None,
+            timed_out: true,
+            cancelled,
+            execution_observed: observed,
+            output_truncated: true,
+            failed_tests: Vec::new(),
+            structured_test_result: None,
+            diagnostic_stdout: None,
+            warnings: vec!["timed out".into()],
+        };
+        let deferred = crate::tui::followup::DeferredFollowupStore::default();
+        let mut evidence = TestFailureEvidence::default();
+        evidence.observe(&result);
+        assert_eq!(
+            evidence.stage(crate::jobs::JobId(1), &deferred, &tx),
+            expected
+        );
+        let followup = deferred.take(crate::jobs::JobId(1));
+        assert_eq!(followup.is_some(), expected);
+        if expected {
+            let prompt = followup.expect("started timeout").prompt;
+            assert!(prompt.contains("STARTED_TIMEOUT_MARKER"), "{prompt}");
+            assert!(prompt.contains("Exit code: timeout"), "{prompt}");
+            assert!(prompt.contains("fixture-python -m pytest -v"), "{prompt}");
+            assert!(!prompt.contains("All reported tests passed"));
+        }
+    }
     assert!(
-        followup.prompt.contains("STARTED_TIMEOUT_MARKER"),
-        "{}",
-        followup.prompt
-    );
-    assert!(
-        followup.prompt.contains("Exit code: timeout"),
-        "{}",
-        followup.prompt
+        !rx.try_iter()
+            .any(|line| line.contains("All reported tests passed"))
     );
 }
