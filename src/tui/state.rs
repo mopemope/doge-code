@@ -187,6 +187,7 @@ pub struct TuiApp {
     pub inference_label: Option<String>,
     // input history and navigation index; index==history.len() means current (editing) buffer
     pub input_history: Vec<String>,
+    input_history_root: Option<std::path::PathBuf>,
     pub history_index: usize,
     pub draft: String,
 
@@ -505,6 +506,7 @@ impl TuiApp {
             inference_label: None,
             model,
             input_history,
+            input_history_root: None,
             history_index,
             draft: String::new(),
 
@@ -579,8 +581,23 @@ impl TuiApp {
     }
 
     pub fn new(title: impl Into<String>, model: Option<String>, theme_name: &str) -> Result<Self> {
-        let (input_history, history_index) = load_input_history();
-        let mut app = Self::from_parts(title, model, theme_name, input_history, history_index);
+        let root = std::env::current_dir()?;
+        let loaded = crate::features::input_history::InputHistoryStore::at(&root).load();
+        let (history, warning) = match loaded {
+            Ok(history) => (history, None),
+            Err(_) => (
+                Vec::new(),
+                Some(
+                    "[history][warning] Input history could not be loaded safely; the existing file was preserved.",
+                ),
+            ),
+        };
+        let index = history.len();
+        let mut app = Self::from_parts(title, model, theme_name, history, index);
+        app.input_history_root = Some(root);
+        if let Some(warning) = warning {
+            app.push_log(warning);
+        }
         if let Some(tx) = app.inbox_tx.clone() {
             app.shell_session = ShellSession::new(tx).ok();
         }
@@ -1110,31 +1127,20 @@ impl TuiApp {
     }
 }
 
-fn history_store_path() -> std::path::PathBuf {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let base = project_dir.join(".doge/sessions");
-    std::fs::create_dir_all(&base).ok();
-    base.join("input_history.json")
-}
-
-fn load_input_history() -> (Vec<String>, usize) {
-    let path = history_store_path();
-    let s = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
-    let mut v: Vec<String> = serde_json::from_str(&s).unwrap_or_default();
-    if v.len() > 1000 {
-        let start = v.len() - 1000;
-        v = v[start..].to_vec();
+impl TuiApp {
+    pub(crate) fn save_input_history(&mut self) {
+        // Tests without an explicit project root never access the process CWD.
+        let root = self
+            .cfg
+            .as_ref()
+            .map(|cfg| &cfg.project_root)
+            .or(self.input_history_root.as_ref());
+        if let Some(root) = root
+            && crate::features::input_history::InputHistoryStore::at(root)
+                .save(&self.input_history)
+                .is_err()
+        {
+            self.push_log("[history][warning] Input history was not saved (unsafe path, capacity or I/O error); your submitted input is retained in memory.");
+        }
     }
-    let idx = v.len();
-    (v, idx)
-}
-
-pub(crate) fn save_input_history(hist: &[String]) {
-    let path = history_store_path();
-    let slice: Vec<&String> = hist.iter().rev().take(1000).collect();
-    let out: Vec<String> = slice.into_iter().rev().cloned().collect();
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".to_string()),
-    );
 }

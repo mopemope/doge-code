@@ -8,7 +8,7 @@ use ratatui_textarea::{CursorMove, Input, TextArea};
 use tracing::debug;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::tui::state::{CompletionType, TuiApp, save_input_history};
+use crate::tui::state::{CompletionType, TuiApp};
 
 #[cfg(test)]
 type TerminalType = Terminal<CrosstermBackend<std::io::Stdout>>;
@@ -158,7 +158,7 @@ pub fn handle_normal_mode_key(
                 }
                 if app.input_history.last().map(|s| s.as_str()) != Some(line.as_str()) {
                     app.input_history.push(line.clone());
-                    save_input_history(&app.input_history);
+                    app.save_input_history();
                 }
                 app.history_index = app.input_history.len();
                 app.draft.clear();
