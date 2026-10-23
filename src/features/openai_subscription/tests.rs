@@ -3363,3 +3363,55 @@ async fn failed_browser_launch_can_finish_mock_login_using_manual_url() -> Resul
     assert_eq!(saved.accounts[0].subject, "manual-sub");
     Ok(())
 }
+
+#[test]
+fn provider_error_free_text_never_becomes_diagnostic_metadata() {
+    let secret = "SYNTHETIC_AUTH_SECRET";
+    for body in [
+        json!({"error":secret}),
+        json!(secret),
+        json!({"error":{"code":secret,"type":secret,"param":secret,"message":secret}}),
+    ] {
+        for status in [401, 403, 400, 500] {
+            let error = ProviderError::from_body(Some(status), &body, Some("req_fixture".into()));
+            assert!(!format!("{error} {error:?}").contains(secret));
+            assert_eq!(error.code, "unknown_error");
+            assert_eq!(error.error_type, None);
+            assert_eq!(error.param, None);
+            assert_eq!(error.request_id.as_deref(), Some("req_fixture"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_error_http_free_text_and_stream_diagnostics_are_private() {
+    use httptest::{Expectation, matchers::request, responders::status_code};
+    for status in [401, 403] {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/error"))
+                .respond_with(status_code(status).body(r#"{"error":"SYNTHETIC_AUTH_SECRET"}"#)),
+        );
+        let response = auth::http_client()
+            .expect("client")
+            .get(server.url_str("/error"))
+            .send()
+            .await
+            .expect("fixture");
+        let error = auth::json_response(response)
+            .await
+            .expect_err("provider error");
+        assert!(!format!("{error} {error:?}").contains("SYNTHETIC_AUTH_SECRET"));
+        let provider = error
+            .downcast::<ProviderError>()
+            .expect("typed error")
+            .during_stream();
+        assert!(!provider.retryable);
+        assert!(!format!("{provider} {provider:?}").contains("SYNTHETIC_AUTH_SECRET"));
+    }
+    let terminal = ProviderError::from_body(Some(400), &json!({"error":"invalid_grant"}), None);
+    assert_eq!(
+        terminal.code, "invalid_grant",
+        "OAuth machine errors must still terminate token renewal"
+    );
+}

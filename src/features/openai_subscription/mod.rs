@@ -171,6 +171,7 @@ impl ProviderError {
             .get("code")
             .and_then(|v| v.as_str())
             .or_else(|| error.as_str())
+            .and_then(crate::llm::telemetry::known_provider_code)
             .unwrap_or("unknown_error")
             .to_owned();
         let (retryable, recovery) = match code.as_str() {
@@ -214,12 +215,13 @@ impl ProviderError {
                 .get("error")
                 .and_then(|error| error.get("type"))
                 .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty() && safe_identifier(value) == *value)
+                .and_then(crate::llm::telemetry::known_provider_type)
                 .map(str::to_owned),
             param: error
                 .get("param")
                 .and_then(|v| v.as_str())
-                .map(safe_identifier),
+                .and_then(crate::llm::telemetry::known_provider_param)
+                .map(str::to_owned),
             request_id: request_id.map(|v| safe_identifier(&v)),
             recovery,
             retryable,
