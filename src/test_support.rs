@@ -221,3 +221,44 @@ fn diagnostic_captures_survive_unsubscribed_rebuild_without_sharing_events() {
     assert!(!first.text().contains("second capture"));
     assert!(!second.text().contains("first capture"));
 }
+
+/// Seed raw Git path bytes without requiring a filesystem to accept invalid UTF-8.
+/// The real Git inventory still returns those bytes through the production runner.
+#[cfg(unix)]
+pub(crate) fn git_index_path(root: &std::path::Path, name: &[u8]) {
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::{Command, Stdio};
+    let git = || {
+        let mut command = Command::new("git");
+        command
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+            ])
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command
+    };
+    let blob = git()
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("empty fixture blob");
+    assert!(blob.status.success(), "{blob:?}");
+    let oid = String::from_utf8(blob.stdout).expect("blob id");
+    let indexed = git()
+        .args(["update-index", "--add", "--cacheinfo", "100644", oid.trim()])
+        .arg(std::ffi::OsString::from_vec(name.to_vec()))
+        .output()
+        .expect("raw fixture index path");
+    assert!(indexed.status.success(), "{indexed:?}");
+    let inventory = git()
+        .args(["ls-files", "-z"])
+        .output()
+        .expect("raw inventory");
+    assert!(inventory.status.success(), "{inventory:?}");
+    assert!(inventory.stdout.split(|b| *b == 0).any(|path| path == name));
+}

@@ -931,7 +931,6 @@ async fn project_subdirectory_and_unborn_repository_are_explicit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn git_helpers_are_disabled_and_non_utf8_is_not_aliased() {
-    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     let f = fixture(true);
     let helper = f.dir.path().join("helper");
@@ -974,8 +973,8 @@ async fn git_helpers_are_disabled_and_non_utf8_is_not_aliased() {
     let r = report(&f, false).await;
     assert!(r.repository.comparison_available);
     assert!(!marker.exists());
-    let name = std::ffi::OsString::from_vec(vec![b'b', 255]);
-    fs::write(f.dir.path().join(name), "bad path").expect("non-UTF-8");
+    crate::test_support::git_index_path(f.dir.path(), &[b'b', 0xff]);
+    assert!(!marker.exists(), "fixture must not invoke fsmonitor");
     let r = report(&f, false).await;
     assert_eq!(r.repository.state, RepositoryState::Unavailable);
     assert!(
@@ -993,6 +992,10 @@ async fn git_helpers_are_disabled_and_non_utf8_is_not_aliased() {
         )
         .await
         .is_err()
+    );
+    assert!(
+        !marker.exists(),
+        "report/export must not invoke Git helpers"
     );
 }
 
@@ -2016,4 +2019,29 @@ async fn file_detail_bounds_and_escapes_fields_and_retains_structured_counts() {
     assert!(text.contains("\"passed\":2,\"failed\":1"));
     assert!(lines.len() <= 256);
     assert!(lines.iter().all(|l| l.len() < 12000));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacement_character_path_is_not_treated_as_lossless() {
+    let f = fixture(true);
+    fs::write(f.dir.path().join("b\u{fffd}"), "ambiguous path").expect("UTF-8 path");
+    let r = report(&f, false).await;
+    assert_eq!(r.repository.state, RepositoryState::Unavailable);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.code == WarningCode::WorkspaceUnavailable)
+    );
+    assert!(
+        export(
+            f.dir.path(),
+            &f.session.meta.id,
+            Some("HEAD"),
+            false,
+            ReportFormat::Json
+        )
+        .await
+        .is_err()
+    );
 }

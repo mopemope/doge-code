@@ -395,11 +395,13 @@ fn read_pagination_many_short_control_lines_preserve_complete_prefixes() {
 fn read_pagination_long_paths_scope_and_metadata_cap() {
     let (dir, mut config, _) = fixture("");
     let mut nested = dir.path().to_path_buf();
-    for _ in 0..10 {
+    // Stress escaped path metadata while staying below macOS PATH_MAX (1024).
+    for _ in 0..3 {
         nested = nested.join(format!("{}\"", "a".repeat(190)));
     }
     std::fs::create_dir_all(&nested).unwrap();
     let path = nested.join("quoted\".txt");
+    assert!(path.as_os_str().len() > 600);
     std::fs::write(&path, vec!["\"\\\u{0001}".repeat(1000); 10].join("\n")).unwrap();
     let page = fs_read(
         path.to_str().unwrap(),

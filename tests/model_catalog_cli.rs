@@ -155,7 +155,13 @@ fn openrouter_models(arguments: &[&str], cached: bool) -> Output {
     let invalid = "invalid TOML [ SYNTHETIC_PRIVATE_CONFIG";
     std::fs::write(&config, invalid).unwrap();
     if cached {
-        let path = dir.path().join("doge-code/openrouter/models-v1.json");
+        // Match the child process's native cache root, not the host process's HOME.
+        let cache_root = if cfg!(target_os = "macos") {
+            dir.path().join("Library/Caches")
+        } else {
+            dir.path().to_path_buf()
+        };
+        let path = cache_root.join("doge-code/openrouter/models-v1.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::json!({
             "schema_version":1,"source":"https://openrouter.ai/api/v1/models", "fetched_at":chrono::Utc::now(),"excluded_entries":0,
