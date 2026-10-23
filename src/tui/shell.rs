@@ -13,6 +13,18 @@ pub struct ShellSession {
 
 impl ShellSession {
     pub fn new() -> Result<Self> {
+        Self::spawn(CommandBuilder::new("bash"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Result<Self> {
+        let mut command = CommandBuilder::new("bash");
+        command.arg("--noprofile");
+        command.arg("--norc");
+        Self::spawn(command)
+    }
+
+    fn spawn(cmd: CommandBuilder) -> Result<Self> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -21,7 +33,6 @@ impl ShellSession {
             pixel_height: 0,
         })?;
 
-        let cmd = CommandBuilder::new("bash");
         let _child = pair.slave.spawn_command(cmd)?;
 
         let mut reader = pair.master.try_clone_reader()?;

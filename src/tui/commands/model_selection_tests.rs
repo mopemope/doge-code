@@ -592,7 +592,7 @@ fn model_selection_postrename_sync_warning_keeps_disk_and_runtime_consistent() {
 #[test]
 fn model_selection_allows_idle_persistent_shell_pty() {
     let (mut executor, mut ui, _dir) = fixture(false);
-    ui.shell_session = Some(crate::tui::shell::ShellSession::new().unwrap());
+    ui.shell_session = Some(crate::tui::shell::ShellSession::fixture().unwrap());
     executor.handle("/models glm-5.3", &mut ui);
     assert!(ui.model_picker.is_some());
     executor

@@ -62,7 +62,7 @@ pub struct EditResult {
 }
 
 // A partial current line is not a completed preceding line.
-fn line_at(content: &str, byte: usize) -> usize {
+pub(crate) fn line_at(content: &str, byte: usize) -> usize {
     content.as_bytes()[..byte]
         .iter()
         .filter(|&&b| b == b'\n')
