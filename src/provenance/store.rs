@@ -17,6 +17,31 @@ use super::wire::{
     v6 as wire_v6, v7 as wire_v7, v8 as wire_v8,
 };
 
+// New event writes and authoritative reads must agree on serialized JSON bytes.
+const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
+fn serialize_event(wire: &wire_v8::V8Envelope) -> Result<Vec<u8>> {
+    struct EventBytes(Vec<u8>);
+    impl std::io::Write for EventBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_EVENT_BYTES - self.0.len() {
+                return Err(std::io::Error::other(
+                    "Provenance event exceeds serialized 8 MiB limit",
+                ));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut payload = EventBytes(Vec::new());
+    serde_json::to_writer_pretty(&mut payload, wire)
+        .context("failed to serialize provenance event")?;
+    Ok(payload.0)
+}
+
 /// Durable provenance store for one session.
 ///
 /// Layout:
@@ -127,14 +152,6 @@ impl ProvenanceStore {
         session_id: &str,
         event: ProvenanceEvent,
     ) -> Result<ProvenanceEventEnvelope> {
-        let current_dir = self.current_events_dir();
-        std::fs::create_dir_all(&current_dir).with_context(|| {
-            format!(
-                "failed to create provenance events dir {}",
-                current_dir.display()
-            )
-        })?;
-
         let mut event = event;
         let event_id = Uuid::now_v7().to_string();
         // Keep a single identity for changes: when the caller leaves
@@ -154,11 +171,18 @@ impl ProvenanceStore {
             event,
         };
         let wire = to_v8_wire(&canonical);
-        let payload =
-            serde_json::to_string_pretty(&wire).context("failed to serialize provenance event")?;
+        // Bound escaped JSON before touching the event directory or temp files.
+        let payload = serialize_event(&wire)?;
+        let current_dir = self.current_events_dir();
+        std::fs::create_dir_all(&current_dir).with_context(|| {
+            format!(
+                "failed to create provenance events dir {}",
+                current_dir.display()
+            )
+        })?;
         let dest = current_dir.join(format!("{event_id}.json"));
 
-        persist_sibling_noclobber(&current_dir, &dest, payload.as_bytes())
+        persist_sibling_noclobber(&current_dir, &dest, &payload)
             .with_context(|| format!("failed to persist provenance event {}", dest.display()))?;
 
         // Never log directive content: only ids, origin, and hashes.
@@ -336,7 +360,7 @@ impl ProvenanceReadBounds {
         Self {
             max_files: 65536,
             max_bytes: 128 * 1024 * 1024,
-            max_file_bytes: 8 * 1024 * 1024,
+            max_file_bytes: MAX_EVENT_BYTES,
             complete_required: true,
             ..Self::default()
         }
@@ -628,6 +652,116 @@ mod tests {
                 .to_string_lossy()
                 .ends_with("provenance/v8/events")
         );
+    }
+
+    #[test]
+    fn serialized_event_limit_accepts_exact_bytes_and_rejects_one_more() {
+        let canonical = ProvenanceEventEnvelope {
+            schema_version: PROVENANCE_SCHEMA_VERSION,
+            event_id: "boundary".into(),
+            session_id: "s".into(),
+            timestamp: "2026-10-23T00:00:00Z".into(),
+            event: change_event(None),
+        };
+        let mut wire = to_v8_wire(&canonical);
+        let wire_v8::V8Event::ChangeCommitted(change) = &mut wire.event else {
+            panic!("change")
+        };
+        change.diff.clear();
+        let overhead = serde_json::to_vec_pretty(&wire).expect("wire bytes").len();
+        let wire_v8::V8Event::ChangeCommitted(change) = &mut wire.event else {
+            panic!("change")
+        };
+        change.diff = "x".repeat(MAX_EVENT_BYTES - overhead);
+        let bytes = serialize_event(&wire).expect("exact limit");
+        assert_eq!(bytes.len(), MAX_EVENT_BYTES);
+        // The actual bounded reader must accept the writer's exact upper boundary.
+        let root = tempfile::tempdir().expect("root");
+        let store = ProvenanceStore::new(root.path().join("s"));
+        std::fs::create_dir_all(store.events_dir()).expect("events");
+        std::fs::write(store.events_dir().join("boundary.json"), bytes).expect("event");
+        assert_eq!(
+            store
+                .load_complete("s")
+                .expect("read exact limit")
+                .events
+                .len(),
+            1
+        );
+        let wire_v8::V8Event::ChangeCommitted(change) = &mut wire.event else {
+            panic!("change")
+        };
+        change.diff.push('x');
+        assert!(serialize_event(&wire).is_err());
+    }
+
+    #[test]
+    fn large_unicode_event_roundtrips_exactly_and_fresh_rejection_leaves_no_files() {
+        let root = tempfile::tempdir().expect("root");
+        let store = ProvenanceStore::new(root.path().join("s"));
+        let mut event = change_event(Some("linked-step"));
+        let text = "あ😀\u{0001}".repeat(200_000);
+        if let ProvenanceEvent::ChangeCommitted(ref mut change) = event {
+            change.diff = text.clone();
+            change.diff_hash = crate::provenance::diff_hash_for(&text);
+            change.directive_id = Some("directive".into());
+            change.requirement_ids = vec!["requirement".into()];
+        }
+        let saved = store.append("s", event).expect("large event");
+        let loaded = ProvenanceStore::new(root.path().join("s"))
+            .load_complete("s")
+            .expect("resume");
+        assert_eq!(loaded.events.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&loaded.events[0]).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+        let clean = ProvenanceStore::new(root.path().join("empty"));
+        let mut event = change_event(None);
+        if let ProvenanceEvent::ChangeCommitted(ref mut change) = event {
+            change.diff = "x".repeat(MAX_EVENT_BYTES + 1);
+        }
+        assert!(clean.append("empty", event).is_err());
+        assert!(!clean.events_dir().exists());
+    }
+
+    #[test]
+    fn oversized_append_preserves_reloadable_existing_events() {
+        for contents in [
+            "x".repeat(8 * 1024 * 1024 + 1),
+            "\u{0001}".repeat(1_500_000),
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            let session = root.path().join("s");
+            let store = ProvenanceStore::new(session.clone());
+            let old = store.append("s", change_event(None)).expect("old event");
+            let path = store.events_dir().join(format!("{}.json", old.event_id));
+            let before = std::fs::read(&path).expect("old bytes");
+            let mut event = change_event(None);
+            if let ProvenanceEvent::ChangeCommitted(ref mut change) = event {
+                change.diff = format!("SYNTHETIC_PRIVATE_DIFF{contents}");
+            }
+            let error = match store.append("s", event) {
+                Err(error) => error,
+                Ok(_) => panic!(
+                    "oversized append succeeded; authoritative reload: {:?}",
+                    store.load_complete("s").err()
+                ),
+            };
+            assert!(!format!("{error:#} {error:?}").contains("SYNTHETIC_PRIVATE_DIFF"));
+            assert_eq!(std::fs::read(path).expect("preserved bytes"), before);
+            assert_eq!(
+                std::fs::read_dir(store.events_dir())
+                    .expect("events")
+                    .count(),
+                1
+            );
+            let loaded = ProvenanceStore::new(session)
+                .load_complete("s")
+                .expect("resume");
+            assert_eq!(loaded.events.len(), 1);
+            assert_eq!(loaded.events[0].event_id, old.event_id);
+        }
     }
 
     #[test]

@@ -1189,6 +1189,14 @@ Verification:
 - Requirement coverage (`requirements_read`) reports `no_linked_work` / `planned_no_active_change` / `active_unverified` / `observed_passing` (at least one successful observation of an active change — not a correctness proof) / `diverged` / `reverted` / `mixed`, plus compact `verification_obligations` per requirement (id, plan_item_id, kind, state).
 - Storage: `.doge/sessions/<id>/provenance/v8/events/<uuid>.json` for new writes (one sibling-temp + no-clobber file per event); legacy `provenance/v1/events/`, `provenance/v2/events/`, `provenance/v3/events/` and `provenance/v4/events/` and `provenance/v5/events/` and `provenance/v6/events/` and `provenance/v7/events/` remain readable but are never written or migrated. Deleting the session removes its provenance.
 
+Each new provenance event is limited to **8 MiB of serialized UTF-8 JSON**,
+including envelope fields, formatting and escaped content, matching the complete
+reader's per-event limit. Oversized events fail before publication; directives and
+diffs are never truncated to fit, and existing event files are preserved. If the
+source mutation already committed, the existing warning and incomplete-provenance
+flag report the tracking failure while preserving the source change and undo.
+Historical display and aggregate acquisition retain their separate read budgets.
+
 ## Provenance & Evidence
 
 Doge-Code observes its own work and links it as:
