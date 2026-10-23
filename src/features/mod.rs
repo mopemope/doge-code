@@ -38,3 +38,5 @@ pub mod repair_workflow;
 pub(crate) mod safe_display;
 
 pub mod openrouter;
+
+pub(crate) mod input_history;
