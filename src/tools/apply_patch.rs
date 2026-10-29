@@ -596,14 +596,24 @@ fn apply_patch_with_fuzz_params(
     max_fuzz_offset_lines: usize,
 ) -> Result<String> {
     let mut image = split_lines_preserve_newline(original_content);
+    // Offset from original-file coordinates into the current image. This
+    // includes both earlier edits and relocation found while matching them.
     let mut line_shift: isize = 0;
 
     for hunk in patch.hunks() {
         let lines = hunk.lines();
         let mut applied = false;
-        let mut applied_delta: isize = 0;
-        let base_expected = hunk.new_range().start().saturating_sub(1);
-        let expected_pos = clamp_expected_pos(base_expected as isize + line_shift, image.len());
+        // Empty old ranges identify the insertion gap after `start`; other
+        // ranges use 1-based line numbers. New coordinates already include
+        // prior hunk deltas, so adding line_shift to them would count twice.
+        let old_range = hunk.old_range();
+        let base_expected = if old_range.is_empty() {
+            old_range.start()
+        } else {
+            old_range.start().saturating_sub(1)
+        };
+        let base_expected =
+            isize::try_from(base_expected).context("Patch line number exceeds supported range")?;
 
         for leading_trim in 0..=max_fuzz_lines {
             for trailing_trim in 0..=max_fuzz_lines {
@@ -613,8 +623,20 @@ fn apply_patch_with_fuzz_params(
                 };
 
                 let pre = pre_image_lines(trimmed);
+                // Fuzz may discard context, but may never turn a contextual
+                // insertion into an unconditional one. An originally empty
+                // old range is an explicit context-free insertion and is valid.
+                if pre.is_empty() && !old_range.is_empty() {
+                    continue;
+                }
+                let expected_pos = clamp_expected_pos(
+                    base_expected
+                        .saturating_add(line_shift)
+                        .saturating_add(leading_trim as isize),
+                    image.len(),
+                );
                 let pos = if pre.is_empty() {
-                    std::cmp::min(expected_pos, image.len())
+                    expected_pos
                 } else if let Some(pos) =
                     find_best_subsequence(&image, &pre, expected_pos, max_fuzz_offset_lines)
                 {
@@ -627,7 +649,13 @@ fn apply_patch_with_fuzz_params(
                 let delta = post.len() as isize - pre.len() as isize;
                 image.splice(pos..pos + pre.len(), post);
                 applied = true;
-                applied_delta = delta;
+                // `pos` refers to the trimmed fragment, not the full hunk.
+                // Retain the actual relocation for subsequent hunks as well
+                // as this edit's size change.
+                line_shift = (pos as isize)
+                    .saturating_sub(leading_trim as isize)
+                    .saturating_sub(base_expected)
+                    .saturating_add(delta);
                 break;
             }
 
@@ -639,8 +667,6 @@ fn apply_patch_with_fuzz_params(
         if !applied {
             anyhow::bail!("Failed to apply patch: context mismatch remained after fuzzy matching");
         }
-
-        line_shift = line_shift.saturating_add(applied_delta);
     }
 
     Ok(image.concat())
@@ -1704,5 +1730,148 @@ mod receipt_tests {
         let undo = crate::tools::undo::undo(&fs).await.unwrap();
         assert!(undo.success);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "v0\n");
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_safety {
+    use super::*;
+
+    async fn apply(
+        original: &str,
+        patch: &str,
+    ) -> (
+        crate::tools::mutation::MutationExecution<ApplyPatchResult>,
+        String,
+    ) {
+        let dir = tempfile::tempdir().expect("project");
+        let file = dir.path().join("sample.txt");
+        std::fs::write(&file, original).expect("fixture");
+        let config = AppConfig {
+            project_root: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let result = apply_patch_with_recovery_and_receipt(
+            ApplyPatchParams {
+                file_path: file.to_string_lossy().into_owned(),
+                patch_content: patch.into(),
+            },
+            &config,
+        )
+        .await
+        .expect("patch outcome");
+        (result, std::fs::read_to_string(&file).expect("read result"))
+    }
+
+    #[tokio::test]
+    async fn rejects_insert_when_all_context_is_missing() {
+        let original = "unrelated1\nunrelated2\nunrelated3\n";
+        let patch = "--- a\n+++ b\n@@ -1,2 +1,3 @@\n expected1\n+INJECTED\n expected2\n";
+        let (result, content) = apply(original, patch).await;
+        assert!(!result.result.success, "must reject unanchored insertion");
+        assert!(!result.result.changed);
+        assert!(result.receipt.is_none());
+        assert_eq!(content, original);
+        let parsed = diffy::Patch::from_str(patch).expect("patch");
+        assert!(apply_patch_with_fuzz(original, &parsed).is_err());
+        assert!(apply_patch_with_aggressive_fuzz(original, &parsed).is_err());
+    }
+
+    #[tokio::test]
+    async fn later_unanchored_insert_does_not_commit_earlier_hunk() {
+        let original = "A\nf2\nf3\nf4\nf5\nf6\nf7\nunrelated1\nunrelated2\n";
+        let patch = "--- a\n+++ b\n@@ -1 +1 @@\n-A\n+B\n@@ -8,2 +8,3 @@\n expected1\n+INJECTED\n expected2\n";
+        let (result, content) = apply(original, patch).await;
+        assert!(!result.result.success);
+        assert!(!result.result.changed);
+        assert!(result.receipt.is_none());
+        assert_eq!(content, original);
+    }
+
+    #[tokio::test]
+    async fn added_lines_are_counted_once_for_later_hunks() {
+        let original = "A \nf2\nf3\nf4\nf5\nf6\nf7\nf8\ntarget\nf10\nf11\nf12\nf13\ntarget\nTAIL\n";
+        let patch = "--- a\n+++ b\n@@ -1 +1,6 @@\n-A\n+A\n+n1\n+n2\n+n3\n+n4\n+n5\n@@ -9 +14 @@\n-target\n+CHANGED\n";
+        let expected = "A\nn1\nn2\nn3\nn4\nn5\nf2\nf3\nf4\nf5\nf6\nf7\nf8\nCHANGED\nf10\nf11\nf12\nf13\ntarget\nTAIL\n";
+        let (result, content) = apply(original, patch).await;
+        assert!(result.result.success, "{}", result.result.message);
+        assert_eq!(content, expected);
+        let receipt = result.receipt.expect("receipt");
+        assert_eq!(receipt.before.content_or_empty(), original);
+        assert_eq!(receipt.after.content_or_empty(), expected);
+    }
+
+    #[tokio::test]
+    async fn equally_near_matches_fail_without_committing_earlier_hunk() {
+        let original = "A \nx\ntarget\nmid\ntarget\n";
+        let patch = "--- a\n+++ b\n@@ -1 +1 @@\n-A\n+B\n@@ -4 +4 @@\n-target\n+CHANGED\n";
+        let (result, content) = apply(original, patch).await;
+        assert!(!result.result.success);
+        assert!(!result.result.changed);
+        assert!(result.receipt.is_none());
+        assert_eq!(content, original);
+    }
+
+    #[tokio::test]
+    async fn deleted_lines_are_counted_once_for_later_hunks() {
+        let original = "A \nremove1\nremove2\nremove3\nf5\ntarget\nf7\nf8\ntarget\nTAIL\n";
+        let patch = "--- a\n+++ b\n@@ -1,4 +1 @@\n-A\n-remove1\n-remove2\n-remove3\n+A\n@@ -9 +6 @@\n-target\n+CHANGED\n";
+        let (result, content) = apply(original, patch).await;
+        assert!(result.result.success, "{}", result.result.message);
+        assert_eq!(content, "A\nf5\ntarget\nf7\nf8\nCHANGED\nTAIL\n");
+    }
+
+    #[test]
+    fn leading_trim_moves_the_expected_match_position() {
+        let original = "target\nchanged_context\ntarget\nTAIL\n";
+        let patch = diffy::Patch::from_str(
+            "--- a\n+++ b\n@@ -2,2 +2,2 @@\n old_context\n-target\n+CHANGED\n",
+        )
+        .expect("patch");
+        for result in [
+            apply_patch_with_fuzz(original, &patch),
+            apply_patch_with_aggressive_fuzz(original, &patch),
+        ] {
+            assert_eq!(
+                result.expect("anchored match"),
+                "target\nchanged_context\nCHANGED\nTAIL\n"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_offset_is_carried_to_later_hunks() {
+        let original = "inserted1\ninserted2\nA \nf2\nf3\ntarget\nf5\ntarget\nTAIL\n";
+        let patch = diffy::Patch::from_str(
+            "--- a\n+++ b\n@@ -1 +1 @@\n-A\n+B\n@@ -6 +6 @@\n-target\n+CHANGED\n",
+        )
+        .expect("patch");
+        assert_eq!(
+            apply_patch_with_fuzz(original, &patch).expect("relocated hunks"),
+            "inserted1\ninserted2\nB\nf2\nf3\ntarget\nf5\nCHANGED\nTAIL\n"
+        );
+    }
+
+    #[test]
+    fn genuine_context_free_insertions_remain_supported() {
+        for (original, patch, expected) in [
+            ("", "--- a\n+++ b\n@@ -0,0 +1 @@\n+first\n", "first\n"),
+            (
+                "one\ntwo\n",
+                "--- a\n+++ b\n@@ -2,0 +3 @@\n+last\n",
+                "one\ntwo\nlast\n",
+            ),
+            (
+                "one\ntwo\n",
+                "--- a\n+++ b\n@@ -1,0 +2 @@\n+middle\n",
+                "one\nmiddle\ntwo\n",
+            ),
+        ] {
+            let parsed = diffy::Patch::from_str(patch).expect("patch");
+            assert_eq!(
+                apply_patch_with_fuzz(original, &parsed).expect("explicit insertion"),
+                expected
+            );
+        }
     }
 }
