@@ -962,6 +962,12 @@ multi-file full mode preserves the original separators and final newline.
 - `edit`: Replace specific code blocks
 - `edit_symbol`: TUI slash command (`/edit-symbol`) to edit entire symbols (functions, structs, etc.)
 
+`apply_patch` can tolerate limited context differences, but rejects an insertion
+if fuzzy matching would discard all of its original context. Re-read the file
+and regenerate the patch in that case. Explicit context-free insertions remain
+supported. Multi-hunk fuzzy matching accounts for prior edits and matched
+position shifts; a failed hunk leaves the whole file unchanged.
+
 Tools with optional arguments use non-strict function schemas so omitted fields
 keep their documented defaults. This includes plan, requirements, provenance,
 and memory search/write tools; memory metadata can contain arbitrary JSON.
