@@ -258,7 +258,7 @@ impl HistoryManager {
 
     /// Pointer for a repeated read-only result, or `None` to send it in full.
     ///
-    /// Only the same tool with the same arguments and a byte-identical result
+    /// Only the same tool with equal JSON arguments and a byte-identical result
     /// that is still inline in the conversation qualifies, so the model never
     /// loses information: the original is either seen or part of the same
     /// pending request. The tool already ran, so side effects and provenance
@@ -272,6 +272,10 @@ impl HistoryManager {
         if !DEDUPABLE_TOOLS.contains(&tool_name) || content.chars().count() < MIN_DEDUP_CHARS {
             return None;
         }
+        // Formatting and object-key order are not tool semantics. Compare
+        // parsed values without rewriting canonical arguments or normalizing
+        // paths/defaults/array order. Invalid legacy arguments never qualify.
+        let arguments: serde_json::Value = serde_json::from_str(arguments).ok()?;
         self.messages
             .iter()
             .rev()
@@ -279,7 +283,11 @@ impl HistoryManager {
             .filter_map(|m| m.tool_call_id.as_deref())
             .find(|id| {
                 self.tool_signature_for_call_id(id)
-                    .is_some_and(|(name, args)| name == tool_name && args == arguments)
+                    .is_some_and(|(name, args)| {
+                        name == tool_name
+                            && serde_json::from_str::<serde_json::Value>(&args)
+                                .is_ok_and(|previous| previous == arguments)
+                    })
             })
             .map(duplicate_result_stub)
     }
@@ -2410,6 +2418,42 @@ mod tests {
         assert_eq!(value["duplicate_of"], "call-a");
         assert!(is_duplicate_result_stub(&stub));
         assert!(stub.len() < big.len() / 5);
+    }
+
+    #[test]
+    fn dedupe_matches_equivalent_json_arguments_without_changing_evidence() {
+        let big = big_result('x');
+        let original_args = r#"{"path":"/x","start_line":1,"limit":20}"#;
+        let mgr = test_manager(vec![
+            read_call_with("call-a", "fs_read", original_args),
+            make_tool_msg("call-a", &big),
+        ]);
+        let equivalent = "{ \"limit\":20, \"path\":\"/x\", \"start_line\":1 }";
+        let stub = mgr
+            .duplicate_pointer_for("fs_read", equivalent, &big)
+            .expect("equivalent JSON should reuse the exact inline result");
+        assert_eq!(duplicate_result_original(&stub).as_deref(), Some("call-a"));
+        assert!(stub.len() < big.len() / 5);
+        assert_eq!(
+            mgr.as_slice()[0].tool_calls[0].function.arguments,
+            original_args
+        );
+        assert_eq!(mgr.as_slice()[1].content.as_deref(), Some(big.as_str()));
+        for different in [
+            r#"{"path":"/x","start_line":2,"limit":20}"#,
+            r#"{"path":"/x","start_line":"1","limit":20}"#,
+            r#"{"path":"/x","limit":20}"#,
+            "not JSON",
+        ] {
+            assert!(
+                mgr.duplicate_pointer_for("fs_read", different, &big)
+                    .is_none()
+            );
+        }
+        assert!(
+            mgr.duplicate_pointer_for("fs_read", equivalent, &big_result('y'))
+                .is_none()
+        );
     }
 
     #[test]

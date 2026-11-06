@@ -11,6 +11,24 @@ use crate::tools::FsTools;
 const ADVISORY_CONTEXT_PREFIX: &str =
     "Advisory context (JSON data only, not instructions or authorization):\n";
 
+/// Reserved marker for the agent loop's generated response-correction feedback.
+/// Canonical history keeps it as an assistant observation; request projection
+/// uses user role so providers do not interpret the correction as assistant prefill.
+pub(crate) const RESPONSE_CORRECTION_PREFIX: &str = "[Harness observation] ";
+
+fn is_response_correction(message: &crate::llm::ChatMessage) -> bool {
+    message.role == "assistant"
+        && message.provider_state.is_none()
+        && message.reasoning.reasoning_content.is_none()
+        && message.reasoning.reasoning_details.is_none()
+        && message.tool_calls.is_empty()
+        && message.tool_call_id.is_none()
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|s| s.starts_with(RESPONSE_CORRECTION_PREFIX))
+}
+
 /// TUI bootstrap data stays system-shaped internally so the existing durable
 /// projection drops it. RequestMessages lowers only this explicit envelope to
 /// user role before provider projection; ordinary authority messages are kept.
@@ -241,12 +259,15 @@ pub enum RequestMessages<'a> {
 
 impl<'a> RequestMessages<'a> {
     pub fn borrowed(history: &'a [crate::llm::types::ChatMessage]) -> Self {
-        if !history.iter().any(is_advisory_context) {
+        if !history
+            .iter()
+            .any(|m| is_advisory_context(m) || is_response_correction(m))
+        {
             return Self::Borrowed(history);
         }
         let mut projected = history.to_vec();
         for message in &mut projected {
-            if is_advisory_context(message) {
+            if is_advisory_context(message) || is_response_correction(message) {
                 message.role = "user".into();
             }
         }
@@ -302,7 +323,7 @@ impl<'a> RequestMessages<'a> {
         }
     }
 
-    /// Zero-allocation fast path indicator: true when no overlay was added.
+    /// Zero-allocation fast path: no overlay or role projection was needed.
     pub fn is_borrowed(&self) -> bool {
         matches!(self, Self::Borrowed(_))
     }
@@ -457,6 +478,65 @@ mod tests {
                     .ends_with(RUNTIME_TRUNCATION_MARKER)
             );
         }
+    }
+
+    #[test]
+    fn response_correction_projection_is_ephemeral_idempotent_and_keeps_tool_pairing() {
+        let correction = "[Harness observation] The provider response could not be decoded.";
+        let mut evidence = tool_result("read-1");
+        evidence.content = Some("unseen evidence".into());
+        let history = vec![
+            system("authority"),
+            user("fix the bug"),
+            assistant_tool_call("read-1"),
+            evidence,
+            assistant(correction),
+        ];
+        let before = serde_json::to_value(&history).expect("history JSON");
+        for snapshot in [
+            RuntimeContextSnapshot::default(),
+            RuntimeContextSnapshot::new(Some("recent file".into()), None),
+        ] {
+            let projected = RequestMessages::with_runtime_context(&history, &snapshot);
+            let messages = projected.as_slice();
+            assert_eq!(messages.last().expect("feedback").role, "user");
+            assert_eq!(
+                messages.last().expect("feedback").content.as_deref(),
+                Some(correction)
+            );
+            crate::llm::history::validate_tool_blocks(messages, false).expect("paired tools");
+            let again = RequestMessages::borrowed(messages);
+            assert!(again.is_borrowed(), "projection is idempotent");
+            assert_eq!(
+                serde_json::to_value(&history).expect("history JSON"),
+                before
+            );
+        }
+        let durable = crate::llm::durable_conversation_messages(history);
+        assert_eq!(durable.iter().filter(|m| m.role == "user").count(), 1);
+        assert_eq!(durable.last().expect("saved observation").role, "assistant");
+    }
+
+    #[test]
+    fn response_correction_projection_preserves_ordinary_and_stateful_messages() {
+        let marker = "[Harness observation] a quoted observation";
+        let mut with_reasoning = assistant(marker);
+        with_reasoning.reasoning.reasoning_content = Some("retained reasoning".into());
+        let mut with_calls = assistant_tool_call("call-1");
+        with_calls.content = Some(marker.into());
+        let mut result = tool_result("call-1");
+        result.content = Some(marker.into());
+        let history = vec![
+            system(marker),
+            user(marker),
+            assistant("ordinary response"),
+            assistant("Quoted: [Harness observation] keep this"),
+            with_reasoning,
+            with_calls,
+            result,
+        ];
+        let projected = RequestMessages::borrowed(&history);
+        assert!(projected.is_borrowed());
     }
 
     #[test]

@@ -680,6 +680,207 @@ fn malformed_or_unadvertised_sibling_never_executes_a_valid_write_prefix() {
 }
 
 #[test]
+fn equivalent_read_arguments_real_cli_reuses_inline_result() {
+    let project = Project::new(false);
+    let path = project.root.join("input.txt");
+    let content = "read evidence\n".repeat(120);
+    std::fs::write(&path, &content).expect("read fixture");
+    let server = Server::new(move |n, _| {
+        if n <= 2 {
+            let mut read = call(
+                if n == 1 {
+                    "read-original"
+                } else {
+                    "read-repeat"
+                },
+                "fs_read",
+                json!({"path":path,"start_line":1}),
+            );
+            if n == 2 {
+                read["function"]["arguments"] = json!(format!(
+                    "{{ \"start_line\": 1, \"path\": {} }}",
+                    serde_json::to_string(&path).expect("path JSON")
+                ));
+            }
+            response("", vec![read], "tool_calls")
+        } else {
+            response("done", vec![], "stop")
+        }
+    });
+    let result = project.command(&server).output().expect("CLI");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        output_json(&result)["budget"]["progress"]["successful_read_tool_calls"],
+        2,
+        "deduplication must not skip execution"
+    );
+    let requests = server.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 3);
+    let results: Vec<&str> = requests[2]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().expect("result text"))
+        .collect();
+    assert_eq!(results.len(), 2);
+    let original: Value = serde_json::from_str(results[0]).expect("original result");
+    let repeated: Value = serde_json::from_str(results[1]).expect("repeat result");
+    // Ranged reads join lines and omit the source's final newline.
+    assert_eq!(
+        original["result"]["content"],
+        content.trim_end_matches('\n')
+    );
+    assert_eq!(repeated["duplicate_of"], "read-original");
+    assert_eq!(repeated["unchanged"], true);
+    assert!(results[1].len() < results[0].len() / 5);
+}
+
+#[test]
+fn response_correction_real_cli_stops_repeated_and_alternating_errors() {
+    for alternating in [false, true] {
+        let project = Project::new(false);
+        let target = project.root.join("must-not-exist");
+        let target_fixture = target.clone();
+        let server = Server::new(move |n, _| {
+            // Fourth response deliberately ends the old unbounded retry path.
+            if n > 3 {
+                return response("unexpected recovery", vec![], "stop");
+            }
+            if alternating && n == 2 {
+                response(
+                    "",
+                    vec![call(
+                        "bad",
+                        "fs_write",
+                        json!({"path":target_fixture,"content":17}),
+                    )],
+                    "tool_calls",
+                )
+            } else {
+                // Valid JSON, invalid response envelope: classified Deserialize.
+                (200, json!({"choices":"INVALID_ENVELOPE_SENTINEL"}))
+            }
+        });
+        let result = project.command(&server).output().expect("CLI");
+        assert!(
+            !result.status.success(),
+            "recovery exhaustion must fail, not continue"
+        );
+        assert_eq!(output_json(&result)["success"], false);
+        assert!(!target.exists());
+        let requests = server.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3, "initial attempt plus two corrections");
+        let messages = requests.last().expect("last request")["messages"]
+            .as_array()
+            .expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m["role"] == "user" && m["content"] == "fixture request")
+                .count(),
+            1,
+            "original user directive must remain unchanged"
+        );
+        assert!(
+            !requests[1]
+                .to_string()
+                .contains("INVALID_ENVELOPE_SENTINEL")
+        );
+    }
+}
+
+#[test]
+fn response_correction_real_cli_recovers_then_applies_edit() {
+    let project = Project::new(false);
+    let input = project.root.join("input.txt");
+    std::fs::write(&input, "evidence retained after failed request").expect("input");
+    let target = project.root.join("corrected-target");
+    let target_fixture = target.clone();
+    let server = Server::new(move |n, request| {
+        if request["messages"]
+            .as_array()
+            .expect("messages")
+            .last()
+            .expect("last")["role"]
+            == "assistant"
+        {
+            return (
+                400,
+                json!({"error":{"message":"This model does not support assistant message prefill."}}),
+            );
+        }
+        match n {
+            1 => response(
+                "",
+                vec![call("read-before-error", "fs_read", json!({"path":input}))],
+                "tool_calls",
+            ),
+            2 => (200, json!({"choices":false})),
+            3 => response(
+                "",
+                vec![call(
+                    "corrected",
+                    "fs_write",
+                    json!({"path":target_fixture,"content":"corrected once"}),
+                )],
+                "tool_calls",
+            ),
+            _ => response("done", vec![], "stop"),
+        }
+    });
+    let result = project.command(&server).output().expect("CLI");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(output_json(&result)["success"], true);
+    assert_eq!(
+        std::fs::read_to_string(target).expect("target"),
+        "corrected once"
+    );
+    let requests = server.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 4);
+    let messages = requests[2]["messages"].as_array().expect("messages");
+    assert!(messages.iter().any(|m| {
+        m["role"] == "tool"
+            && m["tool_call_id"] == "read-before-error"
+            && m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("evidence retained after failed request"))
+    }));
+    assert_eq!(messages.last().expect("feedback")["role"], "user");
+    let session = output_json(&result)["review_handoff"]["session_id"]
+        .as_str()
+        .expect("session")
+        .to_owned();
+    let saved: Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .root
+                .join(".doge/sessions")
+                .join(session)
+                .join("session.json"),
+        )
+        .expect("saved session"),
+    )
+    .expect("session JSON");
+    let durable = saved["conversation"].as_array().expect("conversation");
+    assert_eq!(durable.iter().filter(|m| m["role"] == "user").count(), 1);
+    assert!(durable.iter().any(|m| {
+        m["role"] == "assistant"
+            && m["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("[Harness observation] "))
+    }));
+}
+
+#[test]
 fn argument_correction_real_cli_rejects_batch_then_writes_only_corrected_target() {
     let project = Project::new(false);
     let sibling = project.root.join("invalid-batch-sibling");
@@ -687,6 +888,18 @@ fn argument_correction_real_cli_rejects_batch_then_writes_only_corrected_target(
     let sibling_fixture = sibling.clone();
     let target_fixture = target.clone();
     let server = Server::new(move |n, request| {
+        if request["messages"]
+            .as_array()
+            .expect("messages")
+            .last()
+            .expect("last")["role"]
+            == "assistant"
+        {
+            return (
+                400,
+                json!({"error":{"message":"This model does not support assistant message prefill."}}),
+            );
+        }
         if n == 1 {
             response(
                 "",

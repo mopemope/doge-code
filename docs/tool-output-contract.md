@@ -69,7 +69,10 @@ When `fs_read`, `fs_read_many_files`, `search_text`, `search_repomap`, `fs_list`
 `find_file` succeeds with a model-bound result of at least 1,000 characters that is
 byte-identical to a `role=tool` result of the same tool and arguments still inline in the conversation, the agent
 loop sends `{"ok":true,"unchanged":true,"duplicate_of":"<call id>","note":...}`
-instead (`HistoryManager::duplicate_pointer_for`); local compaction first restores every pointer
+instead (`HistoryManager::duplicate_pointer_for`). Arguments are compared as JSON
+values: whitespace and object-key order are immaterial; types, values and array
+order remain significant. Invalid JSON never matches. Canonical call arguments
+are not rewritten. Local compaction first restores every pointer
 to its content (`materialize_duplicate_pointers`) so none outlives its original. The tool still ran, so
 provenance and side effects are unchanged. Offloaded/cleared originals, other tools,
 mutations, commands and small results never match, and a changed file produces a

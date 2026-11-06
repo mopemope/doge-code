@@ -885,9 +885,17 @@ dgc session evidence <SESSION_ID> --include-content
 ```
 
 Invalid tool arguments are rejected before any tool in the batch executes. The
-main agent requests correction at most twice per run, using the supplied schema;
+main agent shares an allowance of at most two correction requests per run across
+invalid tool arguments and undecodable provider responses, using the supplied schema;
 these requests count toward iteration, token, and elapsed budgets and remain
 cancellable. Unknown tools and invalid batch IDs fail without this correction.
+Alternating error types or a successful intermediate response does not reset the
+allowance. Exhaustion fails the run. Correction feedback is a labelled harness
+observation, not an additional user directive.
+It remains an assistant observation in saved history and compaction input; only
+the provider-bound copy uses user role, avoiding assistant-prefill requirements.
+Context budgeting uses that same projection. Tool calls, reasoning payloads and
+ordinary assistant messages retain their roles.
 
 ## 🛠️ Tools and Commands
 
@@ -2445,6 +2453,9 @@ allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "CARGO_TERM_COLOR"]
   least 1,000 characters that is still in the conversation returns `{"unchanged":true,"duplicate_of":<call id>}`
   instead of a second copy (`fs_read`, `fs_read_many_files`, `search_text`,
   `search_repomap`, `fs_list`, `find_file`); a modified file is returned in full.
+  Argument JSON whitespace and object-key order do not prevent reuse; values,
+  types and array order must still match. Tools still execute, and the original
+  arguments and exact inline result remain intact.
   Before the 6,000-character output budget is applied, a stream of at least 1,500
   characters with at least eight
   passing-test or build-progress lines (Rust `test … ... ok`, Cargo

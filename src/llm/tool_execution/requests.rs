@@ -816,6 +816,63 @@ mod tests {
     use httptest::{Expectation, matchers::*, responders::*};
 
     #[tokio::test]
+    async fn response_correction_projects_on_openrouter_wire_and_toolless_finalization() {
+        let server = crate::test_support::HTTP_SERVER_POOL.get_server();
+        let mut completed = assistant_done_response();
+        completed["choices"][0]["finish_reason"] = "stop".into();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/v1/chat/completions"),
+                request::body(json_decoded(|body: &serde_json::Value| {
+                    let messages = body["messages"].as_array().expect("messages");
+                    body["model"] == "anthropic/fixture-no-prefill"
+                        && messages.len() == 2
+                        && messages[0]["role"] == "user"
+                        && messages[0]["content"] == "Inspect only"
+                        && messages[1]["role"] == "user"
+                        && messages[1]["content"]
+                            == "[Harness observation] The provider response could not be decoded."
+                }))
+            ])
+            .times(2)
+            .respond_with(json_encoded(completed)),
+        );
+        // Test-only endpoint injection; production OpenRouter URL validation
+        // remains strict. Exercise the real adapter and response decoder.
+        let mut client = OpenAIClient::new(server.url_str(""), "fixture").expect("client");
+        client.provider = crate::features::openai_subscription::ProviderKind::Openrouter;
+        let mut messages = user_message();
+        messages[0].content = Some("Inspect only".into());
+        let mut observation = messages[0].clone();
+        observation.role = "assistant".into();
+        observation.content =
+            Some("[Harness observation] The provider response could not be decoded.".into());
+        messages.push(observation);
+        let before = serde_json::to_value(&messages).expect("canonical messages");
+        let tools = default_tools_def();
+        for defs in [tools.as_slice(), &[][..]] {
+            let result = chat_tools_once_with_activation_and_usage(
+                &client,
+                "anthropic/fixture-no-prefill",
+                &messages,
+                defs,
+                defs,
+                None,
+                ReasoningMode::Off,
+                None,
+                None,
+            )
+            .await
+            .expect("OpenRouter correction response");
+            assert_eq!(result.message.content.as_deref(), Some("done"));
+        }
+        assert_eq!(
+            serde_json::to_value(&messages).expect("canonical messages"),
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn advisory_context_is_user_data_on_http_wire_including_toolless_finalization() {
         let server = crate::test_support::HTTP_SERVER_POOL.get_server();
         server.expect(

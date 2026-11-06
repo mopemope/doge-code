@@ -34,6 +34,13 @@ filesystem compare-and-swap: final check-to-rename/unlink races remain possible.
 Runtime hints are request-scoped context, not conversation state.
 Do not push recent-file/memory hints into durable HistoryManager messages.
 
+Generated response-correction feedback remains a labelled assistant observation
+in canonical history. `RequestMessages` projects only plain correction messages
+to user role for provider requests, avoiding assistant prefill. The projection
+is idempotent, preserves content and tool pairing, and is used by both context
+measurement and request dispatch. Never persist the projected roles as observed
+user directives or rewrite assistant messages carrying reasoning/provider state.
+
 Each assistant tool-call batch has exactly one matching result per call before
 the next non-tool message. Queue non-tool interventions until the batch closes.
 Checkpoint real or skipped results individually; only the final interrupted

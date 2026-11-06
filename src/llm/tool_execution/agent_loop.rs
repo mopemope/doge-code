@@ -117,7 +117,7 @@ fn mutation_result_content(
 
 const PLAN_WRITE_NO_CHANGE_BLOCK_THRESHOLD: usize = 2;
 const PLAN_WRITE_TOOL_NAME: &str = "plan_write";
-const MAX_TOOL_ARGUMENT_CORRECTIONS: usize = 2;
+const MAX_RESPONSE_CORRECTIONS: usize = 2;
 
 /// Snapshot observations into the session before returning messages.
 /// History messages flow back to the TUI/session via the return value;
@@ -678,7 +678,9 @@ pub async fn run_agent_loop(
     let mut consecutive_plan_write_no_change_count = 0usize;
     let mut budget_governor = ContextBudgetGovernor::new(cfg.context_budget.clone());
     let mut reactive_guard = ReactiveRetryGuard::new();
-    let mut tool_argument_corrections = 0usize;
+    // Shared, run-wide allowance: switching error types or briefly succeeding
+    // must not create an unbounded series of repair requests.
+    let mut response_corrections = 0usize;
     // Client-side prefix-stability diagnostics (observational only).
     // Session-local; no persistence needed.
     let mut previous_prefix_signature: Option<crate::llm::prompt_cache::PromptPrefixSignature> =
@@ -1743,62 +1745,55 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                if let Some(LlmErrorKind::InvalidToolArguments) = e.downcast_ref::<LlmErrorKind>() {
+                if matches!(
+                    e.downcast_ref::<LlmErrorKind>(),
+                    Some(LlmErrorKind::InvalidToolArguments | LlmErrorKind::Deserialize)
+                ) {
                     run_budget.charge_request(
                         current_estimate,
                         &ledger_before_request,
                         &ledger_after_fail,
                     );
-                    if tool_argument_corrections >= MAX_TOOL_ARGUMENT_CORRECTIONS {
-                        return Err(e.context("tool argument correction limit reached"));
+                    if response_corrections >= MAX_RESPONSE_CORRECTIONS {
+                        return Err(e.context("model response correction limit reached"));
                     }
-                    tool_argument_corrections += 1;
+                    response_corrections += 1;
                     reasoning_controller.observe_json_recovery();
-                    // Preflight guarantees this failed batch produced no effects.
-                    // Only the sanitized validation summary reaches the model.
+                    let observation_prefix =
+                        crate::llm::runtime_context::RESPONSE_CORRECTION_PREFIX;
+                    let (feedback, warning) = if matches!(
+                        e.downcast_ref::<LlmErrorKind>(),
+                        Some(LlmErrorKind::InvalidToolArguments)
+                    ) {
+                        (
+                            format!(
+                                "{observation_prefix}Error: {e}. No tools in the rejected batch were executed. Correct the tool arguments using the supplied tool schema, including field names and JSON types, and submit a corrected batch."
+                            ),
+                            "Invalid tool arguments received. Requesting correction...",
+                        )
+                    } else {
+                        (
+                            format!(
+                                "{observation_prefix}The provider response could not be decoded. No tools from that response were executed. Return a valid response with tool arguments matching the supplied JSON schemas."
+                            ),
+                            "Invalid JSON received. Requesting correction...",
+                        )
+                    };
+                    // Preflight guarantees no effects from the rejected response.
+                    // Generated feedback is not an observed user directive; keep
+                    // it summarizable and never echo raw provider response bodies.
+                    // RequestMessages projects this labelled observation to user
+                    // role on the wire, avoiding unsupported assistant prefill.
                     history.push(ChatMessage {
                         reasoning: Default::default(),
                         provider_state: None,
-                        role: "user".into(),
-                        content: Some(format!(
-                            "Error: {e}. No tools in the rejected batch were executed. Correct the tool arguments using the supplied tool schema, including field names and JSON types, and submit a corrected batch."
-                        )),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    });
-                    if let Some(tx) = &ui_tx {
-                        let _ = tx.send(
-                            "::status:warning:Invalid tool arguments received. Requesting correction...".to_string(),
-                        );
-                    }
-                    continue;
-                }
-
-                if let Some(LlmErrorKind::Deserialize) = e.downcast_ref::<LlmErrorKind>() {
-                    run_budget.charge_request(
-                        current_estimate,
-                        &ledger_before_request,
-                        &ledger_after_fail,
-                    );
-                    warn!("JSON parse error from LLM: {}", e);
-                    reasoning_controller.observe_json_recovery();
-                    let feedback = format!(
-                        "Error: Invalid JSON format in your response: {}. Please correct your output to be valid JSON. Ensure you are not using markdown code blocks for the entire response if it's not required by the tool.",
-                        e
-                    );
-                    history.push(ChatMessage {
-                        reasoning: Default::default(),
-                        provider_state: None,
-                        role: "user".into(),
+                        role: "assistant".into(),
                         content: Some(feedback),
                         tool_calls: vec![],
                         tool_call_id: None,
                     });
                     if let Some(tx) = &ui_tx {
-                        let _ = tx.send(
-                            "::status:warning:Invalid JSON received. Requesting correction..."
-                                .to_string(),
-                        );
+                        let _ = tx.send(format!("::status:warning:{warning}"));
                     }
                     continue;
                 }
