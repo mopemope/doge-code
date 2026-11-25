@@ -14,14 +14,18 @@ use dgc_protocol::model::{
 };
 use dgc_protocol::truncate_summary;
 use serde_json::Value;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::{
-    AgentError, PendingEntry, QueueItem, SESSION_SHUTDOWN_GRACE, Shared, lock, provider, save_queue,
+    AgentError, PendingEntry, ProviderTimeouts, QueueItem, SESSION_SHUTDOWN_GRACE, Shared, lock,
+    provider, save_queue,
 };
-use crate::provider::{AgentSpec, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession};
+use crate::provider::{
+    AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+};
 use crate::time::now_rfc3339;
 
 const COMMAND_CHANNEL_CAPACITY: usize = 64;
@@ -70,22 +74,48 @@ enum Flow {
     Stop,
 }
 
+/// Await a provider call for at most `limit`.
+async fn bounded<T>(
+    limit: Duration,
+    call: &'static str,
+    future: BoxFut<'_, Result<T, ProviderError>>,
+) -> Result<T, ProviderError> {
+    timeout(limit, future)
+        .await
+        .unwrap_or(Err(ProviderError::TimedOut(call)))
+}
+
 enum Input {
     Command(Option<Command>),
     Event(Option<ProviderEvent>),
+}
+
+/// What an actor starts from.
+pub(super) struct Launch {
+    pub(super) adapter: Arc<dyn ProviderAdapter>,
+    pub(super) agent: Agent,
+    /// Workspace path.
+    pub(super) cwd: PathBuf,
+    pub(super) start: Start,
+    pub(super) queue: VecDeque<QueueItem>,
+    pub(super) timeouts: ProviderTimeouts,
 }
 
 /// Start the provider session, send the first message, then serve commands
 /// and provider events until the agent stops being live.
 pub(super) async fn run_actor(
     shared: Arc<Shared>,
-    adapter: Arc<dyn ProviderAdapter>,
-    mut agent: Agent,
-    cwd: PathBuf,
-    start: Start,
-    queue: VecDeque<QueueItem>,
+    launch: Launch,
     commands: mpsc::Receiver<Command>,
 ) {
+    let Launch {
+        adapter,
+        mut agent,
+        cwd,
+        start,
+        queue,
+        timeouts,
+    } = launch;
     let resume_session_id = match start {
         Start::Resume => agent.provider_session_id.clone(),
         Start::Create { .. } => None,
@@ -97,7 +127,7 @@ pub(super) async fn run_actor(
         mode: agent.mode.clone(),
         resume_session_id,
     };
-    let session = match adapter.start(spec).await {
+    let session = match bounded(timeouts.start, "start", adapter.start(spec)).await {
         Ok(session) => session,
         Err(err) => {
             let message = truncate_summary(&err.to_string());
@@ -119,9 +149,16 @@ pub(super) async fn run_actor(
         session,
         queue,
         queue_path,
+        timeouts,
+        deferred_exit: None,
+        wedged: None,
     };
     let begun = match start {
-        Start::Create { prompt } => actor.session.send_user(&prompt).await.map(|()| true),
+        Start::Create { prompt } => {
+            bounded(timeouts.call, "send_user", actor.session.send_user(&prompt))
+                .await
+                .map(|()| true)
+        }
         Start::Resume => actor.send_next_queued().await,
     };
     match begun {
@@ -141,16 +178,30 @@ struct Actor {
     session: Box<dyn ProviderSession>,
     queue: VecDeque<QueueItem>,
     queue_path: PathBuf,
+    timeouts: ProviderTimeouts,
+    /// An exit seen while draining events after an interrupt; handled by
+    /// the main loop before anything else.
+    deferred_exit: Option<(bool, String)>,
+    /// Message of a provider call that timed out; the main loop fails the
+    /// agent once the current command has been answered.
+    wedged: Option<String>,
 }
 
 impl Actor {
     async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
         loop {
+            if let Some((success, stderr_tail)) = self.deferred_exit.take() {
+                self.exited(success, stderr_tail).await;
+                break;
+            }
+            // Biased toward provider events: events already buffered are
+            // applied before a command that arrived after them.
             let input = tokio::select! {
-                command = commands.recv() => Input::Command(command),
+                biased;
                 event = self.session.events().recv() => Input::Event(event),
+                command = commands.recv() => Input::Command(command),
             };
-            let flow = match input {
+            let mut flow = match input {
                 Input::Command(Some(command)) => self.handle_command(command).await,
                 // Unreachable while `Shared::live` holds the sender; stop quietly.
                 Input::Command(None) => {
@@ -160,10 +211,23 @@ impl Actor {
                 Input::Event(Some(event)) => self.handle_event(event).await,
                 Input::Event(None) => self.exited(false, String::new()).await,
             };
+            if matches!(flow, Flow::Continue)
+                && let Some(message) = self.wedged.take()
+            {
+                flow = self.fail(message).await;
+            }
             if matches!(flow, Flow::Stop) {
                 break;
             }
         }
+    }
+
+    /// Remember a timed-out call so the main loop fails the agent.
+    fn note<T>(&mut self, result: Result<T, ProviderError>) -> Result<T, ProviderError> {
+        if let Err(err @ ProviderError::TimedOut(_)) = &result {
+            self.wedged = Some(err.to_string());
+        }
+        result
     }
 
     fn set_state(&mut self, state: AgentState) {
@@ -240,7 +304,12 @@ impl Actor {
         let Some(item) = self.queue.front().cloned() else {
             return Ok(false);
         };
-        self.session.send_user(&item.text).await?;
+        bounded(
+            self.timeouts.call,
+            "send_user",
+            self.session.send_user(&item.text),
+        )
+        .await?;
         self.queue.pop_front();
         if let Err(err) = save_queue(&self.queue_path, &self.queue) {
             warn!(agent_id = %self.agent.id, error = %err, "could not persist agent queue");
@@ -295,7 +364,13 @@ impl Actor {
     ) -> Result<SendOutcome, AgentError> {
         match self.agent.state {
             AgentState::Idle => {
-                self.session.send_user(&text).await.map_err(provider)?;
+                let sent = bounded(
+                    self.timeouts.call,
+                    "send_user",
+                    self.session.send_user(&text),
+                )
+                .await;
+                self.note(sent).map_err(provider)?;
                 self.record_user(text, behavior);
                 self.set_state(AgentState::Running);
                 Ok(SendOutcome::Sent)
@@ -310,7 +385,9 @@ impl Actor {
                     Ok(SendOutcome::Queued)
                 }
                 SendBehavior::Steer => {
-                    if self.session.steer(&text).await.map_err(provider)? {
+                    let steered =
+                        bounded(self.timeouts.call, "steer", self.session.steer(&text)).await;
+                    if self.note(steered).map_err(provider)? {
                         self.record_user(text, behavior);
                         Ok(SendOutcome::Steered)
                     } else {
@@ -328,9 +405,19 @@ impl Actor {
         text: String,
         behavior: SendBehavior,
     ) -> Result<SendOutcome, AgentError> {
-        self.session.interrupt().await.map_err(provider)?;
+        self.interrupt_session().await?;
         self.cancel_pending();
-        if let Err(err) = self.session.send_user(&text).await {
+        if self.deferred_exit.is_some() {
+            self.set_state(AgentState::Idle);
+            return Err(provider(ProviderError::Exited));
+        }
+        let sent = bounded(
+            self.timeouts.call,
+            "send_user",
+            self.session.send_user(&text),
+        )
+        .await;
+        if let Err(err) = self.note(sent) {
             self.set_state(AgentState::Idle);
             return Err(provider(err));
         }
@@ -339,10 +426,46 @@ impl Actor {
         Ok(SendOutcome::InterruptedAndSent)
     }
 
+    /// Interrupt the provider, then apply what it emitted before the
+    /// interrupt returned. Turn-ending and permission events in that buffer
+    /// belong to the interrupted turn: `TurnCompleted` is recorded without a
+    /// transition and permission requests are dropped. An exit is deferred to
+    /// the main loop.
+    async fn interrupt_session(&mut self) -> Result<(), AgentError> {
+        let interrupted = bounded(self.timeouts.call, "interrupt", self.session.interrupt()).await;
+        self.note(interrupted).map_err(provider)?;
+        loop {
+            match self.session.events().try_recv() {
+                Ok(ProviderEvent::TurnCompleted { usage }) => self
+                    .shared
+                    .emit_or_warn(&self.agent.id, EventKind::TurnCompleted { usage }),
+                Ok(ProviderEvent::PermissionRequested { .. }) => {
+                    debug!(agent_id = %self.agent.id, "dropped permission request of interrupted turn");
+                }
+                Ok(ProviderEvent::SessionStarted { session_id }) => {
+                    self.session_started(session_id)
+                }
+                Ok(ProviderEvent::Event(kind)) => self.shared.emit_or_warn(&self.agent.id, kind),
+                Ok(ProviderEvent::Exited {
+                    success,
+                    stderr_tail,
+                }) => {
+                    self.deferred_exit = Some((success, stderr_tail));
+                    return Ok(());
+                }
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    self.deferred_exit = Some((false, String::new()));
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     async fn interrupt(&mut self) -> Result<(), AgentError> {
         match self.agent.state {
             AgentState::Running | AgentState::WaitingPermission => {
-                self.session.interrupt().await.map_err(provider)?;
+                self.interrupt_session().await?;
                 self.cancel_pending();
                 self.set_state(AgentState::Idle);
                 Ok(())
@@ -361,10 +484,13 @@ impl Actor {
             .filter(|entry| entry.permission.agent_id == self.agent.id)
             .map(|entry| entry.provider_request_id.clone())
             .ok_or(AgentError::NotFound("permission"))?;
-        self.session
-            .respond_permission(&request_id, decision)
-            .await
-            .map_err(provider)?;
+        let responded = bounded(
+            self.timeouts.call,
+            "respond_permission",
+            self.session.respond_permission(&request_id, decision),
+        )
+        .await;
+        self.note(responded).map_err(provider)?;
         lock(&self.shared.permissions).remove(&id);
         self.shared.emit_or_warn(
             &self.agent.id,
@@ -382,12 +508,7 @@ impl Actor {
     async fn handle_event(&mut self, event: ProviderEvent) -> Flow {
         match event {
             ProviderEvent::SessionStarted { session_id } => {
-                if self.agent.provider_session_id.as_deref() != Some(session_id.as_str()) {
-                    self.agent.provider_session_id = Some(session_id);
-                    if let Err(err) = self.shared.put_agent(&self.agent) {
-                        warn!(agent_id = %self.agent.id, error = %err, "could not store session id");
-                    }
-                }
+                self.session_started(session_id);
                 Flow::Continue
             }
             ProviderEvent::Event(kind) => {
@@ -408,6 +529,15 @@ impl Actor {
                 success,
                 stderr_tail,
             } => self.exited(success, stderr_tail).await,
+        }
+    }
+
+    fn session_started(&mut self, session_id: String) {
+        if self.agent.provider_session_id.as_deref() != Some(session_id.as_str()) {
+            self.agent.provider_session_id = Some(session_id);
+            if let Err(err) = self.shared.put_agent(&self.agent) {
+                warn!(agent_id = %self.agent.id, error = %err, "could not store session id");
+            }
         }
     }
 

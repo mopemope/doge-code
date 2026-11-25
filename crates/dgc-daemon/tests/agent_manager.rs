@@ -5,10 +5,10 @@
 //! methods the manager called.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dgc_daemon::agent::{AgentError, AgentManager};
+use dgc_daemon::agent::{AgentError, AgentManager, ProviderTimeouts};
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::{
@@ -29,6 +29,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(5);
+/// Provider call bounds used by every test manager.
+const TEST_PROVIDER_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// What the manager asked a scripted session to do.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +47,9 @@ struct SessionHandle {
     spec: AgentSpec,
     events: mpsc::Sender<ProviderEvent>,
     calls: mpsc::UnboundedReceiver<Call>,
+    /// Events the session emits from inside `interrupt`, before it returns
+    /// (a provider finishing the turn just as the interrupt arrives).
+    interrupt_emits: Arc<Mutex<Vec<ProviderEvent>>>,
 }
 
 impl SessionHandle {
@@ -70,6 +75,8 @@ impl SessionHandle {
 struct ScriptedAdapter {
     steer_supported: bool,
     fail_start: bool,
+    start_hangs: bool,
+    interrupt_hangs: bool,
     sessions: mpsc::UnboundedSender<SessionHandle>,
 }
 
@@ -94,18 +101,26 @@ impl ProviderAdapter for ScriptedAdapter {
             if self.fail_start {
                 return Err(ProviderError::Spawn("scripted start failure".to_owned()));
             }
+            if self.start_hangs {
+                std::future::pending::<()>().await;
+            }
             let (events_tx, events_rx) = mpsc::channel(4096);
             let (calls_tx, calls_rx) = mpsc::unbounded_channel();
+            let interrupt_emits = Arc::new(Mutex::new(Vec::new()));
             self.sessions
                 .send(SessionHandle {
                     spec,
-                    events: events_tx,
+                    events: events_tx.clone(),
                     calls: calls_rx,
+                    interrupt_emits: Arc::clone(&interrupt_emits),
                 })
                 .map_err(|_| ProviderError::Spawn("test gone".to_owned()))?;
             Ok(Box::new(ScriptedSession {
                 steer_supported: self.steer_supported,
+                interrupt_hangs: self.interrupt_hangs,
                 events: events_rx,
+                events_tx,
+                interrupt_emits,
                 calls: calls_tx,
             }) as Box<dyn ProviderSession>)
         })
@@ -114,7 +129,10 @@ impl ProviderAdapter for ScriptedAdapter {
 
 struct ScriptedSession {
     steer_supported: bool,
+    interrupt_hangs: bool,
     events: mpsc::Receiver<ProviderEvent>,
+    events_tx: mpsc::Sender<ProviderEvent>,
+    interrupt_emits: Arc<Mutex<Vec<ProviderEvent>>>,
     calls: mpsc::UnboundedSender<Call>,
 }
 
@@ -139,7 +157,20 @@ impl ProviderSession for ScriptedSession {
     }
 
     fn interrupt(&mut self) -> BoxFut<'_, Result<(), ProviderError>> {
-        Box::pin(async move { self.record(Call::Interrupt) })
+        Box::pin(async move {
+            self.record(Call::Interrupt)?;
+            if self.interrupt_hangs {
+                std::future::pending::<()>().await;
+            }
+            let emits = std::mem::take(&mut *self.interrupt_emits.lock().expect("emits lock"));
+            for event in emits {
+                self.events_tx
+                    .send(event)
+                    .await
+                    .map_err(|_| ProviderError::Io("events closed".to_owned()))?;
+            }
+            Ok(())
+        })
     }
 
     fn respond_permission<'a>(
@@ -171,11 +202,15 @@ struct Harness {
 struct Options {
     steer_supported: bool,
     fail_start: bool,
+    start_hangs: bool,
+    interrupt_hangs: bool,
 }
 
 const DEFAULT: Options = Options {
     steer_supported: true,
     fail_start: false,
+    start_hangs: false,
+    interrupt_hangs: false,
 };
 
 impl Harness {
@@ -309,6 +344,8 @@ fn new_manager(
     let adapter: Arc<dyn ProviderAdapter> = Arc::new(ScriptedAdapter {
         steer_supported: options.steer_supported,
         fail_start: options.fail_start,
+        start_hangs: options.start_hangs,
+        interrupt_hangs: options.interrupt_hangs,
         sessions,
     });
     let mut adapters = HashMap::new();
@@ -319,6 +356,10 @@ fn new_manager(
         DaemonConfig::default(),
         adapters,
     )
+    .with_timeouts(ProviderTimeouts {
+        start: TEST_PROVIDER_TIMEOUT,
+        call: TEST_PROVIDER_TIMEOUT,
+    })
 }
 
 fn state_changes(events: &[EventKind]) -> Vec<AgentState> {
@@ -529,7 +570,7 @@ async fn queue_is_drained_after_turn() {
 async fn steer_unsupported_falls_back_to_interrupt() {
     let mut h = Harness::new(Options {
         steer_supported: false,
-        fail_start: false,
+        ..DEFAULT
     });
     let (agent, mut session) = h.running("first").await;
 
@@ -772,8 +813,8 @@ async fn resume_uses_provider_session_id() {
 #[tokio::test]
 async fn send_to_failed_agent_is_invalid_state() {
     let h = Harness::new(Options {
-        steer_supported: true,
         fail_start: true,
+        ..DEFAULT
     });
     let agent = h.create("first").await;
     let failed = h.wait_state(&agent.id, AgentState::Failed).await;
@@ -992,4 +1033,185 @@ fn manager_futures_are_send() {
         assert_send(&manager.shutdown_all(Duration::from_secs(1)));
     }
     let _ = check;
+}
+
+/// Give the actor time to apply anything still buffered.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn stale_turn_completed_after_interrupt_is_ignored() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, mut session) = h.running("first").await;
+    assert_eq!(
+        h.send(&agent.id, "queued", SendBehavior::Queue).await,
+        SendOutcome::Queued
+    );
+
+    // The old turn ends just as the interrupt arrives: its TurnCompleted is
+    // buffered before `interrupt` returns.
+    session
+        .interrupt_emits
+        .lock()
+        .expect("emits lock")
+        .push(turn_completed());
+    assert_eq!(
+        h.send(&agent.id, "now", SendBehavior::Interrupt).await,
+        SendOutcome::InterruptedAndSent
+    );
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    assert_eq!(session.next_call().await, Call::SendUser("now".to_owned()));
+    settle().await;
+    // The new turn is still running; the queue was not sent into it.
+    session.assert_no_call();
+    assert_eq!(
+        h.manager.get(&agent.id).expect("get").state,
+        AgentState::Running
+    );
+    assert_eq!(h.queue_texts(&agent.id), vec!["queued"]);
+    assert!(
+        h.events(&agent.id)
+            .contains(&EventKind::TurnCompleted { usage: None })
+    );
+
+    // The new turn's own completion drains the queue as usual.
+    session.emit(turn_completed()).await;
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("queued".to_owned())
+    );
+
+    // Plain interrupt: the stale completion does not idle the next turn.
+    session
+        .interrupt_emits
+        .lock()
+        .expect("emits lock")
+        .push(turn_completed());
+    h.manager.interrupt(&agent.id).await.expect("interrupt");
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    assert_eq!(
+        h.send(&agent.id, "after", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("after".to_owned())
+    );
+    settle().await;
+    assert_eq!(
+        h.manager.get(&agent.id).expect("get").state,
+        AgentState::Running
+    );
+}
+
+#[tokio::test]
+async fn stale_permission_request_after_interrupt_is_dropped() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, mut session) = h.running("first").await;
+    session
+        .interrupt_emits
+        .lock()
+        .expect("emits lock")
+        .push(permission_request("old"));
+    h.manager.interrupt(&agent.id).await.expect("interrupt");
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    settle().await;
+    assert_eq!(
+        h.manager.get(&agent.id).expect("get").state,
+        AgentState::Idle
+    );
+    assert!(h.manager.pending_permissions(None).is_empty());
+
+    // Same when the interrupt is part of a send.
+    assert_eq!(
+        h.send(&agent.id, "go", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(session.next_call().await, Call::SendUser("go".to_owned()));
+    session
+        .interrupt_emits
+        .lock()
+        .expect("emits lock")
+        .push(permission_request("old-2"));
+    assert_eq!(
+        h.send(&agent.id, "redo", SendBehavior::Interrupt).await,
+        SendOutcome::InterruptedAndSent
+    );
+    settle().await;
+    assert_eq!(
+        h.manager.get(&agent.id).expect("get").state,
+        AgentState::Running
+    );
+    assert!(h.manager.pending_permissions(None).is_empty());
+    assert!(
+        !h.events(&agent.id)
+            .iter()
+            .any(|k| matches!(k, EventKind::PermissionRequested { .. }))
+    );
+}
+
+#[tokio::test]
+async fn wedged_interrupt_fails_agent_and_archive_succeeds() {
+    let mut h = Harness::new(Options {
+        interrupt_hangs: true,
+        ..DEFAULT
+    });
+    let (agent, mut session) = h.running("first").await;
+    let err = timeout(WAIT, h.manager.interrupt(&agent.id))
+        .await
+        .expect("interrupt is bounded")
+        .expect_err("timed out");
+    assert!(matches!(err, AgentError::Provider(_)), "{err:?}");
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    let failed = h.wait_state(&agent.id, AgentState::Failed).await;
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("interrupt timed out")),
+        "{failed:?}"
+    );
+    assert_eq!(session.next_call().await, Call::Shutdown);
+    let archived = timeout(WAIT, h.manager.archive(&agent.id))
+        .await
+        .expect("archive in time")
+        .expect("archive");
+    assert_eq!(archived.state, AgentState::Archived);
+}
+
+#[tokio::test]
+async fn hung_start_fails_agent() {
+    let h = Harness::new(Options {
+        start_hangs: true,
+        ..DEFAULT
+    });
+    let agent = h.create("first").await;
+    let failed = h.wait_state(&agent.id, AgentState::Failed).await;
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("start timed out")),
+        "{failed:?}"
+    );
+}
+
+#[tokio::test]
+async fn buffered_turn_completed_is_applied_before_a_later_command() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, mut session) = h.running("first").await;
+    // The provider finished the turn before the user's message arrived, so
+    // the message starts a new turn instead of being queued. Repeated because
+    // an unordered choice would pass by chance half of the time.
+    for i in 0..20 {
+        session.emit(turn_completed()).await;
+        let text = format!("next {i}");
+        assert_eq!(
+            h.send(&agent.id, &text, SendBehavior::Queue).await,
+            SendOutcome::Sent,
+            "iteration {i}"
+        );
+        assert_eq!(session.next_call().await, Call::SendUser(text));
+    }
 }

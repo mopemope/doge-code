@@ -17,6 +17,8 @@
 //!   while taking another lock, and no lock is held across an `.await`.
 //!   Agents that are not live are changed only while holding `live`, so such a
 //!   change cannot race with a resume or with an actor's final transition.
+//! - Provider calls are bounded by [`ProviderTimeouts`]; a call that times
+//!   out fails the agent, so a wedged session never blocks archive.
 //! - Tracing carries ids and states only, never prompt or output text.
 
 use std::collections::{HashMap, VecDeque};
@@ -44,7 +46,7 @@ use tracing::{info, warn};
 
 mod actor;
 
-use self::actor::{Command, Start, register, run_actor};
+use self::actor::{Command, Launch, Start, register, run_actor};
 use crate::config::DaemonConfig;
 use crate::events_log::EventLog;
 use crate::paths::{DaemonPaths, ensure_private_dir};
@@ -62,6 +64,27 @@ const AGENTS_DIR: &str = "agents";
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Extra time `shutdown_all` gives actors beyond the session grace.
 const SHUTDOWN_MARGIN: Duration = Duration::from_millis(500);
+/// Default bound on `ProviderAdapter::start`.
+pub const PROVIDER_START_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default bound on each `ProviderSession` call other than `shutdown`.
+pub const PROVIDER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bounds on provider calls. A call that exceeds its bound fails the agent,
+/// so one wedged session cannot block the agent's later commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderTimeouts {
+    pub start: Duration,
+    pub call: Duration,
+}
+
+impl Default for ProviderTimeouts {
+    fn default() -> Self {
+        Self {
+            start: PROVIDER_START_TIMEOUT,
+            call: PROVIDER_CALL_TIMEOUT,
+        }
+    }
+}
 
 /// Agent operation failures. Messages never contain prompt or agent text.
 #[derive(Debug, thiserror::Error)]
@@ -264,6 +287,7 @@ impl Shared {
 pub struct AgentManager {
     shared: Arc<Shared>,
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
+    timeouts: ProviderTimeouts,
 }
 
 impl AgentManager {
@@ -285,7 +309,14 @@ impl AgentManager {
                 permissions: Mutex::new(HashMap::new()),
             }),
             adapters,
+            timeouts: ProviderTimeouts::default(),
         }
+    }
+
+    /// Replace the provider call bounds (tests use short ones).
+    pub fn with_timeouts(mut self, timeouts: ProviderTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
 
     fn load(&self, id: &AgentId) -> Result<Agent, AgentError> {
@@ -369,17 +400,17 @@ impl AgentManager {
         }
         let commands = register(&mut lock(&self.shared.live), &agent.id);
         info!(agent_id = %agent.id, provider = ?agent.provider, auto_approve, "agent created");
-        tokio::spawn(run_actor(
-            Arc::clone(&self.shared),
+        let launch = Launch {
             adapter,
-            agent.clone(),
-            workspace.path,
-            Start::Create {
+            agent: agent.clone(),
+            cwd: workspace.path,
+            start: Start::Create {
                 prompt: params.initial_prompt,
             },
-            VecDeque::new(),
-            commands,
-        ));
+            queue: VecDeque::new(),
+            timeouts: self.timeouts,
+        };
+        tokio::spawn(run_actor(Arc::clone(&self.shared), launch, commands));
         Ok(agent)
     }
 
@@ -403,15 +434,15 @@ impl AgentManager {
             (agent, workspace.path, adapter, queue, commands)
         };
         info!(agent_id = %agent.id, queued = queue.len(), "agent resuming");
-        tokio::spawn(run_actor(
-            Arc::clone(&self.shared),
+        let launch = Launch {
             adapter,
-            agent.clone(),
+            agent: agent.clone(),
             cwd,
-            Start::Resume,
+            start: Start::Resume,
             queue,
-            commands,
-        ));
+            timeouts: self.timeouts,
+        };
+        tokio::spawn(run_actor(Arc::clone(&self.shared), launch, commands));
         Ok(agent)
     }
 

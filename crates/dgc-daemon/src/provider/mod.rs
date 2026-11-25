@@ -14,10 +14,16 @@
 //!   marks the agent failed. Closing the event channel without it counts as an
 //!   unexpected exit.
 //! - After [`ProviderSession::interrupt`] returns, the adapter must not emit
-//!   `TurnCompleted` for the interrupted turn: the manager treats the agent as
-//!   idle (or already running the next turn) at that point. Permission requests
-//!   outstanding at interrupt are treated as cancelled; the adapter answers them
-//!   to the provider if its protocol needs that.
+//!   `TurnCompleted` or `PermissionRequested` for the interrupted turn: the
+//!   manager treats the agent as idle (or already running the next turn) at
+//!   that point. Such events buffered before `interrupt` returned are
+//!   discarded by the manager (`TurnCompleted` is recorded without a state
+//!   change, `PermissionRequested` is dropped). Permission requests
+//!   outstanding at interrupt are treated as cancelled; the adapter answers
+//!   them to the provider if its protocol needs that.
+//! - `start` and every session method must complete in bounded time. The
+//!   manager enforces bounds (`agent::ProviderTimeouts`): a call that exceeds
+//!   its bound fails the agent and the session is shut down.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -74,6 +80,9 @@ pub enum ProviderError {
     Protocol(String),
     #[error("provider session has exited")]
     Exited,
+    /// The named call did not complete within its bound.
+    #[error("provider {0} timed out")]
+    TimedOut(&'static str),
 }
 
 pub trait ProviderAdapter: Send + Sync {

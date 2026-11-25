@@ -184,6 +184,19 @@
   resume は workspace が active であることを確認し、`last_error` を消す。queue.json の読み込みは `O_NOFOLLOW`、未知 version は
   `Storage` エラー。
 
+- 2026-11-25 (M1 Task 8 修正 1): プロバイダ呼び出しに上限を設ける。`agent::ProviderTimeouts { start, call }`
+  （既定 `PROVIDER_START_TIMEOUT` = 60 秒、`PROVIDER_CALL_TIMEOUT` = 30 秒、`AgentManager::with_timeouts` で上書き。テストは 300ms）。
+  actor は `start` と全 session 呼び出し（send_user/steer/interrupt/respond_permission）を `tokio::time::timeout` で囲み、超過は
+  `ProviderError::TimedOut(call)`（文言 `provider <call> timed out`、本文なし）。呼び出し元には `Provider` エラーを返した後、
+  エージェントを `failed` にして session を shutdown する（詰まった session が archive を含む以後の操作を塞がないため）。
+  `shutdown` は従来どおり grace（archive/failed 時 5 秒）で打ち切る。
+- 2026-11-25 (M1 Task 8 修正 1): interrupt 前に溜まったイベントの扱い。`interrupt()` が返った直後に session のイベントを
+  `try_recv` で読み切り、`TurnCompleted` は状態遷移なしで記録、`PermissionRequested` は破棄（WaitingPermission にしない）、
+  `Exited`（またはチャネル切断）は送信を中止してメインループで failed にする。その他は通常どおり記録。actor の `select!` は
+  `biased;` でプロバイダイベントを先に処理する（先に届いた TurnCompleted を後のコマンドより先に適用するため。イベントが
+  途切れなく来る間はコマンドが待たされる）。アダプタ契約（`provider/mod.rs`）に「interrupt 後に中断ターンの
+  TurnCompleted/PermissionRequested を出さない」「全メソッドは有限時間で終わる」を追記。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -258,6 +271,12 @@
     `verify.sh test queue_is_drained_after_turn`: PASS（`verify.sh test agent_manager` はテスト名で絞るため 0 件で拒否される）。
   - ミューテーション確認: resume で `resume_session_id` を渡さない → `resume_uses_provider_session_id` FAIL、interrupt で保留権限を
     cancel しない → `interrupt_cancels_pending_permissions` FAIL、failed 時に queue を消す → `crash_marks_failed_and_keeps_queue` FAIL。
+
+- 2026-11-25 M1 Task 8 修正 1（Linux、1.99.0）: `cargo test --locked -p dgc-daemon --test agent_manager` 20 件 PASS（5 回連続）、
+  `--lib` 34 件 PASS、新 crate 全テスト PASS、clippy clean。ミューテーション: interrupt 後の読み切りを外す →
+  `stale_turn_completed_after_interrupt_is_ignored` と `stale_permission_request_after_interrupt_is_dropped` が FAIL、
+  timeout を外す → `wedged_interrupt_fails_agent_and_archive_succeeds` と `hung_start_fails_agent` が FAIL、
+  `biased;` を外す → `buffered_turn_completed_is_applied_before_a_later_command` が FAIL。
 
 ## 保留中の小さな改善
 
