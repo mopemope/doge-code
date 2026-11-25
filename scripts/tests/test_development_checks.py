@@ -95,6 +95,17 @@ class VerificationTests(unittest.TestCase):
         code, _ = self.run_fixture("Ran 3 tests in 0.001s\n\nOK (skipped=2)", require_tests="unittest")
         self.assertEqual(code, 0)
 
+    def test_rust_and_test_modes_cover_workspace(self):
+        for mode, test_filter in (("rust", None), ("test", "x")):
+            argvs = [argv for argv, _ in verify.commands(mode, test_filter, SCRIPTS.parent)]
+            cargo_tests = [argv for argv in argvs if argv[:2] == ["cargo", "test"]]
+            self.assertTrue(cargo_tests)
+            self.assertTrue(all("--workspace" in argv for argv in cargo_tests), cargo_tests)
+            clippy = [argv for argv in argvs if argv[:2] == ["cargo", "clippy"]]
+            self.assertTrue(all("--workspace" in argv for argv in clippy), clippy)
+        msrv = verify.commands("msrv", None, SCRIPTS.parent)[0][0]
+        self.assertIn("--workspace", msrv)
+
     def test_guidance_includes_test_integrity_checker(self):
         commands = verify.commands("guidance", None, SCRIPTS.parent)
         labels = [" ".join(argv) for argv, _ in commands]
@@ -256,10 +267,26 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue(guidance.check_ci(self.root))
         self.write(".github/workflows/ci.yml", source.replace(f"@{toolchain}", "@0.0.0"))
         self.assertTrue(guidance.check_ci(self.root))
+        for workspace_command in ("cargo test --locked --workspace",
+                                  "cargo clippy --locked --workspace",
+                                  "cargo check --locked --workspace"):
+            self.write(".github/workflows/ci.yml", source.replace(
+                workspace_command, workspace_command.replace(" --workspace", "")))
+            self.assertTrue(guidance.check_ci(self.root), workspace_command)
         self.write(".github/workflows/ci.yml", source.replace(
             "bash scripts/verify.sh macos", 'cargo test --locked tui::'))
         errors = guidance.check_ci(self.root)
         self.assertTrue(any("verify.sh macos" in error for error in errors), errors)
+
+    def test_workflow_doc_lists_wrapper_rust_commands(self):
+        self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
+        self.write("Cargo.toml", (SCRIPTS.parent / "Cargo.toml").read_text())
+        source = (SCRIPTS.parent / "docs/ai/workflow.md").read_text()
+        self.write("docs/ai/workflow.md", source)
+        self.assertEqual(guidance.check_workflow_doc(self.root), [])
+        self.write("docs/ai/workflow.md", source.replace(" --workspace", ""))
+        errors = guidance.check_workflow_doc(self.root)
+        self.assertTrue(any("cargo test --locked --workspace" in error for error in errors), errors)
 
     def test_skill_description_rejects_invalid_yaml_scalar(self):
         self.write("AGENTS.md", "Guidance\n")

@@ -1,0 +1,9 @@
+[package]
+name = "dgc-client"
+description = "Client for the dgc orchestrator daemon socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]

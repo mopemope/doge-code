@@ -25,9 +25,17 @@ The first practical job is a small bug fix in an existing tested Go/Rust
 repository, delivered as an independently verified, reviewable patch with
 remaining uncertainty. Prioritize observed workflow failures and user effort;
 do not expand languages, providers or UI breadth as a goal. Internal contract
-checks and CI are prerequisites, not product-acceptance evidence. Compare narrow
-usefulness before deciding on an external execution foundation; no full migration
-is authorized by this direction. See [evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
+checks and CI are prerequisites, not product-acceptance evidence. See
+[evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
+
+## Orchestrator migration (active)
+
+dgc is being rebuilt as an orchestrator that drives the Claude Code and Codex
+CLIs instead of calling LLM APIs directly (approved 2026-11-25). Before any work
+on it, read [PROGRESS.md](docs/orchestrator/PROGRESS.md) and resume from its
+"現在の作業" section; it links the design and milestone plans. New code lives in
+`crates/`; the legacy `src/` runtime stays working until milestone M3 removes it.
+Update PROGRESS.md in the same commit as each finished task, and before stopping.
 
 ## Choose the relevant guidance
 
