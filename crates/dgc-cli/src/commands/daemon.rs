@@ -15,7 +15,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing_subscriber::filter::LevelFilter;
 
-use super::{CliResult, resolve_paths};
+use super::{CliResult, connect_or_spawn, resolve_paths};
 use crate::output;
 
 /// How long `stop` waits for the daemon to release the socket and the lock.
@@ -51,11 +51,6 @@ pub async fn run(command: DaemonCommand, json: bool) -> CliResult<ExitCode> {
         DaemonCommand::Stop => stop(&paths).await,
         DaemonCommand::Status => status(&paths, json).await,
     }
-}
-
-async fn connect_or_spawn(paths: &DaemonPaths) -> CliResult<Client> {
-    let exe = std::env::current_exe()?;
-    Ok(Client::connect_or_spawn(paths, &exe).await?)
 }
 
 fn log_level() -> LevelFilter {

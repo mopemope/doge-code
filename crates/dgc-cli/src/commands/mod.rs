@@ -1,9 +1,12 @@
 //! Subcommand implementations.
 
 pub mod daemon;
+pub mod project;
+pub mod workspace;
 
 use std::error::Error;
 
+use dgc_client::Client;
 use dgc_daemon::paths::DaemonPaths;
 
 pub type CliResult<T> = Result<T, Box<dyn Error>>;
@@ -15,4 +18,15 @@ pub fn resolve_paths() -> CliResult<DaemonPaths> {
         Some(root) if !root.is_empty() => Ok(DaemonPaths::under(std::path::Path::new(&root))),
         _ => Ok(DaemonPaths::from_env()?),
     }
+}
+
+/// Connect to the daemon at `paths`, starting it if it is not running.
+pub async fn connect_or_spawn(paths: &DaemonPaths) -> CliResult<Client> {
+    let exe = std::env::current_exe()?;
+    Ok(Client::connect_or_spawn(paths, &exe).await?)
+}
+
+/// Connect to the daemon at the resolved paths, starting it if needed.
+pub async fn connect() -> CliResult<Client> {
+    connect_or_spawn(&resolve_paths()?).await
 }

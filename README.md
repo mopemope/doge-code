@@ -27,6 +27,13 @@ output). `status` starts the daemon on demand; a background daemon logs to
 Setting `DGC_STATE_ROOT=<dir>` keeps the socket, state, config and worktrees
 under `<dir>` instead of the XDG locations (for tests and experiments).
 
+Projects and workspaces: `dgc-next project {add [PATH] | ls | rm ID}` and
+`dgc-next workspace {create --project ID [--worktree --branch NAME [--base REF]
+[--slug S]] | ls [--project ID] | archive ID}`. A worktree workspace is a git
+worktree dgc creates under `<worktrees>/<repo>-<id>/<slug>`; archiving it removes
+the worktree and its branch, but only for paths inside that managed directory.
+Local workspaces use the project directory and are never deleted.
+
 ## 🚀 Key Features
 
 ### Core Capabilities

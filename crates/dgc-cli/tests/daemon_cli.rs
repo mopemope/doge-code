@@ -1,92 +1,15 @@
-//! End-to-end tests for `dgc-next daemon ...`. Every test runs against its own
-//! `DGC_STATE_ROOT` and stops the daemon it started, even when it panics.
+//! End-to-end tests for `dgc-next daemon ...`. The harness in `common` gives each
+//! test its own `DGC_STATE_ROOT` and stops the daemon it started.
+
+mod common;
 
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use dgc_daemon::lock::{InstanceLock, LockError};
-use dgc_daemon::paths::DaemonPaths;
+use common::{TestEnv, assert_success, stdout};
 use dgc_protocol::methods::DaemonStatus;
-use tempfile::{TempDir, tempdir};
-
-struct TestEnv {
-    dir: TempDir,
-    paths: DaemonPaths,
-}
-
-impl TestEnv {
-    fn new() -> Self {
-        let dir = tempdir().expect("tempdir");
-        let paths = DaemonPaths::under(dir.path());
-        Self { dir, paths }
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_dgc-next"));
-        command
-            .args(args)
-            .env("DGC_STATE_ROOT", self.dir.path())
-            .env_remove("DGC_LOG")
-            .stdin(Stdio::null());
-        command
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.command(args).output().expect("dgc-next should start")
-    }
-
-    fn lock_pid(&self) -> Option<i32> {
-        std::fs::read_to_string(self.paths.state_dir.join("daemon.lock"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
-    }
-}
-
-impl Drop for TestEnv {
-    fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]).output();
-        // Fallback: if the lock is still held, the daemon ignored `stop`; kill
-        // the recorded holder. Acquiring the lock proves the pid file is not
-        // stale, so an unrelated process with a reused pid is never signalled.
-        if !self.paths.state_dir.exists() {
-            return;
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match InstanceLock::acquire(&self.paths.state_dir) {
-                Err(LockError::AlreadyRunning) => {
-                    if let Some(pid) = self.lock_pid() {
-                        // SAFETY: plain kill(2) on a pid read from the lock file.
-                        unsafe { libc::kill(pid, libc::SIGKILL) };
-                    }
-                }
-                _ => return,
-            }
-            if Instant::now() > deadline {
-                return;
-            }
-            sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8(output.stdout.clone()).expect("stdout is UTF-8")
-}
-
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "status {:?}\nstdout: {}\nstderr: {}",
-        output.status,
-        stdout(output),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 fn status_json(output: &Output) -> DaemonStatus {
     assert_success(output);

@@ -26,6 +26,16 @@ enum Command {
         #[command(subcommand)]
         command: commands::daemon::DaemonCommand,
     },
+    /// Register and remove projects.
+    Project {
+        #[command(subcommand)]
+        command: commands::project::ProjectCommand,
+    },
+    /// Create, list and archive workspaces.
+    Workspace {
+        #[command(subcommand)]
+        command: commands::workspace::WorkspaceCommand,
+    },
 }
 
 #[tokio::main]
@@ -33,6 +43,8 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Daemon { command } => commands::daemon::run(command, cli.json).await,
+        Command::Project { command } => commands::project::run(command, cli.json).await,
+        Command::Workspace { command } => commands::workspace::run(command, cli.json).await,
     };
     match result {
         Ok(code) => code,

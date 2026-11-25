@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dgc_protocol::methods::{DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams};
+use dgc_protocol::methods::{
+    DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams, PROJECT_ADD, PROJECT_LIST,
+    PROJECT_REMOVE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST,
+};
 use dgc_protocol::rpc::{
     INTERNAL, INVALID_REQUEST, INVALID_STATE, JSONRPC_VERSION, METHOD_NOT_FOUND, Notification,
     PARSE_ERROR, Request, Response, RpcError, VERSION_MISMATCH,
@@ -31,9 +34,12 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 
 use crate::config::DaemonConfig;
+use crate::handlers;
 use crate::lock::{InstanceLock, LockError};
 use crate::paths::{DaemonPaths, PathsError, ensure_private_dir};
+use crate::store::{Store, StoreError};
 use crate::time::now_rfc3339;
+use crate::workspace::WorkspaceManager;
 
 /// Capacity of each connection's outbound queue (responses and notifications).
 pub const OUTBOUND_CAPACITY: usize = 1024;
@@ -50,6 +56,8 @@ pub enum DaemonError {
     Paths(#[from] PathsError),
     #[error(transparent)]
     Lock(#[from] LockError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("{} exists and is not a socket; refusing to replace it", .0.display())]
@@ -163,14 +171,21 @@ pub struct DaemonDispatcher {
     config: DaemonConfig,
     started_at: String,
     shutdown: watch::Sender<bool>,
+    workspaces: Arc<WorkspaceManager>,
 }
 
 impl DaemonDispatcher {
-    pub fn new(config: DaemonConfig, started_at: String, shutdown: watch::Sender<bool>) -> Self {
+    pub fn new(
+        config: DaemonConfig,
+        started_at: String,
+        shutdown: watch::Sender<bool>,
+        workspaces: Arc<WorkspaceManager>,
+    ) -> Self {
         Self {
             config,
             started_at,
             shutdown,
+            workspaces,
         }
     }
 
@@ -190,11 +205,18 @@ impl DaemonDispatcher {
         &self,
         _conn: &ConnCtx,
         method: &str,
-        _params: Value,
+        params: Value,
     ) -> Result<Value, RpcError> {
+        let workspaces = self.workspaces.as_ref();
         match method {
             DAEMON_STATUS => self.status(),
             DAEMON_SHUTDOWN => Ok(json!({})),
+            PROJECT_ADD => handlers::project_add(workspaces, params).await,
+            PROJECT_LIST => handlers::project_list(workspaces).await,
+            PROJECT_REMOVE => handlers::project_remove(workspaces, params).await,
+            WORKSPACE_CREATE => handlers::workspace_create(workspaces, params).await,
+            WORKSPACE_LIST => handlers::workspace_list(workspaces, params).await,
+            WORKSPACE_ARCHIVE => handlers::workspace_archive(workspaces, params).await,
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!("unknown method: {}", clip(other)),
@@ -226,6 +248,8 @@ pub async fn run_daemon(
 ) -> Result<(), DaemonError> {
     ensure_private_dir(&paths.state_dir)?;
     let _lock = InstanceLock::acquire(&paths.state_dir)?;
+    let store = Arc::new(Store::open(&paths.state_dir)?);
+    let workspaces = Arc::new(WorkspaceManager::new(store, paths.worktrees_dir.clone()));
 
     let socket_dir = paths
         .socket
@@ -245,6 +269,7 @@ pub async fn run_daemon(
         config,
         now_rfc3339(),
         shutdown.clone(),
+        workspaces,
     ));
     accept_loop(listener, dispatcher, shutdown.subscribe()).await;
 

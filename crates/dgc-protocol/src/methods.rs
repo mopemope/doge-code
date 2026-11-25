@@ -48,6 +48,29 @@ pub struct HelloParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAddParams {
+    /// Directory to register; the daemon canonicalizes it.
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRemoveParams {
+    pub id: ProjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorkspaceListParams {
+    /// Only workspaces of this project; all projects when absent.
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceArchiveParams {
+    pub id: WorkspaceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCreateParams {
     pub project_id: ProjectId,
     pub isolation: Isolation,
@@ -186,6 +209,23 @@ mod tests {
         .unwrap();
         assert_eq!(p.isolation, Isolation::Local);
         assert!(p.branch.is_none() && p.base_ref.is_none() && p.slug.is_none());
+    }
+
+    #[test]
+    fn project_and_workspace_params_roundtrip() {
+        let add: ProjectAddParams =
+            serde_json::from_value(serde_json::json!({"path": "/work/repo"})).unwrap();
+        assert_eq!(add.path, PathBuf::from("/work/repo"));
+        let list: WorkspaceListParams = serde_json::from_str("{}").unwrap();
+        assert!(list.project_id.is_none());
+        let id = WorkspaceId::generate();
+        let archive: WorkspaceArchiveParams =
+            serde_json::from_value(serde_json::json!({"id": id})).unwrap();
+        assert_eq!(archive.id, id);
+        let pid = ProjectId::generate();
+        let remove: ProjectRemoveParams =
+            serde_json::from_value(serde_json::json!({"id": pid})).unwrap();
+        assert_eq!(remove.id, pid);
     }
 
     #[test]

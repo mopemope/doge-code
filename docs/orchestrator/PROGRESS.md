@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 7（プロジェクトとワークスペース）
+- タスク: M1 Task 8（ProviderAdapter と AgentManager）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 7 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 8 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -53,7 +53,7 @@
 | 4 | 子プロセス管理 | 完了 | `feat(daemon): add process-group child management` |
 | 5 | ソケットサーバー | 完了 | `feat(daemon): serve JSON-RPC over private unix socket` |
 | 6 | クライアントと `dgc-next daemon` | 完了 | `feat(cli): add daemon lifecycle commands with autostart` |
-| 7 | プロジェクトとワークスペース | 未着手 | |
+| 7 | プロジェクトとワークスペース | 完了 | `feat(daemon): manage projects and worktree workspaces` |
 | 8 | ProviderAdapter と AgentManager | 未着手 | |
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 未着手 | |
 | 10 | 偽プロバイダ | 未着手 | |
@@ -130,6 +130,25 @@
   最大 256 件バッファして `subscribe` が先に配信する（超過分は古いものから捨てる）。クライアントの 1 行上限も `MAX_MESSAGE_BYTES`。
   `daemon stop` はソケット消滅に加えて instance lock が解放されるまで最大 5 秒待つ（直後の自動起動がロック競合で負けないため）。
   `--json` は `Cli` の global フラグ（`daemon status --json` でも可）。
+- 2026-11-25 (M1 Task 7): 依存クレートの追加なし。`dgc-protocol` に `ProjectAddParams`、`ProjectRemoveParams`、
+  `WorkspaceListParams`、`WorkspaceArchiveParams` を追加（コントローラ裁定）。結果は `project.list` → `{"projects":[..]}`、
+  `workspace.list` → `{"workspaces":[..]}`（active のみ）、`workspace.archive` → archived の `Workspace`。
+  `WorkspaceManager`（`workspace.rs`、`WorkspaceError` が NOT_FOUND / INVALID_PARAMS / INVALID_STATE / INTERNAL に対応）と
+  パラメータ解析・エラー写像の `handlers.rs` を追加し、`DaemonDispatcher::new` が `Arc<WorkspaceManager>` を受け取る。
+  `run_daemon` は lock 取得直後（bind 前）に `Store::open` する（`DaemonError::Store` を追加）。
+- 2026-11-25 (M1 Task 7): `is_managed_path(path, worktrees_dir)` は「両方絶対、`.`/`..` なし、component 単位の prefix、
+  かつ `<repo-key>/<slug>` の 2 階層以上下」を字句で確認し、さらに存在する最長の祖先を `canonicalize` した結果でも同じ検査を行う
+  （symlink 脱出と dangling symlink は拒否）。削除は `owned` かつ `isolation == worktree` かつ managed のときだけ。
+  managed 外の owned workspace は警告ログのうえディスクに触れず archived にする。worktree 削除（`git worktree remove --force`）が
+  失敗したら何も archived にせず INTERNAL（stderr 末尾 4096 バイト以内）。ブランチ削除（`git branch -D`）の失敗は警告ログのみで
+  archive は成功扱い。ディレクトリが既に無ければ `git worktree prune` のうえブランチを削除する。archive は冪等。
+  `base_ref` には解決済みコミットのフルハッシュを保存する（設計書 §データモデルの「解決済み」）。
+  `local` workspace に `branch`/`base_ref`/`slug` を渡すと INVALID_PARAMS。slug は `[A-Za-z0-9._-]` 1〜128 文字、先頭 `.` 不可
+  （明示 slug も同規則、省略時は branch を同規則で置換）。ユーザー指定の ref/branch は `-` 始まりを拒否し git の option と
+  解釈させない。git は `tokio::process::Command`（`kill_on_drop`、30 秒、`GIT_TERMINAL_PROMPT=0`、`GIT_DIR` 等を除去）で実行する。
+  変更系操作は `tokio::sync::Mutex` で直列化する。archive 時のエージェント archive は Task 13 で接続（コード内 TODO）。
+- 2026-11-25 (M1 Task 7): `crates/dgc-cli/tests/common/mod.rs` に Task 6 の `TestEnv` を移して `daemon_cli.rs` と共有（挙動変更なし）。
+  README に `project` / `workspace` コマンドを追記。
 
 ## 検証記録
 
@@ -186,6 +205,15 @@
     終了後に `dgc-next` プロセス残存なし）。`cargo test --locked -p dgc-client`: 12 件 PASS（偽サーバーによる単体、実デーモンとの往復を含む）。
   - 未検証: `subscribe` の実デーモンでの動作（サーバー側 `subscribe` は Task 13。偽サーバーでの単体のみ）。
     `daemon stop` のロック待ちは、待たない版でもテストが通る（競合が速すぎて再現しない）ため、ミューテーションでは検出できない。
+- 2026-11-25 M1 Task 7（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test workspace`: 実装前は `dgc_daemon::workspace` 未定義で RED（compile error）→ 26 件 PASS。
+    `--lib`（`is_managed_path`、名前規則、タイムアウト kill ほか `workspace::tests` 15 件、`handlers::tests` 4 件）PASS。
+    `cargo test --locked -p dgc-cli --test workspace_cli`: 3 件 PASS。新 crate 全テストを 3 回連続 PASS、終了後に `dgc-next` 残存なし。
+    clippy（`-D warnings`）clean。`verify.sh test archive_removes_owned_worktree`: PASS。
+  - ミューテーション確認: `is_managed_path` を常に true にすると `archive_refuses_{path_outside_managed_dir,traversal_path,symlink_escape}`
+    が FAIL、archive の `owned` 条件を外すと `archive_keeps_unowned_directory_inside_managed_dir` が FAIL。
+  - 注: `repo_key` は仕様どおり uuid v7 の先頭 12 桁（ミリ秒タイムスタンプ部）なので、同名ディレクトリのプロジェクトを同一ミリ秒に
+    作ると衝突しうる（実用上は無視できる）。
 
 ## 保留中の小さな改善
 
