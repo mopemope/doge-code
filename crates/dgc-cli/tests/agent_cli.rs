@@ -504,6 +504,55 @@ fn logs_pages_through_more_than_one_message_worth_of_events() {
 }
 
 #[test]
+fn permit_ls_escapes_control_characters_and_marks_truncation() {
+    // The Bash command starts with a carriage return and an erase-line
+    // escape that would hide "rm -rf ~" on a terminal, and is 10 KiB long.
+    let command = format!("\rrm -rf ~\x1b[2K{}", "#".repeat(10 * 1024));
+    let a = AgentEnv::new("claude_turn", None);
+    let generated = a.env.dir.path().join("spoof.jsonl");
+    let mut lines = vec![
+        r#"{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}"#.to_owned(),
+        r#"{"capture":"init","path":"/request_id"}"#.to_owned(),
+        r#"{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}"#.to_owned(),
+        r#"{"expect":{"type":"user"}}"#.to_owned(),
+        r#"{"send":{"type":"system","subtype":"init","session_id":"sess-spoof"}}"#.to_owned(),
+    ];
+    lines.push(
+        serde_json::json!({"send": {"type": "control_request", "request_id": "perm-1",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": command}}}})
+        .to_string(),
+    );
+    lines.push(r#"{"expect_eof":true}"#.to_owned());
+    fs::write(&generated, lines.join("\n") + "\n").expect("write scenario");
+    write_wrapper(
+        &a.env.dir.path().join("bin"),
+        "claude",
+        CLAUDE_VERSION,
+        &generated,
+    );
+    let a = a.with_workspace(None);
+
+    let id = created_id(&a.run_agent("claude", &["Do it"]));
+    a.wait_permission(&id);
+    let human = stdout(&a.run(&["permit", "ls"]));
+    assert!(
+        human.contains("Bash: \\rrm -rf ~\\x1b[2K###"),
+        "control characters must be shown escaped: {human:?}"
+    );
+    assert!(
+        !human.contains('\r') && !human.contains('\x1b'),
+        "{human:?}"
+    );
+    assert!(
+        human.contains("…(truncated, "),
+        "a cut summary must say so: {human:?}"
+    );
+    let logs = stdout(&a.run(&["logs", &id]));
+    assert!(!logs.contains('\r') && !logs.contains('\x1b'), "{logs:?}");
+    assert!(logs.contains("\\rrm -rf ~\\x1b[2K"), "{logs:?}");
+}
+
+#[test]
 fn status_lists_provider_versions() {
     let a = AgentEnv::new("claude_turn", None);
     // The daemon's PATH holds no codex, and none is configured.

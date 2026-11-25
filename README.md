@@ -95,11 +95,17 @@ Agents:
   `turn started`, `turn completed`, `rate limited: DETAIL`, `error: MESSAGE`,
   `state: STATE`. Continuation lines of multi-line text are indented by four
   spaces. A prompt or reply longer than 256 KiB is stored as several events
-  (reply parts before the last show as `assistant (partial)`).
+  (reply parts before the last show as `assistant (partial)`). Human-readable
+  output shows control characters in daemon-supplied text (agent output,
+  summaries, errors) escaped (`\r`, `\t`, `\x1b`, `\u{202e}`; newlines are
+  kept only where text may span lines), so a terminal escape cannot hide or
+  rewrite what is displayed.
 - Permissions: `dgc-next permit ls [--agent ID]` lists pending requests
   (`PERM_ID  AGENT_ID  KIND  SUMMARY`, oldest first); `dgc-next permit allow ID
   [--session]` and `dgc-next permit deny ID` answer one. Requests stay pending
-  until answered, interrupted, or the daemon stops.
+  until answered, interrupted, or the daemon stops. A summary longer than 4 KiB
+  is cut and ends with `…(truncated, N bytes total)`; the full request is in
+  `permit ls --json` (`raw`, up to 64 KiB).
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).

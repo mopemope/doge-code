@@ -321,6 +321,11 @@
   1 イベントの本文は `MAX_EVENT_TEXT_BYTES`（256 KiB、JSON エスケープ後の長さで数える）以下: `dgc_protocol::chunk_text` で
   Claude の assistant テキスト（最後以外 `final_: false`）、Codex の集約メッセージ（`MAX_MESSAGE_BUFFER_BYTES` も 256 KiB、
   完了時の item 本文も分割）、`UserMessage`（初期プロンプトと send。同じ behavior で複数イベント）を分割する。
+- 2026-11-26 (M1 最終レビュー修正 3): CLI の人間向け出力（イベント行、`permit ls`、`ls`/`show`、project/workspace 行、
+  `daemon status`、`error:` 行、auto-approve 警告）は `output::escape_text`（`\n` は残す）/ `escape_line`（`\n` も `\\n`。1 行の
+  欄で別の行を装えないように）で制御文字を `\r` `\t` `\x1b` `\u{9b}` に、双方向制御文字（U+200E/F、U+061C、U+202A–E、
+  U+2066–9）を `\u{..}` にする（双方向制御は brief の範囲外だが、表示と承認内容のずれを防ぐ同じ目的のため含めた）。
+  `truncate_summary` は切ったとき末尾に `…(truncated, N bytes total)` を付け、印を含めて 4 KiB 以内に収める。
 
 ## 検証記録
 

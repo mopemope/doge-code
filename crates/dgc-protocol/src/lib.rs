@@ -57,16 +57,19 @@ fn json_escaped_len(c: char) -> usize {
     }
 }
 
-/// Cut `text` to at most [`MAX_SUMMARY_BYTES`] bytes on a UTF-8 char boundary.
+/// Cut `text` to at most [`MAX_SUMMARY_BYTES`] bytes on a UTF-8 char
+/// boundary. A cut text ends with `…(truncated, N bytes total)` (N is the
+/// original length) and the result, marker included, stays within the limit.
 pub fn truncate_summary(text: &str) -> String {
     if text.len() <= MAX_SUMMARY_BYTES {
         return text.to_owned();
     }
-    let mut end = MAX_SUMMARY_BYTES;
+    let marker = format!("…(truncated, {} bytes total)", text.len());
+    let mut end = MAX_SUMMARY_BYTES.saturating_sub(marker.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    text[..end].to_owned()
+    format!("{}{marker}", &text[..end])
 }
 
 #[cfg(test)]
@@ -118,12 +121,25 @@ mod tests {
     }
 
     #[test]
-    fn truncate_summary_cuts_on_char_boundary() {
-        // 3-byte chars: 4096 is not a multiple of 3, so the cut must back off.
+    fn truncate_summary_cuts_on_char_boundary_and_says_so() {
+        // 3-byte chars: the cut must back off to a char boundary.
         let text = "あ".repeat(2000);
         let cut = truncate_summary(&text);
+        assert!(cut.len() <= MAX_SUMMARY_BYTES, "{}", cut.len());
+        let marker = "…(truncated, 6000 bytes total)";
+        let kept = cut.strip_suffix(marker).expect("marker at the end");
+        assert!(text.starts_with(kept));
+        assert!(kept.len() > MAX_SUMMARY_BYTES - 64);
+    }
+
+    #[test]
+    fn truncate_summary_marks_a_long_command() {
+        let text = "x".repeat(10 * 1024);
+        let cut = truncate_summary(&text);
         assert!(cut.len() <= MAX_SUMMARY_BYTES);
-        assert_eq!(cut.len(), 4095);
-        assert!(text.starts_with(&cut));
+        assert!(cut.ends_with("…(truncated, 10240 bytes total)"), "{cut}");
+        // Exactly at the limit nothing is cut.
+        let exact = "y".repeat(MAX_SUMMARY_BYTES);
+        assert_eq!(truncate_summary(&exact), exact);
     }
 }

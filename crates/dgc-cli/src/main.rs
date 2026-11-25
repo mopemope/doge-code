@@ -58,7 +58,7 @@ async fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err}");
+            eprintln!("error: {}", output::escape_text(&err.to_string()));
             ExitCode::FAILURE
         }
     }

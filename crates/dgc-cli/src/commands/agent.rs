@@ -140,7 +140,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
                     "warning: agent {} runs in auto-approve mode {}: the provider acts \
                      without asking for permission",
                     agent.id,
-                    agent.mode.as_deref().unwrap_or("-")
+                    output::escape_line(agent.mode.as_deref().unwrap_or("-"))
                 );
             }
             if json {

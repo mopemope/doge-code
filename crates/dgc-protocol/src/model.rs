@@ -244,7 +244,8 @@ mod tests {
             "2026-11-25T00:00:00Z".to_owned(),
         );
         assert_eq!(p.raw, raw);
-        assert_eq!(p.summary.len(), MAX_SUMMARY_BYTES);
+        assert!(p.summary.len() <= MAX_SUMMARY_BYTES);
+        assert!(p.summary.ends_with("bytes total)"), "{}", p.summary);
     }
 
     #[test]
