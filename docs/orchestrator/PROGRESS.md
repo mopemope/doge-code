@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 5（ソケットサーバー）
+- タスク: M1 Task 6（クライアントと `dgc-next daemon`）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 5 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 6 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -51,7 +51,7 @@
 | 2 | パス、設定、ロック、Store | 完了 | `feat(daemon): add state paths, config, lock and store` |
 | 3 | イベントログ | 完了 | `feat(daemon): add per-agent event log` |
 | 4 | 子プロセス管理 | 完了 | `feat(daemon): add process-group child management` |
-| 5 | ソケットサーバー | 未着手 | |
+| 5 | ソケットサーバー | 完了 | `feat(daemon): serve JSON-RPC over private unix socket` |
 | 6 | クライアントと `dgc-next daemon` | 未着手 | |
 | 7 | プロジェクトとワークスペース | 未着手 | |
 | 8 | ProviderAdapter と AgentManager | 未着手 | |
@@ -109,6 +109,15 @@
   `ChildProcess` は `process_group(0)`（pre_exec 不要）で新グループのリーダーにし、`kill_on_drop(false)`、`Drop` でグループへ SIGKILL。
   `terminate`/`wait` はリーダーを回収した直後にグループの残りへ SIGKILL してから PGID を手放す（`wait` も同様。PGID 再利用による誤爆を避けるため）。
   行読み取りは 16 MiB 超を読み捨て `Oversized { bytes }`（改行なしの最終行は EOF で配信、空なら配信しない）。エラー型は `process::ProcessError`。
+- 2026-11-25 (M1 Task 5): `dgc-daemon` の tokio features に `net` を追加（依存クレートの追加なし）。
+  `run_daemon(paths, config, shutdown: watch::Sender<bool>)`（コントローラ裁定 R1）。`Dispatcher` トレイトは作らず具体型
+  `DaemonDispatcher::call(&self, &ConnCtx, method, params)`（`hello` は接続状態を持つため接続層で処理し、`daemon.status` /
+  `daemon.shutdown` をディスパッチャが処理）。`daemon.shutdown` は応答を書き終えた後に接続層が `request_shutdown()` で true を送る。
+  `Response.id` は u64 のため、id 不明の PARSE_ERROR / INVALID_REQUEST 応答は id 0。hello 前の不正入力は PARSE_ERROR ではなく
+  INVALID_REQUEST で close。1 行 > `MAX_MESSAGE_BYTES`（改行除く）は無応答で close。送信は接続ごとに有界 mpsc（1024）1 本の
+  writer タスク。応答は `send().await`（破棄しない）、通知は `ConnCtx::notify` の `try_send`（満杯で false。購読の破棄と `lagged` 送信は Task 13）。
+  終了時は accept 停止、接続を最大 2 秒で flush、ソケットファイル削除、lock 解放の順。ソケットパスが socket 以外なら
+  `DaemonError::SocketPathOccupied` で起動拒否（削除しない）。`run_daemon` / `DaemonError` は `server` モジュールで定義し lib.rs から再エクスポート。
 
 ## 検証記録
 
@@ -155,6 +164,11 @@
     ミューテーション確認: `finish` の残存グループへの SIGKILL を外すと `terminate_kills_descendants_that_outlive_the_leader` が FAIL。
     `verify.sh test terminate_kills_grandchildren`: PASS。clippy clean、新 crate 全テスト PASS。
     注: この端末の `/bin/sh` は bash。TERM を無視する子孫のテストは trap 設定後に pid を出力する（SIGTERM との競合回避）。
+- 2026-11-25 M1 Task 5（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test server`: 実装前は `run_daemon` / `DaemonError` 未定義で RED（compile error）→ 18 件 PASS（5 回連続 PASS）。
+    `cargo test --locked -p dgc-daemon --lib`: 15 件 PASS（`server::tests` 6 件）。clippy clean、新 crate 全テスト PASS。
+    `verify.sh test shutdown_removes_socket_file`: PASS。
+  - 未検証: 他 UID のピア拒否（別ユーザーで接続できないため。`peer_cred` と `geteuid` の比較コードのみ）。
 
 ## 保留中の小さな改善
 
