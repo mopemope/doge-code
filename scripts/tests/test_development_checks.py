@@ -278,6 +278,16 @@ class GuidanceTests(unittest.TestCase):
         errors = guidance.check_ci(self.root)
         self.assertTrue(any("verify.sh macos" in error for error in errors), errors)
 
+    def test_workflow_doc_lists_wrapper_rust_commands(self):
+        self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
+        self.write("Cargo.toml", (SCRIPTS.parent / "Cargo.toml").read_text())
+        source = (SCRIPTS.parent / "docs/ai/workflow.md").read_text()
+        self.write("docs/ai/workflow.md", source)
+        self.assertEqual(guidance.check_workflow_doc(self.root), [])
+        self.write("docs/ai/workflow.md", source.replace(" --workspace", ""))
+        errors = guidance.check_workflow_doc(self.root)
+        self.assertTrue(any("cargo test --locked --workspace" in error for error in errors), errors)
+
     def test_skill_description_rejects_invalid_yaml_scalar(self):
         self.write("AGENTS.md", "Guidance\n")
         self.write("CLAUDE.md", "@AGENTS.md\n")

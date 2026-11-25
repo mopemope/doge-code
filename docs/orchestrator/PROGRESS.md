@@ -70,8 +70,9 @@
 - 2026-11-25: 権限の自動承認系 mode は M1 から `--mode` 明示で使える（設計者判断）。
 - 2026-11-25: `dgc-protocol` に ID 生成のため `uuid` 依存を置く（設計書 §5.1 の表への追加）。
 - 2026-11-25 (M0): `[workspace.dependencies]` には使用中のものだけ置く（現在 `clap` のみ）。
-  Cargo 1.99 が未使用の workspace 依存と未使用の依存に警告を出すため。M1 の各タスクで
-  最初に使うときに追加する（バージョンはルートパッケージの宣言と同一にする）。
+  M1 の各タスクで最初に使うときに追加する（バージョンはルートパッケージの宣言と同一にする）。
+  注: 未使用依存の警告は PATH 上の Cargo 1.100 で出たもので、固定の 1.99.0 では出ない
+  （最終レビューで確認）。判断の理由は「使うものだけを宣言する」こと。
 - 2026-11-25 (M0): 新バイナリはルートから `cargo run -p dgc-cli --bin dgc-next` で起動する
   （ルートパッケージが default-run のため `--bin` だけでは見つからない）。
 - 2026-11-25 (M0): 作業は `feat/orchestrator` ブランチで行う（別 worktree は旧 crate の
@@ -97,3 +98,16 @@
   - 環境の注意: この端末の PATH 上の `cargo` は stable 1.100 で、`rust-toolchain.toml` の 1.99.0 ではない。
     1.100 の clippy は旧 `src/execution/policy.rs:463` を警告する（CI の 1.99.0 では出ない）。
     検証は `PATH=$HOME/.rustup/toolchains/1.99.0-x86_64-unknown-linux-gnu/bin:$PATH` を付けて実行する。
+  - 最終レビュー（別エージェント）: 判定「修正後マージ可」。Important 1 件（`docs/ai/workflow.md` の
+    Rust ゲートのコマンド記述に `--workspace` が無い）を修正し、`check-agent-guidance.py` に
+    `check_workflow_doc` を追加して再発を防止（`test_workflow_doc_lists_wrapper_rust_commands` RED→GREEN、
+    `verify.sh guidance` PASS 193 tests）。Minor は下の「保留中の小さな改善」に記録。
+
+## 保留中の小さな改善
+
+- M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
+  の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
+- M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が
+  消えても通る（空リストに `all`）。`assertTrue(clippy)` を足す。
+- M0 最終レビュー由来: `crates/dgc-cli/tests/version.rs` は版を直書き。`env!("CARGO_PKG_VERSION")` を使う。
+- M0 最終レビュー由来: `crates/dgc-protocol/Cargo.toml` 末尾の空行。

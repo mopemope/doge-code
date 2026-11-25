@@ -213,6 +213,17 @@ def check_ci(root):
     return errors
 
 
+def check_workflow_doc(root):
+    """Require the workflow guide to quote each command the wrapper's Rust gate runs."""
+    text = (root / "docs/ai/workflow.md").read_text()
+    module_spec = importlib.util.spec_from_file_location("dgc_verify_doc", root / "scripts/verify.py")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return [f"docs/ai/workflow.md does not list Rust gate command: {shlex.join(argv)}"
+            for argv, _ in module.commands("rust", None, root)
+            if f"`{shlex.join(argv)}`" not in text]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -222,6 +233,7 @@ def main():
         catalog_errors, count = check_catalog(args.root)
         errors.extend(catalog_errors)
         errors.extend(check_ci(args.root))
+        errors.extend(check_workflow_doc(args.root))
     except (OSError, ValueError, IndexError) as error:
         print(f"Guidance check failed: {error}", file=sys.stderr)
         return 1

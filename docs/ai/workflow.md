@@ -50,9 +50,11 @@ are needed. Rust/search checks also need Cargo and ripgrep on PATH.
 | Cargo/dependencies/MSRV | Affected tests and builds | Rust gate, `msrv`, `tui-deps` when the TUI graph changes |
 
 `rust` runs `cargo fmt --all --check`,
-`cargo clippy --locked --all-targets --all-features -- -D warnings`, and
-`cargo test --locked`. Format with `cargo fmt --all` before running it.
-`msrv` uses the package's `rust-version` via `rustup run`; install the matching
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and
+`cargo test --locked --workspace`, covering the legacy package and `crates/*`.
+Format with `cargo fmt --all` before running it. `test` mode also passes
+`--workspace`. `msrv` runs `cargo check --locked --workspace` with the root
+package's `rust-version` via `rustup run`; install the matching
 toolchain separately when needed. A missing toolchain is an environment blocker.
 `macos` runs the CI's TUI/execution/jobs tests only on macOS. `tui-deps` verifies
 that the declared Crossterm backend is active and legacy 0.28 metadata is inactive.
