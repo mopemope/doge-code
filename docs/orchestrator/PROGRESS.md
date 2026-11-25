@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 9（実プロバイダの記録）
+- タスク: M1 Task 10（偽プロバイダ）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 9 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 10 Step 1（テスト `replays_send_and_expect` ほか）から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -55,7 +55,7 @@
 | 6 | クライアントと `dgc-next daemon` | 完了 | `feat(cli): add daemon lifecycle commands with autostart` |
 | 7 | プロジェクトとワークスペース | 完了 | `feat(daemon): manage projects and worktree workspaces` |
 | 8 | ProviderAdapter と AgentManager | 完了 | `feat(daemon): add agent state machine over provider adapters` |
-| 9 | 実プロバイダの記録（手動・トークン消費あり） | 未着手 | |
+| 9 | 実プロバイダの記録（手動・トークン消費あり） | 完了 | `test(daemon): record provider wire fixtures` |
 | 10 | 偽プロバイダ | 未着手 | |
 | 11 | ClaudeAdapter | 未着手 | |
 | 12 | CodexAdapter | 未着手 | |
@@ -197,6 +197,30 @@
   途切れなく来る間はコマンドが待たされる）。アダプタ契約（`provider/mod.rs`）に「interrupt 後に中断ターンの
   TurnCompleted/PermissionRequested を出さない」「全メソッドは有限時間で終わる」を追記。
 
+- 2026-11-25 (M1 Task 9): 実プロバイダの wire 形式を記録した（`crates/dgc-daemon/tests/fixtures/`、詳細と全形状は同 README の
+  Wire notes）。Claude 2.1.332 は stdio で権限要求を出せたので、設計書 §8.1 のフォールバック（`dgc-next permission-bridge`）は不要。
+  計画の「予想」との差分（実測を正とする）:
+  - Claude: `--permission-prompt-tool stdio` は `--help` に無いが**必須**。無いと承認が必要なツールはホストに問い合わせず自動拒否
+    （`system/permission_denied`）。`system/init` は起動時 1 回ではなく**ターンごと**に出る。`assistant` は content ブロック
+    ごとに 1 行。SessionStart フックの `system/hook_*` 行が initialize 応答より先に出うる。中断は `control_response`
+    `{"still_queued":[]}` → `[Request interrupted by user]` の user 行 → `result{subtype:"error_during_execution",is_error:true}`
+    で、プロセスは次のターンを受け付ける。不正モデルの `result` は **`subtype:"success"` かつ `is_error:true`**（成否は `is_error`
+    で判定）、stdin を閉じた後の終了コード 1。`--resume` は同じ `session_id` を継続。レート制限は `rate_limit_event`
+    （`rate_limit_info.status` 等）が API 呼び出しごとに出る。観測値は `allowed` のみ。
+  - Codex: メッセージに `jsonrpc` フィールドは無い（送らなくてよい）。通知はトップレベルに `emittedAtMs` を持つ。サーバー要求
+    （承認）の id は 0 始まりで dgc の要求 id と番号空間が別（`method` の有無で区別）。`on-request`+`workspace-write` では
+    ワークスペース内コマンドに承認要求が出ない（コマンド承認は `untrusted` で、ファイル変更承認は `on-request`+`read-only` で記録）。
+    コマンド承認の `availableDecisions` は `accept` / `acceptWithExecpolicyAmendment` / `cancel` で、`decline` と
+    `acceptForSession` は提示されなかった（Task 12 の Deny→`decline`、AllowForSession→`acceptForSession` はコマンドでは未検証）。
+    `item/fileChange/requestApproval` の params に差分は無く、同じ `itemId` の `item/started`（fileChange）の `changes` にある。
+    使用量は `turn/completed` ではなく `thread/tokenUsage/updated`。`account/rateLimits/updated` は制限に達していなくても毎応答出る
+    （到達判定は `rateLimitReachedType` 等で行う必要があるが、到達時の値は未観測）。中断・steer で途中の agentMessage には
+    `item/completed` が来ない。`thread/resume` は `excludeTurns: true` 推奨（無いと `deprecationNotice`）。不正モデルは
+    thread/start・turn/start とも成功し、ターン中に `error{codexErrorInfo:"modelNotFound",willRetry:false}` →
+    `turn/completed{status:"failed"}`。アクティブターン無しの steer/interrupt は JSON-RPC エラー `-32600`。
+  - 未観測: 両プロバイダのレート制限到達時の値、未ログイン時のエラー（ユーザーのログアウトはしない方針）、Claude の
+    `--permission-mode` 指定時と initialize 省略時の挙動、Codex のコマンド承認への `decline`/`acceptForSession`。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -277,6 +301,12 @@
   `stale_turn_completed_after_interrupt_is_ignored` と `stale_permission_request_after_interrupt_is_dropped` が FAIL、
   timeout を外す → `wedged_interrupt_fails_agent_and_archive_succeeds` と `hung_start_fails_agent` が FAIL、
   `biased;` を外す → `buffered_turn_completed_is_applied_before_a_later_command` が FAIL。
+
+- 2026-11-25 M1 Task 9（Linux、手動記録。Rust 変更なし）: Claude Code 2.1.332（`--model haiku`）で 8 ターン、Codex 0.172.0
+  （`gpt-6-luna`、`effort: low`）で 9 ターンを使い捨て git リポジトリ上で記録。自動承認系 mode は不使用。permission_deny /
+  file_change_decline で hello.txt が作られないこと、allow / accept で作られることを確認。記録後 `pgrep -af 'claude -p|codex app-server'`
+  で記録器が起動したプロセスが残っていないことを確認（残っていたのは記録前から動いていたユーザーの Codex 常駐デーモンのみ）。
+  フィクスチャをユーザー名・メール・`sk-`・`Bearer`・`/home/<実ユーザー>`・組織名・プラン名で grep し該当なし。
 
 ## 保留中の小さな改善
 
