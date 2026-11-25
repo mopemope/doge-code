@@ -1,0 +1,8 @@
+// SYNTHETIC (not recorded): a logged-out CLI was never recorded (the recording
+// policy forbids logging the user out). Models the worst case for startup: the
+// CLI reads `initialize`, writes a diagnostic to stderr and exits 1 without
+// answering. The adapter must fail `start` promptly with the stderr tail.
+{"expect_args":["-p","--input-format","stream-json","--output-format","stream-json","--verbose","--permission-prompt-tool","stdio"]}
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}
+{"stderr":"Not logged in · Please run /login"}
+{"exit":1}

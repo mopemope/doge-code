@@ -25,6 +25,8 @@
 //!   manager enforces bounds (`agent::ProviderTimeouts`): a call that exceeds
 //!   its bound fails the agent and the session is shut down.
 
+pub mod claude;
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;

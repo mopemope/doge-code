@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 11（ClaudeAdapter）
+- タスク: M1 Task 12（CodexAdapter）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 11 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 12 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -57,7 +57,7 @@
 | 8 | ProviderAdapter と AgentManager | 完了 | `feat(daemon): add agent state machine over provider adapters` |
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 完了 | `test(daemon): record provider wire fixtures` |
 | 10 | 偽プロバイダ | 完了 | `test(daemon): add scenario-replay fake provider` |
-| 11 | ClaudeAdapter | 未着手 | |
+| 11 | ClaudeAdapter | 完了 | `feat(daemon): drive Claude Code over stream-json` |
 | 12 | CodexAdapter | 未着手 | |
 | 13 | エージェント操作の公開（ソケットと CLI） | 未着手 | |
 | 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 未着手 | |
@@ -224,6 +224,19 @@
   ブリーフ外の追加: `expect_args`（argv の順序付き部分列、`${ANY}` 可、先頭行のみ、不一致 exit 3）、`expect_eof`、`//` コメント行、
   環境変数 `DGC_FAKE_TIMEOUT_MS`（既定 10 s、超過 exit 4）。exit 2 は形式エラー、5 は stdio 失敗。
   アダプタ用シナリオは Task 11/12 で `tests/fixtures/` 配下に書く（ブリーフの `*/scenarios/` ではなく、本タスクの自前シナリオは `fake/`）。
+- 2026-11-25 (M1 Task 11): 依存クレートの追加なし。`provider/claude.rs` の `ClaudeAdapter`（wire 型は同ファイルの `mod wire`）。
+  イベント対応はモジュール doc に記載: `system/init`（毎ターン）→ `SessionStarted`、`assistant` の text ブロック →
+  `AssistantText{final:true}`、tool_use → `tool_call`（要約は `command`/`file_path`/`notebook_path`/`path` のいずれか、無ければ
+  input の compact JSON）、`user` の tool_result → `tool_result`、`result` → `TurnCompleted{usage}`（`is_error:true` なら先に
+  `Error`。文言は `result` 文字列、無ければ subtype/terminal_reason）、`rate_limit_event` は破棄（`RateLimited` は TODO(M4)）、
+  16 MiB 超の行 → `Error` で継続、未知の type はログに type のみ。`can_use_tool` 以外の control_request には
+  `{"subtype":"error"}` の control_response を返す（Agent SDK の形。未記録）。
+  中断: 未回答の権限要求に deny を返してから `interrupt` を送り、応答時点で応答待ちのターン数だけ後続の `result` を捨てる
+  （その間の `can_use_tool` は deny で自動回答し通知しない）。中断されたターンも必ず `result` を 1 つ出す前提（記録どおり）。
+  `start` は initialize を 20 秒で打ち切り、起動中にプロセスが終わったら stderr 末尾を含む `ProviderError::Spawn` を返す。
+  `shutdown` は stdin を閉じて最大 1 秒待ち、残っていれば `terminate(2 秒)`。セッション drop でプロセスグループを kill する。
+  シナリオ `tests/fixtures/claude/scenarios/*.jsonl` は記録から機械変換（dgc が振る control request id を `${ANY}` + capture）。
+  `login_error.jsonl` と `crash_mid_turn.jsonl` の終わり方は合成（未ログインは未記録のため、initialize を読んで stderr に出して exit 1）。
 
 ## 検証記録
 
