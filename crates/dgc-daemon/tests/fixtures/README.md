@@ -75,7 +75,7 @@ codex app-server        # stdio JSON-RPC（--listen stdio:// が既定）
 | `codex/command_approval_accept.jsonl` | **untrusted** / workspace-write | 「`touch hello.txt` を実行」→ `item/commandExecution/requestApproval` に `accept` → 実行 |
 | `codex/command_on_request_no_approval.jsonl` | on-request / workspace-write | 参考: 同じ依頼で承認要求が**出ない**ことの記録（サンドボックス内で実行される） |
 | `codex/file_change_decline.jsonl` | on-request / **read-only** | 「apply_patch で hello.txt を作成」→ `item/fileChange/requestApproval` に `decline` → 作成されず |
-| `codex/interrupt.jsonl` | on-request / workspace-write | 長文生成 → 最初の delta の 1 秒後に `turn/interrupt` |
+| `codex/interrupt.jsonl` | on-request / workspace-write | 長文生成 → 最初の delta から 1 秒待って `turn/interrupt`（その時点で delta 74 個受信済み: 38〜111 行目、interrupt は 112 行目） |
 | `codex/steer.jsonl` | on-request / workspace-write | 果物 40 個の列挙 → 最初の delta 直後に `turn/steer`（「steered とだけ返せ」）|
 | `codex/resume.jsonl` | （resume 時は指定せず） | 前プロセスで BLUEFISH を覚えさせた thread を新プロセスで `thread/resume` → 1 ターン |
 | `codex/resume_exclude_turns.jsonl` | 同上 | 参考: `thread/resume` に `excludeTurns: true` を付けた場合（ターンは実行しない） |
@@ -120,12 +120,12 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
    `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]},"parent_tool_use_id":null,"session_id":""}`
    （記録では Agent SDK と同じく `parent_tool_use_id` と `session_id:""` を付けた。これらを省いた形は未確認。）
 5. CLI → `{"type":"system","subtype":"init","session_id":"<uuid>","cwd":"/WORKSPACE","model":"claude-haiku-5-5","permissionMode":"default","tools":[..],"claude_code_version":"2.1.332",...}`。
-   **ユーザー入力ごと（ターンごと）に毎回出る**（プロセス起動時に 1 回ではない）。`session_id` は全メッセージに付く。
+   **ユーザー入力ごと（ターンごと）に毎回出る**（プロセス起動時に 1 回ではない）。`session_id` は `control_request` / `control_response` 以外の全メッセージに付く（制御メッセージには付かない）。
 6. CLI → 0 個以上の `{"type":"system","subtype":"thinking_tokens","estimated_tokens":N,"estimated_tokens_delta":N,...}`（無視可）。
 7. CLI → `assistant` メッセージ。**content ブロック 1 つにつき 1 行**（thinking / tool_use / text が別の行で、
    同じ `message.id` を共有する）。`message.content[].type` は `thinking`（`thinking` は空文字、`signature` あり）、
-   `tool_use`（`id`, `name`, `input`, `caller`）、`text`（`text`）。`message.stop_reason` は常に `null`
-   （確定値は `result` 側）。トップレベルに `session_id`, `uuid`, `timestamp`, `request_id`, `parent_tool_use_id`。
+   `tool_use`（`id`, `name`, `input`, `caller`）、`text`（`text`）。通常の行の `message.stop_reason` は `null`
+   （確定値は `result` 側）。ただし不正モデル時の合成エラー行（`message.model:"<synthetic>"`）は `"stop_sequence"`（`error.jsonl` 9 行目）。トップレベルに `session_id`, `uuid`, `timestamp`, `request_id`, `parent_tool_use_id`。
 8. CLI → `{"type":"rate_limit_event","rate_limit_info":{...}}`（API 呼び出しごと。下記）。
 9. ツール実行後 CLI → `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_..","content":"..","is_error":false}]},"tool_use_result":{..},"tool_result_meta":[{"id":"toolu_..","permission_decision":{"decision":"accept","source":"user_temporary"}}],...}`。
 10. CLI → `result`（**ターン終了の唯一の合図**）:
@@ -270,8 +270,11 @@ dgc → `{"method":"turn/start","id":3,"params":{"threadId":"..","input":[{"type
    — **使用量はここで来る**（`turn/completed` には含まれない）。モデル応答ごとに出る。
 9. `account/rateLimits/updated`（下記）
 10. `thread/status/changed {status:{type:"idle"}}`
-11. **`turn/completed {threadId, turn:{id, status, error, items, itemsView:"summary", startedAt, completedAt, durationMs}}` がターン終了の合図**。
+11. **`turn/completed {threadId, turn:{id, status, error, items, itemsView, startedAt, completedAt, durationMs}}` がターン終了の合図**。
     `turn.status`: `"completed"` / `"interrupted"`（中断）/ `"failed"`（`turn.error` にエラー）。
+    正常完了では `itemsView:"summary"` で `items` に agentMessage が入るが、中断・失敗では `itemsView:"notLoaded"`, `items:[]`
+    （`interrupt.jsonl` 116 行目、`error.jsonl` 45 行目）。**アダプタは `turn/completed` の `items` に依存しないこと**
+    （本文は `item/*` 通知から組み立てる）。
 
 コマンド実行は `item.type:"commandExecution"`（`command:"/usr/bin/bash -lc 'touch hello.txt'"`, `cwd`, `status:"inProgress"→"completed"`,
 `exitCode`, `aggregatedOutput`, `commandActions`）、ファイル変更は `item.type:"fileChange"`
@@ -324,8 +327,12 @@ dgc → `{"method":"turn/interrupt","id":4,"params":{"threadId":"..","turnId":".
 dgc → `{"method":"turn/steer","id":4,"params":{"threadId":"..","expectedTurnId":"<現ターン id>","input":[{"type":"text","text":".."}]}}`
 → `{"id":4,"result":{"turnId":"<同じターン id>"}}`。
 
-同じターンの中で、追加入力が新しい `userMessage` item として現れ、新しい `agentMessage` item が始まる。
-steer 前に流れていた agentMessage（17 delta 受信済み）には `item/completed` が来ない。`turn/completed` は 1 回だけで、
+`steer.jsonl` の順序: 旧 agentMessage の `item/started`（37 行目）→ delta 1 個（38 行目）→ `turn/steer` 送信（39 行目）→
+旧 item の delta（40 行目）→ steer の応答 `{turnId}`（41 行目）→ **応答の後も旧 item の delta が続く**（42〜56 行目。送信後に計 16 個、
+旧 item 全体で 17 個）→ `thread/tokenUsage/updated` 等 → 追加入力が新しい `userMessage` item（61〜62 行目）→ 新しい `agentMessage`
+item（63 行目、delta 64〜65 行目）→ 新 item だけの `item/completed`（66 行目）。
+**旧 item には `item/completed` が来ない**。steer 応答で旧 item のストリームが止まると仮定せず、delta は `itemId` ごとに束ね、
+旧 item は完了通知なしで終わるものとして扱うこと。`turn/completed` は 1 回だけで、
 `turn.id` は元のまま。アクティブなターンが無いときは `{"error":{"code":-32600,"message":"no active turn to steer"},"id":3}`。
 
 ### Resume
