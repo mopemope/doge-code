@@ -6,6 +6,10 @@
 // capture. Server-request ids (0, ...) are the recorded ones. turn/start's recorded
 // `effort` (used only to keep the recording cheap) is not expected, and thread/start's
 // `cwd` is ${ANY} (the recording ran in /WORKSPACE).
+// EDITED 2026-11-26: thread/resume also expects `approvalPolicy`/`sandbox` (the
+// recording resumed without them; dgc now always sends the mode's policy, here the
+// default workspace-write / on-request, so a resumed thread cannot keep a stored
+// auto-approve policy). Both fields are in the 0.172.0 ThreadResumeParams schema.
 {"expect_args":["app-server"]}
 {"expect":{"method":"initialize","id":"${ANY}","params":{"clientInfo":{"name":"dgc","title":"dgc","version":"0.1.0"}}}}
 {"capture":"r1","path":"/id"}
@@ -14,7 +18,7 @@
 {"send":{"method":"configWarning","params":{"summary":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled.","details":null},"emittedAtMs":1795597514937}}
 {"send":{"method":"configWarning","params":{"summary":"Codex is ignoring 5 unrecognized configuration settings. Check for typos or deprecated settings.\n  user (/home/USER/.codex/config.toml): `features.rmcp_client` is ignored.\n  user (/home/USER/.codex/config.toml): `memories.approval_policy` is ignored.\n  user (/home/USER/.codex/config.toml): `memories.approvals_reviewer` is ignored.\n  ... and 2 more ignored settings.","details":null},"emittedAtMs":1795597514937}}
 {"send":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"HOSTNAME","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1795597514937}}
-{"expect":{"method":"thread/resume","id":"${ANY}","params":{"threadId":"01a211f3-13c3-7ca1-94f9-426849436da7","model":"gpt-6-luna","excludeTurns":true}}}
+{"expect":{"method":"thread/resume","id":"${ANY}","params":{"threadId":"01a211f3-13c3-7ca1-94f9-426849436da7","model":"gpt-6-luna","excludeTurns":true,"approvalPolicy":"on-request","sandbox":"workspace-write"}}}
 {"capture":"r2","path":"/id"}
 {"send":{"method":"warning","params":{"threadId":"01a211f3-13c3-7ca1-94f9-426849436da7","message":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled."},"emittedAtMs":1795597515228}}
 {"send":{"method":"warning","params":{"threadId":"01a211f3-13c3-7ca1-94f9-426849436da7","message":"Codex is ignoring 5 unrecognized configuration settings. Check for typos or deprecated settings.\n  user (/home/USER/.codex/config.toml): `features.rmcp_client` is ignored.\n  user (/home/USER/.codex/config.toml): `memories.approval_policy` is ignored.\n  user (/home/USER/.codex/config.toml): `memories.approvals_reviewer` is ignored.\n  ... and 2 more ignored settings."},"emittedAtMs":1795597515228}}

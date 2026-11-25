@@ -509,7 +509,9 @@ async fn codex_steer_rejected_on_ended_turn_returns_false() {
 async fn codex_resume_calls_thread_resume() {
     let dir = tempdir().expect("tempdir");
     let thread = "01a211f3-13c3-7ca1-94f9-426849436da7";
-    // The scenario expects thread/resume {threadId, model, excludeTurns: true}.
+    // The scenario expects thread/resume {threadId, model, excludeTurns: true,
+    // approvalPolicy: "on-request", sandbox: "workspace-write"}: the default
+    // mode's policy is sent even though no mode was given.
     let adapter = fake_adapter("resume");
     let mut session = start(&adapter, spec(&dir, None, Some(thread))).await;
     session

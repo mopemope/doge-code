@@ -332,6 +332,9 @@
   Deny → `{permissions:{}, scope:"turn"}`（interrupt 時の自動拒否も同じ）。形は codex-cli 0.172.0 の
   `app-server generate-json-schema` 由来で実機記録なし（合成シナリオ 2 本）。`mcpServer/elicitation/request` は M1 では
   従来どおり -32601 で拒否し `Error` イベントを出す。
+- 2026-11-26 (M1 最終レビュー修正 5): Codex の `thread/resume` は mode の有無に関わらず `approvalPolicy` / `sandbox` を送る
+  （`--mode` なしは既定の `workspace-write` / `on-request`。保存された policy を黙って引き継がない）。記録由来の
+  `scenarios/resume.jsonl` の `thread/resume` 期待行に両フィールドを足し、ヘッダに EDITED 注記を付けた。
 
 ## 検証記録
 

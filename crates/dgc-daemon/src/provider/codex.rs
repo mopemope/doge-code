@@ -14,12 +14,14 @@
 //!   that asks before commands.
 //! - `start` spawns `codex app-server`, sends `initialize` and `initialized`,
 //!   then `thread/start {cwd, approvalPolicy, sandbox, model?}` or, to resume,
-//!   `thread/resume {threadId, model?, excludeTurns: true}` in a new process
-//!   (`excludeTurns` avoids the full-history `deprecationNotice` and the
-//!   replay of old turns; dgc does not read them). On resume the thread keeps
-//!   its stored policy and sandbox unless a mode is given, in which case
-//!   `approvalPolicy`/`sandbox` are sent too (in the 0.172.0 schema, not
-//!   recorded). The thread id is reported as `SessionStarted`. If the server
+//!   `thread/resume {threadId, model?, excludeTurns: true, approvalPolicy,
+//!   sandbox}` in a new process (`excludeTurns` avoids the full-history
+//!   `deprecationNotice` and the replay of old turns; dgc does not read them).
+//!   The policy and sandbox of the agent's mode (the default
+//!   `workspace-write` / `on-request` when none is given) are always sent on
+//!   resume, so the thread never keeps a stored policy the agent does not
+//!   show (in the 0.172.0 schema, not recorded). The thread id is reported as
+//!   `SessionStarted`. If the server
 //!   exits during startup the error carries its stderr tail.
 //! - Requests: dgc's ids increase from 1. Every request waits for its
 //!   response for at most [`RPC_TIMEOUT`]. Incoming lines are classified by
@@ -547,11 +549,15 @@ impl CodexSession {
             .await?;
         let (rpc, mut params) = match &spec.resume_session_id {
             Some(thread_id) => {
-                let mut params = json!({"threadId": thread_id, "excludeTurns": true});
-                if spec.mode.is_some() {
-                    params["approvalPolicy"] = json!(policy.approval);
-                    params["sandbox"] = json!(policy.sandbox);
-                }
+                // The policy is always sent (the default mode's when none is
+                // given), so a resumed thread never keeps a stored policy the
+                // agent record does not show.
+                let params = json!({
+                    "threadId": thread_id,
+                    "excludeTurns": true,
+                    "approvalPolicy": policy.approval,
+                    "sandbox": policy.sandbox,
+                });
                 (Rpc::ThreadResume, params)
             }
             None => {
