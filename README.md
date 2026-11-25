@@ -105,7 +105,10 @@ Agents:
   [--session]` and `dgc-next permit deny ID` answer one. Requests stay pending
   until answered, interrupted, or the daemon stops. A summary longer than 4 KiB
   is cut and ends with `…(truncated, N bytes total)`; the full request is in
-  `permit ls --json` (`raw`, up to 64 KiB).
+  `permit ls --json` (`raw`, up to 64 KiB). A Codex request for extra sandbox
+  permissions (network access, file system paths) is listed with kind `other`
+  and a `permissions: ...` summary; `allow` grants them for the turn,
+  `allow --session` for the session, `deny` grants none.
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).

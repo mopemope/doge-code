@@ -63,9 +63,12 @@
 //!   - `item/commandExecution/requestApproval` → `PermissionRequested`
 //!     (Command; summary = the command), `item/fileChange/requestApproval` →
 //!     FileChange (summary = the changes of the item's `item/started`; the
-//!     request has no diff). `provider_request_id` is the server's request id
-//!     as JSON text (e.g. `"0"`). Other server requests get the JSON-RPC
-//!     error -32601 and an `Error` event naming the method.
+//!     request has no diff), `item/permissions/requestApproval` → Other
+//!     (summary = `permissions: <network access / read|write paths>
+//!     (reason: ...)`; schema-derived, not recorded). `provider_request_id` is
+//!     the server's request id as JSON text (e.g. `"0"`). Other server
+//!     requests (e.g. `mcpServer/elicitation/request`) get the JSON-RPC error
+//!     -32601 and an `Error` event naming the method.
 //!   - `account/rateLimits/updated` arrives with every reply and is dropped.
 //!     TODO(M4): emit `RateLimited` once a reached-limit sample is recorded
 //!     (`rateLimitReachedType != null` is the unconfirmed candidate).
@@ -76,7 +79,9 @@
 //!   `accept`; Deny → `decline` if offered, else `cancel`. `cancel` also
 //!   interrupts the turn on Codex's side (its `turn/completed` then arrives
 //!   with status `interrupted` and is delivered). File-change requests carry
-//!   no list, so Deny is `decline` there.
+//!   no list, so Deny is `decline` there. Permission-profile requests answer
+//!   `{permissions, scope}`: Allow grants the requested profile with scope
+//!   `turn`, AllowForSession with scope `session`, Deny grants `{}`.
 //! - The session owns the process group: dropping it kills the group.
 //!   `shutdown` closes stdin, waits briefly and then terminates. Stdout EOF
 //!   plus the exit status yields one `Exited`, unless `shutdown` caused it.
@@ -161,6 +166,12 @@ mod wire {
     /// Answer to an approval request.
     pub(super) fn decision(id: &Value, decision: &str) -> Value {
         json!({"id": id, "result": {"decision": decision}})
+    }
+
+    /// Answer to `item/permissions/requestApproval`: the granted profile and
+    /// its scope (`turn` or `session`).
+    pub(super) fn permissions_grant(id: &Value, permissions: &Value, scope: &str) -> Value {
+        json!({"id": id, "result": {"permissions": permissions, "scope": scope}})
     }
 
     /// Answer to a server request dgc does not handle.
@@ -304,15 +315,32 @@ struct Approval {
     /// The server's request id, echoed in the answer.
     server_id: Value,
     turn_id: String,
-    /// String entries of `availableDecisions`, when the request has the list.
-    offered: Option<Vec<String>>,
+    request: ApprovalRequest,
+}
+
+/// What kind of answer the server expects.
+enum ApprovalRequest {
+    /// Command / file-change approval, answered with `{decision}`.
+    Decision {
+        /// String entries of `availableDecisions`, when the request has the list.
+        offered: Option<Vec<String>>,
+    },
+    /// `item/permissions/requestApproval`, answered with the granted
+    /// permission profile and its scope.
+    Permissions {
+        /// The request's `permissions` profile.
+        requested: Value,
+    },
 }
 
 impl Approval {
     fn offers(&self, decision: &str) -> bool {
-        self.offered
-            .as_ref()
-            .is_none_or(|offered| offered.iter().any(|d| d == decision))
+        match &self.request {
+            ApprovalRequest::Decision { offered } => offered
+                .as_ref()
+                .is_none_or(|offered| offered.iter().any(|d| d == decision)),
+            ApprovalRequest::Permissions { .. } => false,
+        }
     }
 
     fn decision(&self, d: Decision) -> &'static str {
@@ -322,6 +350,22 @@ impl Approval {
             Decision::AllowForSession => "accept",
             Decision::Deny if self.offers("decline") => "decline",
             Decision::Deny => "cancel",
+        }
+    }
+
+    /// The JSON-RPC response that answers this request with `d`.
+    /// Permissions: Allow grants the requested profile for the turn,
+    /// AllowForSession for the session, Deny grants nothing.
+    fn answer(&self, d: Decision) -> Value {
+        match &self.request {
+            ApprovalRequest::Decision { .. } => wire::decision(&self.server_id, self.decision(d)),
+            ApprovalRequest::Permissions { requested } => match d {
+                Decision::Allow => wire::permissions_grant(&self.server_id, requested, "turn"),
+                Decision::AllowForSession => {
+                    wire::permissions_grant(&self.server_id, requested, "session")
+                }
+                Decision::Deny => wire::permissions_grant(&self.server_id, &json!({}), "turn"),
+            },
         }
     }
 }
@@ -667,10 +711,7 @@ impl ProviderSession for CodexSession {
                 // Outstanding requests are cancelled; answer them so the
                 // server does not wait on them.
                 for approval in &outstanding {
-                    let decision = approval.decision(Decision::Deny);
-                    self.shared
-                        .write(&wire::decision(&approval.server_id, decision))
-                        .await?;
+                    self.shared.write(&approval.answer(Decision::Deny)).await?;
                 }
                 let params = json!({"threadId": self.thread_id, "turnId": turn_id});
                 let rpc = Rpc::TurnInterrupt {
@@ -705,9 +746,7 @@ impl ProviderSession for CodexSession {
                 .approvals
                 .remove(provider_request_id)
                 .ok_or_else(|| ProviderError::Protocol("unknown permission request".to_owned()))?;
-            self.shared
-                .write(&wire::decision(&approval.server_id, approval.decision(d)))
-                .await
+            self.shared.write(&approval.answer(d)).await
         })
     }
 
@@ -1150,6 +1189,7 @@ async fn server_request(
     let kind = match method {
         "item/commandExecution/requestApproval" => PermissionKind::Command,
         "item/fileChange/requestApproval" => PermissionKind::FileChange,
+        "item/permissions/requestApproval" => PermissionKind::Other,
         _ => {
             debug!(method, "refusing unsupported codex server request");
             if let Err(error) = shared.write(&wire::method_not_found(id)).await {
@@ -1161,15 +1201,23 @@ async fn server_request(
         }
     };
     let provider_request_id = id.to_string();
+    let request = match kind {
+        PermissionKind::Other => ApprovalRequest::Permissions {
+            requested: params["permissions"].clone(),
+        },
+        _ => ApprovalRequest::Decision {
+            offered: params["availableDecisions"].as_array().map(|decisions| {
+                decisions
+                    .iter()
+                    .filter_map(|d| d.as_str().map(str::to_owned))
+                    .collect()
+            }),
+        },
+    };
     let approval = Approval {
         server_id: id.clone(),
         turn_id: params["turnId"].as_str().unwrap_or("").to_owned(),
-        offered: params["availableDecisions"].as_array().map(|decisions| {
-            decisions
-                .iter()
-                .filter_map(|d| d.as_str().map(str::to_owned))
-                .collect()
-        }),
+        request,
     };
     {
         let mut state = shared.state();
@@ -1183,6 +1231,7 @@ async fn server_request(
                     .map(str::to_owned)
                     .or_else(|| item.map(|item| item.summary.clone()))
                     .unwrap_or_else(|| "command".to_owned()),
+                PermissionKind::Other => permissions_summary(params),
                 _ => item
                     .map(|item| item.summary.clone())
                     .filter(|summary| !summary.is_empty())
@@ -1201,14 +1250,57 @@ async fn server_request(
     }
     // The turn is being interrupted: the request is cancelled.
     debug!(request_id = %provider_request_id, "cancelling approval request of interrupted codex turn");
-    let decision = approval.decision(Decision::Deny);
-    if let Err(error) = shared
-        .write(&wire::decision(&approval.server_id, decision))
-        .await
-    {
+    if let Err(error) = shared.write(&approval.answer(Decision::Deny)).await {
         debug!(%error, "could not cancel codex approval request");
     }
     Vec::new()
+}
+
+/// `permissions: <what>[, <what>...] (reason: <reason>)` for an
+/// `item/permissions/requestApproval`: `network access`, `read|write <path>`
+/// for the legacy lists and `<access> <path>` for `entries` (a glob pattern,
+/// or a special path's kind and subpath). The caller bounds the length.
+fn permissions_summary(params: &Value) -> String {
+    let profile = &params["permissions"];
+    let mut parts: Vec<String> = Vec::new();
+    if profile["network"]["enabled"].as_bool() == Some(true) {
+        parts.push("network access".to_owned());
+    }
+    let file_system = &profile["fileSystem"];
+    for access in ["read", "write"] {
+        for path in file_system[access].as_array().into_iter().flatten() {
+            if let Some(path) = path.as_str() {
+                parts.push(format!("{access} {path}"));
+            }
+        }
+    }
+    for entry in file_system["entries"].as_array().into_iter().flatten() {
+        let access = entry["access"].as_str().unwrap_or("?");
+        let path = &entry["path"];
+        let target = match path["type"].as_str() {
+            Some("path") => path["path"].as_str().unwrap_or("?").to_owned(),
+            Some("glob_pattern") => path["pattern"].as_str().unwrap_or("?").to_owned(),
+            Some("special") => {
+                let value = &path["value"];
+                let kind = value["kind"].as_str().unwrap_or("?");
+                let named = value["path"].as_str().unwrap_or(kind);
+                match value["subpath"].as_str() {
+                    Some(sub) => format!("{named}/{sub}"),
+                    None => named.to_owned(),
+                }
+            }
+            _ => path.to_string(),
+        };
+        parts.push(format!("{access} {target}"));
+    }
+    if parts.is_empty() {
+        parts.push("(none listed)".to_owned());
+    }
+    let mut summary = format!("permissions: {}", parts.join(", "));
+    if let Some(reason) = params["reason"].as_str().filter(|r| !r.is_empty()) {
+        summary.push_str(&format!(" (reason: {reason})"));
+    }
+    summary
 }
 
 #[cfg(test)]
@@ -1229,6 +1321,45 @@ mod tests {
                 other => panic!("unexpected event {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn permission_grant_answers_follow_the_schema() {
+        let requested = serde_json::json!({"network": {"enabled": true}});
+        let approval = Approval {
+            server_id: serde_json::json!(7),
+            turn_id: "t".to_owned(),
+            request: ApprovalRequest::Permissions {
+                requested: requested.clone(),
+            },
+        };
+        assert_eq!(
+            approval.answer(Decision::Allow),
+            serde_json::json!({"id": 7, "result": {"permissions": requested, "scope": "turn"}})
+        );
+        assert_eq!(
+            approval.answer(Decision::AllowForSession),
+            serde_json::json!({"id": 7, "result": {"permissions": requested, "scope": "session"}})
+        );
+        assert_eq!(
+            approval.answer(Decision::Deny),
+            serde_json::json!({"id": 7, "result": {"permissions": {}, "scope": "turn"}})
+        );
+    }
+
+    #[test]
+    fn command_decisions_use_the_offered_list() {
+        let approval = Approval {
+            server_id: serde_json::json!(0),
+            turn_id: "t".to_owned(),
+            request: ApprovalRequest::Decision {
+                offered: Some(vec!["accept".to_owned(), "cancel".to_owned()]),
+            },
+        };
+        let decision = |d| approval.answer(d)["result"]["decision"].clone();
+        assert_eq!(decision(Decision::Allow), "accept");
+        assert_eq!(decision(Decision::AllowForSession), "accept");
+        assert_eq!(decision(Decision::Deny), "cancel");
     }
 
     #[test]

@@ -405,6 +405,7 @@ stderr にはモデルエラーは出ない。stderr には tracing ログ（ANS
 | `turn/interrupt{threadId, turnId}` | 確認。応答 `{}`、`turn/completed` が `status:"interrupted"` |
 | `item/commandExecution/requestApproval` → `{decision:"accept"}` | 確認（`untrusted` policy で発生。`on-request`+`workspace-write` では発生せず） |
 | `item/fileChange/requestApproval` → `{decision:"decline"}` | 確認（`on-request`+`read-only` で発生）。差分は params に無く item/started 側 |
+| `item/permissions/requestApproval` → `{permissions, scope}` | **未記録**（2026-11-26 にスキーマ `PermissionsRequestApprovalParams`/`Response` から実装）。params は `{threadId, turnId, itemId, cwd, reason?, permissions:{fileSystem?:{read?,write?,entries?}, network?:{enabled?}}, startedAtMs}`、応答は `{permissions:<許可するプロファイル>, scope:"turn"\|"session"}`。合成シナリオ `scenarios/permissions_approval_{session,deny}.jsonl` |
 | 決定値 `accept|acceptForSession|decline|cancel` | スキーマ上は存在。ただし記録したコマンド承認の `availableDecisions` は `accept`, `acceptWithExecpolicyAmendment`, `cancel` のみで、**`decline` と `acceptForSession` は提示されなかった**。コマンドへの `decline`、および `acceptForSession` は未検証 |
 | 通知 `turn/started`, `item/agentMessage/delta`, `item/started`, `item/completed`, `turn/completed`, `error`, `account/rateLimits/updated` | すべて確認。`account/rateLimits/updated` は毎応答出る。使用量は `thread/tokenUsage/updated` |
 | サーバー要求 id | 予想に記載なし。**0 から始まり dgc の要求 id と番号空間が別** |

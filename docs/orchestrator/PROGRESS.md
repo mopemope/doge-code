@@ -326,6 +326,12 @@
   欄で別の行を装えないように）で制御文字を `\r` `\t` `\x1b` `\u{9b}` に、双方向制御文字（U+200E/F、U+061C、U+202A–E、
   U+2066–9）を `\u{..}` にする（双方向制御は brief の範囲外だが、表示と承認内容のずれを防ぐ同じ目的のため含めた）。
   `truncate_summary` は切ったとき末尾に `…(truncated, N bytes total)` を付け、印を含めて 4 KiB 以内に収める。
+- 2026-11-26 (M1 最終レビュー修正 4): Codex の `item/permissions/requestApproval` を `PermissionKind::Other` として中継する
+  （要約は `permissions: network access, write <path>, <access> <entry> (reason: ...)`、`truncate_summary` で上限付き、表示は修正 3 の
+  エスケープ）。応答はスキーマどおり Allow → `{permissions:<要求どおり>, scope:"turn"}`、AllowForSession → `scope:"session"`、
+  Deny → `{permissions:{}, scope:"turn"}`（interrupt 時の自動拒否も同じ）。形は codex-cli 0.172.0 の
+  `app-server generate-json-schema` 由来で実機記録なし（合成シナリオ 2 本）。`mcpServer/elicitation/request` は M1 では
+  従来どおり -32601 で拒否し `Error` イベントを出す。
 
 ## 検証記録
 

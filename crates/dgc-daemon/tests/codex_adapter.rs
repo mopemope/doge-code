@@ -546,6 +546,52 @@ async fn codex_unknown_server_request_is_rejected() {
     shutdown_quietly(session).await;
 }
 
+/// Synthetic (shapes from the 0.172.0 schema): `item/permissions/requestApproval`
+/// becomes an `Other` permission request; `decision` is answered per the
+/// response schema, which the scenario checks.
+async fn permissions_request(scenario: &str, decision: Decision) {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter(scenario);
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let events = until_permission(&mut session).await;
+    let Some(ProviderEvent::PermissionRequested {
+        provider_request_id,
+        kind,
+        summary,
+        raw,
+    }) = events.last()
+    else {
+        panic!("expected PermissionRequested, got {events:?}");
+    };
+    assert_eq!(provider_request_id, "0");
+    assert_eq!(*kind, PermissionKind::Other);
+    assert_eq!(
+        summary,
+        "permissions: network access, write /WORKSPACE/../outside, read tmpdir \
+         (reason: need to fetch deps)"
+    );
+    assert_eq!(raw["permissions"]["network"]["enabled"], true);
+    session
+        .respond_permission(provider_request_id, decision)
+        .await
+        .expect("respond");
+    let events = turn_events(&mut session).await;
+    assert_eq!(events[0], text("pong", true), "{events:?}");
+    assert!(matches!(events[1], ProviderEvent::TurnCompleted { .. }));
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_permissions_request_allow_for_session_grants_requested() {
+    permissions_request("permissions_approval_session", Decision::AllowForSession).await;
+}
+
+#[tokio::test]
+async fn codex_permissions_request_deny_grants_nothing() {
+    permissions_request("permissions_approval_deny", Decision::Deny).await;
+}
+
 #[tokio::test]
 async fn codex_failed_turn_reports_error_and_completes() {
     let dir = tempdir().expect("tempdir");
