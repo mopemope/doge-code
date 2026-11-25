@@ -1,0 +1,6 @@
+// Sends ready, expects a hello (subset match), replies, then exits 7.
+{"send":{"type":"ready"}}
+{"expect":{"type":"hello"}}
+{"send":{"type":"world","n":[1,2]}}
+{"stderr":"scenario says bye"}
+{"exit":7}

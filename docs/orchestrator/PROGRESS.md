@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 10（偽プロバイダ）
+- タスク: M1 Task 11（ClaudeAdapter）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 10 Step 1（テスト `replays_send_and_expect` ほか）から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 11 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -56,7 +56,7 @@
 | 7 | プロジェクトとワークスペース | 完了 | `feat(daemon): manage projects and worktree workspaces` |
 | 8 | ProviderAdapter と AgentManager | 完了 | `feat(daemon): add agent state machine over provider adapters` |
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 完了 | `test(daemon): record provider wire fixtures` |
-| 10 | 偽プロバイダ | 未着手 | |
+| 10 | 偽プロバイダ | 完了 | `test(daemon): add scenario-replay fake provider` |
 | 11 | ClaudeAdapter | 未着手 | |
 | 12 | CodexAdapter | 未着手 | |
 | 13 | エージェント操作の公開（ソケットと CLI） | 未着手 | |
@@ -220,6 +220,10 @@
     `turn/completed{status:"failed"}`。アクティブターン無しの steer/interrupt は JSON-RPC エラー `-32600`。
   - 未観測: 両プロバイダのレート制限到達時の値、未ログイン時のエラー（ユーザーのログアウトはしない方針）、Claude の
     `--permission-mode` 指定時と initialize 省略時の挙動、Codex のコマンド承認への `decline`/`acceptForSession`。
+- 2026-11-25 (M1 Task 10): `dgc-fake-provider`（`src/bin/`、同期、serde_json のみ）の形式は `crates/dgc-daemon/tests/fixtures/fake/README.md`。
+  ブリーフ外の追加: `expect_args`（argv の順序付き部分列、`${ANY}` 可、先頭行のみ、不一致 exit 3）、`expect_eof`、`//` コメント行、
+  環境変数 `DGC_FAKE_TIMEOUT_MS`（既定 10 s、超過 exit 4）。exit 2 は形式エラー、5 は stdio 失敗。
+  アダプタ用シナリオは Task 11/12 で `tests/fixtures/` 配下に書く（ブリーフの `*/scenarios/` ではなく、本タスクの自前シナリオは `fake/`）。
 
 ## 検証記録
 
