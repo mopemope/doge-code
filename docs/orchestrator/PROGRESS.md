@@ -252,7 +252,7 @@
   - 受信行は形で分類（`method`+`id` = サーバー要求、`method` のみ = 通知、`result`/`error` のみ = dgc の要求への応答）。
     dgc の要求 id は 1 から単調増加、各要求は `RPC_TIMEOUT`（20 秒）で打ち切り。
   - ターンは id で追跡（`turn/start` の `result.turn.id` / `turn/started`）。steer は実行中ターンがあれば
-    `turn/steer{expectedTurnId}` で true、無ければ送らず false（ターン終了と競合して拒否された場合も false）。
+    `turn/steer{expectedTurnId}` で true、無ければ送らず false（ターン終了で拒否された場合も false。-32600 は `turn/completed` より先に来うるので、コードで判定する。修正 1）。
     interrupt は実行中ターンが無ければ何も送らない。あればそのターンの未回答承認に Deny 対応の値（`cancel`/`decline`）を返してから
     `turn/interrupt{turnId}`。応答（`{}`、またはターンが先に終わった場合の -32600）後はそのターン id の `turn/completed`・通知・承認を
     破棄する（承認は同様に自動回答）。他のターンには影響しない。
@@ -374,6 +374,13 @@
   新 item 開始時の旧 item の flush を外す → steer テスト FAIL、未回答承認の cancel を外す → `codex_interrupt_cancels_pending_approval` FAIL、
   エラーコードを -32600 にする → `codex_unknown_server_request_is_rejected` FAIL。
   未検出（記録に該当する並びが無い）: 使用量のターン id 照合、interrupt への -32600 応答（ターンが先に終わった競合）、steer の競合時の false。
+- 2026-11-25 M1 Task 12 修正 1（Linux、1.99.0）: steer への -32600 が `turn/completed` より先に来た場合に Err になっていたのを
+  `Ok(false)` に修正。合成シナリオ `steer_rejected_turn_ended`（steer と interrupt に -32600、その後で遅れた `turn/completed`、
+  steer 文を新ターンとして開始）で `codex_steer_rejected_on_ended_turn_returns_false` と
+  `codex_manager_steer_on_ended_turn_sends_new_turn`（behavior=Steer → `InterruptedAndSent`、failed にならず idle、TurnCompleted は 1 件）が
+  修正前に FAIL（`turn/steer request failed (-32600)`）→ 修正後 PASS。`--test codex_adapter` 18 件 PASS（10 回連続）、
+  `--test agent_manager` 20 件 PASS、`verify.sh test codex_` PASS（18 executed）、fmt/clippy clean。interrupt への -32600 経路も
+  このシナリオで通るようになった。
 
 ## 保留中の小さな改善
 

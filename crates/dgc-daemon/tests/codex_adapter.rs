@@ -18,9 +18,10 @@ use dgc_daemon::provider::{AgentSpec, ProviderAdapter, ProviderEvent, ProviderSe
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
-use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams};
+use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams, AgentSendParams};
 use dgc_protocol::model::{
-    Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, Workspace, WorkspaceState,
+    Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, SendBehavior,
+    SendOutcome, Workspace, WorkspaceState,
 };
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
@@ -472,6 +473,38 @@ async fn codex_steer_uses_expected_turn_id() {
     shutdown_quietly(session).await;
 }
 
+const STEER_TEXT: &str =
+    "Change of plan: stop the list now and just reply with the single word steered.";
+
+/// Synthetic: Codex rejects the steer with -32600 "no active turn to steer"
+/// before the turn's turn/completed has arrived. That is "cannot steer"
+/// (`Ok(false)`), not a failure. The manager's fallback then interrupts (also
+/// answered -32600) and starts the text as a new turn; the first turn's late
+/// turn/completed is dropped.
+#[tokio::test]
+async fn codex_steer_rejected_on_ended_turn_returns_false() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("steer_rejected_turn_ended");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let steered = timeout(EVENT_WAIT, session.steer(STEER_TEXT))
+        .await
+        .expect("steer did not finish")
+        .expect("steer");
+    assert!(!steered);
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    session.send_user(STEER_TEXT).await.expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[0], session_started(SIMPLE_THREAD));
+    assert_eq!(events[1], text("pong", true));
+    assert_eq!(usage_total_tokens(&events[2]), 23806);
+    shutdown_quietly(session).await;
+}
+
 #[tokio::test]
 async fn codex_resume_calls_thread_resume() {
     let dir = tempdir().expect("tempdir");
@@ -692,6 +725,56 @@ async fn codex_manager_simple_turn() {
     );
     assert!(h.error_messages(&agent.id).is_empty(), "{events:?}");
 
+    let archived = timeout(EVENT_WAIT, h.manager.archive(&agent.id))
+        .await
+        .expect("archive did not finish")
+        .expect("archive");
+    assert_eq!(archived.state, AgentState::Archived);
+}
+
+/// Synthetic (see `codex_steer_rejected_on_ended_turn_returns_false`): a
+/// steer send whose turn already ended falls back to interrupt-and-send and
+/// the agent does not fail.
+#[tokio::test]
+async fn codex_manager_steer_on_ended_turn_sends_new_turn() {
+    let h = Harness::new(fake_adapter("steer_rejected_turn_ended"));
+    let agent = h.create(Some(MODEL), PONG).await;
+    h.wait_state(&agent.id, AgentState::Running, EVENT_WAIT)
+        .await;
+    let outcome = timeout(
+        EVENT_WAIT,
+        h.manager.send(AgentSendParams {
+            agent_id: agent.id.clone(),
+            text: STEER_TEXT.to_owned(),
+            behavior: SendBehavior::Steer,
+        }),
+    )
+    .await
+    .expect("send did not finish")
+    .expect("send");
+    assert_eq!(outcome, SendOutcome::InterruptedAndSent);
+    let idle = h.wait_state(&agent.id, AgentState::Idle, EVENT_WAIT).await;
+    assert_eq!(idle.last_error, None);
+    let events = h.events(&agent.id);
+    assert!(h.error_messages(&agent.id).is_empty(), "{events:?}");
+    assert!(
+        !events.contains(&EventKind::StateChanged {
+            state: AgentState::Failed
+        }),
+        "{events:?}"
+    );
+    let completed = events
+        .iter()
+        .filter(|kind| matches!(kind, EventKind::TurnCompleted { .. }))
+        .count();
+    assert_eq!(completed, 1, "{events:?}");
+    assert!(
+        events.contains(&EventKind::AssistantText {
+            text: "pong".to_owned(),
+            final_: true,
+        }),
+        "{events:?}"
+    );
     let archived = timeout(EVENT_WAIT, h.manager.archive(&agent.id))
         .await
         .expect("archive did not finish")

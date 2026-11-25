@@ -30,8 +30,11 @@
 //!   result (or `turn/started`) and ends with its `turn/completed`.
 //!   - `send_user` → `turn/start {threadId, input}`.
 //!   - `steer` → `turn/steer {threadId, expectedTurnId, input}` when a turn is
-//!     running, else `Ok(false)` without sending. A rejected steer whose turn
-//!     ended meanwhile also returns `Ok(false)`.
+//!     running, else `Ok(false)` without sending. A steer rejected because
+//!     its turn ended also returns `Ok(false)`: either the turn's
+//!     `turn/completed` already arrived, or the error is -32600 ("no active
+//!     turn to steer", which can precede `turn/completed`). The manager then
+//!     interrupts, which retires the turn (see below).
 //!   - `interrupt` → nothing without a running turn. Otherwise approvals of
 //!     that turn still pending are answered with the Deny mapping (`cancel`
 //!     where offered, else `decline`; the manager counts them cancelled),
@@ -605,7 +608,14 @@ impl ProviderSession for CodexSession {
             match self.request(Rpc::TurnSteer, params).await? {
                 Ok(_) => Ok(true),
                 // The turn ended before the steer arrived: nothing was added.
-                Err(err) if self.current_turn().as_deref() != Some(turn_id.as_str()) => {
+                // Codex may answer -32600 "no active turn to steer" before
+                // that turn's turn/completed reaches us, so the code counts
+                // as "ended" even while the turn still looks current; the
+                // manager's fallback interrupt then retires it.
+                Err(err)
+                    if err.code == wire::INVALID_REQUEST
+                        || self.current_turn().as_deref() != Some(turn_id.as_str()) =>
+                {
                     debug!(code = err.code, "codex steer raced the end of its turn");
                     Ok(false)
                 }
