@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 14（M1 受け入れ（実 CLI 手動確認とドキュメント））
+- タスク: M2 の計画作成（M1 は受け入れ完了、最終レビュー待ち）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 14 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 の最終レビュー、続いて M2（TUI）の計画を作成する。受け入れで見つけた小さな課題は「保留中の小さな改善」の末尾
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -28,7 +28,7 @@
 | M | 内容 | 状態 | 計画 |
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
-| M1 | デーモン中核と CLI（`dgc-next`） | 未着手 | m1-daemon |
+| M1 | デーモン中核と CLI（`dgc-next`） | 完了（最終レビュー待ち） | m1-daemon |
 | M2 | TUI | 未着手 | 未作成 |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
@@ -60,7 +60,7 @@
 | 11 | ClaudeAdapter | 完了 | `feat(daemon): drive Claude Code over stream-json` |
 | 12 | CodexAdapter | 完了 | `feat(daemon): drive Codex over app-server` |
 | 13 | エージェント操作の公開（ソケットと CLI） | 完了 | `feat(cli): expose agent and permission commands` |
-| 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 未着手 | |
+| 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 完了 | `docs(orchestrator): complete M1 acceptance` |
 
 ## 決定事項
 
@@ -432,14 +432,62 @@
   `--test daemon_cli` 7 件、`dgc-daemon --test server` 22 件、`-p dgc-client` 12 件、`dgc-daemon --lib` 41 件（echo 上限の単体テスト追加）PASS、
   新 crate 全テスト 261 件 PASS、fmt / clippy（新 crate 4 つ、`-D warnings`）clean。
 
+- 2026-11-25 M1 Task 14 受け入れ（Linux、Claude Code 2.1.332 `--model haiku`、codex-cli 0.172.0 `gpt-6-luna`、固定ツールチェーン 1.99.0）。
+  手動確認は TDD の対象外（実 CLI の観察）。`DGC_STATE_ROOT` を作業用ディレクトリ配下に置き、使い捨て git リポジトリ 2 つ（README とファイル 1 つ）で
+  実行。自動承認系 mode は不使用、Codex は `--mode untrusted`。プロバイダのターンは Claude 約 12、Codex 約 12（中断を含む）。
+  Codex に "mini" は無く（`codex debug models` は luna/terra/sol/astra 系のみ）、Task 9 と同じ最小の `gpt-6-luna` を使った。
+  `DGC_STATE_ROOT` を長いパスにするとソケットが `sockaddr_un` の上限を超え `I/O error: path must be shorter than SUN_LEN` で起動できない
+  （`/tmp/dgc14` の短い symlink で回避。下の保留中に記録）。
+  - A. 主要フロー（本文は記録しない）:
+
+    | 手順 | Claude | Codex |
+    |---|---|---|
+    | project add → `workspace create --worktree --branch dgc-accept-<p>` | PASS | PASS |
+    | `run --follow`（権限要求）→ 別呼び出しの `permit ls` / `permit allow` | PASS（Write の file_change 要求、許可後 hello.txt 作成・idle） | PASS（command 要求、許可後 hello.txt 作成・idle） |
+    | `send --behavior queue`（実行中のターンに送る） | PASS（`queued`、ターン終了後に自動送信され 2 ターン目完了） | PASS（同左） |
+    | `interrupt`（実行中） | PASS（`interrupted`、idle） | PASS（idle） |
+    | `daemon stop` → `daemon start` → `resume` → 追加ターン | PASS（stopped → starting → idle、直前の会話内容を覚えている） | PASS（stopped → starting → idle、追加ターン完了） |
+    | `archive` → `workspace archive` | PASS（worktree ディレクトリと `dgc-accept-claude` ブランチが消え、`git worktree list` は本体のみ） | PASS（同左） |
+
+    `run --follow` の終了コードは背景実行のため取得していない（出力は idle で終了）。`daemon stop` 後に dgc が起動した `claude` / `codex app-server`
+    は残らなかった（残っていたのは作業前からあるユーザー自身の Claude セッションと Codex 常駐デーモンのみ）。
+  - B. 保留していた手動確認:
+
+    | 項目 | 結果 | 観察 |
+    |---|---|---|
+    | Claude: send 直後（ターン開始前）の interrupt | PASS | idle になり、warn `interrupted a turn that had not started` が出た。次のターンは通常どおり完了し TurnCompleted は 1 件 |
+    | Claude: interrupt 直後に `send --behavior interrupt` | PASS | idle 後の送信は `sent`、実行中への送信は `interrupted_and_sent`。どちらも次のターンが完了し TurnCompleted は 1 件 |
+    | Codex: 承認待ち中に interrupt（cancel → `turn/interrupt`） | PASS | `tool error: declined`、権限は `cancelled`、idle。ファイルは作られず、保留権限なし |
+    | Codex: `permit deny` | PASS | 提示された決定は `accept` / `acceptWithExecpolicyAmendment` / `cancel`（`decline` は無い）ので cancel を送る。`declined`、ターン完了、idle、ファイル無し |
+    | Codex: `permit allow --session` | PASS（縮退） | `acceptForSession` は提示されず `accept` にフォールバック（記録は `allow_for_session`）。同じセッションの次のコマンドは再び承認を求めた |
+    | Codex: `untrusted` で作った agent の resume で policy が保たれるか | PASS | daemon 再起動と resume の後でもコマンドが承認待ちになった（承認なしで実行されない） |
+
+  - C. ソケットと状態ファイル: ソケット 0600（`run/` は 0700）、`state/` `agents/` `projects/` `workspaces/` `data/` は 0700、
+    `daemon.lock` `daemon.log` と agent / project / workspace の json、`events.jsonl`、`queue.json` はすべて 0600。
+    `ss -ltnp` / `ss -lunp` にデーモンの pid は無く、`ss -lxp` に `daemon.sock` の LISTEN のみ。`daemon.log`（22 行）に作業中のプロンプト語は 0 件。
+  - D. 全体検証（固定ツールチェーン 1.99.0）:
+
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all` | 差分なし |
+    | `bash scripts/verify.sh rust` | fmt PASS、clippy PASS、test は旧 `src/` の既知の不安定テスト 1 件で FAIL（`logging::tests::retention_bounds_reserve_active_runs_and_preserve_unmanaged_files`、2398 passed / 1 failed。この時点で後続のテスト実行は止まる） |
+    | `cargo test --locked --workspace --no-fail-fast --config 'env.TMPDIR.value="/var/tmp"' --config 'env.TMPDIR.force=true' -- --test-threads=1` | PASS（2706 passed / 0 failed。stray `/tmp/.git` と並列の不安定を避けた） |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+    | `bash scripts/verify.sh msrv`（1.94.0） | PASS |
+
 ## 保留中の小さな改善
 
-- M1 Task 12 由来（Task 14 の実 CLI 手動確認に含める）: コマンド承認への `decline` / `acceptForSession`（未提示・未検証）、
-  承認待ち中の interrupt（`cancel` 回答と `turn/interrupt` の順序での実際の応答）、`thread/resume` に mode 由来の
-  `approvalPolicy`/`sandbox` を渡したときの挙動、`excludeTurns:true` での resume 後のターン実行。
-- M1 Task 11 修正 1 由来（Task 14 の実 CLI 手動確認に含める）: user メッセージ送信の直後（`system/init` より前）に
-  interrupt した場合の Claude の挙動（中断されたターンの `result` が出るか）。未記録のため、アダプタはその場合 warn を出し
-  `result` が来る前提のままにしている。
+- M1 Task 14 受け入れ由来（すべて小さく、受け入れは通った。M2 前か M2 の最初に直す）:
+  - `DGC_STATE_ROOT` 配下のソケットパス長は `DaemonPaths::under` で検査されず、長いと `path must be shorter than SUN_LEN` という
+    原因の分かりにくい I/O エラーになる（XDG 経由は `SocketPathTooLong` で明示される）。
+  - `dgc-next logs ID | head` のようにパイプが閉じられると `println!` が panic する（Broken pipe）。
+  - 中断後、Claude の最後の `assistant_text`（final）が `state: idle` より後に記録される（順序が逆転して見える）。
+  - Claude の `turn started` イベントが出ない（README のイベント一覧には `turn started` がある。Codex も未観測）。
+  - ユーザー送信の表示が idle への送信でも `user (queue)` になる（`behavior` の既定値が表示されるだけ）。
+  - workspace archive 後に空の親ディレクトリ `<worktrees>/<repo>-<id>/` が残る。
+- （Task 14 で確認済み）M1 Task 11 / 12 由来の手動確認（Claude の send 直後の interrupt、Codex の承認待ち interrupt・deny・
+  `allow --session`・resume 後の policy）は検証記録 B に記録。未検証で残るのは Codex の `thread/resume` の `excludeTurns:true`
+  （現状は `false`）と、`decline` が提示される承認種別（コマンド承認では提示されなかった）のみ。
 - M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
   の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
 - M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が

@@ -15,10 +15,25 @@ protect mechanisms; their count or CI success does not establish usefulness.
 
 Doge-Code is being rebuilt as an orchestrator that drives the existing Claude
 Code and Codex CLIs instead of calling LLM APIs itself. The new daemon and its
-`dgc-next` client live under `crates/` and are not usable yet; the `dgc` binary
-described below keeps working until the legacy runtime is removed. See the
+`dgc-next` client live under `crates/`. They run Claude Code and Codex agents
+from the command line (milestone M1; no TUI yet); the `dgc` binary described
+below keeps working until the legacy runtime is removed. See the
 [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
 [progress](docs/orchestrator/PROGRESS.md).
+
+Install: `cargo build --release -p dgc-cli` builds `target/release/dgc-next`
+(Unix only; Rust 1.94 or newer). Agents need the
+`claude` and/or `codex` CLI installed and logged in; dgc never reads their
+credentials. Typical session:
+
+```sh
+dgc-next project add ~/src/app                  # prints the project id
+dgc-next workspace create --project PRJ --worktree --branch fix-bug
+dgc-next run --workspace WS --provider claude --follow "Fix the failing test"
+dgc-next permit ls                              # from a second terminal
+dgc-next permit allow PERM
+dgc-next send AGENT --behavior queue "Then update the changelog"
+```
 
 The daemon lifecycle commands work for development: `dgc-next daemon
 {run [--detach] | start | stop | status}` (`--json` prints machine-readable
@@ -80,6 +95,65 @@ Agents:
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).
+
+Storage (XDG; `DGC_STATE_ROOT=<dir>` replaces all of these with `<dir>/run`,
+`<dir>/state`, `<dir>/config` and `<dir>/data`):
+
+| What | Location |
+|---|---|
+| Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
+| Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
+| Config (`claude_path`, `codex_path`, `events_max_bytes`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
+| Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
+
+The socket path must stay under 100 bytes (`sockaddr_un` limit), so keep
+`DGC_STATE_ROOT` short.
+
+Security properties:
+
+- The daemon listens only on a Unix socket (0600, in a 0700 directory) and
+  checks the peer's UID on every connection; other users are refused. It opens
+  no TCP or UDP port. All state files are 0600 and directories 0700.
+- The trust boundary is your UID: any process running as you can drive agents.
+  Agents started by dgc are trusted to the extent their provider mode allows.
+- dgc stores and forwards no credentials. The provider CLIs authenticate
+  themselves and inherit the daemon's environment.
+- Nothing is auto-approved unless you pass an auto-approve `--mode`
+  explicitly; permission requests otherwise wait for `permit allow|deny`.
+
+Running as a service is optional (`status`, `run` and the other commands start
+the daemon on demand). Examples only; dgc installs neither file. Use an
+absolute `ExecStart`/`ProgramArguments` path and make sure `claude` / `codex`
+are on the service's `PATH` (or set `claude_path` / `codex_path` in the config).
+
+```ini
+# ~/.config/systemd/user/dgc.service  (systemctl --user enable --now dgc)
+[Unit]
+Description=dgc orchestrator daemon
+
+[Service]
+ExecStart=%h/.cargo/bin/dgc-next daemon run
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```xml
+<!-- ~/Library/LaunchAgents/dev.dgc.daemon.plist  (launchctl load -w <file>) -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.dgc.daemon</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/you/.cargo/bin/dgc-next</string><string>daemon</string><string>run</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
 
 ## 🚀 Key Features
 
