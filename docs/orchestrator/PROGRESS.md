@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 4（子プロセス管理）
+- タスク: M1 Task 5（ソケットサーバー）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 4 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 5 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -50,7 +50,7 @@
 | 1 | プロトコル型 | 完了 | `feat(protocol): define orchestrator socket protocol types` |
 | 2 | パス、設定、ロック、Store | 完了 | `feat(daemon): add state paths, config, lock and store` |
 | 3 | イベントログ | 完了 | `feat(daemon): add per-agent event log` |
-| 4 | 子プロセス管理 | 未着手 | |
+| 4 | 子プロセス管理 | 完了 | `feat(daemon): add process-group child management` |
 | 5 | ソケットサーバー | 未着手 | |
 | 6 | クライアントと `dgc-next daemon` | 未着手 | |
 | 7 | プロジェクトとワークスペース | 未着手 | |
@@ -104,6 +104,11 @@
   （既存 `.1` は rename で置換）。1 行が max_bytes を超えても新ファイルへ書く。ファイルは 0600、`O_NOFOLLOW`（symlink は
   `EventLogError::Symlink`）。open 時に末尾が改行でなければ改行を足す（クラッシュで切れた行が次のイベントを巻き込まないため）。
   現ファイルが空で `.1` のみ存在する場合は `.1` の最後の有効行から seq を復元する。
+- 2026-11-25 (M1 Task 4): `[workspace.dependencies]` に `tokio`（`default-features = false`、バージョンはルートと同一）を追加。
+  `dgc-daemon` は features `io-util`, `macros`, `process`, `rt`, `sync`, `time` のみ有効化。
+  `ChildProcess` は `process_group(0)`（pre_exec 不要）で新グループのリーダーにし、`kill_on_drop(false)`、`Drop` でグループへ SIGKILL。
+  `terminate`/`wait` はリーダーを回収した直後にグループの残りへ SIGKILL してから PGID を手放す（`wait` も同様。PGID 再利用による誤爆を避けるため）。
+  行読み取りは 16 MiB 超を読み捨て `Oversized { bytes }`（改行なしの最終行は EOF で配信、空なら配信しない）。エラー型は `process::ProcessError`。
 
 ## 検証記録
 
@@ -145,6 +150,11 @@
   - `cargo test --locked -p dgc-daemon --test events_log`: 実装前はモジュール未定義で RED（compile error）→ 10 件 PASS。
     `cargo test --locked -p dgc-daemon --lib time`: 5 件 PASS。clippy clean。
     注: `verify.sh test events_log` はファイル名ではなくテスト名で絞るため 0 件で拒否される（`verify.sh test rotation_keeps` は PASS）。
+- 2026-11-25 M1 Task 4（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test process`: 実装前は未定義型で RED（compile error）→ 14 件 PASS（5 回連続 PASS）。
+    ミューテーション確認: `finish` の残存グループへの SIGKILL を外すと `terminate_kills_descendants_that_outlive_the_leader` が FAIL。
+    `verify.sh test terminate_kills_grandchildren`: PASS。clippy clean、新 crate 全テスト PASS。
+    注: この端末の `/bin/sh` は bash。TERM を無視する子孫のテストは trap 設定後に pid を出力する（SIGTERM との競合回避）。
 
 ## 保留中の小さな改善
 

@@ -5,5 +5,6 @@ pub mod config;
 pub mod events_log;
 pub mod lock;
 pub mod paths;
+pub mod process;
 pub mod store;
 pub mod time;
