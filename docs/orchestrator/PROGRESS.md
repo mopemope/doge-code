@@ -304,6 +304,17 @@
   を 15 秒に上げる」（クライアント側の hello タイマーは connect 直後に始まり、accept の時点を知り得ないため）。`SPAWN_WAIT` も 15 秒
   （Task 6 の「最大 5 秒再接続」を置き換え）。両定数と `VERSION_TIMEOUT` の doc に「VERSION_TIMEOUT + 起動の残りより十分大きいこと」を記載。
   パラメータ解析エラーの echo 上限を 200 → `ECHO_LIMIT`（64 文字）に統一（裁定どおり）。
+- 2026-11-26 (M1 最終レビュー修正 1、ユーザー決定): `workspace.archive` は所有 worktree に未コミット/未追跡の変更、または
+  記録した `base_ref` から到達できないコミット（worktree の HEAD と、削除対象のブランチ）があると INVALID_STATE で拒否する
+  （理由に `uncommitted changes` / `N commit(s) not in base` を含む）。`WorkspaceArchiveParams.force`（serde 既定 false）と
+  `dgc-next workspace archive --force` で従来どおり `worktree remove --force` と `branch -D` を行う。force なしは
+  `git worktree remove <path>`（--force なし）と `git branch -d`（拒否されたらブランチを残す）。`--force` と `-D` は
+  `discard_worktree` の中だけに置き、`if force` からしか呼ばない（構造テスト `destructive_git_flags_appear_only_in_the_force_path`）。
+  handler は `check_archive` を先に行い、通ったときだけエージェントを archive する（拒否なら何も変えない）。
+  `workspace.archive` の結果は `WorkspaceArchiveResult`（Workspace のフィールドを flatten し、`worktree_removed` と
+  `branch_kept` を足す。既に archived なら両方 false）。人間向け出力は workspace 行に続けて `branch kept: NAME` /
+  `worktree kept on disk: PATH`。作成時のロールバック（store 失敗）も安全な経路を使う。
+  注: base からの到達で判定するため、ブランチを main へマージ済みでも base より先のコミットがあれば拒否される（`--force` が必要）。
 
 ## 検証記録
 

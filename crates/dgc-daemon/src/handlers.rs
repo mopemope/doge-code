@@ -79,6 +79,7 @@ pub async fn workspace_archive(
     params: Value,
 ) -> Result<Value, RpcError> {
     let params: WorkspaceArchiveParams = parse(params)?;
+    manager.check_archive(&params.id, params.force).await?;
     for agent in agents.list()? {
         if agent.workspace_id != params.id || agent.state == AgentState::Archived {
             continue;
@@ -89,7 +90,7 @@ pub async fn workspace_archive(
             Err(err) => return Err(err.into()),
         }
     }
-    encode(&manager.archive_workspace(&params.id).await?)
+    encode(&manager.archive_workspace(&params.id, params.force).await?)
 }
 
 pub async fn agent_create(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {

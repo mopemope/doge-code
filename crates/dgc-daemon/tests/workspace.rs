@@ -387,11 +387,11 @@ async fn archive_removes_owned_worktree() {
 
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
-    assert_eq!(archived.id, ws.id);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.id, ws.id);
     assert!(!ws.path.exists(), "worktree directory removed");
     assert!(!branch_exists(&env.repo, "feature/x"), "branch removed");
     assert!(
@@ -409,26 +409,191 @@ async fn archive_removes_owned_worktree() {
     );
 }
 
+/// Both checks the brief names must refuse, and the refusal must leave the
+/// worktree, its branch and the record untouched.
+fn assert_untouched(env: &Env, ws: &Workspace, branch: &str) {
+    assert!(ws.path.is_dir(), "worktree kept");
+    assert!(branch_exists(&env.repo, branch), "branch kept");
+    let stored = env.store.get_workspace(&ws.id).expect("get").expect("some");
+    assert_eq!(stored.state, WorkspaceState::Active);
+}
+
 #[tokio::test]
-async fn archive_removes_dirty_worktree() {
+async fn archive_refuses_a_dirty_worktree() {
     let env = Env::new();
     let (_project, ws) = env.worktree("dirty").await;
-    fs::write(ws.path.join("untracked.txt"), "x").expect("write");
     fs::write(ws.path.join("a.txt"), "changed\n").expect("write");
-    env.manager
-        .archive_workspace(&ws.id)
+    let err = env
+        .manager
+        .check_archive(&ws.id, false)
+        .await
+        .expect_err("check refuses");
+    assert_eq!(err.code(), INVALID_STATE);
+    let err = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect_err("dirty worktree");
+    assert_eq!(err.code(), INVALID_STATE);
+    assert!(
+        err.message().contains("uncommitted changes"),
+        "{}",
+        err.message()
+    );
+    assert_untouched(&env, &ws, "dirty");
+    assert_eq!(
+        fs::read_to_string(ws.path.join("a.txt")).expect("read"),
+        "changed\n"
+    );
+}
+
+#[tokio::test]
+async fn archive_refuses_untracked_files() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("untracked").await;
+    fs::write(ws.path.join("new.txt"), "x").expect("write");
+    let err = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect_err("untracked file");
+    assert_eq!(err.code(), INVALID_STATE);
+    assert!(
+        err.message().contains("uncommitted changes"),
+        "{}",
+        err.message()
+    );
+    assert_untouched(&env, &ws, "untracked");
+    assert!(ws.path.join("new.txt").is_file());
+}
+
+#[tokio::test]
+async fn archive_refuses_commits_not_in_base() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("ahead").await;
+    for n in 0..2 {
+        fs::write(ws.path.join("a.txt"), format!("{n}\n")).expect("write");
+        git(&ws.path, &["commit", "-q", "-am", "agent work"]);
+    }
+    let tip = git(&ws.path, &["rev-parse", "HEAD"]);
+    let err = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect_err("unmerged commits");
+    assert_eq!(err.code(), INVALID_STATE);
+    assert!(
+        err.message().contains("2 commits not in base"),
+        "{}",
+        err.message()
+    );
+    assert!(!err.message().contains("uncommitted"), "{}", err.message());
+    assert_untouched(&env, &ws, "ahead");
+    assert_eq!(git(&env.repo, &["rev-parse", "ahead"]), tip);
+}
+
+#[tokio::test]
+async fn archive_names_both_reasons() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("both").await;
+    fs::write(ws.path.join("a.txt"), "1\n").expect("write");
+    git(&ws.path, &["commit", "-q", "-am", "agent work"]);
+    fs::write(ws.path.join("new.txt"), "x").expect("write");
+    let err = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect_err("dirty and ahead");
+    assert!(
+        err.message().contains("uncommitted changes")
+            && err.message().contains("1 commit not in base"),
+        "{}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn archive_removes_a_clean_merged_worktree_with_a_safe_branch_delete() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("clean").await;
+    let result = env
+        .manager
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
+    assert_eq!(result.workspace.state, WorkspaceState::Archived);
+    assert!(result.worktree_removed);
+    assert!(!result.branch_kept);
     assert!(!ws.path.exists());
+    assert!(!branch_exists(&env.repo, "clean"));
+}
+
+#[tokio::test]
+async fn archive_keeps_the_branch_when_git_refuses_the_safe_delete() {
+    let env = Env::new();
+    // Base the workspace on a commit the main checkout later leaves:
+    // `branch -d` then refuses ("not fully merged" into HEAD).
+    fs::write(env.repo.join("a.txt"), "two\n").expect("write");
+    git(&env.repo, &["commit", "-q", "-am", "second"]);
+    let (_project, ws) = env.worktree("kept").await;
+    git(&env.repo, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    let result = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect("archive");
+    assert_eq!(result.workspace.state, WorkspaceState::Archived);
+    assert!(result.worktree_removed);
+    assert!(
+        result.branch_kept,
+        "safe delete refused, branch reported kept"
+    );
+    assert!(!ws.path.exists());
+    assert!(branch_exists(&env.repo, "kept"));
+}
+
+#[tokio::test]
+async fn forced_archive_discards_changes_and_commits() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("forced").await;
+    fs::write(ws.path.join("a.txt"), "1\n").expect("write");
+    git(&ws.path, &["commit", "-q", "-am", "agent work"]);
+    fs::write(ws.path.join("a.txt"), "dirty\n").expect("write");
+    fs::write(ws.path.join("new.txt"), "x").expect("write");
+    env.manager
+        .check_archive(&ws.id, true)
+        .await
+        .expect("force passes the check");
+    let result = env
+        .manager
+        .archive_workspace(&ws.id, true)
+        .await
+        .expect("forced archive");
+    assert_eq!(result.workspace.state, WorkspaceState::Archived);
+    assert!(result.worktree_removed);
+    assert!(!result.branch_kept);
+    assert!(!ws.path.exists());
+    assert!(!branch_exists(&env.repo, "forced"));
 }
 
 #[tokio::test]
 async fn archive_is_idempotent() {
     let env = Env::new();
     let (_project, ws) = env.worktree("twice").await;
-    let first = env.manager.archive_workspace(&ws.id).await.expect("first");
-    let second = env.manager.archive_workspace(&ws.id).await.expect("second");
-    assert_eq!(first, second);
+    let first = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect("first");
+    let second = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect("second");
+    assert_eq!(first.workspace, second.workspace);
+    assert!(first.worktree_removed);
+    assert!(!second.worktree_removed && !second.branch_kept);
 }
 
 #[tokio::test]
@@ -436,7 +601,7 @@ async fn archive_unknown_workspace_is_not_found() {
     let env = Env::new();
     let err = env
         .manager
-        .archive_workspace(&WorkspaceId::generate())
+        .archive_workspace(&WorkspaceId::generate(), false)
         .await
         .expect_err("unknown");
     assert_eq!(err.code(), NOT_FOUND);
@@ -459,10 +624,10 @@ async fn archive_keeps_local_directory() {
         .expect("local");
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
     assert!(
         env.repo.join("a.txt").is_file(),
         "project directory untouched"
@@ -484,10 +649,10 @@ async fn archive_refuses_path_outside_managed_dir() {
 
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
     assert!(
         victim.join("precious.txt").is_file(),
         "outside directory kept"
@@ -508,7 +673,7 @@ async fn archive_refuses_traversal_path() {
     env.store.put_workspace(&ws).expect("put tampered");
 
     env.manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
     assert!(victim.join("precious.txt").is_file());
@@ -528,7 +693,7 @@ async fn archive_refuses_symlink_escape() {
     env.store.put_workspace(&ws).expect("put tampered");
 
     env.manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
     assert!(victim.join("precious.txt").is_file());
@@ -542,7 +707,7 @@ async fn archive_keeps_unowned_directory_inside_managed_dir() {
     ws.owned = false;
     env.store.put_workspace(&ws).expect("put");
     env.manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
     assert!(ws.path.exists(), "unowned directory kept");
@@ -562,7 +727,7 @@ async fn archive_failure_leaves_workspace_active() {
 
     let err = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect_err("git removal fails");
     assert_eq!(err.code(), INTERNAL);
@@ -596,10 +761,10 @@ async fn archive_tolerates_a_worktree_directory_that_is_already_gone() {
 
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
     assert!(
         !branch_exists(&env.repo, "gone"),
         "dgc's own branch removed"
@@ -631,10 +796,10 @@ async fn archive_keeps_a_branch_the_user_recreated_after_the_registration_was_go
 
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
     assert!(
         branch_exists(&env.repo, "feature/x"),
         "the user's branch survives"
@@ -650,10 +815,10 @@ async fn archive_keeps_both_branches_when_the_user_switched_branch_in_the_worktr
 
     let archived = env
         .manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
-    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert_eq!(archived.workspace.state, WorkspaceState::Archived);
     assert!(!ws.path.exists(), "dgc's own worktree directory is removed");
     assert!(branch_exists(&env.repo, "orig"), "recorded branch kept");
     assert!(branch_exists(&env.repo, "switched"), "user's branch kept");
@@ -666,7 +831,7 @@ async fn archive_keeps_the_branch_when_the_worktree_is_detached() {
     git(&ws.path, &["checkout", "-q", "--detach"]);
 
     env.manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
     assert!(!ws.path.exists());
@@ -686,7 +851,7 @@ async fn remove_project_with_active_workspace_fails() {
     assert_eq!(env.manager.list_projects().await.expect("list").len(), 1);
 
     env.manager
-        .archive_workspace(&ws.id)
+        .archive_workspace(&ws.id, false)
         .await
         .expect("archive");
     env.manager

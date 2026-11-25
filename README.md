@@ -44,9 +44,16 @@ under `<dir>` instead of the XDG locations (for tests and experiments).
 
 Projects and workspaces: `dgc-next project {add [PATH] | ls | rm ID}` and
 `dgc-next workspace {create --project ID [--worktree --branch NAME [--base REF]
-[--slug S]] | ls [--project ID] | archive ID}`. A worktree workspace is a git
-worktree dgc creates under `<worktrees>/<repo>-<id>/<slug>`; archiving it removes
-the worktree and its branch, but only for paths inside that managed directory.
+[--slug S]] | ls [--project ID] | archive ID [--force]}`. A worktree workspace
+is a git worktree dgc creates under `<worktrees>/<repo>-<id>/<slug>`; archiving
+it removes the worktree (`git worktree remove`) and safely deletes its branch
+(`git branch -d`), but only for paths inside that managed directory. Archive is
+refused, and nothing (agents included) is changed, while the worktree has
+uncommitted or untracked changes or commits not reachable from the commit it
+was created from (the error names which); `--force` removes it anyway and
+force-deletes the branch. When git refuses the safe branch delete the branch is
+kept and `archive` prints `branch kept: NAME` (`--json`: `"branch_kept": true`,
+and `"worktree_removed"` tells whether the directory was removed).
 Local workspaces use the project directory and are never deleted. Archiving a
 workspace first archives its agents.
 

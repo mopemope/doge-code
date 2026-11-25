@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dgc_protocol::ids::{ProjectId, WorkspaceId};
-use dgc_protocol::methods::WorkspaceCreateParams;
+use dgc_protocol::methods::{WorkspaceArchiveResult, WorkspaceCreateParams};
 use dgc_protocol::model::{Isolation, Project, Workspace, WorkspaceState};
 use dgc_protocol::rpc::{INTERNAL, INVALID_PARAMS, INVALID_STATE, NOT_FOUND, RpcError};
 use tokio::process::Command;
@@ -540,119 +540,359 @@ impl WorkspaceManager {
         ))
     }
 
-    /// Mark the workspace archived. For an owned worktree inside the managed
-    /// directory the checkout and its branch are removed first; if removing
-    /// the checkout fails nothing is archived. Any other workspace keeps its
-    /// directory. Archiving an archived workspace returns it unchanged.
-    pub async fn archive_workspace(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
+    /// Check, without changing anything, that [`Self::archive_workspace`]
+    /// with the same `force` would not refuse to remove the workspace's
+    /// worktree. The handler calls this before archiving the workspace's
+    /// agents so that a refusal leaves everything untouched.
+    pub async fn check_archive(&self, id: &WorkspaceId, force: bool) -> Result<(), WorkspaceError> {
         let _guard = self.write_lock.lock().await;
-        let mut workspace = self
-            .store
-            .get_workspace(id)
-            .map_err(store_error)?
-            .ok_or_else(|| WorkspaceError::NotFound(format!("unknown workspace {id}")))?;
+        let workspace = self.get_workspace(id)?;
         if workspace.state == WorkspaceState::Archived {
-            return Ok(workspace);
+            return Ok(());
+        }
+        self.plan_removal(&workspace, force).await.map(|_| ())
+    }
+
+    /// Mark the workspace archived. For an owned worktree inside the managed
+    /// directory the checkout and its branch are removed first. Without
+    /// `force` that is refused (`INVALID_STATE`, nothing changed) while the
+    /// worktree has uncommitted or untracked changes or commits not
+    /// reachable from the recorded base, and the branch is deleted only with
+    /// git's safe `branch -d` (kept, and reported, if git refuses). If
+    /// removing the checkout fails nothing is archived. Any other workspace
+    /// keeps its directory. Archiving an archived workspace returns it
+    /// unchanged.
+    pub async fn archive_workspace(
+        &self,
+        id: &WorkspaceId,
+        force: bool,
+    ) -> Result<WorkspaceArchiveResult, WorkspaceError> {
+        let _guard = self.write_lock.lock().await;
+        let mut workspace = self.get_workspace(id)?;
+        if workspace.state == WorkspaceState::Archived {
+            return Ok(WorkspaceArchiveResult {
+                workspace,
+                worktree_removed: false,
+                branch_kept: false,
+            });
         }
         // The caller (`handlers::workspace_archive`) has archived the
         // workspace's agents already.
-        if workspace.owned && workspace.isolation == Isolation::Worktree {
-            if is_managed_path(&workspace.path, &self.worktrees_dir) {
-                let project = self
-                    .store
-                    .get_project(&workspace.project_id)
-                    .map_err(store_error)?
-                    .ok_or_else(|| {
-                        WorkspaceError::InvalidState("the workspace's project is missing".into())
-                    })?;
-                self.remove_owned_worktree(&project, &workspace).await?;
-            } else {
-                tracing::warn!(workspace = %workspace.id, "owned workspace is outside the managed directory; keeping it on disk");
+        let (worktree_removed, branch_kept) = match self.plan_removal(&workspace, force).await? {
+            Removal::KeepOnDisk => (false, workspace.branch.is_some()),
+            Removal::Remove(plan) => {
+                let branch_kept = if force {
+                    discard_worktree(&plan, &workspace).await?
+                } else {
+                    remove_clean_worktree(&plan, &workspace).await?
+                };
+                (true, branch_kept)
             }
-        }
+        };
         workspace.state = WorkspaceState::Archived;
         self.store.put_workspace(&workspace).map_err(store_error)?;
-        Ok(workspace)
+        Ok(WorkspaceArchiveResult {
+            workspace,
+            worktree_removed,
+            branch_kept,
+        })
     }
 
-    /// Remove the checkout and, if it is provably dgc's, its branch. The
-    /// caller has verified ownership and that the path is managed. Only this
-    /// workspace's own git state is touched: never a repository-wide prune, and
-    /// the branch is deleted only when git's registration for this very path
-    /// still names the recorded branch.
+    fn get_workspace(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
+        self.store
+            .get_workspace(id)
+            .map_err(store_error)?
+            .ok_or_else(|| WorkspaceError::NotFound(format!("unknown workspace {id}")))
+    }
+
+    /// Decide what archiving `workspace` does on disk. Only an owned worktree
+    /// inside the managed directory is ever removed. Without `force`, an
+    /// archive that would lose work is refused here.
+    async fn plan_removal(
+        &self,
+        workspace: &Workspace,
+        force: bool,
+    ) -> Result<Removal, WorkspaceError> {
+        if !workspace.owned || workspace.isolation != Isolation::Worktree {
+            return Ok(Removal::KeepOnDisk);
+        }
+        if !is_managed_path(&workspace.path, &self.worktrees_dir) {
+            tracing::warn!(workspace = %workspace.id, "owned workspace is outside the managed directory; keeping it on disk");
+            return Ok(Removal::KeepOnDisk);
+        }
+        let project = self
+            .store
+            .get_project(&workspace.project_id)
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                WorkspaceError::InvalidState("the workspace's project is missing".into())
+            })?;
+        let plan = inspect_worktree(&project, workspace).await?;
+        if !force {
+            ensure_nothing_lost(&plan, workspace).await?;
+        }
+        Ok(Removal::Remove(plan))
+    }
+
+    /// Remove a just-created worktree again (store failure in
+    /// `create_workspace`). It holds no work, so the safe path suffices.
     async fn remove_owned_worktree(
         &self,
         project: &Project,
         workspace: &Workspace,
     ) -> Result<(), WorkspaceError> {
-        let repo = project.path.as_path();
-        let listed = git(
-            repo,
-            &[os("worktree"), os("list"), os("--porcelain"), os("-z")],
+        let plan = inspect_worktree(project, workspace).await?;
+        remove_clean_worktree(&plan, workspace).await.map(|_| ())
+    }
+}
+
+/// What archiving does on disk.
+enum Removal {
+    /// Archive the record only.
+    KeepOnDisk,
+    /// Remove the owned worktree (and maybe its branch) first.
+    Remove(RemovalPlan),
+}
+
+/// The git state of an owned, managed worktree that is about to be removed.
+struct RemovalPlan {
+    /// The project's repository (git's working directory for removal).
+    repo: PathBuf,
+    /// Whether the worktree directory exists.
+    exists: bool,
+    /// Whether git has a registration for exactly this path.
+    registered: bool,
+    /// The recorded branch, when git's registration for this very path
+    /// still names it: the only branch dgc may delete.
+    branch_to_delete: Option<String>,
+}
+
+impl RemovalPlan {
+    /// Whether `git worktree remove` must run: the directory exists, or git
+    /// has a stale entry for exactly this path. With neither there is
+    /// nothing of ours left to remove.
+    fn needs_git_remove(&self) -> bool {
+        self.exists || self.registered
+    }
+}
+
+/// Read git's registration for `workspace` and whether its directory exists.
+/// Only this workspace's own git state is considered: never a
+/// repository-wide prune, and the branch qualifies for deletion only when
+/// git's registration for this very path still names the recorded branch.
+async fn inspect_worktree(
+    project: &Project,
+    workspace: &Workspace,
+) -> Result<RemovalPlan, WorkspaceError> {
+    let repo = project.path.clone();
+    let listed = git(
+        &repo,
+        &[os("worktree"), os("list"), os("--porcelain"), os("-z")],
+    )
+    .await?;
+    if !listed.success {
+        return Err(git_failure("git worktree list", &listed));
+    }
+    let entry = registered_branch(&listed.stdout, &workspace.path);
+    let branch_to_delete = match (workspace.branch.as_deref(), &entry) {
+        (Some(recorded), Some(Some(current)))
+            if validate_branch_text(recorded).is_ok()
+                && current.strip_prefix("refs/heads/") == Some(recorded) =>
+        {
+            Some(recorded.to_owned())
+        }
+        (Some(_), _) => {
+            tracing::warn!(
+                workspace = %workspace.id,
+                "recorded branch is not checked out in this worktree; keeping the branch"
+            );
+            None
+        }
+        (None, _) => None,
+    };
+    let exists = match fs::symlink_metadata(&workspace.path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(WorkspaceError::internal(format!(
+                "cannot inspect the worktree: {}",
+                err.kind()
+            )));
+        }
+    };
+    Ok(RemovalPlan {
+        repo,
+        exists,
+        registered: entry.is_some(),
+        branch_to_delete,
+    })
+}
+
+/// Refuse (`INVALID_STATE`) when removing the worktree and its branch would
+/// lose work: uncommitted or untracked changes in the worktree, or commits
+/// on its HEAD or on the branch to delete that are not reachable from the
+/// recorded base commit.
+async fn ensure_nothing_lost(
+    plan: &RemovalPlan,
+    workspace: &Workspace,
+) -> Result<(), WorkspaceError> {
+    let mut reasons: Vec<String> = Vec::new();
+    // A worktree whose directory exists and is registered for this path has
+    // its own `.git` file, so git inside it inspects exactly this checkout.
+    let inspect_checkout = plan.exists && plan.registered;
+    if inspect_checkout {
+        let status = git(
+            &workspace.path,
+            &[os("status"), os("--porcelain"), os("-z")],
         )
         .await?;
-        if !listed.success {
-            return Err(git_failure("git worktree list", &listed));
+        if !status.success {
+            return Err(git_failure("git status", &status));
         }
-        let entry = registered_branch(&listed.stdout, &workspace.path);
-        let branch_to_delete = match (workspace.branch.as_deref(), &entry) {
-            (Some(recorded), Some(Some(current)))
-                if validate_branch_text(recorded).is_ok()
-                    && current.strip_prefix("refs/heads/") == Some(recorded) =>
-            {
-                Some(recorded)
-            }
-            (Some(_), _) => {
-                tracing::warn!(
-                    workspace = %workspace.id,
-                    "recorded branch is not checked out in this worktree; keeping the branch"
-                );
-                None
-            }
-            (None, _) => None,
-        };
-
-        let exists = match fs::symlink_metadata(&workspace.path) {
-            Ok(_) => true,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-            Err(err) => {
-                return Err(WorkspaceError::internal(format!(
-                    "cannot inspect the worktree: {}",
-                    err.kind()
-                )));
-            }
-        };
-        // A directory that is already gone is still removed through git when
-        // git has a stale entry for exactly this path; with no entry there is
-        // nothing of ours left to remove.
-        if exists || entry.is_some() {
-            let removed = git(
-                repo,
-                &[
-                    os("worktree"),
-                    os("remove"),
-                    os("--force"),
-                    workspace.path.as_os_str(),
-                ],
-            )
-            .await?;
-            if !removed.success {
-                return Err(git_failure("git worktree remove", &removed));
-            }
+        if !status.stdout.is_empty() {
+            reasons.push("uncommitted changes".to_owned());
         }
-        if let Some(branch) = branch_to_delete {
-            match git(repo, &[os("branch"), os("-D"), os(branch)]).await {
-                Ok(out) if out.success => {}
-                Ok(out) => {
-                    tracing::warn!(workspace = %workspace.id, stderr_bytes = out.stderr.len(), "could not delete the workspace branch")
-                }
-                Err(err) => {
-                    tracing::warn!(workspace = %workspace.id, %err, "could not delete the workspace branch")
-                }
-            }
-        }
-        Ok(())
     }
+
+    let mut tips: Vec<String> = Vec::new();
+    if inspect_checkout {
+        tips.push("HEAD".to_owned());
+    }
+    if let Some(branch) = &plan.branch_to_delete {
+        tips.push(format!("refs/heads/{branch}"));
+    }
+    if !tips.is_empty() {
+        let base = workspace
+            .base_ref
+            .as_deref()
+            .filter(|base| validate_ref_text("base ref", base).is_ok());
+        match base {
+            Some(base) => {
+                let cwd = if inspect_checkout {
+                    workspace.path.as_path()
+                } else {
+                    plan.repo.as_path()
+                };
+                let exclude = format!("^{base}");
+                let mut args: Vec<&OsStr> = vec![os("rev-list"), os("--count")];
+                args.extend(tips.iter().map(|tip| os(tip)));
+                args.push(os(&exclude));
+                args.push(os("--"));
+                let counted = git(cwd, &args).await?;
+                if !counted.success {
+                    return Err(git_failure("git rev-list", &counted));
+                }
+                let ahead: u64 = counted.stdout.trim().parse().map_err(|_| {
+                    WorkspaceError::internal("git rev-list printed no commit count")
+                })?;
+                if ahead > 0 {
+                    let noun = if ahead == 1 { "commit" } else { "commits" };
+                    reasons.push(format!("{ahead} {noun} not in base"));
+                }
+            }
+            None => reasons.push("no recorded base commit to compare against".to_owned()),
+        }
+    }
+
+    if reasons.is_empty() {
+        return Ok(());
+    }
+    Err(WorkspaceError::InvalidState(format!(
+        "workspace {} has {}; archiving would delete them (archive with force to discard them)",
+        workspace.id,
+        reasons.join(" and ")
+    )))
+}
+
+/// The non-destructive removal: `git worktree remove` without `--force`
+/// (git itself refuses a dirty checkout) and the safe `git branch -d`.
+/// Returns whether the recorded branch still exists afterwards.
+async fn remove_clean_worktree(
+    plan: &RemovalPlan,
+    workspace: &Workspace,
+) -> Result<bool, WorkspaceError> {
+    let repo = plan.repo.as_path();
+    if plan.needs_git_remove() {
+        let removed = git(
+            repo,
+            &[os("worktree"), os("remove"), workspace.path.as_os_str()],
+        )
+        .await?;
+        if !removed.success {
+            return Err(git_failure("git worktree remove", &removed));
+        }
+    }
+    if let Some(branch) = &plan.branch_to_delete {
+        match git(repo, &[os("branch"), os("-d"), os(branch)]).await {
+            Ok(out) if out.success => {}
+            Ok(out) => {
+                tracing::warn!(workspace = %workspace.id, stderr_bytes = out.stderr.len(), "git refused the safe branch delete; keeping the branch")
+            }
+            Err(err) => {
+                tracing::warn!(workspace = %workspace.id, %err, "could not delete the workspace branch")
+            }
+        }
+    }
+    recorded_branch_exists(repo, workspace).await
+}
+
+/// The destructive removal, used only when the caller passed `force`:
+/// `git worktree remove --force` and `git branch -D`. Still limited to the
+/// owned, managed worktree and to the branch git's registration for this
+/// path names. Returns whether the recorded branch still exists afterwards.
+async fn discard_worktree(
+    plan: &RemovalPlan,
+    workspace: &Workspace,
+) -> Result<bool, WorkspaceError> {
+    let repo = plan.repo.as_path();
+    if plan.needs_git_remove() {
+        let removed = git(
+            repo,
+            &[
+                os("worktree"),
+                os("remove"),
+                os("--force"),
+                workspace.path.as_os_str(),
+            ],
+        )
+        .await?;
+        if !removed.success {
+            return Err(git_failure("git worktree remove", &removed));
+        }
+    }
+    if let Some(branch) = &plan.branch_to_delete {
+        match git(repo, &[os("branch"), os("-D"), os(branch)]).await {
+            Ok(out) if out.success => {}
+            Ok(out) => {
+                tracing::warn!(workspace = %workspace.id, stderr_bytes = out.stderr.len(), "could not delete the workspace branch")
+            }
+            Err(err) => {
+                tracing::warn!(workspace = %workspace.id, %err, "could not delete the workspace branch")
+            }
+        }
+    }
+    recorded_branch_exists(repo, workspace).await
+}
+
+/// Whether the workspace's recorded branch exists in `repo`. A failed check
+/// counts as "exists" (the conservative answer for `branch_kept`).
+async fn recorded_branch_exists(
+    repo: &Path,
+    workspace: &Workspace,
+) -> Result<bool, WorkspaceError> {
+    let Some(branch) = workspace.branch.as_deref() else {
+        return Ok(false);
+    };
+    if validate_branch_text(branch).is_err() {
+        return Ok(true);
+    }
+    let full_ref = format!("refs/heads/{branch}");
+    let shown = git(
+        repo,
+        &[os("show-ref"), os("--verify"), os("--quiet"), os(&full_ref)],
+    )
+    .await;
+    Ok(shown.map_or(true, |out| out.success))
 }
 
 /// In `git worktree list --porcelain -z` output, find the entry for `path`.
@@ -810,6 +1050,57 @@ mod tests {
         let link = tmp.path().join("link");
         symlink(&real, &link).expect("symlink");
         assert!(is_managed_path(&link.join("repo/slug"), &link));
+    }
+
+    #[test]
+    fn destructive_git_flags_appear_only_in_the_force_path() {
+        // Structural guard (like the legacy worktree manager's): forced
+        // removal and forced branch deletion can discard work, so their
+        // flags may appear only inside `discard_worktree`, which is called
+        // only when the caller passed `force`. Tokens are built at runtime
+        // so this test's own text cannot match.
+        let source = include_str!("workspace.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let flag = |text: &str| format!("os(\"{text}\")");
+        let force_flag = flag(&["--", "force"].concat());
+        let force_delete = flag(&["-", "D"].concat());
+        let prune = format!("\"{}\"", ["pr", "une"].concat());
+        assert!(!prod.contains(&prune), "no repository-wide prune");
+
+        let def = ["async fn ", "discard_worktree", "("].concat();
+        let start = prod.find(&def).expect("discard_worktree is defined");
+        let end = prod[start + def.len()..]
+            .find("\nasync fn ")
+            .or_else(|| prod[start + def.len()..].find("\nfn "))
+            .map_or(prod.len(), |offset| start + def.len() + offset);
+        for token in [&force_flag, &force_delete] {
+            let positions: Vec<usize> =
+                prod.match_indices(token.as_str()).map(|(i, _)| i).collect();
+            assert_eq!(positions.len(), 1, "{token} must appear exactly once");
+            assert!(
+                positions.iter().all(|&i| i > start && i < end),
+                "{token} must appear only inside discard_worktree"
+            );
+        }
+        let safe_delete = format!("{}, {}", flag("branch"), flag(&["-", "d"].concat()));
+        assert!(
+            prod.contains(&safe_delete),
+            "the safe path uses `branch -d`"
+        );
+
+        let call = ["discard_worktree", "("].concat();
+        let calls: Vec<usize> = prod
+            .match_indices(&call)
+            .map(|(i, _)| i)
+            .filter(|&i| !prod[..i].ends_with("async fn "))
+            .collect();
+        assert_eq!(calls.len(), 1, "discard_worktree has exactly one caller");
+        let guard = ["if ", "force", " {"].concat();
+        let before = &prod[calls[0].saturating_sub(200)..calls[0]];
+        assert!(
+            before.contains(&guard),
+            "discard_worktree is called only under `if force`"
+        );
     }
 
     #[test]

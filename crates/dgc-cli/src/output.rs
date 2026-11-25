@@ -1,7 +1,7 @@
 //! Rendering shared by subcommands.
 
 use dgc_protocol::event::{AgentEvent, EventKind};
-use dgc_protocol::methods::{DaemonStatus, ProviderStatus};
+use dgc_protocol::methods::{DaemonStatus, ProviderStatus, WorkspaceArchiveResult};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PendingPermission, PermissionKind, Project,
     ProviderKind, Resolution, SendBehavior, SendOutcome, Workspace, WorkspaceState,
@@ -209,6 +209,27 @@ pub fn workspace_line(workspace: &Workspace) -> String {
         workspace.branch.as_deref().unwrap_or("-"),
         workspace.path.display()
     )
+}
+
+/// The archived workspace's line, then for a worktree what stayed on disk:
+/// `worktree kept on disk: <path>` and/or `branch kept: <branch>`.
+pub fn archive_text(result: &WorkspaceArchiveResult) -> String {
+    let workspace = &result.workspace;
+    let mut text = workspace_line(workspace);
+    if workspace.isolation == Isolation::Worktree {
+        if !result.worktree_removed && workspace.path.exists() {
+            text.push_str(&format!(
+                "\nworktree kept on disk: {}",
+                workspace.path.display()
+            ));
+        }
+        if result.branch_kept
+            && let Some(branch) = &workspace.branch
+        {
+            text.push_str(&format!("\nbranch kept: {branch}"));
+        }
+    }
+    text
 }
 
 #[cfg(test)]

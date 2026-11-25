@@ -55,6 +55,33 @@ fn write_wrapper(dir: &Path, name: &str, version: &str, scenario: &Path) -> Path
     path
 }
 
+/// Run git hermetically; panics on failure.
+fn git(cwd: &Path, args: &[&str]) {
+    // git must not look above the temp dir (this host has a stray /tmp/.git).
+    let ceiling = fs::canonicalize(std::env::temp_dir()).expect("temp dir");
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git should start");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn json(output: &Output) -> Value {
     assert_success(output);
     serde_json::from_str(stdout(output).trim()).expect("stdout is one JSON value")
@@ -117,6 +144,31 @@ impl AgentEnv {
         ]));
         self.workspace = workspace["id"].as_str().expect("workspace id").to_owned();
         self
+    }
+
+    /// Like [`Self::with_workspace`], but the project is a git repository
+    /// and the workspace a dgc-owned worktree on branch `agent-work`.
+    /// Returns the worktree path too.
+    fn with_worktree_workspace(mut self) -> (Self, PathBuf) {
+        let repo = self.env.dir.path().join("repo");
+        fs::create_dir(&repo).expect("mkdir repo");
+        let repo = fs::canonicalize(repo).expect("canon");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let project = json(&self.run(&["--json", "project", "add", repo.to_str().expect("utf8")]));
+        let workspace = json(&self.run(&[
+            "--json",
+            "workspace",
+            "create",
+            "--project",
+            project["id"].as_str().expect("project id"),
+            "--worktree",
+            "--branch",
+            "agent-work",
+        ]));
+        self.workspace = workspace["id"].as_str().expect("workspace id").to_owned();
+        let path = PathBuf::from(workspace["path"].as_str().expect("path"));
+        (self, path)
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -378,6 +430,31 @@ fn archive_workspace_archives_agents() {
 
     let resumed = a.run(&["resume", &id]);
     assert!(!resumed.status.success(), "archived agents cannot resume");
+}
+
+#[test]
+fn refused_workspace_archive_leaves_agents_alone_until_forced() {
+    let (a, worktree) = AgentEnv::new("claude_turn", None).with_worktree_workspace();
+    let id = created_id(&a.run_agent("claude", &["--follow", "Say pong"]));
+    assert_eq!(a.agent(&id)["state"], "idle");
+    fs::write(worktree.join("agent-output.txt"), "work").expect("write");
+
+    let refused = a.run(&["workspace", "archive", &a.workspace]);
+    assert!(!refused.status.success(), "dirty worktree must be refused");
+    assert!(
+        stderr(&refused).contains("uncommitted changes"),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(a.agent(&id)["state"], "idle", "agents are not archived");
+    assert!(worktree.join("agent-output.txt").is_file());
+
+    let forced = json(&a.run(&["--json", "workspace", "archive", "--force", &a.workspace]));
+    assert_eq!(forced["state"], "archived");
+    assert_eq!(forced["worktree_removed"], true);
+    assert_eq!(forced["branch_kept"], false);
+    assert_eq!(a.agent(&id)["state"], "archived");
+    assert!(!worktree.exists());
 }
 
 #[test]

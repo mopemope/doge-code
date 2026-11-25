@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
-use crate::model::{Decision, Isolation, ProviderKind, SendBehavior};
+use crate::model::{Decision, Isolation, ProviderKind, SendBehavior, Workspace};
 
 pub const HELLO: &str = "hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
@@ -68,6 +68,26 @@ pub struct WorkspaceListParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceArchiveParams {
     pub id: WorkspaceId,
+    /// Remove an owned worktree even when it has uncommitted changes or
+    /// commits not in its base, and force-delete its branch. Without it such
+    /// a workspace is refused (`INVALID_STATE`) and nothing is changed.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `workspace.archive` result: the archived workspace (its fields at the top
+/// level) plus what this call did on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceArchiveResult {
+    #[serde(flatten)]
+    pub workspace: Workspace,
+    /// True when this call removed the owned worktree directory.
+    pub worktree_removed: bool,
+    /// True when the workspace records a branch that still exists after this
+    /// call (git refused the safe delete, or the branch is not provably
+    /// dgc's). False when no branch is recorded or it was deleted. Both flags
+    /// are false when the workspace was already archived.
+    pub branch_kept: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +277,7 @@ mod tests {
         let archive: WorkspaceArchiveParams =
             serde_json::from_value(serde_json::json!({"id": id})).unwrap();
         assert_eq!(archive.id, id);
+        assert!(!archive.force, "force defaults to false");
         let pid = ProjectId::generate();
         let remove: ProjectRemoveParams =
             serde_json::from_value(serde_json::json!({"id": pid})).unwrap();
@@ -280,6 +301,34 @@ mod tests {
         })
         .unwrap();
         assert_eq!(lagged, serde_json::json!({"agent_id": null, "next_seq": 0}));
+    }
+
+    #[test]
+    fn archive_result_flattens_the_workspace() {
+        use crate::model::WorkspaceState;
+        let workspace = Workspace {
+            id: WorkspaceId::generate(),
+            project_id: ProjectId::generate(),
+            isolation: Isolation::Worktree,
+            path: PathBuf::from("/w/a"),
+            branch: Some("b".into()),
+            base_ref: None,
+            state: WorkspaceState::Archived,
+            owned: true,
+            created_at: String::new(),
+        };
+        let result = WorkspaceArchiveResult {
+            workspace,
+            worktree_removed: true,
+            branch_kept: true,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["state"], "archived");
+        assert_eq!(value["branch"], "b");
+        assert_eq!(value["worktree_removed"], true);
+        assert_eq!(value["branch_kept"], true);
+        let back: WorkspaceArchiveResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, result);
     }
 
     #[test]
