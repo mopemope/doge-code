@@ -340,6 +340,9 @@
   新しいメッセージ送信前に `queue.json` を空で保存し、捨てた 1 件ごとに `EventKind::QueueDiscarded { text, behavior }` を記録する
   （本文は `UserMessage` と同じく 256 KiB ごとに分割。件数付きの 1 イベントにはしない）。人間向け表示は
   `[seq] queued message discarded: TEXT`。archive / shutdown / 失敗ではキューは従来どおり残る（resume で送られる）。
+- 2026-11-26 (M1 最終レビュー修正 7): 所有 worktree の archive で project ディレクトリが存在しない（削除・移動）ときは git を
+  実行せず記録だけ archive する（`--force` 不要、`tracing::warn` に workspace/project の id、結果は `worktree_removed: false`・
+  `branch_kept: true`）。managed ディレクトリ下に残ったファイルは手動で消す（README に記載）。これで project も `project rm` できる。
 
 ## 検証記録
 

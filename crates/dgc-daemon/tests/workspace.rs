@@ -906,3 +906,33 @@ async fn list_workspaces_filters_by_project() {
         .expect("second");
     assert_eq!(only_second, vec![local]);
 }
+
+#[tokio::test]
+async fn archive_after_the_project_directory_was_deleted_keeps_the_files() {
+    let env = Env::new();
+    let (project_id, ws) = env.worktree("orphan").await;
+    fs::write(ws.path.join("work.txt"), "agent work").expect("write");
+    fs::remove_dir_all(&env.repo).expect("delete the project directory");
+
+    env.manager
+        .check_archive(&ws.id, false)
+        .await
+        .expect("check passes without force");
+    let result = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect("archive without force");
+    assert_eq!(result.workspace.state, WorkspaceState::Archived);
+    assert!(!result.worktree_removed, "nothing was removed");
+    assert!(result.branch_kept);
+    assert!(
+        ws.path.join("work.txt").is_file(),
+        "files under the managed directory are left for manual cleanup"
+    );
+    env.manager
+        .remove_project(&project_id)
+        .await
+        .expect("the project can be removed");
+    assert!(env.manager.list_projects().await.expect("list").is_empty());
+}

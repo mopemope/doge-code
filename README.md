@@ -53,7 +53,11 @@ uncommitted or untracked changes or commits not reachable from the commit it
 was created from (the error names which); `--force` removes it anyway and
 force-deletes the branch. When git refuses the safe branch delete the branch is
 kept and `archive` prints `branch kept: NAME` (`--json`: `"branch_kept": true`,
-and `"worktree_removed"` tells whether the directory was removed).
+and `"worktree_removed"` tells whether the directory was removed). If the
+project directory was deleted or moved, archiving one of its worktree
+workspaces (no `--force` needed) only archives the record and prints
+`worktree kept on disk: PATH`: delete the leftover directory under
+`<worktrees>/` yourself. The project can then be removed.
 Local workspaces use the project directory and are never deleted. Archiving a
 workspace first archives its agents.
 

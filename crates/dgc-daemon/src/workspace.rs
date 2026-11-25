@@ -4,7 +4,8 @@
 //! Deleting a worktree is destructive, so removal is gated three ways: the
 //! workspace must be `owned`, must be a worktree, and its path must resolve to
 //! a location strictly inside the daemon's managed worktrees directory
-//! ([`is_managed_path`]). Anything else is archived without touching disk.
+//! ([`is_managed_path`]). Anything else is archived without touching disk, as
+//! is a worktree whose project directory no longer exists.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -627,6 +628,17 @@ impl WorkspaceManager {
             .ok_or_else(|| {
                 WorkspaceError::InvalidState("the workspace's project is missing".into())
             })?;
+        if !project.path.is_dir() {
+            // The repository was deleted or moved: git cannot be run for it,
+            // so archive the record only and leave the files for manual
+            // cleanup.
+            tracing::warn!(
+                workspace = %workspace.id,
+                project = %project.id,
+                "project directory is gone; archiving the workspace without touching disk"
+            );
+            return Ok(Removal::KeepOnDisk);
+        }
         let plan = inspect_worktree(&project, workspace).await?;
         if !force {
             ensure_nothing_lost(&plan, workspace).await?;
