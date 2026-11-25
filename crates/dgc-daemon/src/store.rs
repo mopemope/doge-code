@@ -1,5 +1,6 @@
 //! JSON entity store: one file per entity under `<state>/{projects,workspaces,agents}/`.
 //!
+//! `list_*` skips (and warns about) unreadable entries; `get_*` reports them.
 //! Files hold `{"version":1,"data":{...}}`. Writes are atomic (temp file in the
 //! same directory, fsync, rename), created 0600, and never follow symlinks.
 
@@ -37,6 +38,18 @@ pub enum StoreError {
     },
     #[error("store file {} has unsupported version {found} (expected {STORE_VERSION})", path.display())]
     UnsupportedVersion { path: PathBuf, found: u64 },
+}
+
+impl StoreError {
+    /// Short, content-free label for logs.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "io",
+            Self::Symlink { .. } => "symlink",
+            Self::Json { .. } => "json",
+            Self::UnsupportedVersion { .. } => "unsupported_version",
+        }
+    }
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
@@ -114,8 +127,16 @@ impl Store {
         files.sort();
         let mut out = Vec::with_capacity(files.len());
         for name in files {
-            if let Some(value) = read_entity(&dir.join(name))? {
-                out.push(value);
+            // One bad file must not hide the others (daemon restore at startup).
+            // Log the entity file name and the error kind only, never contents.
+            match read_entity(&dir.join(&name)) {
+                Ok(Some(value)) => out.push(value),
+                Ok(None) => {}
+                Err(err) => tracing::warn!(
+                    file = %name.to_string_lossy(),
+                    error_kind = err.kind(),
+                    "skipping unreadable store entry"
+                ),
             }
         }
         Ok(out)

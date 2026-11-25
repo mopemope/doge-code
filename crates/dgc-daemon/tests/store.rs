@@ -210,7 +210,6 @@ fn store_rejects_unknown_version() {
     fs::write(&file, serde_json::to_vec(&value).expect("encode")).expect("rewrite");
 
     assert!(store.get_project(&project.id).is_err());
-    assert!(store.list_projects().is_err());
 }
 
 #[test]
@@ -225,6 +224,37 @@ fn store_rejects_corrupt_file() {
         .join(format!("{}.json", project.id.as_str()));
     fs::write(&file, "not json").expect("corrupt");
     assert!(store.get_project(&project.id).is_err());
+}
+
+#[test]
+fn list_skips_unreadable_entries() {
+    let dir = tempdir().expect("tempdir");
+    let store = open_store(dir.path());
+    let ws = WorkspaceId::generate();
+    let good = sample_agent(&ws);
+    store.put_agent(&good).expect("put good");
+
+    let agents_dir = dir.path().join("state/agents");
+    let wrong_version = sample_agent(&ws);
+    store.put_agent(&wrong_version).expect("put");
+    let wrong_path = agents_dir.join(format!("{}.json", wrong_version.id.as_str()));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&wrong_path).expect("read")).expect("json");
+    value["version"] = serde_json::json!(2);
+    fs::write(&wrong_path, serde_json::to_vec(&value).expect("encode")).expect("rewrite");
+
+    let garbage = AgentId::generate();
+    fs::write(
+        agents_dir.join(format!("{}.json", garbage.as_str())),
+        "garbage",
+    )
+    .expect("write");
+
+    assert_eq!(store.list_agents().expect("list"), vec![good.clone()]);
+    // get keeps reporting the problem for the specific id.
+    assert!(store.get_agent(&wrong_version.id).is_err());
+    assert!(store.get_agent(&garbage).is_err());
+    assert_eq!(store.get_agent(&good.id).expect("get"), Some(good));
 }
 
 #[test]
