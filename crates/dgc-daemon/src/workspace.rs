@@ -755,7 +755,15 @@ async fn ensure_nothing_lost(
     if inspect_checkout {
         let status = git(
             &workspace.path,
-            &[os("status"), os("--porcelain"), os("-z")],
+            &[
+                os("status"),
+                os("--porcelain"),
+                os("-z"),
+                // Explicit, so `status.showUntrackedFiles=no` (or a
+                // submodule ignore setting) cannot hide work.
+                os("--untracked-files=all"),
+                os("--ignore-submodules=none"),
+            ],
         )
         .await?;
         if !status.success {
@@ -817,7 +825,9 @@ async fn ensure_nothing_lost(
 }
 
 /// The non-destructive removal: `git worktree remove` without `--force`
-/// (git itself refuses a dirty checkout) and the safe `git branch -d`.
+/// (git itself refuses a dirty checkout, with untracked files always counted
+/// via `-c status.showUntrackedFiles=all`) and the safe `git branch -d`.
+/// Gitignored files are not work to git and are removed with the checkout.
 /// Returns whether the recorded branch still exists afterwards.
 async fn remove_clean_worktree(
     plan: &RemovalPlan,
@@ -827,7 +837,17 @@ async fn remove_clean_worktree(
     if plan.needs_git_remove() {
         let removed = git(
             repo,
-            &[os("worktree"), os("remove"), workspace.path.as_os_str()],
+            &[
+                // git's own cleanliness check in `worktree remove` runs
+                // `git status`, which obeys `status.showUntrackedFiles`; `-c`
+                // reaches that child too, so untracked files always make git
+                // refuse even if `ensure_nothing_lost` was bypassed.
+                os("-c"),
+                os("status.showUntrackedFiles=all"),
+                os("worktree"),
+                os("remove"),
+                workspace.path.as_os_str(),
+            ],
         )
         .await?;
         if !removed.success {
@@ -1113,6 +1133,57 @@ mod tests {
             before.contains(&guard),
             "discard_worktree is called only under `if force`"
         );
+    }
+
+    /// Hermetic git for the tests below; panics on failure.
+    fn test_git(cwd: &Path, args: &[&str]) {
+        let ceiling = fs::canonicalize(std::env::temp_dir()).expect("temp dir");
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CEILING_DIRECTORIES", ceiling)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git starts");
+        assert!(output.status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn safe_removal_keeps_untracked_files_hidden_by_git_config() {
+        // Even when the cleanliness check is bypassed, the non-force removal
+        // must not delete untracked files that `status.showUntrackedFiles=no`
+        // hides from git's own check.
+        let tmp = tempdir().expect("tempdir");
+        let root = fs::canonicalize(tmp.path()).expect("canon");
+        let repo = root.join("repo");
+        fs::create_dir(&repo).expect("mkdir");
+        test_git(&repo, &["init", "-q", "-b", "main"]);
+        test_git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let path = root.join("wt");
+        test_git(&repo, &["worktree", "add", "-q", "-b", "wt", "../wt"]);
+        test_git(&repo, &["config", "status.showUntrackedFiles", "no"]);
+        fs::write(path.join("work.txt"), "x").expect("write");
+
+        let project = Project {
+            id: ProjectId::generate(),
+            path: repo.clone(),
+            name: "repo".into(),
+            created_at: String::new(),
+        };
+        let workspace = new_workspace(
+            &project,
+            Isolation::Worktree,
+            path.clone(),
+            Some("wt".into()),
+            None,
+            true,
+        );
+        let plan = inspect_worktree(&project, &workspace).await.expect("plan");
+        let result = remove_clean_worktree(&plan, &workspace).await;
+        assert!(result.is_err(), "git must refuse the removal");
+        assert!(path.join("work.txt").is_file(), "untracked file survives");
     }
 
     #[test]

@@ -936,3 +936,26 @@ async fn archive_after_the_project_directory_was_deleted_keeps_the_files() {
         .expect("the project can be removed");
     assert!(env.manager.list_projects().await.expect("list").is_empty());
 }
+
+#[tokio::test]
+async fn archive_refuses_untracked_files_hidden_by_git_config() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("hidden").await;
+    // The user's config hides untracked files from `git status`.
+    git(&env.repo, &["config", "status.showUntrackedFiles", "no"]);
+    fs::write(ws.path.join("only-work.txt"), "agent output").expect("write");
+
+    let err = env
+        .manager
+        .archive_workspace(&ws.id, false)
+        .await
+        .expect_err("untracked work must be detected");
+    assert_eq!(err.code(), INVALID_STATE);
+    assert!(
+        err.message().contains("uncommitted changes"),
+        "{}",
+        err.message()
+    );
+    assert_untouched(&env, &ws, "hidden");
+    assert!(ws.path.join("only-work.txt").is_file(), "the file survives");
+}

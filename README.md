@@ -51,7 +51,12 @@ it removes the worktree (`git worktree remove`) and safely deletes its branch
 refused, and nothing (agents included) is changed, while the worktree has
 uncommitted or untracked changes or commits not reachable from the commit it
 was created from (the error names which); `--force` removes it anyway and
-force-deletes the branch. When git refuses the safe branch delete the branch is
+force-deletes the branch. The check is reachability from that base commit only,
+so a branch already merged into main that still carries commits beyond its base
+also needs `--force`. Untracked files count as work regardless of git's
+`status.showUntrackedFiles`, but gitignored files in the worktree (build output,
+`.env`, ...) are removed by a non-force archive, since git treats them as
+disposable. When git refuses the safe branch delete the branch is
 kept and `archive` prints `branch kept: NAME` (`--json`: `"branch_kept": true`,
 and `"worktree_removed"` tells whether the directory was removed). If the
 project directory was deleted or moved, archiving one of its worktree

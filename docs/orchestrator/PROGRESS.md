@@ -263,8 +263,9 @@
     承認要求の要約はコマンド文字列、fileChange は先行する `item/started` の changes。`provider_request_id` はサーバー要求 id の JSON 文字列（`"0"`）。
   - `TurnCompleted.usage` はそのターン id の最新 `thread/tokenUsage/updated`。`status:"failed"` は直前の `error` 通知
     （`willRetry:false`）の文言で `Error` を先に出す。`turn/completed` の `items` は使わない。
-  - resume は新プロセスで `thread/resume{threadId, model?, excludeTurns:true}`（deprecationNotice と旧ターンの再送を避ける）。
-    mode 指定時のみ `approvalPolicy`/`sandbox` も送る（0.172.0 のスキーマにあるが未記録）。未指定なら thread の保存値が復元される。
+  - resume は新プロセスで `thread/resume{threadId, model?, excludeTurns:true, approvalPolicy, sandbox}`（deprecationNotice と
+    旧ターンの再送を避ける）。`approvalPolicy`/`sandbox` は mode の値を常に送る（未指定は workspace-write / on-request。0.172.0 の
+    スキーマにあるが未記録。2026-11-26 最終レビュー修正 5 で「mode 指定時のみ」から変更）。
   - シナリオ `tests/fixtures/codex/scenarios/`: simple_turn / command_approval_accept / file_change_decline / interrupt / steer は記録から
     機械変換（dgc の要求 id は `${ANY}` + capture、`turn/start` の `effort` と `thread/start` の `cwd` は照合しない）。error は記録の
     17〜20 行目（アクティブターン無しの steer/interrupt）を除外。resume は resume_exclude_turns 全体 + resume の 21〜50 行目の合成。
@@ -343,6 +344,11 @@
 - 2026-11-26 (M1 最終レビュー修正 7): 所有 worktree の archive で project ディレクトリが存在しない（削除・移動）ときは git を
   実行せず記録だけ archive する（`--force` 不要、`tracing::warn` に workspace/project の id、結果は `worktree_removed: false`・
   `branch_kept: true`）。managed ディレクトリ下に残ったファイルは手動で消す（README に記載）。これで project も `project rm` できる。
+- 2026-11-26 (M1 最終レビュー修正 1 の追加修正): 未コミット判定の `git status` に `--untracked-files=all --ignore-submodules=none`
+  を付け、安全経路の `git worktree remove` を `-c status.showUntrackedFiles=all` 付きで実行する（git 内部の清浄性チェックの
+  `git status` にも `-c` が伝わるため、判定を経ずに呼ばれても未追跡ファイルを消さない）。`status.showUntrackedFiles=no` の設定下で
+  未追跡ファイルだけの worktree が消えた穴を塞ぐ。gitignore されたファイルは git 上「作業」ではないため force なしでも消える（README に記載）。
+  コントローラ裁定: main へマージ済みでも base より先のコミットがあれば `--force` が必要（README に明記）。
 
 ## 検証記録
 
