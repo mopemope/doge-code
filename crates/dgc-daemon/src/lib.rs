@@ -2,6 +2,8 @@
 //! private Unix socket. Implemented in milestone M1.
 
 pub mod config;
+pub mod events_log;
 pub mod lock;
 pub mod paths;
 pub mod store;
+pub mod time;

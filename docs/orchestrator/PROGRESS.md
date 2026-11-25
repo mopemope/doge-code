@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 3（イベントログ）
+- タスク: M1 Task 4（子プロセス管理）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 3 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 4 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -49,7 +49,7 @@
 |---|---|---|---|
 | 1 | プロトコル型 | 完了 | `feat(protocol): define orchestrator socket protocol types` |
 | 2 | パス、設定、ロック、Store | 完了 | `feat(daemon): add state paths, config, lock and store` |
-| 3 | イベントログ | 未着手 | |
+| 3 | イベントログ | 完了 | `feat(daemon): add per-agent event log` |
 | 4 | 子プロセス管理 | 未着手 | |
 | 5 | ソケットサーバー | 未着手 | |
 | 6 | クライアントと `dgc-next daemon` | 未着手 | |
@@ -98,6 +98,12 @@
 - 2026-11-25 (M1 Task 2 修正): 上記を変更。`list_*` は読めない/壊れた/未知 version のエントリを読み飛ばし、
   `tracing::warn!`（ファイル名とエラー種別のみ、内容は出さない）を出して残りを返す（1 ファイルの破損でデーモン起動時の
   復元を止めないため、コントローラ判断）。`get_*` は従来どおりその id のエラーを返す。`[workspace.dependencies]` に `tracing = "0.1"` を追加。
+- 2026-11-25 (M1 Task 3): `EventLog::open(agent_dir, agent_id, max_bytes)`（event に agent_id を付けるため引数追加）。
+  `dgc_daemon::time::{now_rfc3339, format_rfc3339}` を追加（chrono なし、UTC、ミリ秒、days-from-civil）。後続タスクで再利用する。
+  ローテーションは「追記前に現サイズ + 新行 > max_bytes かつ現ファイルが空でない」とき `events.jsonl` → `events.1.jsonl`
+  （既存 `.1` は rename で置換）。1 行が max_bytes を超えても新ファイルへ書く。ファイルは 0600、`O_NOFOLLOW`（symlink は
+  `EventLogError::Symlink`）。open 時に末尾が改行でなければ改行を足す（クラッシュで切れた行が次のイベントを巻き込まないため）。
+  現ファイルが空で `.1` のみ存在する場合は `.1` の最後の有効行から seq を復元する。
 
 ## 検証記録
 
@@ -135,6 +141,10 @@
   - `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`: clean。
   - 修正後: `list_skips_unreadable_entries` が RED（list が Err）→ 実装後 23 件 PASS、clippy clean、`verify.sh test store` PASS。
   - 未検証: 他ユーザー所有ディレクトリの拒否（root なしでは再現できない）。
+- 2026-11-25 M1 Task 3（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test events_log`: 実装前はモジュール未定義で RED（compile error）→ 10 件 PASS。
+    `cargo test --locked -p dgc-daemon --lib time`: 5 件 PASS。clippy clean。
+    注: `verify.sh test events_log` はファイル名ではなくテスト名で絞るため 0 件で拒否される（`verify.sh test rotation_keeps` は PASS）。
 
 ## 保留中の小さな改善
 
