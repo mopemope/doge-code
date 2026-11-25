@@ -200,7 +200,10 @@ async fn worktree_created_under_managed_dir() {
     let parts: Vec<_> = relative.iter().map(|p| p.to_string_lossy()).collect();
     assert_eq!(parts.len(), 2, "{parts:?}");
     let uuid_part = &project_id.as_str()["prj_".len()..];
-    assert_eq!(parts[0], format!("repo-{}", &uuid_part[..12]));
+    assert_eq!(
+        parts[0],
+        format!("repo-{}", &uuid_part[uuid_part.len() - 12..])
+    );
     assert_eq!(parts[1], "feature_login");
 
     assert!(ws.path.join("a.txt").is_file());
@@ -574,14 +577,100 @@ async fn archive_failure_leaves_workspace_active() {
 async fn archive_tolerates_a_worktree_directory_that_is_already_gone() {
     let env = Env::new();
     let (_project, ws) = env.worktree("gone").await;
+    // An unrelated worktree of the user whose directory is also missing: it
+    // must keep its registration (no repository-wide prune).
+    let user_wt = env.root.join("base/user-wt");
+    git(
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "user-branch",
+            user_wt.to_str().expect("utf8"),
+        ],
+    );
+    fs::remove_dir_all(&user_wt).expect("rm user worktree");
     fs::remove_dir_all(&ws.path).expect("rm");
+
     let archived = env
         .manager
         .archive_workspace(&ws.id)
         .await
         .expect("archive");
     assert_eq!(archived.state, WorkspaceState::Archived);
-    assert!(!branch_exists(&env.repo, "gone"));
+    assert!(
+        !branch_exists(&env.repo, "gone"),
+        "dgc's own branch removed"
+    );
+    let registered = git(&env.repo, &["worktree", "list", "--porcelain"]);
+    assert!(
+        registered.contains(user_wt.to_str().expect("utf8")),
+        "the user's stale worktree must stay registered:\n{registered}"
+    );
+    assert!(
+        !registered.contains(ws.path.to_str().expect("utf8")),
+        "this workspace's registration is gone"
+    );
+    assert!(branch_exists(&env.repo, "user-branch"));
+}
+
+#[tokio::test]
+async fn archive_keeps_a_branch_the_user_recreated_after_the_registration_was_gone() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("feature/x").await;
+    // The user removes dgc's worktree and branch by hand, then reuses the name.
+    fs::remove_dir_all(&ws.path).expect("rm");
+    git(&env.repo, &["worktree", "prune"]);
+    git(&env.repo, &["branch", "-D", "feature/x"]);
+    fs::write(env.repo.join("a.txt"), "user work\n").expect("write");
+    git(&env.repo, &["commit", "-q", "-am", "user commit"]);
+    git(&env.repo, &["branch", "feature/x"]);
+    let tip = git(&env.repo, &["rev-parse", "feature/x"]);
+
+    let archived = env
+        .manager
+        .archive_workspace(&ws.id)
+        .await
+        .expect("archive");
+    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert!(
+        branch_exists(&env.repo, "feature/x"),
+        "the user's branch survives"
+    );
+    assert_eq!(git(&env.repo, &["rev-parse", "feature/x"]), tip);
+}
+
+#[tokio::test]
+async fn archive_keeps_both_branches_when_the_user_switched_branch_in_the_worktree() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("orig").await;
+    git(&ws.path, &["switch", "-q", "-c", "switched"]);
+
+    let archived = env
+        .manager
+        .archive_workspace(&ws.id)
+        .await
+        .expect("archive");
+    assert_eq!(archived.state, WorkspaceState::Archived);
+    assert!(!ws.path.exists(), "dgc's own worktree directory is removed");
+    assert!(branch_exists(&env.repo, "orig"), "recorded branch kept");
+    assert!(branch_exists(&env.repo, "switched"), "user's branch kept");
+}
+
+#[tokio::test]
+async fn archive_keeps_the_branch_when_the_worktree_is_detached() {
+    let env = Env::new();
+    let (_project, ws) = env.worktree("detach").await;
+    git(&ws.path, &["checkout", "-q", "--detach"]);
+
+    env.manager
+        .archive_workspace(&ws.id)
+        .await
+        .expect("archive");
+    assert!(!ws.path.exists());
+    assert!(branch_exists(&env.repo, "detach"));
 }
 
 #[tokio::test]

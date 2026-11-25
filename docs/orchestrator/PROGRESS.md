@@ -141,7 +141,7 @@
   （symlink 脱出と dangling symlink は拒否）。削除は `owned` かつ `isolation == worktree` かつ managed のときだけ。
   managed 外の owned workspace は警告ログのうえディスクに触れず archived にする。worktree 削除（`git worktree remove --force`）が
   失敗したら何も archived にせず INTERNAL（stderr 末尾 4096 バイト以内）。ブランチ削除（`git branch -D`）の失敗は警告ログのみで
-  archive は成功扱い。ディレクトリが既に無ければ `git worktree prune` のうえブランチを削除する。archive は冪等。
+  archive は成功扱い。archive は冪等。（下の 2026-11-25 修正で、リポジトリ全体の `git worktree prune` とブランチの無条件削除は廃止。）
   `base_ref` には解決済みコミットのフルハッシュを保存する（設計書 §データモデルの「解決済み」）。
   `local` workspace に `branch`/`base_ref`/`slug` を渡すと INVALID_PARAMS。slug は `[A-Za-z0-9._-]` 1〜128 文字、先頭 `.` 不可
   （明示 slug も同規則、省略時は branch を同規則で置換）。ユーザー指定の ref/branch は `-` 始まりを拒否し git の option と
@@ -149,6 +149,13 @@
   変更系操作は `tokio::sync::Mutex` で直列化する。archive 時のエージェント archive は Task 13 で接続（コード内 TODO）。
 - 2026-11-25 (M1 Task 7): `crates/dgc-cli/tests/common/mod.rs` に Task 6 の `TestEnv` を移して `daemon_cli.rs` と共有（挙動変更なし）。
   README に `project` / `workspace` コマンドを追記。
+- 2026-11-25 (M1 Task 7 修正 1): 計画の欠陥の訂正（コントローラ裁定）: `repo_key` の uuid 部は先頭 12 桁（uuid v7 のミリ秒
+  タイムスタンプ部）ではなく**末尾 12 桁**（ランダム部）を使う。
+- 2026-11-25 (M1 Task 7 修正 1): archive の後始末は dgc 自身の git 状態に限定する。リポジトリ全体の `git worktree prune` は
+  使わない（ユーザーの欠けた worktree の登録まで消すため）。削除前に `git worktree list --porcelain -z` でこの workspace の
+  path のエントリを探し、(a) ディレクトリが存在する、または stale エントリがあるときだけ `git worktree remove --force <path>`
+  （欠けたディレクトリでも成功する）、(b) ブランチは、そのエントリが記録どおりの `refs/heads/<branch>` をチェックアウトして
+  いる場合だけ `git branch -D`。エントリ無し・別ブランチ・detached HEAD なら archive は行い、ブランチは残して警告ログ（id のみ）。
 
 ## 検証記録
 
@@ -213,7 +220,10 @@
   - ミューテーション確認: `is_managed_path` を常に true にすると `archive_refuses_{path_outside_managed_dir,traversal_path,symlink_escape}`
     が FAIL、archive の `owned` 条件を外すと `archive_keeps_unowned_directory_inside_managed_dir` が FAIL。
   - 注: `repo_key` は仕様どおり uuid v7 の先頭 12 桁（ミリ秒タイムスタンプ部）なので、同名ディレクトリのプロジェクトを同一ミリ秒に
-    作ると衝突しうる（実用上は無視できる）。
+    作ると衝突しうる（実用上は無視できる）。→ 下の修正で末尾 12 桁に変更。
+- 2026-11-25 M1 Task 7 修正 1（Linux、1.99.0）: `cargo test --locked -p dgc-daemon --test workspace` 29 件 PASS、
+  `--lib workspace` 15 件 PASS、`-p dgc-cli --test workspace_cli` 3 件 PASS、clippy clean。ミューテーション（ブランチを無条件に
+  削除）で新テスト 3 件が FAIL。
 
 ## 保留中の小さな改善
 

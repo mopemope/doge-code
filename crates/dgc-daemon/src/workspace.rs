@@ -38,8 +38,8 @@ const SLUG_MAX_BYTES: usize = 128;
 /// Longest accepted branch name or base ref, in bytes.
 const REF_MAX_BYTES: usize = 255;
 
-/// Hex characters of the project id's uuid used in the per-repository
-/// directory name.
+/// Trailing hex characters of the project id's uuid used in the
+/// per-repository directory name.
 const REPO_KEY_ID_CHARS: usize = 12;
 
 /// Failure of a project or workspace operation. Messages never contain file
@@ -574,50 +574,72 @@ impl WorkspaceManager {
         Ok(workspace)
     }
 
-    /// Remove the checkout and the recorded branch. The caller has verified
-    /// ownership and that the path is managed.
+    /// Remove the checkout and, if it is provably dgc's, its branch. The
+    /// caller has verified ownership and that the path is managed. Only this
+    /// workspace's own git state is touched: never a repository-wide prune, and
+    /// the branch is deleted only when git's registration for this very path
+    /// still names the recorded branch.
     async fn remove_owned_worktree(
         &self,
         project: &Project,
         workspace: &Workspace,
     ) -> Result<(), WorkspaceError> {
         let repo = project.path.as_path();
-        match fs::symlink_metadata(&workspace.path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                // Already deleted by hand: drop git's stale registration.
-                match git(repo, &[os("worktree"), os("prune")]).await {
-                    Ok(out) if out.success => {}
-                    Ok(out) => {
-                        tracing::warn!(stderr_bytes = out.stderr.len(), "git worktree prune failed")
-                    }
-                    Err(err) => tracing::warn!(%err, "git worktree prune failed"),
-                }
+        let listed = git(
+            repo,
+            &[os("worktree"), os("list"), os("--porcelain"), os("-z")],
+        )
+        .await?;
+        if !listed.success {
+            return Err(git_failure("git worktree list", &listed));
+        }
+        let entry = registered_branch(&listed.stdout, &workspace.path);
+        let branch_to_delete = match (workspace.branch.as_deref(), &entry) {
+            (Some(recorded), Some(Some(current)))
+                if validate_branch_text(recorded).is_ok()
+                    && current.strip_prefix("refs/heads/") == Some(recorded) =>
+            {
+                Some(recorded)
             }
+            (Some(_), _) => {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    "recorded branch is not checked out in this worktree; keeping the branch"
+                );
+                None
+            }
+            (None, _) => None,
+        };
+
+        let exists = match fs::symlink_metadata(&workspace.path) {
+            Ok(_) => true,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => false,
             Err(err) => {
                 return Err(WorkspaceError::internal(format!(
                     "cannot inspect the worktree: {}",
                     err.kind()
                 )));
             }
-            Ok(_) => {
-                let removed = git(
-                    repo,
-                    &[
-                        os("worktree"),
-                        os("remove"),
-                        os("--force"),
-                        workspace.path.as_os_str(),
-                    ],
-                )
-                .await?;
-                if !removed.success {
-                    return Err(git_failure("git worktree remove", &removed));
-                }
+        };
+        // A directory that is already gone is still removed through git when
+        // git has a stale entry for exactly this path; with no entry there is
+        // nothing of ours left to remove.
+        if exists || entry.is_some() {
+            let removed = git(
+                repo,
+                &[
+                    os("worktree"),
+                    os("remove"),
+                    os("--force"),
+                    workspace.path.as_os_str(),
+                ],
+            )
+            .await?;
+            if !removed.success {
+                return Err(git_failure("git worktree remove", &removed));
             }
         }
-        if let Some(branch) = workspace.branch.as_deref()
-            && validate_branch_text(branch).is_ok()
-        {
+        if let Some(branch) = branch_to_delete {
             match git(repo, &[os("branch"), os("-D"), os(branch)]).await {
                 Ok(out) if out.success => {}
                 Ok(out) => {
@@ -630,6 +652,35 @@ impl WorkspaceManager {
         }
         Ok(())
     }
+}
+
+/// In `git worktree list --porcelain -z` output, find the entry for `path`.
+/// `None`: no such entry. `Some(None)`: registered with a detached HEAD (or no
+/// branch). `Some(Some(ref))`: the full ref (`refs/heads/...`) it has checked out.
+fn registered_branch(porcelain: &str, path: &Path) -> Option<Option<String>> {
+    let wanted = [Some(path.to_owned()), resolve_with_missing_tail(path)];
+    let matches = |entry: &Path| {
+        wanted.iter().flatten().any(|w| w == entry)
+            || resolve_with_missing_tail(entry)
+                .is_some_and(|r| wanted.iter().flatten().any(|w| *w == r))
+    };
+    let mut found: Option<Option<String>> = None;
+    let mut current_matches = false;
+    for field in porcelain.split('\0') {
+        if let Some(entry) = field.strip_prefix("worktree ") {
+            current_matches = matches(Path::new(entry));
+            if current_matches {
+                found = Some(None);
+            }
+        } else if let Some(branch) = field.strip_prefix("branch ")
+            && current_matches
+        {
+            found = Some(Some(branch.to_owned()));
+        } else if field.is_empty() {
+            current_matches = false;
+        }
+    }
+    found
 }
 
 fn new_workspace(
@@ -653,7 +704,9 @@ fn new_workspace(
     }
 }
 
-/// `<sanitized basename>-<first 12 hex chars of the project id's uuid>`.
+/// `<sanitized basename>-<last 12 hex chars of the project id's uuid>`. The
+/// leading hex digits of a uuid v7 are its millisecond timestamp, so the
+/// trailing (random) ones are used.
 fn repo_key(project: &Project) -> String {
     let base = project
         .path
@@ -661,7 +714,8 @@ fn repo_key(project: &Project) -> String {
         .map_or_else(|| "root".to_owned(), |n| sanitize(&n.to_string_lossy()));
     let id = project.id.as_str();
     let uuid = id.strip_prefix(ProjectId::PREFIX).unwrap_or(id);
-    let short: String = uuid.chars().take(REPO_KEY_ID_CHARS).collect();
+    let skip = uuid.chars().count().saturating_sub(REPO_KEY_ID_CHARS);
+    let short: String = uuid.chars().skip(skip).collect();
     format!("{base}-{short}")
 }
 
@@ -801,7 +855,7 @@ mod tests {
         };
         let key = repo_key(&project);
         let uuid = &project.id.as_str()[ProjectId::PREFIX.len()..];
-        assert_eq!(key, format!("my_repo-{}", &uuid[..12]));
+        assert_eq!(key, format!("my_repo-{}", &uuid[uuid.len() - 12..]));
     }
 
     #[tokio::test]
