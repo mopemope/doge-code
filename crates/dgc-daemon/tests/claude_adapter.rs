@@ -317,6 +317,116 @@ async fn claude_interrupt() {
     shutdown_quietly(session).await;
 }
 
+/// Synthetic: the CLI answers the interrupt but the interrupted (started)
+/// turn never sends a `result`. The next turn's `system/init` closes the
+/// swallow window, so its `result` still completes the turn.
+#[tokio::test]
+async fn claude_interrupt_without_result_does_not_swallow_next_turn() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("interrupt_without_result");
+    let mut session = start(&adapter, spec(&dir, Some("haiku"), None)).await;
+    session
+        .send_user("Write a 1500-word story about a dog who learns to sail. Plain text, no tools.")
+        .await
+        .expect("send_user");
+    assert_eq!(
+        next_event(&mut session).await,
+        session_started("1590b64f-8c2c-4416-b4af-ea380b4d23b9")
+    );
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    session
+        .send_user("Reply with exactly the word: ok")
+        .await
+        .expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[1], text("ok"));
+    assert_eq!(usage_output_tokens(&events[2]), 162);
+    shutdown_quietly(session).await;
+}
+
+/// Synthetic: interrupting after the turn's `result` sends nothing (the
+/// scenario expects the next user message instead) and succeeds.
+#[tokio::test]
+async fn claude_interrupt_when_idle_sends_nothing() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("interrupt_when_idle");
+    let mut session = start(&adapter, spec(&dir, Some("haiku"), None)).await;
+    session
+        .send_user("Reply with exactly the word: pong")
+        .await
+        .expect("send_user");
+    turn_events(&mut session).await;
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    session
+        .send_user("Reply with exactly the word: pong")
+        .await
+        .expect("send_user");
+    // The fake answers the expected user line with system/init; a stray
+    // interrupt request would have made it exit 3 instead.
+    assert_eq!(
+        next_event(&mut session).await,
+        session_started("a8b19be3-3df1-4ce8-8371-d551a1ec21dd")
+    );
+    shutdown_quietly(session).await;
+}
+
+/// Synthetic: a permission request outstanding at interrupt is denied to the
+/// CLI before the interrupt is sent, and the interrupted turn's result is
+/// swallowed.
+#[tokio::test]
+async fn claude_interrupt_denies_pending_permission() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("interrupt_denies_pending_permission");
+    let mut session = start(&adapter, spec(&dir, Some("haiku"), None)).await;
+    session
+        .send_user(
+            "Use the Bash tool to run exactly this command: touch hello.txt\n\
+             Do not use any other tool. If the command is denied, reply with the single word \
+             denied and stop. Otherwise reply with the single word done.",
+        )
+        .await
+        .expect("send_user");
+    let events = until_permission(&mut session).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::PermissionRequested { .. })
+        ),
+        "{events:?}"
+    );
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    // The request was cancelled: answering it now is an error.
+    assert!(
+        session
+            .respond_permission("fea6759a-ad91-49ba-b9b6-b55ac5acaf7c", Decision::Allow)
+            .await
+            .is_err()
+    );
+    session
+        .send_user("Reply with exactly the word: ok")
+        .await
+        .expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(
+        events[0],
+        session_started("0db50f53-6482-4f6b-81c4-f6d70eb258b3")
+    );
+    assert_eq!(events[1], text("ok"));
+    assert_eq!(usage_output_tokens(&events[2]), 162);
+    shutdown_quietly(session).await;
+}
+
 #[tokio::test]
 async fn claude_resume_passes_session_id() {
     let dir = tempdir().expect("tempdir");

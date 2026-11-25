@@ -31,11 +31,15 @@
 //! - Decisions: Allow and AllowForSession → `allow` with `updatedInput` = the
 //!   original tool input (no session-wide rule is sent); Deny → `deny` with a
 //!   fixed message.
-//! - Interrupt: outstanding permission requests are answered `deny`, then the
-//!   `interrupt` control request is sent and its response awaited. The
-//!   interrupted turn's `result` arrives after that response and is swallowed,
-//!   as are permission requests until then (answered `deny`). This assumes, as
-//!   recorded, that every interrupted turn still ends with one `result`.
+//! - Interrupt: with no turn in flight (its `result` already arrived) nothing
+//!   is sent. Otherwise outstanding permission requests are answered `deny`,
+//!   then the `interrupt` control request is sent and its response awaited.
+//!   The interrupted turn's `result` arrives after that response and is
+//!   swallowed, as are permission requests until then (answered `deny`). If
+//!   every interrupted turn had started (sent `system/init`), the next
+//!   `system/init` ends the swallow window even when no `result` came, since
+//!   the CLI runs turns in order. Interrupting a turn that had not started
+//!   logs a warning and relies on a `result` arriving (not recorded).
 //! - The session owns the process group: dropping it (e.g. a manager timeout
 //!   cancelling a call) kills the group. `shutdown` closes stdin, waits briefly
 //!   and then terminates. Stdout EOF (read errors surface as EOF too) plus the
@@ -63,7 +67,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession};
 use crate::process::{ChildIo, ChildProcess, ChildSpec, LineEvent, TailBuffer};
@@ -264,8 +268,15 @@ struct State {
     permissions: HashMap<String, Value>,
     /// User messages sent whose `result` has not arrived.
     turns_in_flight: u32,
+    /// How many of the in-flight turns have seen their `system/init`. The
+    /// CLI runs turns in order, so these are the oldest ones.
+    turns_started: u32,
     /// `result`s still to arrive for interrupted turns; they are dropped.
     swallow_results: u32,
+    /// Every interrupted turn had started when the interrupt was answered,
+    /// so their results must precede the next `system/init`: that init
+    /// closes the swallow window even if a result never came.
+    swallow_ends_at_init: bool,
     /// An interrupt is in progress.
     interrupting: bool,
     /// Stdout reached EOF.
@@ -460,6 +471,12 @@ impl ProviderSession for ClaudeSession {
         Box::pin(async move {
             let outstanding: Vec<String> = {
                 let mut state = self.shared.state();
+                if state.turns_in_flight == 0 {
+                    // The turn already ended; its TurnCompleted is buffered.
+                    // Interrupting an idle CLI was never recorded.
+                    debug!("claude interrupt skipped: no turn in flight");
+                    return Ok(());
+                }
                 state.interrupting = true;
                 state.permissions.drain().map(|(id, _)| id).collect()
             };
@@ -636,15 +653,18 @@ async fn handle_line(shared: &Shared, text: &str) -> Vec<ProviderEvent> {
         }
         "control_request" => control_request(shared, &message).await,
         "system" => match message["subtype"].as_str() {
-            Some("init") => match message["session_id"].as_str() {
-                Some(id) => vec![ProviderEvent::SessionStarted {
-                    session_id: id.to_owned(),
-                }],
-                None => {
-                    debug!("claude system/init without session_id");
-                    Vec::new()
+            Some("init") => {
+                turn_started(shared);
+                match message["session_id"].as_str() {
+                    Some(id) => vec![ProviderEvent::SessionStarted {
+                        session_id: id.to_owned(),
+                    }],
+                    None => {
+                        debug!("claude system/init without session_id");
+                        Vec::new()
+                    }
                 }
-            },
+            }
             subtype => {
                 debug!(subtype, "ignoring claude system message");
                 Vec::new()
@@ -668,6 +688,26 @@ async fn handle_line(shared: &Shared, text: &str) -> Vec<ProviderEvent> {
     }
 }
 
+/// A `system/init`: the next queued turn has started. Results of interrupted
+/// turns that had started before must have arrived by now; any still
+/// expected were never sent, so stop waiting for them.
+fn turn_started(shared: &Shared) {
+    let mut state = shared.state();
+    if state.swallow_results > 0 && state.swallow_ends_at_init {
+        debug!(
+            missing = state.swallow_results,
+            "interrupted claude turn ended without a result"
+        );
+        let missing = state.swallow_results;
+        state.turns_in_flight = state.turns_in_flight.saturating_sub(missing);
+        state.turns_started = state.turns_started.saturating_sub(missing);
+        state.swallow_results = 0;
+    }
+    if state.turns_started < state.turns_in_flight {
+        state.turns_started += 1;
+    }
+}
+
 fn control_response(shared: &Shared, message: &Value) {
     let response = &message["response"];
     let Some(request_id) = response["request_id"].as_str() else {
@@ -683,6 +723,15 @@ fn control_response(shared: &Shared, message: &Value) {
             // Lines are applied in order, so the turns still in flight are the
             // interrupted ones; their results come after this response.
             state.swallow_results = state.turns_in_flight;
+            state.swallow_ends_at_init = state.turns_started >= state.turns_in_flight;
+            if !state.swallow_ends_at_init {
+                warn!(
+                    request_id,
+                    in_flight = state.turns_in_flight,
+                    started = state.turns_started,
+                    "claude interrupted a turn that had not started; its result may never come"
+                );
+            }
         }
         waiter
     };
@@ -801,6 +850,7 @@ fn turn_result(shared: &Shared, message: &Value) -> Vec<ProviderEvent> {
     {
         let mut state = shared.state();
         state.turns_in_flight = state.turns_in_flight.saturating_sub(1);
+        state.turns_started = state.turns_started.saturating_sub(1);
         // Requests of the finished turn can no longer be answered.
         state.permissions.clear();
         if state.swallow_results > 0 {

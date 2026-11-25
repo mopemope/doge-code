@@ -233,6 +233,9 @@
   `{"subtype":"error"}` の control_response を返す（Agent SDK の形。未記録）。
   中断: 未回答の権限要求に deny を返してから `interrupt` を送り、応答時点で応答待ちのターン数だけ後続の `result` を捨てる
   （その間の `can_use_tool` は deny で自動回答し通知しない）。中断されたターンも必ず `result` を 1 つ出す前提（記録どおり）。
+  修正 1: 応答待ちのターンが無ければ interrupt を送らずに Ok を返す（アイドル時の interrupt は未記録）。中断した全ターンが
+  `system/init` 済みだったなら、次の `system/init` で破棄を打ち切る（CLI はターンを順に処理するので、中断したターンの
+  `result` はそれより前に来るはず。来なかった分は応答待ちから外す）。未開始のターンを中断した場合は warn を出し従来の規則のまま。
   `start` は initialize を 20 秒で打ち切り、起動中にプロセスが終わったら stderr 末尾を含む `ProviderError::Spawn` を返す。
   `shutdown` は stdin を閉じて最大 1 秒待ち、残っていれば `terminate(2 秒)`。セッション drop でプロセスグループを kill する。
   シナリオ `tests/fixtures/claude/scenarios/*.jsonl` は記録から機械変換（dgc が振る control request id を `${ANY}` + capture）。
@@ -325,8 +328,21 @@
   で記録器が起動したプロセスが残っていないことを確認（残っていたのは記録前から動いていたユーザーの Codex 常駐デーモンのみ）。
   フィクスチャをユーザー名・メール・`sk-`・`Bearer`・`/home/<実ユーザー>`・組織名・プラン名で grep し該当なし。
 
+- 2026-11-25 M1 Task 11（Linux）: `cargo fmt --all`、clippy（新 crate 4 つ、`--all-targets --all-features -D warnings`）clean。
+  `cargo test --locked -p dgc-daemon --test claude_adapter` 11 件 PASS（15 回連続 PASS）、`verify.sh test claude_` PASS、
+  新 crate 全テスト PASS。ミューテーション: 中断後の result 破棄を外す → `claude_interrupt` が FAIL、deny 文言を変える →
+  `claude_permission_deny` が FAIL（偽プロバイダの差分が stderr に出る）。
+- 2026-11-25 M1 Task 11 修正 1（Linux）: 中断で result が来ない場合の対策後、`claude_adapter` 14 件 PASS（15 回連続 PASS）、
+  `--test agent_manager` 20 件 PASS、新 crate 全テスト 221 件 PASS、fmt/clippy clean。RED: 修正前のアダプタで
+  `claude_interrupt_when_idle_sends_nothing` と `claude_interrupt_without_result_does_not_swallow_next_turn` が FAIL。
+  ミューテーション: 未回答の権限要求への deny ループを外す → `claude_interrupt_denies_pending_permission` が FAIL、
+  `system/init` での破棄解除を外す → `..._without_result_...` が FAIL、アイドル時の送信省略を外す → `..._when_idle_...` が FAIL。
+
 ## 保留中の小さな改善
 
+- M1 Task 11 修正 1 由来（Task 14 の実 CLI 手動確認に含める）: user メッセージ送信の直後（`system/init` より前）に
+  interrupt した場合の Claude の挙動（中断されたターンの `result` が出るか）。未記録のため、アダプタはその場合 warn を出し
+  `result` が来る前提のままにしている。
 - M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
   の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
 - M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が
