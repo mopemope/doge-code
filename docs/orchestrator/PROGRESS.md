@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 8（ProviderAdapter と AgentManager）
+- タスク: M1 Task 9（実プロバイダの記録）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 8 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 9 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -54,7 +54,7 @@
 | 5 | ソケットサーバー | 完了 | `feat(daemon): serve JSON-RPC over private unix socket` |
 | 6 | クライアントと `dgc-next daemon` | 完了 | `feat(cli): add daemon lifecycle commands with autostart` |
 | 7 | プロジェクトとワークスペース | 完了 | `feat(daemon): manage projects and worktree workspaces` |
-| 8 | ProviderAdapter と AgentManager | 未着手 | |
+| 8 | ProviderAdapter と AgentManager | 完了 | `feat(daemon): add agent state machine over provider adapters` |
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 未着手 | |
 | 10 | 偽プロバイダ | 未着手 | |
 | 11 | ClaudeAdapter | 未着手 | |
@@ -157,6 +157,33 @@
   （欠けたディレクトリでも成功する）、(b) ブランチは、そのエントリが記録どおりの `refs/heads/<branch>` をチェックアウトして
   いる場合だけ `git branch -D`。エントリ無し・別ブランチ・detached HEAD なら archive は行い、ブランチは残して警告ログ（id のみ）。
 
+- 2026-11-25 (M1 Task 8): 依存クレートの追加なし。`provider/mod.rs`（トレイトと共通型）、`agent.rs`（`AgentManager`）、
+  `agent/actor.rs`（エージェントごとの actor。`agent.rs` が 700 行を超えたためコントローラ裁定どおり分割）。
+  構成: 生存中のエージェント 1 つにつき tokio タスク 1 つ（actor）が `ProviderSession` と queue を持ち、manager は mpsc の
+  コマンド + oneshot の応答で操作する。コマンドは actor がその時点の状態で評価するため、`starting` 中の send/interrupt/archive は
+  起動完了後に処理される（待つ）。レコードは毎回 Store に保存し `get`/`list` は Store を読む。イベントは EventLog に追記してから
+  全体 1 本の broadcast（容量 1024）へ送る。`subscribe(agent)` の引数は参考値で、絞り込みは受信側の責務。
+  生存していないエージェントの変更と actor の最終遷移は `live` ロック下で行う（resume との競合防止）。
+- 2026-11-25 (M1 Task 8): `AgentError` は `NotFound(&'static str)`（`agent`/`workspace`/`permission`）、
+  `InvalidState { state: String }`（エージェント状態の snake_case、または `workspace_archived`）、`InvalidParams(String)`、
+  `Provider(String)`、`Storage(String)`。`code()` で RPC コードに写像（Provider/Storage は INTERNAL）。
+  `ProviderError` は `Spawn`/`Io`/`Protocol`（String）と `Exited`。公開 API の形: `create`/`resume`/`archive` は `Agent` を返す
+  （create/resume 直後は `starting`）、`interrupt` は `()`、`events_page(&AgentEventsParams)`（`clamped_limit()` を適用）、
+  `recover_on_startup()`（全件処理して最初のエラーを返す）、`shutdown_all(grace)`（各 session を shutdown して `stopped`、
+  最大 grace + 0.5 秒待つ）。
+- 2026-11-25 (M1 Task 8): アダプタの契約（Task 11/12 向け、`provider/mod.rs` の doc に記載）: `ProviderError` の文言にプロンプト・
+  出力本文を含めない。`Exited` は `shutdown` 以外でプロセスが終わったときに 1 回だけ出す（イベントチャネルが `Exited` なしに
+  閉じても予期せぬ終了扱い）。`interrupt` が返った後に中断したターンの `TurnCompleted` を出さない。interrupt 時に未解決の権限要求は
+  manager 側で `cancelled` にするので、プロトコル上の応答が必要ならアダプタが返す。`start` はハングしない。
+- 2026-11-25 (M1 Task 8): 状態機械の細部（ブリーフに無い部分の判断）: create は `state_changed{starting}` と
+  `user_message{初期プロンプト, queue}` を記録してから起動する。起動失敗・初期/queue 先頭の送信失敗・`Exited` は `error`
+  イベント（4096 バイトで切り詰め）を出して `failed`（`last_error` に同じ文言。`Exited` は stderr 末尾、空なら定型文）。
+  起動失敗時の初期プロンプトは queue に入れない。ユーザーの send がプロバイダエラーになった場合は状態を変えずに
+  `Provider` エラーを返す（後続の `Exited` で failed になる）。interrupt 後の送信が失敗したら `idle`。
+  `waiting_permission` 中の `TurnCompleted` も `running` と同様に扱い、残った保留権限は cancelled にする。
+  resume は workspace が active であることを確認し、`last_error` を消す。queue.json の読み込みは `O_NOFOLLOW`、未知 version は
+  `Storage` エラー。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -224,6 +251,13 @@
 - 2026-11-25 M1 Task 7 修正 1（Linux、1.99.0）: `cargo test --locked -p dgc-daemon --test workspace` 29 件 PASS、
   `--lib workspace` 15 件 PASS、`-p dgc-cli --test workspace_cli` 3 件 PASS、clippy clean。ミューテーション（ブランチを無条件に
   削除）で新テスト 3 件が FAIL。
+
+- 2026-11-25 M1 Task 8（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test agent_manager`: 実装前は `dgc_daemon::agent` / `dgc_daemon::provider` 未定義で
+    RED（compile error）→ 15 件 PASS（5 回連続 PASS）。新 crate 全テスト PASS、clippy（`-D warnings`）clean。
+    `verify.sh test queue_is_drained_after_turn`: PASS（`verify.sh test agent_manager` はテスト名で絞るため 0 件で拒否される）。
+  - ミューテーション確認: resume で `resume_session_id` を渡さない → `resume_uses_provider_session_id` FAIL、interrupt で保留権限を
+    cancel しない → `interrupt_cancels_pending_permissions` FAIL、failed 時に queue を消す → `crash_marks_failed_and_keeps_queue` FAIL。
 
 ## 保留中の小さな改善
 
