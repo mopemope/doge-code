@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 1（プロトコル型）
+- タスク: M1 Task 2（パス、設定、ロック、Store）
 - 状態: 未着手
-- 済んだこと: M0 完了（ブランチ `feat/orchestrator`）
-- 次の一手: M1 計画の Task 1 Step 1 から始める。実行方式はユーザーに確認する（M0 はネイティブ方式の指定だった）
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 2 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -47,7 +47,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | プロトコル型 | 未着手 | |
+| 1 | プロトコル型 | 完了 | `feat(protocol): define orchestrator socket protocol types` |
 | 2 | パス、設定、ロック、Store | 未着手 | |
 | 3 | イベントログ | 未着手 | |
 | 4 | 子プロセス管理 | 未着手 | |
@@ -78,6 +78,16 @@
 - 2026-11-25 (M0): 作業は `feat/orchestrator` ブランチで行う（別 worktree は旧 crate の
   再ビルドが重いため作らない）。
 
+- 2026-11-25 (M1 Task 1): `[workspace.dependencies]` に `serde`（derive）、`serde_json`、`uuid`
+  （`default-features = false`）を追加。`dgc-protocol` は uuid の features `std`, `v7` を有効にする
+  （`Uuid::now_v7` は `std` を要する）。
+- 2026-11-25 (M1 Task 1): ID の文字列形式は `prj_` / `ws_` / `agt_` / `perm_` + uuid v7 の 32 桁小文字 hex
+  （ハイフンなし）。`FromStr` と serde の deserialize が接頭辞と本体を検証する。
+- 2026-11-25 (M1 Task 1): 切り詰めは protocol crate の関数で提供する: `truncate_summary`（4096 バイト、
+  UTF-8 境界）、`PendingPermission::new`（`raw` は直列化 64 KiB 超で `{"truncated":true}`）、
+  `EventKind::tool_call` / `tool_result`。`Response` は計画どおり `jsonrpc` フィールドを持たない。
+  `AgentEventsParams` の `since_seq` 既定 0、`limit` 既定 1000（`clamped_limit()` で上限適用）。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -102,6 +112,12 @@
     Rust ゲートのコマンド記述に `--workspace` が無い）を修正し、`check-agent-guidance.py` に
     `check_workflow_doc` を追加して再発を防止（`test_workflow_doc_lists_wrapper_rust_commands` RED→GREEN、
     `verify.sh guidance` PASS 193 tests）。Minor は下の「保留中の小さな改善」に記録。
+
+- 2026-11-25 M1 Task 1（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-protocol`: 実装前は未定義型で RED（compile error）→ 28 件 PASS。
+    `verify.sh test` はテスト名で絞るため `dgc_protocol` では単体テスト（`ids::tests::...`）に一致しない。
+    crate 単位は `cargo test -p dgc-protocol` を使い、`verify.sh test <テスト名>` の動作も確認した。
+  - `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`: clean。
 
 ## 保留中の小さな改善
 
