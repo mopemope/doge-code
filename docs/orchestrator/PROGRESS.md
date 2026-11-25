@@ -20,7 +20,7 @@
 - タスク: M2（TUI）の計画作成
 - 状態: 未着手
 - 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M2（TUI）の計画を作成する（superpowers:writing-plans、計画は docs/superpowers/plans/）。M1 の保留指摘は末尾「M1 レビューで保留した指摘と判断」から優先度を付けて取り込む。M1 ブランチ `feat/orchestrator-m1` は push 済み（PR 未作成。M0 は PR #183）
+- 次の一手: M2（TUI）の計画を作成する（superpowers:writing-plans、計画は docs/superpowers/plans/）。M1 の保留指摘は末尾「M1 レビューで保留した指摘と判断」から優先度を付けて取り込む。M1 は PR #184（`feat/orchestrator-m1` → `develop`）でレビュー待ち。M0 は PR #183 でマージ済み
 - 未コミットの変更: なし
 
 ## マイルストーン
