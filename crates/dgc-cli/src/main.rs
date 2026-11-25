@@ -36,6 +36,13 @@ enum Command {
         #[command(subcommand)]
         command: commands::workspace::WorkspaceCommand,
     },
+    #[command(flatten)]
+    Agent(commands::agent::AgentCommand),
+    /// List and answer agents' permission requests.
+    Permit {
+        #[command(subcommand)]
+        command: commands::permit::PermitCommand,
+    },
 }
 
 #[tokio::main]
@@ -45,6 +52,8 @@ async fn main() -> ExitCode {
         Command::Daemon { command } => commands::daemon::run(command, cli.json).await,
         Command::Project { command } => commands::project::run(command, cli.json).await,
         Command::Workspace { command } => commands::workspace::run(command, cli.json).await,
+        Command::Agent(command) => commands::agent::run(command, cli.json).await,
+        Command::Permit { command } => commands::permit::run(command, cli.json).await,
     };
     match result {
         Ok(code) => code,

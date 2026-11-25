@@ -27,6 +27,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod resolve;
 
 use std::future::Future;
 use std::path::PathBuf;

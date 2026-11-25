@@ -8,6 +8,7 @@
 //! [`MAX_MESSAGE_BYTES`] bytes. The first request on a connection must be a
 //! valid `hello`.
 
+use std::collections::HashMap;
 use std::fs::{self, Permissions};
 use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -16,9 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dgc_protocol::methods::{
-    DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams, PROJECT_ADD, PROJECT_LIST,
-    PROJECT_REMOVE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_INTERRUPT, AGENT_LIST,
+    AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams,
+    PERMISSION_LIST, PERMISSION_RESPOND, PROJECT_ADD, PROJECT_LIST, PROJECT_REMOVE, ProviderStatus,
+    SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST,
 };
+use dgc_protocol::model::ProviderKind;
 use dgc_protocol::rpc::{
     INTERNAL, INVALID_REQUEST, INVALID_STATE, JSONRPC_VERSION, METHOD_NOT_FOUND, Notification,
     PARSE_ERROR, Request, Response, RpcError, VERSION_MISMATCH,
@@ -33,11 +37,17 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 
+use crate::agent::AgentManager;
 use crate::config::DaemonConfig;
 use crate::handlers;
 use crate::lock::{InstanceLock, LockError};
 use crate::paths::{DaemonPaths, PathsError, ensure_private_dir};
+use crate::provider::ProviderAdapter;
+use crate::provider::claude::ClaudeAdapter;
+use crate::provider::codex::CodexAdapter;
+use crate::provider::resolve::resolve_providers;
 use crate::store::{Store, StoreError};
+use crate::subscription::Subscriptions;
 use crate::time::now_rfc3339;
 use crate::workspace::WorkspaceManager;
 
@@ -46,6 +56,9 @@ pub const OUTBOUND_CAPACITY: usize = 1024;
 
 /// How long shutdown waits for in-flight responses to flush.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long daemon shutdown gives live agent sessions to end.
+pub const AGENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Longest piece of untrusted input echoed back in an error message, in chars.
 const ECHO_LIMIT: usize = 64;
@@ -87,6 +100,7 @@ enum Queued {
 pub struct ConnCtx {
     id: u64,
     out: mpsc::Sender<Queued>,
+    subscriptions: Arc<Subscriptions>,
 }
 
 impl std::fmt::Debug for Queued {
@@ -101,7 +115,25 @@ impl std::fmt::Debug for Queued {
 impl ConnCtx {
     fn new(id: u64, capacity: usize) -> (Self, mpsc::Receiver<Queued>) {
         let (out, rx) = mpsc::channel(capacity);
-        (Self { id, out }, rx)
+        let subscriptions = Arc::new(Subscriptions::default());
+        (
+            Self {
+                id,
+                out,
+                subscriptions,
+            },
+            rx,
+        )
+    }
+
+    /// This connection's event subscriptions.
+    pub fn subscriptions(&self) -> &Subscriptions {
+        &self.subscriptions
+    }
+
+    /// Resolves once the connection's writer is gone.
+    pub async fn closed(&self) {
+        self.out.closed().await;
     }
 
     /// Daemon-local connection number, for logs.
@@ -122,6 +154,15 @@ impl ConnCtx {
                 written: None,
             }))
             .is_ok()
+    }
+
+    /// Queue a notification, waiting for room (backfill and the `lagged`
+    /// notice). Returns false if the connection is gone.
+    pub async fn notify_wait(&self, notification: &Notification) -> bool {
+        match encode(notification) {
+            Some(line) => self.send_line(line, false).await,
+            None => false,
+        }
     }
 
     /// Queue a line, waiting for room: responses must never be dropped.
@@ -166,12 +207,14 @@ fn encode<T: Serialize>(message: &T) -> Option<String> {
     }
 }
 
-/// Routes method calls to their handlers. Later tasks add fields and arms.
+/// Routes method calls to their handlers.
 pub struct DaemonDispatcher {
     config: DaemonConfig,
     started_at: String,
     shutdown: watch::Sender<bool>,
     workspaces: Arc<WorkspaceManager>,
+    agents: Arc<AgentManager>,
+    providers: Vec<ProviderStatus>,
 }
 
 impl DaemonDispatcher {
@@ -180,12 +223,16 @@ impl DaemonDispatcher {
         started_at: String,
         shutdown: watch::Sender<bool>,
         workspaces: Arc<WorkspaceManager>,
+        agents: Arc<AgentManager>,
+        providers: Vec<ProviderStatus>,
     ) -> Self {
         Self {
             config,
             started_at,
             shutdown,
             workspaces,
+            agents,
+            providers,
         }
     }
 
@@ -203,11 +250,12 @@ impl DaemonDispatcher {
     /// never `null`.
     pub async fn call(
         &self,
-        _conn: &ConnCtx,
+        conn: &ConnCtx,
         method: &str,
         params: Value,
     ) -> Result<Value, RpcError> {
         let workspaces = self.workspaces.as_ref();
+        let agents = &self.agents;
         match method {
             DAEMON_STATUS => self.status(),
             DAEMON_SHUTDOWN => Ok(json!({})),
@@ -216,7 +264,19 @@ impl DaemonDispatcher {
             PROJECT_REMOVE => handlers::project_remove(workspaces, params).await,
             WORKSPACE_CREATE => handlers::workspace_create(workspaces, params).await,
             WORKSPACE_LIST => handlers::workspace_list(workspaces, params).await,
-            WORKSPACE_ARCHIVE => handlers::workspace_archive(workspaces, params).await,
+            WORKSPACE_ARCHIVE => handlers::workspace_archive(workspaces, agents, params).await,
+            AGENT_CREATE => handlers::agent_create(agents, params).await,
+            AGENT_LIST => handlers::agent_list(agents, params),
+            AGENT_GET => handlers::agent_get(agents, params),
+            AGENT_SEND => handlers::agent_send(agents, params).await,
+            AGENT_INTERRUPT => handlers::agent_interrupt(agents, params).await,
+            AGENT_ARCHIVE => handlers::agent_archive(agents, params).await,
+            AGENT_RESUME => handlers::agent_resume(agents, params).await,
+            AGENT_EVENTS => handlers::agent_events(agents, params),
+            PERMISSION_LIST => handlers::permission_list(agents, params),
+            PERMISSION_RESPOND => handlers::permission_respond(agents, params).await,
+            SUBSCRIBE => handlers::subscribe(agents, conn, params),
+            UNSUBSCRIBE => handlers::unsubscribe(conn, params),
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!("unknown method: {}", clip(other)),
@@ -229,7 +289,7 @@ impl DaemonDispatcher {
             pid: std::process::id(),
             protocol_version: PROTOCOL_VERSION,
             started_at: self.started_at.clone(),
-            providers: Vec::new(),
+            providers: self.providers.clone(),
             path_env: std::env::var_os("PATH")
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -249,7 +309,22 @@ pub async fn run_daemon(
     ensure_private_dir(&paths.state_dir)?;
     let _lock = InstanceLock::acquire(&paths.state_dir)?;
     let store = Arc::new(Store::open(&paths.state_dir)?);
-    let workspaces = Arc::new(WorkspaceManager::new(store, paths.worktrees_dir.clone()));
+    let workspaces = Arc::new(WorkspaceManager::new(
+        Arc::clone(&store),
+        paths.worktrees_dir.clone(),
+    ));
+    let providers = resolve_providers(&config, std::env::var_os("PATH").as_deref()).await;
+    let agents = Arc::new(AgentManager::new(
+        store,
+        paths.clone(),
+        config.clone(),
+        adapters(&providers),
+    ));
+    // No provider process survives a restart: agents left live are stopped
+    // before anyone can talk to them.
+    if let Err(err) = agents.recover_on_startup() {
+        tracing::warn!(error = %err, "could not mark every interrupted agent stopped");
+    }
 
     let socket_dir = paths
         .socket
@@ -270,8 +345,11 @@ pub async fn run_daemon(
         now_rfc3339(),
         shutdown.clone(),
         workspaces,
+        Arc::clone(&agents),
+        providers,
     ));
     accept_loop(listener, dispatcher, shutdown.subscribe()).await;
+    agents.shutdown_all(AGENT_SHUTDOWN_GRACE).await;
 
     match fs::remove_file(&paths.socket) {
         Ok(()) => {}
@@ -280,6 +358,21 @@ pub async fn run_daemon(
     }
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+/// An adapter for every provider that was found.
+fn adapters(providers: &[ProviderStatus]) -> HashMap<ProviderKind, Arc<dyn ProviderAdapter>> {
+    providers
+        .iter()
+        .filter_map(|status| {
+            let path = status.path.clone()?;
+            let adapter: Arc<dyn ProviderAdapter> = match status.kind {
+                ProviderKind::Claude => Arc::new(ClaudeAdapter::new(path)),
+                ProviderKind::Codex => Arc::new(CodexAdapter::new(path)),
+            };
+            Some((status.kind, adapter))
+        })
+        .collect()
 }
 
 /// Remove a leftover socket file from a previous run. Anything that is not a
@@ -365,6 +458,7 @@ async fn serve_connection(
     let writer = tokio::spawn(write_loop(write_half, queue));
     tracing::debug!(conn = id, "connection opened");
     session(read_half, &ctx, &dispatcher, &mut shutdown).await;
+    ctx.subscriptions().clear();
     // Queued responses are flushed before the writer sees `Close`.
     let _ = ctx.out.send(Queued::Close).await;
     let _ = writer.await;
@@ -563,6 +657,8 @@ async fn session(
         if !ctx.send_response(&response, stop_after).await {
             return;
         }
+        // A `subscribe` just answered may start sending now.
+        ctx.subscriptions().release();
         if stop_after {
             tracing::info!(conn = ctx.id(), "shutdown requested");
             dispatcher.request_shutdown();

@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 13（エージェント操作の公開（ソケットと CLI））
+- タスク: M1 Task 14（M1 受け入れ（実 CLI 手動確認とドキュメント））
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 13 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 14 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -59,7 +59,7 @@
 | 10 | 偽プロバイダ | 完了 | `test(daemon): add scenario-replay fake provider` |
 | 11 | ClaudeAdapter | 完了 | `feat(daemon): drive Claude Code over stream-json` |
 | 12 | CodexAdapter | 完了 | `feat(daemon): drive Codex over app-server` |
-| 13 | エージェント操作の公開（ソケットと CLI） | 未着手 | |
+| 13 | エージェント操作の公開（ソケットと CLI） | 完了 | `feat(cli): expose agent and permission commands` |
 | 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 未着手 | |
 
 ## 決定事項
@@ -270,6 +270,34 @@
     17〜20 行目（アクティブターン無しの steer/interrupt）を除外。resume は resume_exclude_turns 全体 + resume の 21〜50 行目の合成。
     unknown_server_request / crash_mid_turn / interrupt_then_next_turn / interrupt_cancels_pending_approval は合成（ヘッダに明記）。
 
+- 2026-11-25 (M1 Task 13): 依存クレートの追加なし。`dgc-protocol` に `AgentIdParams{id}`（agent.get / interrupt / archive / resume）、
+  `AgentListParams{include_archived}`（既定は archived を除く）、`PermissionListParams{agent_id?}`、`UnsubscribeParams{agent_id?}`
+  （指定なしでその接続の全購読を止める）を追加。`LaggedParams.agent_id` を `Option` に変更（全エージェント購読の `lagged` は
+  `{agent_id:null, next_seq:0}`）。結果は `agent.list` → `{"agents":[..]}`、`permission.list` → `{"permissions":[..]}`、
+  `agent.events` → `{"events":[..]}`、`agent.send` → `{"outcome":..}`、`agent.interrupt` / `permission.respond` / `subscribe` /
+  `unsubscribe` → `{}`、create / get / archive / resume → `Agent`。`AgentError` → `RpcError` は `From`（`code()` と表示文言）。
+- 2026-11-25 (M1 Task 13): 購読（`subscription.rs`）: 接続ごとに agent フィルタ（`None` = 全体）をキーとする task。同じキーの再購読は置換。
+  broadcast の受信口を取ってから backfill し、`since_seq`（agent 指定必須、無ければ INVALID_PARAMS）の backfill は `events_page` を
+  ページングして送信キューの空きを待って送る（backfill は lag にしない）。ライブは `try_send`、エージェントごとに送信済み seq 以下を捨てる。
+  キュー満杯または broadcast の `Lagged` で `lagged` を 1 回（空きを待って）送り、その購読は終了する（クライアントは `agent.events` /
+  `since_seq` 付き再購読で回復）。`next_seq` は最後に送った seq + 1（何も送っていないライブのみの購読では 1）。task は接続の
+  writer が消えたとき、`unsubscribe`、接続終了時の `clear()` で終わる。購読 task は `subscribe` の応答をキューに入れた後に送信を
+  始める（`Subscriptions::release`。クライアントが応答待ち中の通知を 256 件しか保持しないため）。
+- 2026-11-25 (M1 Task 13): プロバイダ解決（`provider/resolve.rs`）: 設定のパス（相対パスや実行可能ファイルでなければ warn して利用不可。
+  PATH 探索にはフォールバックしない）→ 無ければデーモンの `PATH` の絶対ディレクトリだけを探索（相対エントリは飛ばす）。
+  `--version` は 5 秒で打ち切り、最初の「数字で始まり `.` を含むトークン」を版とする。版が取れなくても見つかったプロバイダは登録する
+  （tested=false）。解決はロック取得後・bind 前に Claude と Codex を並行で行い、続けて `recover_on_startup`（失敗は warn のみ）。
+  終了時は accept 停止・接続 flush の後に `shutdown_all(5 秒)`、その後ソケット削除。サーバーテストは存在しない絶対パスを設定して
+  ホストの claude/codex を実行しない。
+- 2026-11-25 (M1 Task 13): `workspace.archive` は handler で先にその workspace の非 archived エージェントを archive してから
+  workspace を archive する（Task 7 の TODO を解消。途中で workspace 側が失敗してもエージェントの archive は戻さない）。
+- 2026-11-25 (M1 Task 13): CLI: `run` / `ls` / `show` / `send` / `interrupt` / `archive` / `resume` / `logs` はトップレベル
+  （`commands/agent.rs`、clap の flatten）、`permit {ls|allow|deny}` は `commands/permit.rs`。`run` の title 省略時はプロンプト 1 行目の
+  先頭 60 文字。`run --json` は 1 行目に Agent JSON、`--follow` なら続けて AgentEvent JSONL。自動承認 mode は stderr に `warning:` 行を
+  常に出す。`--follow` は seq 0 から購読し idle/stopped/failed/archived で終了（idle だけ exit 0）。`lagged` を受けたら最後に表示した
+  seq から再購読する。人間向けイベント行の形式は README。CLI テストは `tests/fixtures/scenarios/` の最小シナリオ（記録形状から手書き）を
+  `--version` に自前で答えるラッパー（0700、`DGC_FAKE_TIMEOUT_MS=60000`）経由で偽プロバイダに再生させる。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -381,6 +409,16 @@
   修正前に FAIL（`turn/steer request failed (-32600)`）→ 修正後 PASS。`--test codex_adapter` 18 件 PASS（10 回連続）、
   `--test agent_manager` 20 件 PASS、`verify.sh test codex_` PASS（18 executed）、fmt/clippy clean。interrupt への -32600 経路も
   このシナリオで通るようになった。
+- 2026-11-25 M1 Task 13（Linux、固定ツールチェーン 1.99.0）: RED: `cargo test --locked -p dgc-cli --test agent_cli` 8 件 FAIL
+  （`run` 等が未定義で exit 2、`providers: []`）、`cargo test --locked -p dgc-daemon --test server` の追加 4 件 FAIL
+  （`unknown method: agent.create`）。GREEN: `--test agent_cli` 8 件 PASS、`--test server` 22 件 PASS（各 10 回連続 PASS）、
+  `dgc-daemon --lib` 40 件 PASS（resolve / handlers の単体テストを含む）。`verify.sh test permit_allow_unblocks_agent` PASS（1 executed）、
+  `verify.sh test lagged_subscriber` PASS（1 executed）（`verify.sh test agent_cli` はテスト名に一致しないため 0 件として拒否される）。
+  新 crate 全テスト PASS、`cargo fmt --all`、clippy（新 crate 4 つ、`--all-targets --all-features -D warnings`）clean。
+  ミューテーション: `lagged` 送信を外す → `lagged_subscriber_receives_lagged_notice` FAIL、workspace archive でのエージェント archive の
+  絞り込みを壊す → `archive_workspace_archives_agents` FAIL。`subscribe` 応答より前に通知が出ないこと（`release` のゲート）の RED は
+  current_thread / multi_thread のどちらでも再現できなかった（応答のキュー投入が backfill の読み出しより常に先に終わる）。
+  回帰検出用のアサーションだけ `subscribe_backfills_then_streams_live` に置いた。
 
 ## 保留中の小さな改善
 

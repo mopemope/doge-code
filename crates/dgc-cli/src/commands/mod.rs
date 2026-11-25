@@ -1,6 +1,8 @@
 //! Subcommand implementations.
 
+pub mod agent;
 pub mod daemon;
+pub mod permit;
 pub mod project;
 pub mod workspace;
 

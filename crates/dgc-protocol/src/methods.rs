@@ -137,9 +137,44 @@ pub struct SubscribeParams {
     pub since_seq: Option<u64>,
 }
 
+/// `agent.get` / `agent.interrupt` / `agent.archive` / `agent.resume`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentIdParams {
+    pub id: AgentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentListParams {
+    /// Also list archived agents (default: only the others).
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PermissionListParams {
+    /// Only requests of this agent; all agents when absent.
+    #[serde(default)]
+    pub agent_id: Option<AgentId>,
+}
+
+/// `unsubscribe`: stop this connection's subscription to `agent_id`, or every
+/// subscription of the connection when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UnsubscribeParams {
+    #[serde(default)]
+    pub agent_id: Option<AgentId>,
+}
+
+/// A subscription fell behind and was ended. For a one-agent subscription,
+/// `agent_id` is that agent and `next_seq` the first event it did not
+/// receive: fetch from there with `agent.events` (or subscribe again with
+/// `since_seq = next_seq - 1`). For an all-agents subscription `agent_id` is
+/// null and `next_seq` 0: every tracked agent must be caught up from its own
+/// last seen seq.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaggedParams {
-    pub agent_id: AgentId,
+    #[serde(default)]
+    pub agent_id: Option<AgentId>,
     pub next_seq: u64,
 }
 
@@ -226,6 +261,25 @@ mod tests {
         let remove: ProjectRemoveParams =
             serde_json::from_value(serde_json::json!({"id": pid})).unwrap();
         assert_eq!(remove.id, pid);
+    }
+
+    #[test]
+    fn agent_param_types_default_optional_fields() {
+        let list: AgentListParams = serde_json::from_str("{}").unwrap();
+        assert!(!list.include_archived);
+        let perms: PermissionListParams = serde_json::from_str("{}").unwrap();
+        assert!(perms.agent_id.is_none());
+        let unsub: UnsubscribeParams = serde_json::from_str("{}").unwrap();
+        assert!(unsub.agent_id.is_none());
+        let id = AgentId::generate();
+        let get: AgentIdParams = serde_json::from_value(serde_json::json!({"id": id})).unwrap();
+        assert_eq!(get.id, id);
+        let lagged = serde_json::to_value(LaggedParams {
+            agent_id: None,
+            next_seq: 0,
+        })
+        .unwrap();
+        assert_eq!(lagged, serde_json::json!({"agent_id": null, "next_seq": 0}));
     }
 
     #[test]

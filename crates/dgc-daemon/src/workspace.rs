@@ -554,7 +554,8 @@ impl WorkspaceManager {
         if workspace.state == WorkspaceState::Archived {
             return Ok(workspace);
         }
-        // TODO(task-13): archive the workspace's non-archived agents first.
+        // The caller (`handlers::workspace_archive`) has archived the
+        // workspace's agents already.
         if workspace.owned && workspace.isolation == Isolation::Worktree {
             if is_managed_path(&workspace.path, &self.worktrees_dir) {
                 let project = self

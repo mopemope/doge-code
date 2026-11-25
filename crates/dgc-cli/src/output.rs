@@ -1,7 +1,11 @@
 //! Rendering shared by subcommands.
 
-use dgc_protocol::methods::DaemonStatus;
-use dgc_protocol::model::{Isolation, Project, Workspace, WorkspaceState};
+use dgc_protocol::event::{AgentEvent, EventKind};
+use dgc_protocol::methods::{DaemonStatus, ProviderStatus};
+use dgc_protocol::model::{
+    Agent, AgentState, Decision, Isolation, PendingPermission, PermissionKind, Project,
+    ProviderKind, Resolution, SendBehavior, SendOutcome, Workspace, WorkspaceState,
+};
 
 /// One compact JSON line.
 pub fn daemon_status_json(status: &DaemonStatus) -> serde_json::Result<String> {
@@ -9,10 +13,171 @@ pub fn daemon_status_json(status: &DaemonStatus) -> serde_json::Result<String> {
 }
 
 pub fn daemon_status_text(status: &DaemonStatus) -> String {
-    format!(
+    let mut text = format!(
         "pid: {}\nprotocol_version: {}\nstarted_at: {}\nPATH: {}",
         status.pid, status.protocol_version, status.started_at, status.path_env
+    );
+    for provider in &status.providers {
+        text.push('\n');
+        text.push_str(&provider_line(provider));
+    }
+    text
+}
+
+/// `claude: <path> (<version> (tested|untested))` or `codex: not found`.
+fn provider_line(status: &ProviderStatus) -> String {
+    let name = provider_name(status.kind);
+    let Some(path) = &status.path else {
+        return format!("{name}: not found");
+    };
+    let version = status.version.as_deref().unwrap_or("unknown version");
+    let tested = if status.tested { "tested" } else { "untested" };
+    format!("{name}: {} ({version} ({tested}))", path.display())
+}
+
+pub fn provider_name(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+    }
+}
+
+pub fn state_name(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Starting => "starting",
+        AgentState::Idle => "idle",
+        AgentState::Running => "running",
+        AgentState::WaitingPermission => "waiting_permission",
+        AgentState::Stopped => "stopped",
+        AgentState::Failed => "failed",
+        AgentState::Archived => "archived",
+    }
+}
+
+fn behavior_name(behavior: SendBehavior) -> &'static str {
+    match behavior {
+        SendBehavior::Queue => "queue",
+        SendBehavior::Steer => "steer",
+        SendBehavior::Interrupt => "interrupt",
+    }
+}
+
+pub fn outcome_name(outcome: SendOutcome) -> &'static str {
+    match outcome {
+        SendOutcome::Sent => "sent",
+        SendOutcome::Queued => "queued",
+        SendOutcome::Steered => "steered",
+        SendOutcome::InterruptedAndSent => "interrupted_and_sent",
+    }
+}
+
+fn kind_name(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Command => "command",
+        PermissionKind::FileChange => "file_change",
+        PermissionKind::Tool => "tool",
+        PermissionKind::Other => "other",
+    }
+}
+
+fn resolution_name(resolution: Resolution) -> &'static str {
+    match resolution {
+        Resolution::Decided(Decision::Allow) => "allow",
+        Resolution::Decided(Decision::AllowForSession) => "allow_for_session",
+        Resolution::Decided(Decision::Deny) => "deny",
+        Resolution::Cancelled => "cancelled",
+    }
+}
+
+/// `<id>  <workspace>  <provider>  <state>  <title>[  auto-approve]`
+pub fn agent_line(agent: &Agent) -> String {
+    let mut line = format!(
+        "{}  {}  {}  {}  {}",
+        agent.id,
+        agent.workspace_id,
+        provider_name(agent.provider),
+        state_name(agent.state),
+        agent.title
+    );
+    if agent.auto_approve {
+        line.push_str("  auto-approve");
+    }
+    line
+}
+
+/// `key: value` lines for `show`.
+pub fn agent_details(agent: &Agent) -> String {
+    let optional = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_owned());
+    let mut text = format!(
+        "id: {}\nworkspace: {}\ntitle: {}\nprovider: {}\nmodel: {}\nmode: {}\n\
+         auto_approve: {}\nstate: {}\nprovider_session: {}\ncreated_at: {}",
+        agent.id,
+        agent.workspace_id,
+        agent.title,
+        provider_name(agent.provider),
+        optional(&agent.model),
+        optional(&agent.mode),
+        agent.auto_approve,
+        state_name(agent.state),
+        optional(&agent.provider_session_id),
+        agent.created_at,
+    );
+    if let Some(error) = &agent.last_error {
+        text.push_str(&format!("\nlast_error: {error}"));
+    }
+    text
+}
+
+/// `<permission id>  <agent id>  <kind>  <summary>`
+pub fn permission_line(permission: &PendingPermission) -> String {
+    format!(
+        "{}  {}  {}  {}",
+        permission.id,
+        permission.agent_id,
+        kind_name(permission.kind),
+        permission.summary
     )
+}
+
+/// One event as `[seq] <description>`. Continuation lines of multi-line text
+/// are indented by four spaces, so every event starts with `[`.
+pub fn event_line(event: &AgentEvent) -> String {
+    let body = match &event.kind {
+        EventKind::TurnStarted => "turn started".to_owned(),
+        EventKind::AssistantText { text, final_: true } => format!("assistant: {text}"),
+        EventKind::AssistantText {
+            text,
+            final_: false,
+        } => {
+            format!("assistant (partial): {text}")
+        }
+        EventKind::ToolCall { name, summary } => format!("tool: {name} {summary}"),
+        EventKind::ToolResult {
+            summary,
+            is_error: false,
+        } => format!("tool result: {summary}"),
+        EventKind::ToolResult {
+            summary,
+            is_error: true,
+        } => format!("tool error: {summary}"),
+        EventKind::PermissionRequested { permission } => format!(
+            "permission requested {} ({}): {}",
+            permission.id,
+            kind_name(permission.kind),
+            permission.summary
+        ),
+        EventKind::PermissionResolved { id, resolution } => {
+            format!("permission resolved {id}: {}", resolution_name(*resolution))
+        }
+        EventKind::TurnCompleted { .. } => "turn completed".to_owned(),
+        EventKind::RateLimited { detail } => format!("rate limited: {detail}"),
+        EventKind::Error { message } => format!("error: {message}"),
+        EventKind::StateChanged { state } => format!("state: {}", state_name(*state)),
+        EventKind::UserMessage { text, behavior } => {
+            format!("user ({}): {text}", behavior_name(*behavior))
+        }
+    };
+    format!("[{}] {}", event.seq, body.replace('\n', "\n    "))
 }
 
 /// `<id>  <name>  <path>`
@@ -53,6 +218,27 @@ mod tests {
     use dgc_protocol::ids::{ProjectId, WorkspaceId};
 
     use super::*;
+
+    #[test]
+    fn event_lines_are_prefixed_and_indent_continuations() {
+        let event = AgentEvent {
+            agent_id: dgc_protocol::ids::AgentId::generate(),
+            seq: 7,
+            at: String::new(),
+            kind: EventKind::AssistantText {
+                text: "a\nb".into(),
+                final_: true,
+            },
+        };
+        assert_eq!(event_line(&event), "[7] assistant: a\n    b");
+        let state = AgentEvent {
+            kind: EventKind::StateChanged {
+                state: AgentState::WaitingPermission,
+            },
+            ..event
+        };
+        assert_eq!(event_line(&state), "[7] state: waiting_permission");
+    }
 
     #[test]
     fn workspace_line_shows_branch_or_dash() {

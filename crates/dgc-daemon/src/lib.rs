@@ -11,6 +11,7 @@ pub mod process;
 pub mod provider;
 pub mod server;
 pub mod store;
+pub mod subscription;
 pub mod time;
 pub mod workspace;
 

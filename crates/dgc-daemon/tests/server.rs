@@ -1,6 +1,6 @@
 use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dgc_daemon::config::DaemonConfig;
@@ -53,14 +53,24 @@ async fn start() -> Running {
     start_in(dir).await
 }
 
+/// Provider paths that do not exist, so tests never probe the host's real
+/// `claude`/`codex` on `PATH`.
+fn hermetic_config() -> DaemonConfig {
+    DaemonConfig {
+        claude_path: Some(PathBuf::from("/nonexistent/dgc-test/claude")),
+        codex_path: Some(PathBuf::from("/nonexistent/dgc-test/codex")),
+        ..DaemonConfig::default()
+    }
+}
+
 async fn start_in(dir: TempDir) -> Running {
+    start_with(dir, hermetic_config()).await
+}
+
+async fn start_with(dir: TempDir, config: DaemonConfig) -> Running {
     let paths = DaemonPaths::under(dir.path());
     let (shutdown, _rx) = watch::channel(false);
-    let task = tokio::spawn(run_daemon(
-        paths.clone(),
-        DaemonConfig::default(),
-        shutdown.clone(),
-    ));
+    let task = tokio::spawn(run_daemon(paths.clone(), config, shutdown.clone()));
     wait_for_socket(&paths.socket).await;
     Running {
         _dir: dir,
@@ -73,6 +83,7 @@ async fn start_in(dir: TempDir) -> Running {
 struct Client {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    next_id: u64,
 }
 
 impl Client {
@@ -82,6 +93,7 @@ impl Client {
         Self {
             reader: BufReader::new(r),
             writer: w,
+            next_id: 100,
         }
     }
 
@@ -107,6 +119,31 @@ impl Client {
             .expect("read");
         assert!(n > 0, "connection closed while a response was expected");
         serde_json::from_str(&line).expect("response is JSON")
+    }
+
+    /// Send a request and read until its response. Notifications read
+    /// meanwhile are returned with it.
+    async fn call_collect(&mut self, method: &str, params: Value) -> (Value, Vec<Value>) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .await;
+        let mut notes = Vec::new();
+        loop {
+            let message = self.recv().await;
+            if message.get("id").is_some() {
+                assert_eq!(message["id"], id, "response to another request: {message}");
+                return (message, notes);
+            }
+            notes.push(message);
+        }
+    }
+
+    /// `call_collect` for a call that must succeed; returns its result.
+    async fn call_ok(&mut self, method: &str, params: Value) -> Value {
+        let (response, _) = self.call_collect(method, params).await;
+        assert!(response["error"].is_null(), "{method} failed: {response}");
+        response["result"].clone()
     }
 
     async fn hello(&mut self) -> Value {
@@ -256,7 +293,21 @@ async fn status_reports_pid_and_version() {
     assert_eq!(status.pid, std::process::id());
     assert_eq!(status.protocol_version, PROTOCOL_VERSION);
     assert!(status.started_at.ends_with('Z'), "{}", status.started_at);
-    assert!(status.providers.is_empty());
+    // Both providers are reported; the hermetic config points at nothing.
+    let kinds: Vec<_> = status.providers.iter().map(|p| p.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            dgc_protocol::model::ProviderKind::Claude,
+            dgc_protocol::model::ProviderKind::Codex
+        ]
+    );
+    assert!(
+        status
+            .providers
+            .iter()
+            .all(|p| p.path.is_none() && !p.tested)
+    );
     assert_eq!(status.path_env, std::env::var("PATH").unwrap_or_default());
     daemon.stop().await.expect("clean stop");
 }
@@ -447,5 +498,387 @@ async fn no_tcp_listener_is_opened() {
             );
         }
     }
+    daemon.stop().await.expect("clean stop");
+}
+
+// --- agents, permissions and subscriptions ----------------------------------
+
+const CLAUDE_INIT: [&str; 3] = [
+    r#"{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}"#,
+    r#"{"capture":"init","path":"/request_id"}"#,
+    r#"{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}"#,
+];
+
+/// A Claude Code scenario that answers each prompt (turn) with the given
+/// assistant messages, each a list of text blocks.
+fn claude_scenario(turns: &[Vec<Vec<String>>]) -> String {
+    let mut lines: Vec<String> = CLAUDE_INIT.iter().map(|l| (*l).to_owned()).collect();
+    for messages in turns {
+        lines.push(json!({"expect": {"type": "user"}}).to_string());
+        lines.push(
+            json!({"send": {"type": "system", "subtype": "init", "session_id": "sess-srv"}})
+                .to_string(),
+        );
+        for blocks in messages {
+            let content: Vec<Value> = blocks
+                .iter()
+                .map(|text| json!({"type": "text", "text": text}))
+                .collect();
+            lines.push(
+                json!({"send": {"type": "assistant", "message": {"content": content}}}).to_string(),
+            );
+        }
+        lines.push(
+            json!({"send": {"type": "result", "subtype": "success", "is_error": false,
+                            "session_id": "sess-srv"}})
+            .to_string(),
+        );
+    }
+    lines.push(json!({"expect_eof": true}).to_string());
+    lines.join("\n") + "\n"
+}
+
+fn text_turn(texts: &[&str]) -> Vec<Vec<String>> {
+    vec![texts.iter().map(|t| (*t).to_owned()).collect()]
+}
+
+/// Write `scenario` and a 0700 `claude` wrapper (answering `--version`
+/// itself) into `dir`; returns the wrapper path.
+fn claude_wrapper(dir: &Path, scenario: &str) -> PathBuf {
+    let scenario_path = dir.join("scenario.jsonl");
+    std::fs::write(&scenario_path, scenario).expect("write scenario");
+    let wrapper = dir.join("claude");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '2.1.332 (Claude Code)'; exit 0; fi\n\
+             DGC_FAKE_TIMEOUT_MS=60000 exec '{}' '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_dgc-fake-provider"),
+            scenario_path.display()
+        ),
+    )
+    .expect("write wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+        .expect("chmod wrapper");
+    wrapper
+}
+
+/// A daemon whose Claude is the fake replaying `scenario` (codex is
+/// unavailable), plus a greeted client and one local workspace.
+async fn start_agents(scenario: &str) -> (Running, Client, String) {
+    let dir = tempdir().expect("tempdir");
+    let config = DaemonConfig {
+        claude_path: Some(claude_wrapper(dir.path(), scenario)),
+        ..hermetic_config()
+    };
+    let project_dir = std::fs::canonicalize(dir.path())
+        .expect("canon")
+        .join("project");
+    std::fs::create_dir(&project_dir).expect("mkdir project");
+    let daemon = start_with(dir, config).await;
+    let mut client = Client::connect(&daemon.paths.socket).await;
+    client.hello().await;
+    let project = client
+        .call_ok("project.add", json!({"path": project_dir}))
+        .await;
+    let workspace = client
+        .call_ok(
+            "workspace.create",
+            json!({"project_id": project["id"], "isolation": "local"}),
+        )
+        .await;
+    let ws = workspace["id"].as_str().expect("workspace id").to_owned();
+    (daemon, client, ws)
+}
+
+async fn create_agent(client: &mut Client, ws: &str) -> String {
+    let agent = client
+        .call_ok(
+            "agent.create",
+            json!({"workspace_id": ws, "title": "t", "provider": "claude",
+                   "initial_prompt": "hello"}),
+        )
+        .await;
+    agent["id"].as_str().expect("agent id").to_owned()
+}
+
+async fn wait_state(client: &mut Client, agent: &str, state: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = client.call_ok("agent.get", json!({"id": agent})).await;
+        if got["state"] == state {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "agent never reached {state}: {got}"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn event_notes(notes: &[Value]) -> Vec<Value> {
+    notes
+        .iter()
+        .filter(|n| n["method"] == "event")
+        .map(|n| n["params"].clone())
+        .collect()
+}
+
+fn is_state(event: &Value, state: &str) -> bool {
+    event["kind"]["type"] == "state_changed" && event["kind"]["state"] == state
+}
+
+/// Read notifications until `until` matches an event; returns all events read.
+async fn read_events_until(client: &mut Client, until: impl Fn(&Value) -> bool) -> Vec<Value> {
+    let mut events = Vec::new();
+    loop {
+        let message = client.recv().await;
+        assert_eq!(message["method"], "event", "unexpected message {message}");
+        let event = message["params"].clone();
+        let done = until(&event);
+        events.push(event);
+        if done {
+            return events;
+        }
+    }
+}
+
+fn seqs(events: &[Value]) -> Vec<u64> {
+    events
+        .iter()
+        .map(|e| e["seq"].as_u64().expect("seq"))
+        .collect()
+}
+
+#[tokio::test]
+async fn agent_and_permission_methods_map_results_and_errors() {
+    let scenario = claude_scenario(&[text_turn(&["one"])]);
+    let (daemon, mut client, ws) = start_agents(&scenario).await;
+
+    let (missing, _) = client
+        .call_collect(
+            "agent.create",
+            json!({"workspace_id": ws, "title": "t", "provider": "codex",
+                   "initial_prompt": "x"}),
+        )
+        .await;
+    assert_eq!(error_code(&missing), i64::from(rpc::INVALID_PARAMS));
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not available")),
+        "{missing}"
+    );
+    let (bad, _) = client
+        .call_collect("agent.get", json!({"id": "nope"}))
+        .await;
+    assert_eq!(error_code(&bad), i64::from(rpc::INVALID_PARAMS));
+    let unknown = dgc_protocol::ids::AgentId::generate();
+    let (unknown, _) = client
+        .call_collect("agent.get", json!({"id": unknown}))
+        .await;
+    assert_eq!(error_code(&unknown), i64::from(rpc::NOT_FOUND));
+
+    let agent = create_agent(&mut client, &ws).await;
+    wait_state(&mut client, &agent, "idle").await;
+
+    let listed = client.call_ok("agent.list", json!({})).await;
+    assert_eq!(listed["agents"][0]["id"], agent.as_str());
+    let page = client
+        .call_ok("agent.events", json!({"agent_id": agent, "limit": 2}))
+        .await;
+    assert_eq!(seqs(page["events"].as_array().expect("events")), [1, 2]);
+    let permissions = client.call_ok("permission.list", json!({})).await;
+    assert_eq!(permissions, json!({"permissions": []}));
+    let (idle, _) = client
+        .call_collect("agent.interrupt", json!({"id": agent}))
+        .await;
+    assert_eq!(error_code(&idle), i64::from(rpc::INVALID_STATE));
+    let (unknown_perm, _) = client
+        .call_collect(
+            "permission.respond",
+            json!({"id": dgc_protocol::ids::PermissionId::generate(), "decision": "allow"}),
+        )
+        .await;
+    assert_eq!(error_code(&unknown_perm), i64::from(rpc::NOT_FOUND));
+
+    let (no_agent, _) = client
+        .call_collect("subscribe", json!({"since_seq": 3}))
+        .await;
+    assert_eq!(error_code(&no_agent), i64::from(rpc::INVALID_PARAMS));
+    assert_eq!(client.call_ok("unsubscribe", json!({})).await, json!({}));
+
+    let archived = client.call_ok("agent.archive", json!({"id": agent})).await;
+    assert_eq!(archived["state"], "archived");
+    let active = client.call_ok("agent.list", json!({})).await;
+    assert_eq!(active, json!({"agents": []}));
+    let all = client
+        .call_ok("agent.list", json!({"include_archived": true}))
+        .await;
+    assert_eq!(all["agents"][0]["state"], "archived");
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn subscribe_backfills_then_streams_live() {
+    let scenario = claude_scenario(&[text_turn(&["one"]), text_turn(&["two"])]);
+    let (daemon, mut control, ws) = start_agents(&scenario).await;
+    let agent = create_agent(&mut control, &ws).await;
+    wait_state(&mut control, &agent, "idle").await;
+
+    let mut sub = Client::connect(&daemon.paths.socket).await;
+    sub.hello().await;
+    let (response, notes) = sub
+        .call_collect("subscribe", json!({"agent_id": agent, "since_seq": 0}))
+        .await;
+    assert_eq!(response["result"], json!({}));
+    // Clients buffer only a bounded number of notifications while waiting
+    // for a response, so the backfill must follow the response.
+    assert!(
+        notes.is_empty(),
+        "events before the subscribe response: {notes:?}"
+    );
+    let mut events = read_events_until(&mut sub, |e| is_state(e, "idle")).await;
+    let backfilled = events.len();
+
+    let sent = control
+        .call_ok("agent.send", json!({"agent_id": agent, "text": "next"}))
+        .await;
+    assert_eq!(sent, json!({"outcome": "sent"}));
+    events.extend(read_events_until(&mut sub, |e| is_state(e, "idle")).await);
+
+    let expected: Vec<u64> = (1..=events.len() as u64).collect();
+    assert_eq!(seqs(&events), expected, "no gaps or duplicates");
+    assert!(events.len() > backfilled);
+    let texts: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["kind"]["type"] == "assistant_text")
+        .map(|e| &e["kind"]["text"])
+        .collect();
+    assert_eq!(texts, [&json!("one"), &json!("two")]);
+
+    // A later subscriber resumes after the seq it already has.
+    let last = events.len() as u64;
+    let mut late = Client::connect(&daemon.paths.socket).await;
+    late.hello().await;
+    let (_, notes) = late
+        .call_collect(
+            "subscribe",
+            json!({"agent_id": agent, "since_seq": last - 2}),
+        )
+        .await;
+    let mut tail = event_notes(&notes);
+    while tail.len() < 2 {
+        tail.extend(read_events_until(&mut late, |_| true).await);
+    }
+    assert_eq!(seqs(&tail), [last - 1, last]);
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn lagged_subscriber_receives_lagged_notice() {
+    // Turn 2 emits 4000 events of ~1 KiB: far more than the socket buffer
+    // plus the connection's 1024-entry outbound queue.
+    let block = "x".repeat(1000);
+    let burst: Vec<Vec<String>> = (0..40).map(|_| vec![block.clone(); 100]).collect();
+    let scenario = claude_scenario(&[text_turn(&["ready"]), burst]);
+    let (daemon, mut control, ws) = start_agents(&scenario).await;
+    let agent = create_agent(&mut control, &ws).await;
+    wait_state(&mut control, &agent, "idle").await;
+
+    let mut sub = Client::connect(&daemon.paths.socket).await;
+    sub.hello().await;
+    let (_, notes) = sub
+        .call_collect("subscribe", json!({"agent_id": agent, "since_seq": 0}))
+        .await;
+    let mut events = event_notes(&notes);
+    // From here `sub` stops reading.
+    control
+        .call_ok("agent.send", json!({"agent_id": agent, "text": "go"}))
+        .await;
+    // A client that never reads must not block anyone else.
+    let mut other = Client::connect(&daemon.paths.socket).await;
+    other.hello().await;
+    let status = timeout(
+        Duration::from_secs(2),
+        other.call_ok("daemon.status", json!({})),
+    )
+    .await
+    .expect("daemon.status must not wait for a stuck subscriber");
+    assert!(status["pid"].is_number());
+    wait_state(&mut control, &agent, "idle").await;
+    timeout(
+        Duration::from_secs(2),
+        other.call_ok("daemon.status", json!({})),
+    )
+    .await
+    .expect("daemon.status after the burst");
+
+    let lagged = loop {
+        let message = sub.recv().await;
+        match message["method"].as_str() {
+            Some("event") => events.push(message["params"].clone()),
+            Some("lagged") => break message["params"].clone(),
+            _ => panic!("unexpected message {message}"),
+        }
+    };
+    let delivered = seqs(&events);
+    let expected: Vec<u64> = (1..=delivered.len() as u64).collect();
+    assert_eq!(
+        delivered, expected,
+        "events before the notice are contiguous"
+    );
+    let total = control
+        .call_ok(
+            "agent.events",
+            json!({"agent_id": agent, "since_seq": delivered.len()}),
+        )
+        .await;
+    assert!(
+        !total["events"].as_array().expect("events").is_empty(),
+        "the subscriber must have missed events"
+    );
+    assert_eq!(lagged["agent_id"], agent.as_str());
+    assert_eq!(lagged["next_seq"], delivered.len() as u64 + 1);
+    // The subscription ended with the notice: the next message is a response.
+    let (response, notes) = sub.call_collect("daemon.status", json!({})).await;
+    assert!(response["result"]["pid"].is_number());
+    assert!(notes.is_empty(), "nothing after lagged: {notes:?}");
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn restart_stops_agents_and_shutdown_stops_live_sessions() {
+    let scenario = claude_scenario(&[text_turn(&["one"])]);
+    let (daemon, mut client, ws) = start_agents(&scenario).await;
+    let agent = create_agent(&mut client, &ws).await;
+    wait_state(&mut client, &agent, "idle").await;
+    let state_dir = daemon.paths.state_dir.clone();
+    let socket = daemon.paths.socket.clone();
+    let dir = daemon._dir;
+    daemon.shutdown.send_replace(true);
+    timeout(WAIT, daemon.task)
+        .await
+        .expect("daemon did not stop in time")
+        .expect("daemon task panicked")
+        .expect("clean stop");
+    assert!(!socket.exists());
+
+    let store = dgc_daemon::store::Store::open(&state_dir).expect("store");
+    let id: dgc_protocol::ids::AgentId = agent.parse().expect("agent id");
+    let mut stored = store.get_agent(&id).expect("read").expect("agent");
+    assert_eq!(stored.state, dgc_protocol::model::AgentState::Stopped);
+
+    // A record left `running` by a crash is stopped at the next start.
+    stored.state = dgc_protocol::model::AgentState::Running;
+    store.put_agent(&stored).expect("write");
+    drop(store);
+    let daemon = start_with(dir, hermetic_config()).await;
+    let mut client = Client::connect(&daemon.paths.socket).await;
+    client.hello().await;
+    let got = client.call_ok("agent.get", json!({"id": agent})).await;
+    assert_eq!(got["state"], "stopped");
     daemon.stop().await.expect("clean stop");
 }

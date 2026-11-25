@@ -32,7 +32,54 @@ Projects and workspaces: `dgc-next project {add [PATH] | ls | rm ID}` and
 [--slug S]] | ls [--project ID] | archive ID}`. A worktree workspace is a git
 worktree dgc creates under `<worktrees>/<repo>-<id>/<slug>`; archiving it removes
 the worktree and its branch, but only for paths inside that managed directory.
-Local workspaces use the project directory and are never deleted.
+Local workspaces use the project directory and are never deleted. Archiving a
+workspace first archives its agents.
+
+Providers: at start the daemon uses `claude_path` / `codex_path` from
+`<config>/config.toml` (absolute paths), or else finds `claude` / `codex` on its
+own `PATH`, and runs `--version` once. `daemon status` shows each provider's
+path and version, and whether that version is the tested one (Claude Code
+2.1.332, codex-cli 0.172.0; others work but log a warning). A provider that is
+not found cannot run agents. Providers inherit the daemon's environment.
+
+Agents:
+
+- `dgc-next run --workspace ID --provider claude|codex [--model M] [--mode MODE]
+  [--title T] [--follow] PROMPT` starts an agent and prints its id (`--json`:
+  the agent record). The title defaults to the prompt's first line (60 chars).
+  `--follow` then prints its events until it is idle, stopped, failed or
+  archived; the exit status is 0 only when it ended idle.
+- `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`. Codex: `read-only`,
+  `workspace-write` (default; sandboxed commands inside the workspace run
+  without asking), `untrusted` (asks before running commands), `full-access`.
+  Auto-approve modes (Claude `bypassPermissions`, `auto`, `acceptEdits`; Codex
+  `full-access`) let the provider act without asking: `run` always prints a
+  `warning: ... auto-approve ...` line on stderr for them (also with `--json`),
+  and `ls` marks such agents `auto-approve`.
+- `dgc-next ls [--all]` (archived agents only with `--all`), `dgc-next show ID`,
+  `dgc-next interrupt ID`, `dgc-next archive ID`, `dgc-next resume ID`
+  (restarts a stopped or failed agent from its provider session).
+- `dgc-next send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
+  `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
+  or `interrupted_and_sent` (also used when a provider cannot steer).
+- `dgc-next logs ID [--since SEQ] [--follow]` prints the stored events after
+  `SEQ`; `--follow` keeps streaming new ones until Ctrl-C or the daemon stops.
+  `--json` prints one event JSON object per line. Each human line is
+  `[seq] <event>`: `user (queue): TEXT`, `assistant: TEXT`, `tool: NAME SUMMARY`,
+  `tool result: SUMMARY` / `tool error: SUMMARY`,
+  `permission requested PERM_ID (KIND): SUMMARY`,
+  `permission resolved PERM_ID: allow|allow_for_session|deny|cancelled`,
+  `turn started`, `turn completed`, `rate limited: DETAIL`, `error: MESSAGE`,
+  `state: STATE`. Continuation lines of multi-line text are indented by four
+  spaces.
+- Permissions: `dgc-next permit ls [--agent ID]` lists pending requests
+  (`PERM_ID  AGENT_ID  KIND  SUMMARY`, oldest first); `dgc-next permit allow ID
+  [--session]` and `dgc-next permit deny ID` answer one. Requests stay pending
+  until answered, interrupted, or the daemon stops.
+
+The daemon log never contains prompt or agent text; it is stored only in each
+agent's `events.jsonl` (0600).
 
 ## 🚀 Key Features
 
