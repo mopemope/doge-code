@@ -116,10 +116,18 @@ Security properties:
   no TCP or UDP port. All state files are 0600 and directories 0700.
 - The trust boundary is your UID: any process running as you can drive agents.
   Agents started by dgc are trusted to the extent their provider mode allows.
-- dgc stores and forwards no credentials. The provider CLIs authenticate
-  themselves and inherit the daemon's environment.
-- Nothing is auto-approved unless you pass an auto-approve `--mode`
-  explicitly; permission requests otherwise wait for `permit allow|deny`.
+- dgc never reads provider credential files and does not log prompt text.
+  Provider children inherit the daemon's environment (including any API keys
+  in it), and agent output in `events.jsonl` is stored as-is (0600), so it can
+  contain secrets the agent printed.
+- Outside the listed auto-approve modes dgc adds no approvals of its own, but
+  the provider's default mode and your provider settings still decide what
+  runs without asking: Codex's default `workspace-write` runs sandboxed
+  commands in the workspace, and without `--mode` Claude applies your own
+  Claude settings (allow rules, default mode). `--mode untrusted` (Codex) and
+  `--mode manual` (Claude) are the modes that ask; requests then wait for
+  `permit allow|deny` (the provider's own built-in safe-command and allow-rule
+  exceptions still apply).
 
 Running as a service is optional (`status`, `run` and the other commands start
 the daemon on demand). Examples only; dgc installs neither file. Use an
