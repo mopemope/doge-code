@@ -335,6 +335,11 @@
 - 2026-11-26 (M1 最終レビュー修正 5): Codex の `thread/resume` は mode の有無に関わらず `approvalPolicy` / `sandbox` を送る
   （`--mode` なしは既定の `workspace-write` / `on-request`。保存された policy を黙って引き継がない）。記録由来の
   `scenarios/resume.jsonl` の `thread/resume` 期待行に両フィールドを足し、ヘッダに EDITED 注記を付けた。
+- 2026-11-26 (M1 最終レビュー修正 6、ユーザー決定): interrupt はキューを捨てる。`agent.interrupt` と `interrupt_and_send`
+  （`send --behavior interrupt`、および steer 非対応時のフォールバック。どちらもターンを中断するため同じ扱い）は、interrupt 成功後・
+  新しいメッセージ送信前に `queue.json` を空で保存し、捨てた 1 件ごとに `EventKind::QueueDiscarded { text, behavior }` を記録する
+  （本文は `UserMessage` と同じく 256 KiB ごとに分割。件数付きの 1 イベントにはしない）。人間向け表示は
+  `[seq] queued message discarded: TEXT`。archive / shutdown / 失敗ではキューは従来どおり残る（resume で送られる）。
 
 ## 検証記録
 

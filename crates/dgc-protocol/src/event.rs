@@ -56,6 +56,13 @@ pub enum EventKind {
         text: String,
         behavior: SendBehavior,
     },
+    /// A queued message that an interrupt discarded without sending it (one
+    /// event per message; text past the per-event limit is split into
+    /// several events like `UserMessage`).
+    QueueDiscarded {
+        text: String,
+        behavior: SendBehavior,
+    },
 }
 
 impl EventKind {
@@ -82,6 +89,20 @@ mod tests {
     use crate::ids::AgentId;
     use crate::model::{AgentState, SendBehavior};
     use serde_json::json;
+
+    #[test]
+    fn queue_discarded_wire_shape() {
+        let kind = EventKind::QueueDiscarded {
+            text: "later".to_owned(),
+            behavior: SendBehavior::Queue,
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "queue_discarded", "text": "later", "behavior": "queue"})
+        );
+        assert_eq!(serde_json::from_value::<EventKind>(v).unwrap(), kind);
+    }
 
     #[test]
     fn event_kind_serializes_with_type_tag() {

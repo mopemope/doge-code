@@ -1063,23 +1063,29 @@ async fn stale_turn_completed_after_interrupt_is_ignored() {
     assert_eq!(session.next_call().await, Call::Interrupt);
     assert_eq!(session.next_call().await, Call::SendUser("now".to_owned()));
     settle().await;
-    // The new turn is still running; the queue was not sent into it.
+    // The new turn is still running; the interrupt discarded the queue.
     session.assert_no_call();
     assert_eq!(
         h.manager.get(&agent.id).expect("get").state,
         AgentState::Running
     );
-    assert_eq!(h.queue_texts(&agent.id), vec!["queued"]);
+    assert!(h.queue_texts(&agent.id).is_empty());
     assert!(
         h.events(&agent.id)
             .contains(&EventKind::TurnCompleted { usage: None })
     );
 
-    // The new turn's own completion drains the queue as usual.
+    // The new turn's own completion idles the agent (nothing queued).
     session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    session.assert_no_call();
+    assert_eq!(
+        h.send(&agent.id, "again", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
     assert_eq!(
         session.next_call().await,
-        Call::SendUser("queued".to_owned())
+        Call::SendUser("again".to_owned())
     );
 
     // Plain interrupt: the stale completion does not idle the next turn.
@@ -1258,4 +1264,76 @@ async fn a_huge_prompt_is_stored_in_bounded_chunks() {
     }
     assert!(texts.len() >= 16, "{} user chunks", texts.len());
     assert_eq!(texts.concat(), format!("{prompt}{followup}"));
+}
+
+#[tokio::test]
+async fn interrupt_discards_the_queue_and_records_it() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, mut session) = h.running("first").await;
+    assert_eq!(
+        h.send(&agent.id, "X", SendBehavior::Queue).await,
+        SendOutcome::Queued
+    );
+    assert_eq!(h.queue_texts(&agent.id), vec!["X"]);
+
+    h.manager.interrupt(&agent.id).await.expect("interrupt");
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    assert!(h.queue_texts(&agent.id).is_empty(), "queue.json is cleared");
+    assert!(h.events(&agent.id).contains(&EventKind::QueueDiscarded {
+        text: "X".to_owned(),
+        behavior: SendBehavior::Queue
+    }));
+
+    // A later turn does not pick X up.
+    assert_eq!(
+        h.send(&agent.id, "Y", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(session.next_call().await, Call::SendUser("Y".to_owned()));
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    settle().await;
+    session.assert_no_call();
+}
+
+#[tokio::test]
+async fn interrupting_send_discards_the_queue_before_sending() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, mut session) = h.running("first").await;
+    assert_eq!(
+        h.send(&agent.id, "X", SendBehavior::Queue).await,
+        SendOutcome::Queued
+    );
+    assert_eq!(
+        h.send(&agent.id, "Y", SendBehavior::Interrupt).await,
+        SendOutcome::InterruptedAndSent
+    );
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    assert_eq!(session.next_call().await, Call::SendUser("Y".to_owned()));
+    assert!(h.queue_texts(&agent.id).is_empty());
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    settle().await;
+    session.assert_no_call();
+
+    let events = h.events(&agent.id);
+    let discarded = events
+        .iter()
+        .position(|e| {
+            *e == EventKind::QueueDiscarded {
+                text: "X".to_owned(),
+                behavior: SendBehavior::Queue,
+            }
+        })
+        .expect("discard recorded");
+    let sent = events
+        .iter()
+        .position(|e| {
+            *e == EventKind::UserMessage {
+                text: "Y".to_owned(),
+                behavior: SendBehavior::Interrupt,
+            }
+        })
+        .expect("Y recorded");
+    assert!(discarded < sent, "the queue is cleared before Y is sent");
 }

@@ -84,7 +84,10 @@ Agents:
   (restarts a stopped or failed agent from its provider session).
 - `dgc-next send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
-  or `interrupted_and_sent` (also used when a provider cannot steer).
+  or `interrupted_and_sent` (also used when a provider cannot steer). An
+  interrupt (`dgc-next interrupt`, `send --behavior interrupt`, or a steer that
+  falls back to one) discards the queued messages instead of sending them
+  later; each shows in `logs` as `queued message discarded: TEXT`.
 - `dgc-next logs ID [--since SEQ] [--follow]` prints the stored events after
   `SEQ`; `--follow` keeps streaming new ones until Ctrl-C or the daemon stops.
   `--json` prints one event JSON object per line. Each human line is
@@ -93,7 +96,7 @@ Agents:
   `permission requested PERM_ID (KIND): SUMMARY`,
   `permission resolved PERM_ID: allow|allow_for_session|deny|cancelled`,
   `turn started`, `turn completed`, `rate limited: DETAIL`, `error: MESSAGE`,
-  `state: STATE`. Continuation lines of multi-line text are indented by four
+  `state: STATE`, `queued message discarded: TEXT`. Continuation lines of multi-line text are indented by four
   spaces. A prompt or reply longer than 256 KiB is stored as several events
   (reply parts before the last show as `assistant (partial)`). Human-readable
   output shows control characters in daemon-supplied text (agent output,

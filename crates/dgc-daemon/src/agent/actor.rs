@@ -12,7 +12,7 @@ use dgc_protocol::model::{
     Agent, AgentState, Decision, PendingPermission, PermissionKind, Resolution, SendBehavior,
     SendOutcome,
 };
-use dgc_protocol::truncate_summary;
+use dgc_protocol::{chunk_text, truncate_summary};
 use serde_json::Value;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
@@ -319,6 +319,31 @@ impl Actor {
         Ok(true)
     }
 
+    /// Drop every queued message (an interrupt cancels what was lined up
+    /// behind the interrupted turn): persist the empty queue, then record one
+    /// `QueueDiscarded` event per message (split like `UserMessage`).
+    fn discard_queue(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let discarded = std::mem::take(&mut self.queue);
+        if let Err(err) = save_queue(&self.queue_path, &self.queue) {
+            warn!(agent_id = %self.agent.id, error = %err, "could not persist agent queue");
+        }
+        debug!(agent_id = %self.agent.id, count = discarded.len(), "discarded queued messages");
+        for item in discarded {
+            for text in chunk_text(&item.text) {
+                self.shared.emit_or_warn(
+                    &self.agent.id,
+                    EventKind::QueueDiscarded {
+                        text,
+                        behavior: item.behavior,
+                    },
+                );
+            }
+        }
+    }
+
     async fn handle_command(&mut self, command: Command) -> Flow {
         match command {
             Command::Send {
@@ -408,6 +433,7 @@ impl Actor {
     ) -> Result<SendOutcome, AgentError> {
         self.interrupt_session().await?;
         self.cancel_pending();
+        self.discard_queue();
         if self.deferred_exit.is_some() {
             self.set_state(AgentState::Idle);
             return Err(provider(ProviderError::Exited));
@@ -468,6 +494,7 @@ impl Actor {
             AgentState::Running | AgentState::WaitingPermission => {
                 self.interrupt_session().await?;
                 self.cancel_pending();
+                self.discard_queue();
                 self.set_state(AgentState::Idle);
                 Ok(())
             }

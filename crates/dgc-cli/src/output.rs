@@ -227,6 +227,9 @@ pub fn event_line(event: &AgentEvent) -> String {
         EventKind::UserMessage { text, behavior } => {
             format!("user ({}): {text}", behavior_name(*behavior))
         }
+        EventKind::QueueDiscarded { text, .. } => {
+            format!("queued message discarded: {text}")
+        }
     };
     format!(
         "[{}] {}",
@@ -356,6 +359,20 @@ mod tests {
             ..event
         };
         assert_eq!(event_line(&error), "[3] error: bad\\x07");
+    }
+
+    #[test]
+    fn discarded_queue_items_are_shown() {
+        let event = AgentEvent {
+            agent_id: dgc_protocol::ids::AgentId::generate(),
+            seq: 9,
+            at: String::new(),
+            kind: EventKind::QueueDiscarded {
+                text: "later".into(),
+                behavior: SendBehavior::Queue,
+            },
+        };
+        assert_eq!(event_line(&event), "[9] queued message discarded: later");
     }
 
     #[test]
