@@ -526,7 +526,8 @@
   - workspace archive 後に空の親ディレクトリ `<worktrees>/<repo>-<id>/` が残る。
 - （Task 14 で確認済み）M1 Task 11 / 12 由来の手動確認（Claude の send 直後の interrupt、Codex の承認待ち interrupt・deny・
   `allow --session`・resume 後の policy）は検証記録 B に記録。未検証で残るのは Codex の `thread/resume` の `excludeTurns:true`
-  （現状は `false`）と、`decline` が提示される承認種別（コマンド承認では提示されなかった）のみ。
+  （コードは `true` を送る。記録 `resume_exclude_turns.jsonl` は resume 応答までで、その後のターンは未記録。2026-11-26 に
+  「現状は `false`」の誤記を訂正）と、`decline` が提示される承認種別（コマンド承認では提示されなかった）のみ。
 - M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
   の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
 - M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が

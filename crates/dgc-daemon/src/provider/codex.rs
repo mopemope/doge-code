@@ -38,8 +38,9 @@
 //!     turn to steer", which can precede `turn/completed`). The manager then
 //!     interrupts, which retires the turn (see below).
 //!   - `interrupt` → nothing without a running turn. Otherwise approvals of
-//!     that turn still pending are answered with the Deny mapping (`cancel`
-//!     where offered, else `decline`; the manager counts them cancelled),
+//!     that turn still pending are answered with the Deny mapping (`decline`
+//!     where offered, else `cancel`; a permission-profile request grants
+//!     nothing; the manager counts them cancelled),
 //!     then `turn/interrupt {threadId, turnId}`. Once it is answered (`{}`, or
 //!     error -32600 "no active turn" when the turn ended first), that turn's
 //!     `turn/completed`, notifications and approvals are dropped (approvals
