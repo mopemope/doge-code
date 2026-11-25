@@ -1412,6 +1412,15 @@ version = "0.1.0"
 [[package]]
 name = "dgc-daemon"
 version = "0.1.0"
+dependencies = [
+ "dgc-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+]
 
 [[package]]
 name = "dgc-protocol"

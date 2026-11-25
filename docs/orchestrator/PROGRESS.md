@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 2（パス、設定、ロック、Store）
+- タスク: M1 Task 3（イベントログ）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 2 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 3 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -48,7 +48,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | プロトコル型 | 完了 | `feat(protocol): define orchestrator socket protocol types` |
-| 2 | パス、設定、ロック、Store | 未着手 | |
+| 2 | パス、設定、ロック、Store | 完了 | `feat(daemon): add state paths, config, lock and store` |
 | 3 | イベントログ | 未着手 | |
 | 4 | 子プロセス管理 | 未着手 | |
 | 5 | ソケットサーバー | 未着手 | |
@@ -87,6 +87,14 @@
   UTF-8 境界）、`PendingPermission::new`（`raw` は直列化 64 KiB 超で `{"truncated":true}`）、
   `EventKind::tool_call` / `tool_result`。`Response` は計画どおり `jsonrpc` フィールドを持たない。
   `AgentEventsParams` の `since_seq` 既定 0、`limit` 既定 1000（`clamped_limit()` で上限適用）。
+- 2026-11-25 (M1 Task 2): `[workspace.dependencies]` に `dgc-protocol`（path）、`libc`、`thiserror`、`toml`、
+  `tempfile`（dev）を追加（バージョンはルートパッケージと同一）。`tracing` と `tokio` は未使用のため追加していない。
+- 2026-11-25 (M1 Task 2): `DaemonPaths::from_vars(get)` を追加し `from_env` はそれを呼ぶ（環境変数に触れずにテストするため）。
+  空文字・相対パスの XDG/HOME 値は未設定扱い（XDG 仕様）。ソケットパス上限は 100 バイトで `from_env`/`from_vars` のみ検査し、
+  `under(root)` は検査しない。
+- 2026-11-25 (M1 Task 2): `write_atomic` は対象パスまたは親ディレクトリが symlink なら Err（rename が symlink を
+  黙って置換するのを防ぐ）。Store の読み取りも `O_NOFOLLOW`。`InstanceLock` は open で truncate せず、flock 取得後に pid を書く。
+  Store の `list_*` は壊れたファイル・未知 version を Err にする（黙って読み飛ばさない）。
 
 ## 検証記録
 
@@ -118,6 +126,11 @@
     `verify.sh test` はテスト名で絞るため `dgc_protocol` では単体テスト（`ids::tests::...`）に一致しない。
     crate 単位は `cargo test -p dgc-protocol` を使い、`verify.sh test <テスト名>` の動作も確認した。
   - `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`: clean。
+- 2026-11-25 M1 Task 2（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-daemon --test store`: 実装前はモジュール未定義で RED（compile error）→ 22 件 PASS。
+    `verify.sh test store`: PASS（106 executed）。`cargo test --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli`: PASS。
+  - `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`: clean。
+  - 未検証: 他ユーザー所有ディレクトリの拒否（root なしでは再現できない）。
 
 ## 保留中の小さな改善
 

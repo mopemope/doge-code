@@ -12,8 +12,13 @@ version = "0.1.0"
 # keep versions identical to the legacy root package's declarations.
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+dgc-protocol = { path = "crates/dgc-protocol" }
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.154"
+tempfile = "3"
+thiserror = "2"
+toml = "1.1.8"
 uuid = { version = "1.28.0", default-features = false }
 
 [package]
