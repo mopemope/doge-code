@@ -49,7 +49,9 @@
 //!     completes (a steered-away or interrupted one) is emitted with
 //!     `final_: false` when the next message starts, its turn is interrupted
 //!     or its turn ends. A buffer reaching [`MAX_MESSAGE_BUFFER_BYTES`] is
-//!     emitted as a non-final chunk.
+//!     emitted as a non-final chunk, and any text longer than
+//!     [`MAX_EVENT_TEXT_BYTES`] is split into several events (all but the
+//!     last non-final).
 //!   - `commandExecution` / `fileChange` items → `tool_call` on
 //!     `item/started` (command line / `<kind> <path>` list) and `tool_result`
 //!     on `item/completed` (output or status; an error unless `completed`
@@ -93,7 +95,7 @@ use std::time::Duration;
 
 use dgc_protocol::event::EventKind;
 use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
-use dgc_protocol::truncate_summary;
+use dgc_protocol::{MAX_EVENT_TEXT_BYTES, chunk_text, truncate_summary};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::process::ChildStdin;
@@ -126,8 +128,9 @@ const SHUTDOWN_TERMINATE_GRACE: Duration = Duration::from_secs(2);
 /// Bound on stopping the reader task during `shutdown`.
 const READER_STOP_WAIT: Duration = Duration::from_secs(1);
 pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
-/// Aggregated message text past this size is emitted as a non-final chunk.
-pub const MAX_MESSAGE_BUFFER_BYTES: usize = 1024 * 1024;
+/// Aggregated message text past this size is emitted as a non-final chunk
+/// (the same bound as one event's text).
+pub const MAX_MESSAGE_BUFFER_BYTES: usize = MAX_EVENT_TEXT_BYTES;
 
 /// Outbound message shapes, as recorded.
 mod wire {
@@ -376,7 +379,7 @@ impl State {
         self.messages = kept;
         flushed
             .into_iter()
-            .filter_map(|message| text_event(message.text, false))
+            .flat_map(|message| text_events(&message.text, false))
             .collect()
     }
 
@@ -392,11 +395,25 @@ impl State {
     }
 }
 
-fn text_event(text: String, final_: bool) -> Option<ProviderEvent> {
-    (!text.is_empty()).then_some(ProviderEvent::Event(EventKind::AssistantText {
-        text,
-        final_,
-    }))
+/// `text` as `AssistantText` events of at most [`MAX_EVENT_TEXT_BYTES`]
+/// each; all but the last are non-final, the last is `final_`. Empty text
+/// gives no event.
+fn text_events(text: &str, final_: bool) -> Vec<ProviderEvent> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let chunks = chunk_text(text);
+    let last = chunks.len().saturating_sub(1);
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(n, text)| {
+            ProviderEvent::Event(EventKind::AssistantText {
+                text,
+                final_: final_ && n == last,
+            })
+        })
+        .collect()
 }
 
 /// State shared by the session and its stdout reader task.
@@ -1036,9 +1053,7 @@ fn message_delta(state: &mut State, params: &Value) -> Vec<ProviderEvent> {
         return Vec::new();
     }
     message.chunked = true;
-    text_event(std::mem::take(&mut message.text), false)
-        .into_iter()
-        .collect()
+    text_events(&std::mem::take(&mut message.text), false)
 }
 
 fn item_completed(state: &mut State, params: &Value) -> Vec<ProviderEvent> {
@@ -1059,7 +1074,7 @@ fn item_completed(state: &mut State, params: &Value) -> Vec<ProviderEvent> {
                 (Some(message), None) => message.text,
                 (None, None) => String::new(),
             };
-            text_event(text, true).into_iter().collect()
+            text_events(&text, true)
         }
         Some("commandExecution") => {
             state.items.remove(item_id);
@@ -1194,4 +1209,61 @@ async fn server_request(
         debug!(%error, "could not cancel codex approval request");
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dgc_protocol::MAX_MESSAGE_BYTES;
+
+    /// Assistant texts of `events`, checking every event's size bound.
+    fn texts(events: &[ProviderEvent]) -> Vec<(String, bool)> {
+        events
+            .iter()
+            .map(|event| match event {
+                ProviderEvent::Event(kind @ EventKind::AssistantText { text, final_ }) => {
+                    let size = serde_json::to_vec(kind).expect("serialize").len();
+                    assert!(size < MAX_MESSAGE_BYTES / 2, "{size} bytes");
+                    (text.clone(), *final_)
+                }
+                other => panic!("unexpected event {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_huge_completed_message_is_split_into_bounded_events() {
+        let text = "c".repeat(2 * 1024 * 1024);
+        let mut state = State::default();
+        let params = serde_json::json!({
+            "item": {"id": "msg_1", "type": "agentMessage", "text": text}
+        });
+        let chunks = texts(&item_completed(&mut state, &params));
+        assert!(chunks.len() >= 8, "{} chunks", chunks.len());
+        let last = chunks.len() - 1;
+        for (n, (_, final_)) in chunks.iter().enumerate() {
+            assert_eq!(*final_, n == last, "only the last chunk is final");
+        }
+        let joined: String = chunks.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn streamed_deltas_are_emitted_in_bounded_chunks() {
+        let mut state = State::default();
+        let delta = "d".repeat(64 * 1024);
+        let mut events = Vec::new();
+        for _ in 0..32 {
+            let params = serde_json::json!({
+                "itemId": "msg_1", "turnId": "t1", "delta": delta
+            });
+            events.extend(message_delta(&mut state, &params));
+        }
+        let params = serde_json::json!({"item": {"id": "msg_1", "type": "agentMessage"}});
+        events.extend(item_completed(&mut state, &params));
+        let chunks = texts(&events);
+        assert!(chunks.len() >= 8, "{} chunks", chunks.len());
+        let joined: String = chunks.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(joined.len(), 32 * delta.len());
+    }
 }

@@ -37,6 +37,11 @@ pub const NOTIFY_LAGGED: &str = "lagged";
 /// Largest page `agent.events` returns.
 pub const MAX_EVENTS_LIMIT: u32 = 1000;
 
+/// Serialized size an `agent.events` page stays within (a single event
+/// larger than this is still returned alone). A page can therefore hold fewer
+/// than `limit` events while more exist: page on until an empty page.
+pub const MAX_EVENTS_PAGE_BYTES: usize = 768 * 1024;
+
 fn default_events_limit() -> u32 {
     MAX_EVENTS_LIMIT
 }

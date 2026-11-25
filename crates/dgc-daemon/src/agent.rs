@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use dgc_protocol::chunk_text;
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
@@ -252,6 +253,27 @@ impl Shared {
         Ok(event)
     }
 
+    /// Record a user message as one `UserMessage` event per chunk of at most
+    /// [`MAX_EVENT_TEXT_BYTES`](dgc_protocol::MAX_EVENT_TEXT_BYTES), all with
+    /// the same `behavior`.
+    fn emit_user(
+        &self,
+        id: &AgentId,
+        text: &str,
+        behavior: SendBehavior,
+    ) -> Result<(), AgentError> {
+        for chunk in chunk_text(text) {
+            self.emit(
+                id,
+                EventKind::UserMessage {
+                    text: chunk,
+                    behavior,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     fn emit_or_warn(&self, id: &AgentId, kind: EventKind) {
         if let Err(err) = self.emit(id, kind) {
             warn!(agent_id = %id, error = %err, "could not record agent event");
@@ -383,13 +405,8 @@ impl AgentManager {
                 },
             )
             .and_then(|_| {
-                self.shared.emit(
-                    &agent.id,
-                    EventKind::UserMessage {
-                        text: params.initial_prompt.clone(),
-                        behavior: SendBehavior::Queue,
-                    },
-                )
+                self.shared
+                    .emit_user(&agent.id, &params.initial_prompt, SendBehavior::Queue)
             });
         if let Err(err) = recorded {
             // Do not leave a record that claims to be starting.

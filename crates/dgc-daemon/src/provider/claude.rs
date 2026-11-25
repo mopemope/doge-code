@@ -14,7 +14,8 @@
 //!   carries its stderr tail.
 //! - Event mapping (CLI → [`ProviderEvent`]):
 //!   - `system/init` (sent at the start of every turn) → `SessionStarted`.
-//!   - `assistant`: each `text` block → `AssistantText { final_: true }`, each
+//!   - `assistant`: each `text` block → `AssistantText { final_: true }` (split
+//!     into 256 KiB chunks, all but the last `final_: false`), each
 //!     `tool_use` block → [`EventKind::tool_call`]; `thinking` is ignored.
 //!   - `user` `tool_result` blocks → [`EventKind::tool_result`]; plain text
 //!     user blocks (e.g. the interrupt marker) are ignored.
@@ -60,7 +61,7 @@ use std::time::Duration;
 
 use dgc_protocol::event::EventKind;
 use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
-use dgc_protocol::truncate_summary;
+use dgc_protocol::{chunk_text, truncate_summary};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::process::ChildStdin;
@@ -808,19 +809,30 @@ fn content_blocks(message: &Value) -> &[Value] {
         .map_or(&[], Vec::as_slice)
 }
 
+/// A long text block becomes several `AssistantText` events of at most
+/// [`MAX_EVENT_TEXT_BYTES`](dgc_protocol::MAX_EVENT_TEXT_BYTES); all but the
+/// last are `final_: false`.
 fn assistant_events(message: &Value) -> Vec<ProviderEvent> {
     content_blocks(message)
         .iter()
-        .filter_map(|block| match block["type"].as_str() {
-            Some("text") => Some(EventKind::AssistantText {
-                text: block["text"].as_str().unwrap_or("").to_owned(),
-                final_: true,
-            }),
-            Some("tool_use") => Some(EventKind::tool_call(
+        .flat_map(|block| match block["type"].as_str() {
+            Some("text") => {
+                let chunks = chunk_text(block["text"].as_str().unwrap_or(""));
+                let last = chunks.len().saturating_sub(1);
+                chunks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, text)| EventKind::AssistantText {
+                        text,
+                        final_: n == last,
+                    })
+                    .collect()
+            }
+            Some("tool_use") => vec![EventKind::tool_call(
                 block["name"].as_str().unwrap_or("unknown"),
                 &input_summary(&block["input"]),
-            )),
-            _ => None,
+            )],
+            _ => Vec::new(),
         })
         .map(ProviderEvent::Event)
         .collect()
@@ -877,4 +889,37 @@ fn turn_result(shared: &Shared, message: &Value) -> Vec<ProviderEvent> {
         usage: message.get("usage").cloned(),
     });
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dgc_protocol::MAX_MESSAGE_BYTES;
+
+    #[test]
+    fn a_huge_assistant_text_is_split_into_bounded_events() {
+        let text = "z".repeat(2 * 1024 * 1024);
+        let message = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]}
+        });
+        let events = assistant_events(&message);
+        assert!(events.len() >= 8, "{} events", events.len());
+        let mut joined = String::new();
+        for (n, event) in events.iter().enumerate() {
+            let ProviderEvent::Event(kind @ EventKind::AssistantText { text, final_ }) = event
+            else {
+                panic!("unexpected event {event:?}");
+            };
+            let size = serde_json::to_vec(kind).expect("serialize").len();
+            assert!(size < MAX_MESSAGE_BYTES / 2, "{size} bytes");
+            assert_eq!(
+                *final_,
+                n + 1 == events.len(),
+                "only the last chunk is final"
+            );
+            joined.push_str(text);
+        }
+        assert_eq!(joined, text);
+    }
 }

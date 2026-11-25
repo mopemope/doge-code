@@ -265,12 +265,13 @@ async fn print_history(client: &mut Client, id: &AgentId, since: u64, json: bool
         };
         let result: Value = client.call(AGENT_EVENTS, &params).await?;
         let events: Vec<AgentEvent> = serde_json::from_value(result["events"].clone())?;
+        // Pages are also cut by size: only an empty page ends the history.
+        if events.is_empty() {
+            return Ok(());
+        }
         for event in &events {
             print_event(event, json)?;
             cursor = event.seq;
-        }
-        if events.len() < MAX_EVENTS_LIMIT as usize {
-            return Ok(());
         }
     }
 }

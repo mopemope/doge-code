@@ -315,6 +315,12 @@
   `branch_kept` を足す。既に archived なら両方 false）。人間向け出力は workspace 行に続けて `branch kept: NAME` /
   `worktree kept on disk: PATH`。作成時のロールバック（store 失敗）も安全な経路を使う。
   注: base からの到達で判定するため、ブランチを main へマージ済みでも base より先のコミットがあれば拒否される（`--force` が必要）。
+- 2026-11-26 (M1 最終レビュー修正 2): `agent.events` のページは直列化した配列が `MAX_EVENTS_PAGE_BYTES`（768 KiB、
+  `dgc-protocol`）を超える手前で切る（必ず 1 件は返す。保存行の長さ＝直列化長で数える）。このため `limit` 未満のページでも続きが
+  あり得るので、`dgc-next logs` と購読の backfill は空ページまでページングする（backfill は符号化できないイベントでも cursor を進める）。
+  1 イベントの本文は `MAX_EVENT_TEXT_BYTES`（256 KiB、JSON エスケープ後の長さで数える）以下: `dgc_protocol::chunk_text` で
+  Claude の assistant テキスト（最後以外 `final_: false`）、Codex の集約メッセージ（`MAX_MESSAGE_BUFFER_BYTES` も 256 KiB、
+  完了時の item 本文も分割）、`UserMessage`（初期プロンプトと send。同じ behavior で複数イベント）を分割する。
 
 ## 検証記録
 

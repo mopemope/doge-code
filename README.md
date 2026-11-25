@@ -94,7 +94,8 @@ Agents:
   `permission resolved PERM_ID: allow|allow_for_session|deny|cancelled`,
   `turn started`, `turn completed`, `rate limited: DETAIL`, `error: MESSAGE`,
   `state: STATE`. Continuation lines of multi-line text are indented by four
-  spaces.
+  spaces. A prompt or reply longer than 256 KiB is stored as several events
+  (reply parts before the last show as `assistant (partial)`).
 - Permissions: `dgc-next permit ls [--agent ID]` lists pending requests
   (`PERM_ID  AGENT_ID  KIND  SUMMARY`, oldest first); `dgc-next permit allow ID
   [--session]` and `dgc-next permit deny ID` answer one. Requests stay pending

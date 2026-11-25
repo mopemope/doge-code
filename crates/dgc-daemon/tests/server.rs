@@ -722,6 +722,38 @@ async fn agent_and_permission_methods_map_results_and_errors() {
 }
 
 #[tokio::test]
+async fn subscribe_backfills_across_byte_limited_pages() {
+    // 400 messages of ~4 KiB: the stored backlog spans several pages cut by
+    // size (well under the 1000-event limit each).
+    let texts: Vec<String> = (0..400)
+        .map(|n| format!("m{n:03} {}", "x".repeat(4096)))
+        .collect();
+    let blocks: Vec<Vec<String>> = texts.iter().map(|t| vec![t.clone()]).collect();
+    let scenario = claude_scenario(&[blocks]);
+    let (daemon, mut control, ws) = start_agents(&scenario).await;
+    let agent = create_agent(&mut control, &ws).await;
+    wait_state(&mut control, &agent, "idle").await;
+
+    let mut sub = Client::connect(&daemon.paths.socket).await;
+    sub.hello().await;
+    let (_, notes) = sub
+        .call_collect("subscribe", json!({"agent_id": agent, "since_seq": 0}))
+        .await;
+    let mut events = event_notes(&notes);
+    if !events.iter().any(|e| is_state(e, "idle")) {
+        events.extend(read_events_until(&mut sub, |e| is_state(e, "idle")).await);
+    }
+    let expected: Vec<u64> = (1..=events.len() as u64).collect();
+    assert_eq!(seqs(&events), expected, "no gaps or duplicates");
+    let got = events
+        .iter()
+        .filter(|e| e["kind"]["type"] == "assistant_text")
+        .count();
+    assert_eq!(got, 400);
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
 async fn subscribe_backfills_then_streams_live() {
     let scenario = claude_scenario(&[text_turn(&["one"]), text_turn(&["two"])]);
     let (daemon, mut control, ws) = start_agents(&scenario).await;

@@ -1215,3 +1215,47 @@ async fn buffered_turn_completed_is_applied_before_a_later_command() {
         assert_eq!(session.next_call().await, Call::SendUser(text));
     }
 }
+
+#[tokio::test]
+async fn a_huge_prompt_is_stored_in_bounded_chunks() {
+    let mut h = Harness::new(DEFAULT);
+    let prompt = "p".repeat(2 * 1024 * 1024);
+    let (agent, mut session) = h.running(&prompt).await;
+    let followup = "q".repeat(2 * 1024 * 1024);
+    session
+        .emit(ProviderEvent::TurnCompleted { usage: None })
+        .await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    assert_eq!(
+        h.send(&agent.id, &followup, SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(session.next_call().await, Call::SendUser(followup.clone()));
+
+    let mut events = Vec::new();
+    loop {
+        let since = events.last().map_or(0, |e: &AgentEvent| e.seq);
+        let page = h
+            .manager
+            .events_page(&AgentEventsParams {
+                agent_id: agent.id.clone(),
+                since_seq: since,
+                limit: 1000,
+            })
+            .expect("events page");
+        if page.is_empty() {
+            break;
+        }
+        events.extend(page);
+    }
+    let mut texts: Vec<String> = Vec::new();
+    for event in &events {
+        let size = serde_json::to_vec(event).expect("serialize").len();
+        assert!(size < dgc_protocol::MAX_MESSAGE_BYTES / 2, "{size} bytes");
+        if let EventKind::UserMessage { text, .. } = &event.kind {
+            texts.push(text.clone());
+        }
+    }
+    assert!(texts.len() >= 16, "{} user chunks", texts.len());
+    assert_eq!(texts.concat(), format!("{prompt}{followup}"));
+}

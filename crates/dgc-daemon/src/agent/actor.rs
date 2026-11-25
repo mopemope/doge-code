@@ -241,8 +241,9 @@ impl Actor {
     }
 
     fn record_user(&self, text: String, behavior: SendBehavior) {
-        self.shared
-            .emit_or_warn(&self.agent.id, EventKind::UserMessage { text, behavior });
+        if let Err(err) = self.shared.emit_user(&self.agent.id, &text, behavior) {
+            warn!(agent_id = %self.agent.id, error = %err, "could not record agent event");
+        }
     }
 
     fn has_pending(&self) -> bool {

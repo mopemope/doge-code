@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::AgentId;
+use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
 
 use crate::paths::ensure_private_dir;
 use crate::time::now_rfc3339;
@@ -138,21 +139,35 @@ impl EventLog {
     }
 
     /// Events with `seq > since_seq`, ascending, at most `limit`, reading the
-    /// rotated generation before the current file.
+    /// rotated generation before the current file. The page stops before its
+    /// serialized JSON array would exceed [`MAX_EVENTS_PAGE_BYTES`] but always
+    /// holds at least one event when any is left, so a short page does not
+    /// mean the end: callers page on until an empty page.
     pub fn read_page(&self, since_seq: u64, limit: u32) -> Result<Vec<AgentEvent>, EventLogError> {
         let limit = limit as usize;
         let mut page = Vec::new();
         if limit == 0 {
             return Ok(page);
         }
+        // `[` + `]`, then each event's line plus a separating comma.
+        let mut bytes = 2usize;
+        let mut full = false;
         for path in [&self.rotated_path, &self.current_path] {
-            for_each_event(path, |event| {
-                if event.seq > since_seq {
-                    page.push(event);
+            for_each_event(path, |event, line_len| {
+                if event.seq <= since_seq {
+                    return true;
                 }
-                page.len() < limit
+                let cost = line_len + usize::from(!page.is_empty());
+                if !page.is_empty() && bytes + cost > MAX_EVENTS_PAGE_BYTES {
+                    full = true;
+                    return false;
+                }
+                bytes += cost;
+                page.push(event);
+                full = page.len() >= limit;
+                !full
             })?;
-            if page.len() >= limit {
+            if full {
                 break;
             }
         }
@@ -256,16 +271,20 @@ fn ends_with_newline(file: &mut File, size: u64, path: &Path) -> Result<bool, Ev
 /// Sequence number of the last valid line in `path`, if the file exists and has one.
 fn last_seq_in(path: &Path) -> Result<Option<u64>, EventLogError> {
     let mut last = None;
-    for_each_event(path, |event| {
+    for_each_event(path, |event, _| {
         last = Some(event.seq);
         true
     })?;
     Ok(last)
 }
 
-/// Call `f` for each valid event in `path`, in file order, until it returns
-/// false. A missing file is empty; a symlink is an error.
-fn for_each_event(path: &Path, mut f: impl FnMut(AgentEvent) -> bool) -> Result<(), EventLogError> {
+/// Call `f` for each valid event in `path` (with the byte length of its
+/// trimmed line, which is its serialized size), in file order, until it
+/// returns false. A missing file is empty; a symlink is an error.
+fn for_each_event(
+    path: &Path,
+    mut f: impl FnMut(AgentEvent, usize) -> bool,
+) -> Result<(), EventLogError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -297,7 +316,7 @@ fn for_each_event(path: &Path, mut f: impl FnMut(AgentEvent) -> bool) -> Result<
         }
         match serde_json::from_slice::<AgentEvent>(line) {
             Ok(event) => {
-                if !f(event) {
+                if !f(event, line.len()) {
                     return Ok(());
                 }
             }

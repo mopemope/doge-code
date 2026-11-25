@@ -224,3 +224,50 @@ fn symlinked_rotated_file_is_refused_on_read() {
     let err = log.read_page(0, 10).expect_err("must refuse symlink");
     assert!(matches!(err, EventLogError::Symlink { .. }), "{err}");
 }
+
+#[test]
+fn read_page_stays_within_the_byte_budget() {
+    use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
+    let dir = tempdir().expect("tempdir");
+    let mut log = EventLog::open(dir.path(), AgentId::generate(), 64 << 20).expect("open");
+    for n in 0..400 {
+        log.append(EventKind::AssistantText {
+            text: format!("{n:04}{}", "x".repeat(4096)),
+            final_: true,
+        })
+        .expect("append");
+    }
+    let first = log.read_page(0, 1000).expect("read");
+    assert!(!first.is_empty());
+    assert!(first.len() < 400, "a full page would exceed the budget");
+    let size = serde_json::to_vec(&first).expect("serialize").len();
+    assert!(size <= MAX_EVENTS_PAGE_BYTES, "{size} bytes");
+
+    // Paging on from the last seq returns every event exactly once.
+    let mut all = first;
+    loop {
+        let since = all.last().map_or(0, |e| e.seq);
+        let page = log.read_page(since, 1000).expect("read");
+        if page.is_empty() {
+            break;
+        }
+        assert!(serde_json::to_vec(&page).expect("serialize").len() <= MAX_EVENTS_PAGE_BYTES);
+        all.extend(page);
+    }
+    assert_eq!(seqs(&all), (1..=400).collect::<Vec<u64>>());
+}
+
+#[test]
+fn read_page_returns_an_oversized_event_alone() {
+    use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
+    let dir = tempdir().expect("tempdir");
+    let mut log = EventLog::open(dir.path(), AgentId::generate(), 64 << 20).expect("open");
+    log.append(EventKind::AssistantText {
+        text: "y".repeat(MAX_EVENTS_PAGE_BYTES + 10),
+        final_: true,
+    })
+    .expect("append");
+    log.append(text(2)).expect("append");
+    assert_eq!(seqs(&log.read_page(0, 10).expect("read")), vec![1]);
+    assert_eq!(seqs(&log.read_page(1, 10).expect("read")), vec![2]);
+}

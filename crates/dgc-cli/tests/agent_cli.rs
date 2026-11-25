@@ -458,6 +458,52 @@ fn refused_workspace_archive_leaves_agents_alone_until_forced() {
 }
 
 #[test]
+fn logs_pages_through_more_than_one_message_worth_of_events() {
+    // A scenario like claude_turn whose reply is 400 assistant messages of
+    // ~4 KiB: one 1000-event page would exceed the 1 MiB message limit.
+    let a = AgentEnv::new("claude_turn", None);
+    let generated = a.env.dir.path().join("many.jsonl");
+    let mut lines = vec![
+        r#"{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}"#.to_owned(),
+        r#"{"capture":"init","path":"/request_id"}"#.to_owned(),
+        r#"{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}"#.to_owned(),
+        r#"{"expect":{"type":"user"}}"#.to_owned(),
+        r#"{"send":{"type":"system","subtype":"init","session_id":"sess-many"}}"#.to_owned(),
+    ];
+    for n in 0..400 {
+        let text = format!("msg-{n:03} {}", "x".repeat(4096));
+        lines.push(
+            serde_json::json!({"send": {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}})
+                .to_string(),
+        );
+    }
+    lines.push(r#"{"send":{"type":"result","subtype":"success","is_error":false,"session_id":"sess-many","usage":{"output_tokens":1}}}"#.to_owned());
+    lines.push(r#"{"expect_eof":true}"#.to_owned());
+    fs::write(&generated, lines.join("\n") + "\n").expect("write scenario");
+    write_wrapper(
+        &a.env.dir.path().join("bin"),
+        "claude",
+        CLAUDE_VERSION,
+        &generated,
+    );
+    let a = a.with_workspace(None);
+
+    let id = created_id(&a.run_agent("claude", &["Talk a lot"]));
+    a.wait_state(&id, "idle");
+    let output = a.run(&["logs", &id]);
+    assert_success(&output);
+    let text = stdout(&output);
+    for n in 0..400 {
+        assert!(
+            text.contains(&format!("assistant: msg-{n:03} ")),
+            "message {n} missing"
+        );
+    }
+    let events = a.logs_json(&[&id]);
+    assert!(events.len() > 400, "{} events", events.len());
+}
+
+#[test]
 fn status_lists_provider_versions() {
     let a = AgentEnv::new("claude_turn", None);
     // The daemon's PATH holds no codex, and none is configured.

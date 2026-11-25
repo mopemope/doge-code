@@ -173,19 +173,22 @@ impl Forwarder {
                     return false;
                 }
             };
-            let full = page.len() >= MAX_EVENTS_LIMIT as usize;
+            // A page is also cut by its byte size, so only an empty page
+            // means the backlog is done.
+            if page.is_empty() {
+                return true;
+            }
             for event in &page {
+                // Advance even past an event that cannot be encoded, so the
+                // loop always makes progress.
+                cursor = event.seq;
                 let Some(note) = event_notification(event) else {
                     continue;
                 };
                 if !self.ctx.notify_wait(&note).await {
                     return false;
                 }
-                cursor = event.seq;
                 self.sent.insert(agent.clone(), event.seq);
-            }
-            if !full || page.is_empty() {
-                return true;
             }
         }
     }
