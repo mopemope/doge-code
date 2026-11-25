@@ -26,7 +26,10 @@ use crate::config::DaemonConfig;
 pub const CLAUDE_TESTED_VERSION: &str = "2.1.332";
 /// codex-cli version the adapter was recorded and tested against.
 pub const CODEX_TESTED_VERSION: &str = "0.172.0";
-/// Bound on `<provider> --version`.
+/// Bound on `<provider> --version`. The daemon probes before it accepts
+/// connections (the socket is already bound), so this plus the rest of
+/// startup must stay well below the client's `SPAWN_WAIT` and
+/// `HELLO_TIMEOUT` (15 s each, in `dgc-client`).
 pub const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most `--version` output read.
 const VERSION_OUTPUT_LIMIT: usize = 4096;

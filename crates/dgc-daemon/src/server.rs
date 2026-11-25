@@ -61,7 +61,7 @@ pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 pub const AGENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Longest piece of untrusted input echoed back in an error message, in chars.
-const ECHO_LIMIT: usize = 64;
+pub(crate) const ECHO_LIMIT: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -313,6 +313,24 @@ pub async fn run_daemon(
         Arc::clone(&store),
         paths.worktrees_dir.clone(),
     ));
+    let socket_dir = paths
+        .socket
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
+    ensure_private_dir(socket_dir)?;
+    remove_stale_socket(&paths.socket)?;
+
+    // Bind before the slow part of startup (provider probes, bounded by
+    // `VERSION_TIMEOUT` each and run concurrently) so an autostarting client
+    // sees the socket at once. Its connection waits in the listen backlog
+    // until the accept loop starts below; the client's hello timeout covers
+    // that wait (see `dgc_client`'s `HELLO_TIMEOUT`).
+    let listener = UnixListener::bind(&paths.socket)?;
+    if let Err(err) = fs::set_permissions(&paths.socket, Permissions::from_mode(0o600)) {
+        let _ = fs::remove_file(&paths.socket);
+        return Err(err.into());
+    }
+
     let providers = resolve_providers(&config, std::env::var_os("PATH").as_deref()).await;
     let agents = Arc::new(AgentManager::new(
         store,
@@ -321,22 +339,9 @@ pub async fn run_daemon(
         adapters(&providers),
     ));
     // No provider process survives a restart: agents left live are stopped
-    // before anyone can talk to them.
+    // before any connection is accepted.
     if let Err(err) = agents.recover_on_startup() {
         tracing::warn!(error = %err, "could not mark every interrupted agent stopped");
-    }
-
-    let socket_dir = paths
-        .socket
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
-    ensure_private_dir(socket_dir)?;
-    remove_stale_socket(&paths.socket)?;
-
-    let listener = UnixListener::bind(&paths.socket)?;
-    if let Err(err) = fs::set_permissions(&paths.socket, Permissions::from_mode(0o600)) {
-        let _ = fs::remove_file(&paths.socket);
-        return Err(err.into());
     }
     tracing::info!(pid = std::process::id(), "daemon listening");
 

@@ -16,11 +16,12 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::agent::{AgentError, AgentManager};
-use crate::server::ConnCtx;
+use crate::server::{ConnCtx, ECHO_LIMIT};
 use crate::workspace::WorkspaceManager;
 
-/// Longest piece of a deserialization error echoed to the client, in chars.
-const PARSE_ERROR_ECHO: usize = 200;
+/// Longest piece of a deserialization error echoed to the client, in chars
+/// (the same limit as other echoed input).
+const PARSE_ERROR_ECHO: usize = ECHO_LIMIT;
 
 /// Decode request params. A missing (`null`) params value counts as `{}`.
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
@@ -258,6 +259,19 @@ mod tests {
         assert_eq!(err.code, NOT_FOUND);
         let err = agent_events(&a, json!({"agent_id": id})).expect_err("unknown");
         assert_eq!(err.code, NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn echoed_parse_errors_are_cut_to_the_echo_limit() {
+        let tmp = tempdir().expect("tempdir");
+        let a = agents(tmp.path());
+        let long = "x".repeat(500);
+        let err = agent_get(&a, json!({"id": long})).expect_err("invalid id");
+        let detail = err
+            .message
+            .strip_prefix("invalid params: ")
+            .expect("prefix");
+        assert!(detail.chars().count() <= ECHO_LIMIT, "{}", err.message);
     }
 
     #[tokio::test]

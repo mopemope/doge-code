@@ -27,11 +27,17 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, timeout};
 
 /// How long `connect_or_spawn` keeps retrying after starting the daemon.
-const SPAWN_WAIT: Duration = Duration::from_secs(5);
+/// The daemon binds its socket early but probes the provider CLIs
+/// (`dgc_daemon::provider::resolve::VERSION_TIMEOUT`, 5 s) before accepting,
+/// so this must comfortably exceed that bound plus the rest of startup.
+const SPAWN_WAIT: Duration = Duration::from_secs(15);
 /// Delay between connection attempts while the daemon starts.
 const RETRY_INTERVAL: Duration = Duration::from_millis(50);
-/// Upper bound for the handshake on a freshly opened connection.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for the handshake on a freshly opened connection. A connection
+/// made while the daemon is still starting waits in its listen backlog until
+/// the provider probes (`VERSION_TIMEOUT`, 5 s) finish, so this too must
+/// comfortably exceed that bound plus the rest of startup.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 /// Capacity of the channel [`Client::subscribe`] returns.
 const SUBSCRIBE_CAPACITY: usize = 256;
 /// Notifications kept while waiting for a response; the oldest are dropped.
@@ -55,7 +61,7 @@ pub enum ClientError {
     HelloTimeout,
     #[error("daemon speaks protocol version {daemon}, this client speaks {client}")]
     VersionMismatch { daemon: u32, client: u32 },
-    #[error("daemon did not become reachable within 5 s (last error: {last}); see {}", .log.display())]
+    #[error("daemon did not become reachable within 15 s (last error: {last}); see {}", .log.display())]
     SpawnTimeout { last: String, log: PathBuf },
 }
 
@@ -128,7 +134,7 @@ impl Client {
     }
 
     /// Connect, starting the daemon (`exe daemon run`, detached) when none is
-    /// running, then retry every 50 ms for up to 5 s. The child is not waited
+    /// running, then retry every 50 ms for up to 15 s. The child is not waited
     /// for: if it loses the single-instance race it exits and the retry
     /// connects to the winner.
     pub async fn connect_or_spawn(paths: &DaemonPaths, exe: &Path) -> Result<Self, ClientError> {

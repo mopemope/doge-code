@@ -475,3 +475,55 @@ fn daemon_log_excludes_prompt_text() {
         "agent output leaked into the log:\n{log}"
     );
 }
+
+#[test]
+fn slow_provider_probe_does_not_break_autostart() {
+    let env = TestEnv::new();
+    let bin = env.dir.path().join("bin");
+    fs::create_dir(&bin).expect("mkdir bin");
+    // `--version` hangs past the daemon's 5 s probe bound.
+    // The daemon's PATH is empty below, so `sleep` is named absolutely.
+    let sleep_bin = ["/usr/bin/sleep", "/bin/sleep"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+        .expect("a sleep binary");
+    let claude = bin.join("claude");
+    fs::write(&claude, format!("#!/bin/sh\nexec {sleep_bin} 6\n")).expect("write wrapper");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let config_dir = env.paths.config_file.parent().expect("config dir");
+    fs::create_dir_all(config_dir).expect("mkdir config");
+    fs::write(
+        &env.paths.config_file,
+        format!("claude_path = \"{}\"\n", claude.display()),
+    )
+    .expect("write config");
+    let empty = env.dir.path().join("empty-path");
+    fs::create_dir(&empty).expect("mkdir");
+
+    let started = Instant::now();
+    let child = env
+        .command(&["--json", "daemon", "status"])
+        .env("PATH", &empty)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("dgc-next should start");
+    // The socket is bound before the probes run, well within the 5 s bound.
+    while !env.paths.socket.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the socket must appear before the provider probe ends"
+        );
+        sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().expect("dgc-next should finish");
+    let elapsed = started.elapsed();
+    let status = json(&output);
+    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
+    let claude_status = &status["providers"][0];
+    assert_eq!(claude_status["kind"], "claude");
+    // Found but its version is unknown: usable, untested.
+    assert_eq!(claude_status["path"], claude.to_str().expect("utf8"));
+    assert_eq!(claude_status["version"], Value::Null);
+    assert_eq!(claude_status["tested"], false);
+}

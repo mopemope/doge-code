@@ -286,7 +286,8 @@
 - 2026-11-25 (M1 Task 13): プロバイダ解決（`provider/resolve.rs`）: 設定のパス（相対パスや実行可能ファイルでなければ warn して利用不可。
   PATH 探索にはフォールバックしない）→ 無ければデーモンの `PATH` の絶対ディレクトリだけを探索（相対エントリは飛ばす）。
   `--version` は 5 秒で打ち切り、最初の「数字で始まり `.` を含むトークン」を版とする。版が取れなくても見つかったプロバイダは登録する
-  （tested=false）。解決はロック取得後・bind 前に Claude と Codex を並行で行い、続けて `recover_on_startup`（失敗は warn のみ）。
+  （tested=false）。解決は bind（と chmod）の後・accept 開始前に Claude と Codex を並行で行い、続けて `recover_on_startup`（失敗は warn のみ）。
+  （修正 1 で変更。下記。）
   終了時は accept 停止・接続 flush の後に `shutdown_all(5 秒)`、その後ソケット削除。サーバーテストは存在しない絶対パスを設定して
   ホストの claude/codex を実行しない。
 - 2026-11-25 (M1 Task 13): `workspace.archive` は handler で先にその workspace の非 archived エージェントを archive してから
@@ -297,6 +298,12 @@
   常に出す。`--follow` は seq 0 から購読し idle/stopped/failed/archived で終了（idle だけ exit 0）。`lagged` を受けたら最後に表示した
   seq から再購読する。人間向けイベント行の形式は README。CLI テストは `tests/fixtures/scenarios/` の最小シナリオ（記録形状から手書き）を
   `--version` に自前で答えるラッパー（0700、`DGC_FAKE_TIMEOUT_MS=60000`）経由で偽プロバイダに再生させる。
+- 2026-11-25 (M1 Task 13 修正 1): 起動順を lock → Store → bind・chmod → プロバイダ解決（並行、各 `VERSION_TIMEOUT` 5 秒）→
+  `recover_on_startup` → accept 開始に変更（遅い/ハングする `--version` で自動起動のクライアントが待ち切れなくなるため）。解決中に
+  接続したクライアントは listen backlog で待つ。hello の時間切れを防ぐ方法は「accept は解決後に始め、クライアントの `HELLO_TIMEOUT`
+  を 15 秒に上げる」（クライアント側の hello タイマーは connect 直後に始まり、accept の時点を知り得ないため）。`SPAWN_WAIT` も 15 秒
+  （Task 6 の「最大 5 秒再接続」を置き換え）。両定数と `VERSION_TIMEOUT` の doc に「VERSION_TIMEOUT + 起動の残りより十分大きいこと」を記載。
+  パラメータ解析エラーの echo 上限を 200 → `ECHO_LIMIT`（64 文字）に統一（裁定どおり）。
 
 ## 検証記録
 
@@ -419,6 +426,11 @@
   絞り込みを壊す → `archive_workspace_archives_agents` FAIL。`subscribe` 応答より前に通知が出ないこと（`release` のゲート）の RED は
   current_thread / multi_thread のどちらでも再現できなかった（応答のキュー投入が backfill の読み出しより常に先に終わる）。
   回帰検出用のアサーションだけ `subscribe_backfills_then_streams_live` に置いた。
+- 2026-11-25 M1 Task 13 修正 1（Linux、1.99.0）: 新テスト `slow_provider_probe_does_not_break_autostart`（`--version` が 6 秒 sleep する
+  claude、空の PATH）: 修正前は「ソケットが 3 秒以内に現れない」で FAIL（修正前でも status 自体は 5.05 秒付近で辛うじて成功する競合だったため、
+  ソケット出現の早さで判定）→ 修正後 PASS（約 5 秒、claude は path あり・version null・tested false）。`--test agent_cli` 9 件、
+  `--test daemon_cli` 7 件、`dgc-daemon --test server` 22 件、`-p dgc-client` 12 件、`dgc-daemon --lib` 41 件（echo 上限の単体テスト追加）PASS、
+  新 crate 全テスト 261 件 PASS、fmt / clippy（新 crate 4 つ、`-D warnings`）clean。
 
 ## 保留中の小さな改善
 
