@@ -17,7 +17,7 @@
 
 ## 現在の作業
 
-- タスク: M2 の計画作成（M1 は受け入れ完了、最終レビュー待ち）
+- タスク: M2 の計画作成（M1 は受け入れ完了、最終レビューの指摘 8 件を 2026-11-26 に修正済み、修正の再レビュー待ち）
 - 状態: 未着手
 - 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
 - 次の一手: M1 の最終レビュー、続いて M2（TUI）の計画を作成する。受け入れで見つけた小さな課題は「保留中の小さな改善」の末尾
@@ -513,6 +513,16 @@
     | `cargo test --locked --workspace --no-fail-fast --config 'env.TMPDIR.value="/var/tmp"' --config 'env.TMPDIR.force=true' -- --test-threads=1` | PASS（2706 passed / 0 failed。stray `/tmp/.git` と並列の不安定を避けた） |
     | `bash scripts/verify.sh guidance` | PASS（193 tests） |
     | `bash scripts/verify.sh msrv`（1.94.0） | PASS |
+
+- 2026-11-26 M1 最終レビュー修正（Linux、固定ツールチェーン 1.99.0）: 8 項目を TDD で修正（各項目の RED/GREEN は
+  `.superpowers/sdd/2026-11-25-orchestrator-m1-daemon/final-fix-report.md`）。最終確認:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `cargo test --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli`（2 回） | 2 回とも PASS（295 passed / 0 failed） |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+  旧 `src/` の全体テストと実 CLI での手動確認（Codex の `item/permissions/requestApproval` は実機未記録）は未実施。
 
 ## 保留中の小さな改善
 
