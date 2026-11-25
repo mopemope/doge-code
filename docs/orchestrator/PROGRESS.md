@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 12（CodexAdapter）
+- タスク: M1 Task 13（エージェント操作の公開（ソケットと CLI））
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 12 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 13 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -58,7 +58,7 @@
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 完了 | `test(daemon): record provider wire fixtures` |
 | 10 | 偽プロバイダ | 完了 | `test(daemon): add scenario-replay fake provider` |
 | 11 | ClaudeAdapter | 完了 | `feat(daemon): drive Claude Code over stream-json` |
-| 12 | CodexAdapter | 未着手 | |
+| 12 | CodexAdapter | 完了 | `feat(daemon): drive Codex over app-server` |
 | 13 | エージェント操作の公開（ソケットと CLI） | 未着手 | |
 | 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 未着手 | |
 
@@ -240,6 +240,35 @@
   `shutdown` は stdin を閉じて最大 1 秒待ち、残っていれば `terminate(2 秒)`。セッション drop でプロセスグループを kill する。
   シナリオ `tests/fixtures/claude/scenarios/*.jsonl` は記録から機械変換（dgc が振る control request id を `${ANY}` + capture）。
   `login_error.jsonl` と `crash_mid_turn.jsonl` の終わり方は合成（未ログインは未記録のため、initialize を読んで stderr に出して exit 1）。
+- 2026-11-25 (M1 Task 12): 依存クレートの追加なし。`provider/codex.rs` の `CodexAdapter`（`new` / `with_program`、起動は
+  `<prefix_args> app-server`）。対応の詳細はモジュール doc。コントローラ裁定に従ったブリーフからの変更:
+  - mode に `untrusted`（approvalPolicy `untrusted` / sandbox `workspace-write`）を追加（コマンド承認を得るため）。
+    `full-access` だけが auto_approve。`workspace-write` + `on-request` ではワークスペース内コマンドは承認なしでサンドボックス実行（Codex 既定）。
+  - Decision は `availableDecisions` があればそれに従う: Allow→`accept`、AllowForSession→提示されていれば `acceptForSession`、
+    無ければ `accept`、Deny→提示されていれば `decline`、無ければ `cancel`（`cancel` は Codex 側でターンも中断する）。
+    fileChange 承認にはリストが無いので Deny は `decline`。
+  - `account/rateLimits/updated` は毎応答出るので `RateLimited` にせず破棄（TODO(M4): `rateLimitReachedType != null` が候補だが未観測）。
+    テスト名は `codex_rate_limit_event_routine_update_is_dropped`。
+  - 受信行は形で分類（`method`+`id` = サーバー要求、`method` のみ = 通知、`result`/`error` のみ = dgc の要求への応答）。
+    dgc の要求 id は 1 から単調増加、各要求は `RPC_TIMEOUT`（20 秒）で打ち切り。
+  - ターンは id で追跡（`turn/start` の `result.turn.id` / `turn/started`）。steer は実行中ターンがあれば
+    `turn/steer{expectedTurnId}` で true、無ければ送らず false（ターン終了と競合して拒否された場合も false）。
+    interrupt は実行中ターンが無ければ何も送らない。あればそのターンの未回答承認に Deny 対応の値（`cancel`/`decline`）を返してから
+    `turn/interrupt{turnId}`。応答（`{}`、またはターンが先に終わった場合の -32600）後はそのターン id の `turn/completed`・通知・承認を
+    破棄する（承認は同様に自動回答）。他のターンには影響しない。
+  - 本文は `itemId` ごとに集約し `item/completed` で `AssistantText{final:true}`。完了しない item（steer で打ち切られた旧 item、
+    中断されたもの）は次の agentMessage 開始・中断応答・ターン終了時に `final:false` で出す。1 MiB を超えたら `final:false` で分割。
+  - commandExecution / fileChange の item は `tool_call`（名前は item type、要約はコマンド / `<kind> <path>`）と `tool_result`
+    （出力または status。`completed` かつ exit 0 以外はエラー）にする（Claude アダプタと揃えるためのブリーフ外の追加）。
+    承認要求の要約はコマンド文字列、fileChange は先行する `item/started` の changes。`provider_request_id` はサーバー要求 id の JSON 文字列（`"0"`）。
+  - `TurnCompleted.usage` はそのターン id の最新 `thread/tokenUsage/updated`。`status:"failed"` は直前の `error` 通知
+    （`willRetry:false`）の文言で `Error` を先に出す。`turn/completed` の `items` は使わない。
+  - resume は新プロセスで `thread/resume{threadId, model?, excludeTurns:true}`（deprecationNotice と旧ターンの再送を避ける）。
+    mode 指定時のみ `approvalPolicy`/`sandbox` も送る（0.172.0 のスキーマにあるが未記録）。未指定なら thread の保存値が復元される。
+  - シナリオ `tests/fixtures/codex/scenarios/`: simple_turn / command_approval_accept / file_change_decline / interrupt / steer は記録から
+    機械変換（dgc の要求 id は `${ANY}` + capture、`turn/start` の `effort` と `thread/start` の `cwd` は照合しない）。error は記録の
+    17〜20 行目（アクティブターン無しの steer/interrupt）を除外。resume は resume_exclude_turns 全体 + resume の 21〜50 行目の合成。
+    unknown_server_request / crash_mid_turn / interrupt_then_next_turn / interrupt_cancels_pending_approval は合成（ヘッダに明記）。
 
 ## 検証記録
 
@@ -337,9 +366,20 @@
   `claude_interrupt_when_idle_sends_nothing` と `claude_interrupt_without_result_does_not_swallow_next_turn` が FAIL。
   ミューテーション: 未回答の権限要求への deny ループを外す → `claude_interrupt_denies_pending_permission` が FAIL、
   `system/init` での破棄解除を外す → `..._without_result_...` が FAIL、アイドル時の送信省略を外す → `..._when_idle_...` が FAIL。
+- 2026-11-25 M1 Task 12（Linux、固定ツールチェーン 1.99.0）: `cargo test --locked -p dgc-daemon --test codex_adapter`: 実装前は
+  `dgc_daemon::provider::codex` 未定義で RED（compile error）→ 16 件 PASS（15 回連続 PASS）。`verify.sh test codex_`: PASS（16 executed）。
+  新 crate 全テスト PASS、`cargo fmt --all`、clippy（新 crate 4 つ、`--all-targets --all-features -D warnings`）clean。
+  ミューテーション: Deny を常に `cancel` → `codex_file_change_decline` FAIL、中断ターンの抑止を外す → interrupt 系 3 件 FAIL、
+  `expectedTurnId` を変える → `codex_steer_uses_expected_turn_id` FAIL、`excludeTurns:false` → `codex_resume_calls_thread_resume` FAIL、
+  新 item 開始時の旧 item の flush を外す → steer テスト FAIL、未回答承認の cancel を外す → `codex_interrupt_cancels_pending_approval` FAIL、
+  エラーコードを -32600 にする → `codex_unknown_server_request_is_rejected` FAIL。
+  未検出（記録に該当する並びが無い）: 使用量のターン id 照合、interrupt への -32600 応答（ターンが先に終わった競合）、steer の競合時の false。
 
 ## 保留中の小さな改善
 
+- M1 Task 12 由来（Task 14 の実 CLI 手動確認に含める）: コマンド承認への `decline` / `acceptForSession`（未提示・未検証）、
+  承認待ち中の interrupt（`cancel` 回答と `turn/interrupt` の順序での実際の応答）、`thread/resume` に mode 由来の
+  `approvalPolicy`/`sandbox` を渡したときの挙動、`excludeTurns:true` での resume 後のターン実行。
 - M1 Task 11 修正 1 由来（Task 14 の実 CLI 手動確認に含める）: user メッセージ送信の直後（`system/init` より前）に
   interrupt した場合の Claude の挙動（中断されたターンの `result` が出るか）。未記録のため、アダプタはその場合 warn を出し
   `result` が来る前提のままにしている。

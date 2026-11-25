@@ -26,6 +26,7 @@
 //!   its bound fails the agent and the session is shut down.
 
 pub mod claude;
+pub mod codex;
 
 use std::future::Future;
 use std::path::PathBuf;
