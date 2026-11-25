@@ -53,6 +53,12 @@ pub struct EventLog {
     file: File,
     /// Size of the current file in bytes.
     size: u64,
+    /// The current file was renamed away by a rotation whose reopen failed;
+    /// `file` is stale until the next rotation attempt succeeds.
+    reopen_pending: bool,
+    /// A failed write may have left a partial line that could not be
+    /// truncated away; the next write starts with a newline to isolate it.
+    needs_newline: bool,
 }
 
 impl EventLog {
@@ -92,6 +98,8 @@ impl EventLog {
             last_seq,
             file,
             size,
+            reopen_pending: false,
+            needs_newline: false,
         })
     }
 
@@ -112,14 +120,19 @@ impl EventLog {
         line.push(b'\n');
         let len = line.len() as u64;
 
-        if self.size > 0 && self.size + len > self.max_bytes {
-            self.rotate()?;
+        if self.reopen_pending || (self.size > 0 && self.size + len > self.max_bytes) {
+            self.rotate_with(open_append)?;
         }
-        self.file
-            .write_all(&line)
-            .and_then(|()| self.file.flush())
-            .map_err(|e| io_error(&self.current_path, e))?;
-        self.size += len;
+        match write_line(&mut self.file, self.size, self.needs_newline, &line) {
+            Ok(written) => {
+                self.needs_newline = false;
+                self.size += written;
+            }
+            Err(failure) => {
+                self.needs_newline = failure.dirty;
+                return Err(io_error(&self.current_path, failure.source));
+            }
+        }
         self.last_seq = event.seq;
         Ok(event)
     }
@@ -146,13 +159,77 @@ impl EventLog {
         Ok(page)
     }
 
-    fn rotate(&mut self) -> Result<(), EventLogError> {
-        // rename(2) replaces an existing events.1.jsonl without following it.
-        fs::rename(&self.current_path, &self.rotated_path)
-            .map_err(|e| io_error(&self.current_path, e))?;
-        self.file = open_append(&self.current_path)?;
+    /// Rotate the current file away and reopen a fresh one with `open`. State
+    /// changes only after each step succeeds, so a failed reopen is retried by
+    /// the next call without renaming again.
+    fn rotate_with(
+        &mut self,
+        open: impl FnOnce(&Path) -> Result<File, EventLogError>,
+    ) -> Result<(), EventLogError> {
+        if !self.reopen_pending {
+            // rename(2) replaces an existing events.1.jsonl without following it.
+            fs::rename(&self.current_path, &self.rotated_path)
+                .map_err(|e| io_error(&self.current_path, e))?;
+            self.reopen_pending = true;
+        }
+        self.file = open(&self.current_path)?;
         self.size = 0;
+        self.reopen_pending = false;
+        self.needs_newline = false;
         Ok(())
+    }
+}
+
+/// A log file that can be cut back to a known length.
+trait LogFile: Write {
+    fn truncate_to(&mut self, len: u64) -> io::Result<()>;
+}
+
+impl LogFile for File {
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        // Works under O_APPEND: later writes land at the new end.
+        self.set_len(len)
+    }
+}
+
+#[derive(Debug)]
+struct WriteFailure {
+    source: io::Error,
+    /// A partial line may remain on disk (truncation failed too).
+    dirty: bool,
+}
+
+/// Write `line` (preceded by a newline when `needs_newline`) in one `write_all`
+/// plus flush and return the bytes written. On failure, cut the file back to
+/// `good_size` so no partial line stays; if even that fails, the caller must
+/// isolate the leftovers with a newline on the next write.
+fn write_line<F: LogFile>(
+    file: &mut F,
+    good_size: u64,
+    needs_newline: bool,
+    line: &[u8],
+) -> Result<u64, WriteFailure> {
+    let mut buf;
+    let data = if needs_newline {
+        buf = Vec::with_capacity(line.len() + 1);
+        buf.push(b'\n');
+        buf.extend_from_slice(line);
+        &buf[..]
+    } else {
+        line
+    };
+    match file.write_all(data).and_then(|()| file.flush()) {
+        Ok(()) => Ok(data.len() as u64),
+        Err(source) => {
+            let dirty = match file.truncate_to(good_size) {
+                Ok(()) => false,
+                Err(e) => {
+                    tracing::warn!(kind = ?e.kind(), "cannot truncate event log after failed write");
+                    true
+                }
+            };
+            Err(WriteFailure { source, dirty })
+        }
     }
 }
 
@@ -228,5 +305,134 @@ fn for_each_event(path: &Path, mut f: impl FnMut(AgentEvent) -> bool) -> Result<
                 tracing::warn!(file = %name, line = line_no, "skipping corrupt event log line")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory log file whose writes can fail after a short write.
+    struct FakeFile {
+        data: Vec<u8>,
+        /// Accept at most this many more bytes, then fail with ENOSPC.
+        budget: usize,
+        truncate_fails: bool,
+    }
+
+    impl FakeFile {
+        fn new(data: &[u8], budget: usize, truncate_fails: bool) -> Self {
+            Self {
+                data: data.to_vec(),
+                budget,
+                truncate_fails,
+            }
+        }
+    }
+
+    impl Write for FakeFile {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.budget == 0 {
+                return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+            let n = buf.len().min(self.budget);
+            self.data.extend_from_slice(&buf[..n]);
+            self.budget -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl LogFile for FakeFile {
+        fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+            if self.truncate_fails {
+                return Err(io::Error::other("truncate refused"));
+            }
+            self.data.truncate(len as usize);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn short_write_is_truncated_away() {
+        let good = b"{\"a\":1}\n";
+        let mut file = FakeFile::new(good, 5, false);
+        let failure = write_line(&mut file, good.len() as u64, false, b"{\"b\":2}\n")
+            .expect_err("write must fail");
+        assert!(!failure.dirty);
+        assert_eq!(file.data, good, "partial bytes must be removed");
+
+        // Space returns: the next write lands cleanly after the good line.
+        file.budget = usize::MAX;
+        let n = write_line(&mut file, good.len() as u64, false, b"{\"c\":3}\n").expect("write");
+        assert_eq!(n, 8);
+        assert_eq!(file.data, b"{\"a\":1}\n{\"c\":3}\n");
+    }
+
+    #[test]
+    fn failed_truncate_marks_dirty_and_next_write_isolates_leftovers() {
+        let good = b"{\"a\":1}\n";
+        let mut file = FakeFile::new(good, 5, true);
+        let failure = write_line(&mut file, good.len() as u64, false, b"{\"b\":2}\n")
+            .expect_err("write must fail");
+        assert!(failure.dirty);
+        assert_eq!(file.data.len(), good.len() + 5, "partial bytes remain");
+
+        file.budget = usize::MAX;
+        let n = write_line(&mut file, good.len() as u64, true, b"{\"c\":3}\n").expect("write");
+        assert_eq!(n, 9, "newline prefix is counted");
+        let text = String::from_utf8(file.data).expect("utf8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "{\"a\":1}");
+        assert_eq!(lines[2], "{\"c\":3}", "new event is on its own line");
+    }
+
+    #[test]
+    fn failed_reopen_is_retried_without_renaming_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut log = EventLog::open(dir.path(), AgentId::generate(), 1 << 20).expect("open");
+        log.append(EventKind::TurnStarted).expect("append");
+
+        let err = log
+            .rotate_with(|_| {
+                Err(EventLogError::Serialize(serde::de::Error::custom(
+                    "injected",
+                )))
+            })
+            .expect_err("reopen must fail");
+        assert!(matches!(err, EventLogError::Serialize(_)));
+        assert!(log.reopen_pending);
+        assert!(dir.path().join(ROTATED_FILE).exists());
+
+        // The next append retries only the reopen and then succeeds.
+        let ev = log.append(EventKind::TurnStarted).expect("append");
+        assert_eq!(ev.seq, 2);
+        assert!(!log.reopen_pending);
+        let seqs: Vec<u64> = log
+            .read_page(0, 10)
+            .expect("read")
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
+        let rotated = fs::read_to_string(dir.path().join(ROTATED_FILE)).expect("rotated");
+        let current = fs::read_to_string(dir.path().join(CURRENT_FILE)).expect("current");
+        assert_eq!(rotated.lines().count(), 1);
+        assert_eq!(current.lines().count(), 1);
+    }
+
+    #[test]
+    fn truncate_works_on_real_append_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CURRENT_FILE);
+        let mut file = open_append(&path).expect("open");
+        file.write_all(b"good\npartial").expect("write");
+        file.truncate_to(5).expect("truncate");
+        file.write_all(b"next\n").expect("write");
+        assert_eq!(fs::read(&path).expect("read"), b"good\nnext\n");
     }
 }
