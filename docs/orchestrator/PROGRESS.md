@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 の計画作成（M1 は受け入れ完了、最終レビューの指摘 8 件を 2026-11-26 に修正済み、修正の再レビュー待ち）
+- タスク: M2（TUI）の計画作成
 - 状態: 未着手
 - 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 の最終レビュー、続いて M2（TUI）の計画を作成する。受け入れで見つけた小さな課題は「保留中の小さな改善」の末尾
+- 次の一手: M2（TUI）の計画を作成する（superpowers:writing-plans、計画は docs/superpowers/plans/）。M1 の保留指摘は末尾「M1 レビューで保留した指摘と判断」から優先度を付けて取り込む。M1 ブランチ `feat/orchestrator-m1` は push 済み（PR 未作成。M0 は PR #183）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -28,7 +28,7 @@
 | M | 内容 | 状態 | 計画 |
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
-| M1 | デーモン中核と CLI（`dgc-next`） | 完了（最終レビュー待ち） | m1-daemon |
+| M1 | デーモン中核と CLI（`dgc-next`） | 完了（最終レビューと修正の再レビュー済み、2026-11-26） | m1-daemon |
 | M2 | TUI | 未着手 | 未作成 |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
@@ -550,3 +550,64 @@
   消えても通る（空リストに `all`）。`assertTrue(clippy)` を足す。
 - M0 最終レビュー由来: `crates/dgc-cli/tests/version.rs` は版を直書き。`env!("CARGO_PKG_VERSION")` を使う。
 - M0 最終レビュー由来: `crates/dgc-protocol/Cargo.toml` 末尾の空行。
+
+## M1 レビューで保留した指摘と判断（2026-11-26、実行台帳から移記）
+
+M1 はタスクごとのレビューと全体の最終レビューを通過した。以下は各レビューで Minor として保留した指摘と、
+コントローラが下した判断の全量。M2 以降の計画時に、ここから優先度を付けて取り込む。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): Response/Notification lack jsonrpc field (plan-mandated); limit_raw boundary test at exactly 64 KiB; PROGRESS.md list blank line
+- Task 2: minor (deferred): file modes set via open(2) mode only (umask can make stricter, never looser); list_* order untested; post-rename dir fsync failure returns Err; write_atomic bare relative path; ensure_private_dir creates parents 0700; test gaps (symlink entry in list, dangling target, temp cleanup, events_max_bytes=0)
+- Task 3: minor (deferred): corrupt-line warn repeats per read/open and open scans whole file; 0600 not asserted on events.1.jsonl, pre-existing looser mode not tightened; oversized test doesn't assert fresh file
+- Task 3: minor (deferred): size undercount after double fault (truncate fails then later write ok then fail+truncate ok); no test drives failure paths through append end to end
+- Task 4: minor (deferred): line.clear() keeps 16 MiB capacity after a huge line; tokio macros feature only needed by tests; wait_gone counts zombies as alive (container pid1 flake risk)
+- Task 5: minor (deferred): writer task outside JoinSet leaks after drain timeout; shutdown ignored if response send fails; no pre-hello timeout / connection cap; second_hello test doesn't assert INVALID_STATE code; responses_wait test relies on 50ms sleep; JoinError from connection task silently dropped
+- Task 6: minor (deferred): test guard may miss a still-booting daemon after a failed run; VersionMismatch after spawn reported as SpawnTimeout; Client::call has no overall timeout (wedged daemon hangs CLI); dgc-cli uses tokio::sync without declaring `sync` feature (unification); missing tests (symlinked daemon.log, log 0600, id-0 error path, pending-notification overflow); pre-existing daemon.log mode not tightened; stop's lock probe can make a concurrent autostart lose
+- Task 7: minor (deferred): missing project dir leaves workspace un-archivable → project never removable (consider re-grade at final review); worktree_requires_a_git_repository can't distinguish non-repo vs subdir and manager git inherits global config/hooks in tests; git timeout kills only git not its descendants; failed branch delete only warns (no response field)
+- Task 7: minor (deferred): `git worktree list -z` needs git >= 2.36 (no fallback/doc; fails closed); locked worktree with missing dir makes archive fail permanently; lib test name says prefix but checks suffix
+- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
+- Task 8: minor (deferred): biased select can starve commands under a flooding provider (fairness cap suggested); drain loop has no yield/bound (use len snapshot); no test for Exited during drain; caller gets timeout error before stored state flips (≤5s)
+- Task 9: minor (deferred): Codex command deny never recorded — Deny mapping on commands unexercised (ruling: cancel when decline not offered)
+- Task 10: minor (deferred): tests hard-code sorted-key output (preserve_order unification risk); uncaptured ${name} in expect matches literally (should exit 2); capture line extra keys ignored; stdin read error treated as EOF; lossy UTF-8 on input
+- Task 11: minor (deferred): deny sent before interrupt success known (manager leaves pending on interrupt Protocol error); interrupt internal bound can exceed manager 30s with many pending permissions; full event channel blocks control_response; plan's verify.sh filter name
+- Task 11: minor (deferred, consider re-grade at final review): idle-skip in interrupt() races reader delivery — TurnCompleted can arrive after interrupt returns (contract breach, sub-µs window, affects Steer→interrupt_and_send); init-reset relies on unrecorded "result1 before init2" ordering
+- Task 12: minor (deferred, consider re-grade at final review): interrupt failing with non-32600 error leaves agent Running (TurnCompleted already dropped); untested race paths (interrupt completed-then-32600, usage correlation by turn id) — testable with fake; chunked message with empty remainder emits no final:true; deltas/approvals without turnId stored under "" never cleared; duplicated process-session plumbing between claude.rs and codex.rs (codex.rs 1187 lines); timing-dependent quiet-period drains in tests
+- Task 12: minor (deferred): steer fallback logs only debug (could hide a malformed steer); per-turn usage correlation untested
+- Task 13: minor (deferred): lagged next_seq imprecise for live-only subscriptions; concurrent resume can leave an agent running in an archived workspace; --version probe buffers unbounded stdout and kills only direct child (reuse process-group kill); missing tests (unsubscribe stops delivery, all-agents subscription, follow exit 1 on Failed / WaitingPermission continues); resolve.rs ETXTBSY flake risk; idle subscription connections accumulate after lag
+- Task 13: minor (deferred): non-autostart CLI calls during daemon startup block up to 15s then HelloTimeout; connect_or_spawn worst case can exceed SPAWN_WAIT; bind→chmod umask window (mitigated by 0700 dir; umask(0o177) around bind would harden)
+- Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it; idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
+- Task 14: minor (deferred): README lists `turn started` (never emitted) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
+- Task 14: minor (deferred): README "does not log prompt text" true for daemon.log but events.jsonl stores prompts too — wording should say so
+- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (fix before M4); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
+- Final: minor (deferred): create_workspace rollback uses branch -d (fresh branch can be left behind with --base other); structural test only matches os("--force")/os("-D") form; second archive check after agents archived can refuse (no loss); discard_queue save failure only warns; ToolCall.name / usage unbounded at source; pre-fix oversized legacy events end logs with an error; gitignored files removed by non-force archive (documented)
+
+### コントローラの判断（Ruling）
+
+- Ruling: execute on branch feat/orchestrator-m1 in the main checkout, no separate worktree — legacy crate rebuild cost; keeps PR #183 reviewable — cost if wrong: none beyond shared checkout
+- Ruling R1: Task 5 dispatch is a concrete DaemonDispatcher struct (no trait), connection context type chosen by implementer; Tasks 7/13 extend it — spec §7 only fixes methods, not internal shape — cost if wrong: small refactor if a trait is needed later
+- Ruling R2: Task 10 adds scenario line {"expect_args": [..]} asserting the given strings appear in argv in order — needed by Task 11 resume test and Codex start — cost if wrong: none
+- Ruling R3: dgc-cli tests locate dgc-fake-provider as a sibling of env!("CARGO_BIN_EXE_dgc-next") (same target dir) and fail with an explicit "run with --workspace" message if absent — verify.sh always passes --workspace — cost if wrong: running `cargo test -p dgc-cli` alone fails those tests with a clear message
+- Ruling R4: Task 5 TCP check compares socket inodes from /proc/self/fd against LISTEN inodes in /proc/self/net/tcp{,6} (Linux only) — makes the assertion about this process — cost if wrong: none
+- Ruling R5: git-using tests set GIT_CEILING_DIRECTORIES to the tempdir's parent so a stray /tmp/.git cannot leak in — host artifact must not decide results — cost if wrong: none
+- Task 1: Ruling: RED/GREEN via `cargo test -p dgc-protocol` instead of `verify.sh test dgc_protocol` — unit test names are module paths without the crate name, so the plan's filter matches zero tests — cost if wrong: none
+- Task 2: Ruling: Store::list_* skips unreadable/unknown-version entries with tracing::warn (id + error kind only), get_* still errors — one corrupt file must not block listing/restore at startup; spec's 'reject unknown version' holds per entity — cost if wrong: silent skip hides a corrupt agent from lists (warn in daemon.log)
+- Task 3: Ruling: EventLog::open takes agent_id (needed to stamp AgentEvent); adds time.rs now_rfc3339 (no chrono) — plan signature lacked agent id — cost if wrong: none
+- Ruling: plan's `verify.sh test <file-name>` filters match test names not files — dispatches use `cargo test -p <crate> --test <file>` for RED/GREEN — cost if wrong: none
+- Task 4: Ruling: accept wait() SIGKILLing leftover group members after leader exit — agent tools must not outlive the provider process; avoids signalling a recycled PGID from Drop — cost if wrong: a provider that deliberately daemonizes children within its group loses them
+- Task 5: Ruling: run_daemon takes shutdown: watch::Sender<bool> (not Receiver) so the daemon.shutdown handler can trigger it; caller wires SIGTERM/SIGINT to the same sender — plan said Receiver but also requires daemon.shutdown to send true — cost if wrong: none
+- Task 6: dispatched implementer ad6a947725b096eac (sonnet), BASE 70a168f; Ruling: autostart spawns 'daemon run' detached via setsid + log redirect (no double re-exec), DGC_LOG level without env-filter feature — keeps deps minimal — cost if wrong: none
+- Task 6: Ruling: accept dgc-client → dgc-daemon (+libc) dependency — plan mandated Client::connect(&DaemonPaths) and the autostart spawn reuses ensure_private_dir; dgc-daemon has no heavy deps — cost if wrong: moving DaemonPaths/spawn helpers to a shared crate before phase B (remote client)
+- Task 7: Ruling: list results are objects ({"projects":[..]}, {"workspaces":[..]}) not bare arrays; project/workspace Params types (ProjectAddParams{path}, ProjectRemoveParams{id}, WorkspaceListParams{project_id?}, WorkspaceArchiveParams{id}) added to dgc-protocol — Task 1 brief omitted them — cost if wrong: none
+- Task 7: Ruling: repo_key uses LAST 12 hex of project uuid (random bits) instead of plan's first 12 (v7 timestamp) — plan defect, collision only caused failed creates/stuck archives — cost if wrong: none
+- Task 8: Ruling: provider session calls bounded by PROVIDER_CALL_TIMEOUT=30s, start by 60s, timeout → fail() — reviewer fix proposal; values are controller's choice — cost if wrong: slow provider ops (e.g. heavy interrupt) marked failed; resumable
+- Task 9: Ruling (→Task 12): Codex decision mapping uses the request's offered decisions: Deny → `decline` if offered else `cancel`; AllowForSession → `acceptForSession` if offered else `accept`; Allow → `accept` — command approvals offered only accept/acceptWithExecpolicyAmendment/cancel — cost if wrong: Deny on commands interrupts the turn (cancel) instead of continuing
+- Task 9: Ruling (→Task 12/14): add Codex dgc mode `untrusted` (approvalPolicy "untrusted", sandbox "workspace-write", auto_approve=false); default stays workspace-write/on-request (Codex's own default: in-workspace commands run sandboxed without approval). Task 14's permit step uses --mode untrusted — needed to exercise command approval — cost if wrong: one more mode string
+- Task 9: Ruling (→Task 11/12): M1 adapters do not emit RateLimited from routine per-reply rate-limit updates; only an explicit provider error/result indicating a limit was hit becomes RateLimited; routine updates are dropped (debug log, no content). Precise trigger deferred to M4 handoff work — values at an actual limit were never observed — cost if wrong: M4 handoff proposal fires late/never until refined
+- Task 10: Ruling: Task 10 delivers the fake provider + scenario format + its own small test scenarios; adapter scenario files (derived from the Task 9 fixtures, with dgc-generated fields loosened) are authored in Tasks 11/12 because they depend on each adapter's exact outbound messages — plan put the conversion in Task 10 before the adapters exist — cost if wrong: none (same files, later task)
+- Task 13: Ruling: bind before probing providers (and widen SPAWN_WAIT to 15s) rather than only enlarging the client wait — keeps the socket reachable regardless of provider binaries — cost if wrong: early clients wait in backlog during probe
+- Final: Ruling: archive refuses when branch has commits beyond recorded base even if already merged into main (user decision as written) — user resolves with --force after merging; safest reading of "protect unmerged work" — cost if wrong: extra --force step after merges
+- Final: Ruling: steer fallback (interrupt_and_send) also clears the queue — consistent with "interrupt clears the queue" — cost if wrong: a queued message is dropped when a steer falls back
+- Final: Ruling: item 1 residual is load-bearing (directly violates the user's archive decision) — resumed the fixer for this one-line fix + test, verified by the controller running the named test rather than a second review round — cost if wrong: an unreviewed small diff in the archive path
+- 2026-11-26 M1 最終: 修正の再レビュー後、残り 1 件（未追跡ファイル検出が git 設定に左右される）を 02ae35c で修正し、コントローラが該当テスト 2 件を実行して確認。ワークスペース全体を直列・TMPDIR=/var/tmp で 2742 passed / 0 failed、guidance PASS、msrv PASS（固定ツールチェーン 1.99.0）。
