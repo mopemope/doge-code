@@ -64,18 +64,18 @@ def commands(mode, test_filter, root):
                 ([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests",
                   "-p", "test_*.py"], "unittest")]
     if mode == "test":
-        return [(["cargo", "test", "--locked", test_filter], True)]
+        return [(["cargo", "test", "--locked", "--workspace", test_filter], True)]
     if mode == "rust":
         return [(["cargo", "fmt", "--all", "--check"], False),
-                (["cargo", "clippy", "--locked", "--all-targets", "--all-features",
+                (["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--all-features",
                   "--", "-D", "warnings"], False),
-                (["cargo", "test", "--locked"], True)]
+                (["cargo", "test", "--locked", "--workspace"], True)]
     if mode == "msrv":
         manifest = tomllib.loads((root / "Cargo.toml").read_text())
         version = manifest["package"]["rust-version"]
         if re.fullmatch(r"\d+\.\d+", version):
             version += ".0"
-        return [(["rustup", "run", version, "cargo", "check", "--locked",
+        return [(["rustup", "run", version, "cargo", "check", "--locked", "--workspace",
                   "--all-targets", "--all-features"], False)]
     if mode == "macos":
         if sys.platform != "darwin":

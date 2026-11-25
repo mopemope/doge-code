@@ -95,6 +95,17 @@ class VerificationTests(unittest.TestCase):
         code, _ = self.run_fixture("Ran 3 tests in 0.001s\n\nOK (skipped=2)", require_tests="unittest")
         self.assertEqual(code, 0)
 
+    def test_rust_and_test_modes_cover_workspace(self):
+        for mode, test_filter in (("rust", None), ("test", "x")):
+            argvs = [argv for argv, _ in verify.commands(mode, test_filter, SCRIPTS.parent)]
+            cargo_tests = [argv for argv in argvs if argv[:2] == ["cargo", "test"]]
+            self.assertTrue(cargo_tests)
+            self.assertTrue(all("--workspace" in argv for argv in cargo_tests), cargo_tests)
+            clippy = [argv for argv in argvs if argv[:2] == ["cargo", "clippy"]]
+            self.assertTrue(all("--workspace" in argv for argv in clippy), clippy)
+        msrv = verify.commands("msrv", None, SCRIPTS.parent)[0][0]
+        self.assertIn("--workspace", msrv)
+
     def test_guidance_includes_test_integrity_checker(self):
         commands = verify.commands("guidance", None, SCRIPTS.parent)
         labels = [" ".join(argv) for argv, _ in commands]
@@ -256,6 +267,12 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue(guidance.check_ci(self.root))
         self.write(".github/workflows/ci.yml", source.replace(f"@{toolchain}", "@0.0.0"))
         self.assertTrue(guidance.check_ci(self.root))
+        for workspace_command in ("cargo test --locked --workspace",
+                                  "cargo clippy --locked --workspace",
+                                  "cargo check --locked --workspace"):
+            self.write(".github/workflows/ci.yml", source.replace(
+                workspace_command, workspace_command.replace(" --workspace", "")))
+            self.assertTrue(guidance.check_ci(self.root), workspace_command)
         self.write(".github/workflows/ci.yml", source.replace(
             "bash scripts/verify.sh macos", 'cargo test --locked tui::'))
         errors = guidance.check_ci(self.root)

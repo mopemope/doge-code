@@ -1399,6 +1399,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dgc-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "dgc-client"
+version = "0.1.0"
+
+[[package]]
+name = "dgc-daemon"
+version = "0.1.0"
+
+[[package]]
+name = "dgc-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "diffy"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

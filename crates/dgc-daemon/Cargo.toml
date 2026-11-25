@@ -1,0 +1,9 @@
+[package]
+name = "dgc-daemon"
+description = "dgc orchestrator daemon: supervises Claude Code and Codex agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]

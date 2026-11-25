@@ -1,0 +1,10 @@
+[package]
+name = "dgc-protocol"
+description = "Socket protocol types shared by the dgc orchestrator daemon and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+

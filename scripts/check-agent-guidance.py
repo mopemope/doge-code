@@ -183,9 +183,11 @@ def check_ci(root):
         version += ".0"
     expected = {
         ("cargo", "fmt", "--all", "--check"),
-        ("cargo", "clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"),
-        ("cargo", "test", "--locked"),
-        ("rustup", "run", version, "cargo", "check", "--locked", "--all-targets", "--all-features"),
+        ("cargo", "clippy", "--locked", "--workspace", "--all-targets", "--all-features",
+         "--", "-D", "warnings"),
+        ("cargo", "test", "--locked", "--workspace"),
+        ("rustup", "run", version, "cargo", "check", "--locked", "--workspace", "--all-targets",
+         "--all-features"),
         ("bash", "scripts/verify.sh", "guidance"),
         ("bash", "scripts/verify.sh", "tui-deps"),
         # macOS focused tests run through the wrapper so zero-test filters fail.

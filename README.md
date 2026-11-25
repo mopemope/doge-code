@@ -11,10 +11,14 @@ review. Prioritize demonstrated failures and user effort in that workflow over
 adding languages, model routes or UI features. Internal safety/contract tests
 protect mechanisms; their count or CI success does not establish usefulness.
 
-We will compare this narrow workflow with existing execution foundations and
-ordinary Codex use before deciding whether to retain or replace the custom agent
-runtime. No full migration has been decided, and no comparative practical result
-is claimed. See [practical acceptance evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
+## Orchestrator migration (in progress)
+
+Doge-Code is being rebuilt as an orchestrator that drives the existing Claude
+Code and Codex CLIs instead of calling LLM APIs itself. The new daemon and its
+`dgc-next` client live under `crates/` and are not usable yet; the `dgc` binary
+described below keeps working until the legacy runtime is removed. See the
+[design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
+[progress](docs/orchestrator/PROGRESS.md).
 
 ## 🚀 Key Features
 

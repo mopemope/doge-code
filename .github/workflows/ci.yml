@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - run: rustup run 1.94.0 cargo check --locked --all-targets --all-features
+      - run: rustup run 1.94.0 cargo check --locked --workspace --all-targets --all-features
 
   clippy:
     name: Clippy
@@ -43,7 +43,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -58,7 +58,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep
           rg --version
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
 
   test-macos-focused:
     name: Test (macOS focused)
