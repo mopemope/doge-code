@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M1 Task 6（クライアントと `dgc-next daemon`）
+- タスク: M1 Task 7（プロジェクトとワークスペース）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M1 計画の Task 6 Step 1 から始める
+- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）完了（ブランチ `feat/orchestrator-m1`）
+- 次の一手: M1 計画の Task 7 Step 1 から始める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -52,7 +52,7 @@
 | 3 | イベントログ | 完了 | `feat(daemon): add per-agent event log` |
 | 4 | 子プロセス管理 | 完了 | `feat(daemon): add process-group child management` |
 | 5 | ソケットサーバー | 完了 | `feat(daemon): serve JSON-RPC over private unix socket` |
-| 6 | クライアントと `dgc-next daemon` | 未着手 | |
+| 6 | クライアントと `dgc-next daemon` | 完了 | `feat(cli): add daemon lifecycle commands with autostart` |
 | 7 | プロジェクトとワークスペース | 未着手 | |
 | 8 | ProviderAdapter と AgentManager | 未着手 | |
 | 9 | 実プロバイダの記録（手動・トークン消費あり） | 未着手 | |
@@ -119,6 +119,18 @@
   終了時は accept 停止、接続を最大 2 秒で flush、ソケットファイル削除、lock 解放の順。ソケットパスが socket 以外なら
   `DaemonError::SocketPathOccupied` で起動拒否（削除しない）。`run_daemon` / `DaemonError` は `server` モジュールで定義し lib.rs から再エクスポート。
 
+- 2026-11-25 (M1 Task 6): `[workspace.dependencies]` に `dgc-client`、`dgc-daemon`（path）と `tracing-subscriber`
+  （`default-features = false`、バージョンはルートと同一。`dgc-cli` が `fmt` のみ有効化）を追加。
+  逸脱: `dgc-client` は `dgc-daemon`（`DaemonPaths` と `ensure_private_dir` のため）と `libc`（`pre_exec(setsid)` と `O_NOFOLLOW`）に
+  依存する。設計書 §5.1 の「tokio, dgc-protocol」だけでは、仕様の `Client::connect(&DaemonPaths)` と自動起動を実装できないため。
+  `dgc-cli` は `serde` に依存しない（`serde_json` のみ）。`libc` と `tempfile` は `dgc-cli` の dev-dependency（テストの後始末用）。
+- 2026-11-25 (M1 Task 6): 自動起動は `exe daemon run` を `setsid` 付きで起動する（`--detach` は子ではなく呼び出し側の
+  `connect_or_spawn` の動作）。起動ログは `<state>/daemon.log`（0600、O_APPEND、O_NOFOLLOW）。接続失敗のうち
+  ソケット欠如と接続拒否のときだけ起動し、50ms 間隔で最大 5 秒再接続する。`Client::call` は 1 要求ずつで、応答待ち中の通知は
+  最大 256 件バッファして `subscribe` が先に配信する（超過分は古いものから捨てる）。クライアントの 1 行上限も `MAX_MESSAGE_BYTES`。
+  `daemon stop` はソケット消滅に加えて instance lock が解放されるまで最大 5 秒待つ（直後の自動起動がロック競合で負けないため）。
+  `--json` は `Cli` の global フラグ（`daemon status --json` でも可）。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -169,6 +181,11 @@
     `cargo test --locked -p dgc-daemon --lib`: 15 件 PASS（`server::tests` 6 件）。clippy clean、新 crate 全テスト PASS。
     `verify.sh test shutdown_removes_socket_file`: PASS。
   - 未検証: 他 UID のピア拒否（別ユーザーで接続できないため。`peer_cred` と `geteuid` の比較コードのみ）。
+- 2026-11-25 M1 Task 6（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo test --locked -p dgc-cli --test daemon_cli`: 実装前は `daemon` サブコマンド未定義で 7 件 FAIL（RED）→ 7 件 PASS（8 回連続 PASS、
+    終了後に `dgc-next` プロセス残存なし）。`cargo test --locked -p dgc-client`: 12 件 PASS（偽サーバーによる単体、実デーモンとの往復を含む）。
+  - 未検証: `subscribe` の実デーモンでの動作（サーバー側 `subscribe` は Task 13。偽サーバーでの単体のみ）。
+    `daemon stop` のロック待ちは、待たない版でもテストが通る（競合が速すぎて再現しない）ため、ミューテーションでは検出できない。
 
 ## 保留中の小さな改善
 

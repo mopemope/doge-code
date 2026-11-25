@@ -20,6 +20,13 @@ described below keeps working until the legacy runtime is removed. See the
 [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
 [progress](docs/orchestrator/PROGRESS.md).
 
+The daemon lifecycle commands work for development: `dgc-next daemon
+{run [--detach] | start | stop | status}` (`--json` prints machine-readable
+output). `status` starts the daemon on demand; a background daemon logs to
+`<state>/daemon.log` (`DGC_LOG=error|warn|info|debug|trace`, default `info`).
+Setting `DGC_STATE_ROOT=<dir>` keeps the socket, state, config and worktrees
+under `<dir>` instead of the XDG locations (for tests and experiments).
+
 ## 🚀 Key Features
 
 ### Core Capabilities

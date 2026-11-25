@@ -1403,11 +1403,29 @@ name = "dgc-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dgc-client",
+ "dgc-daemon",
+ "dgc-protocol",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "dgc-client"
 version = "0.1.0"
+dependencies = [
+ "dgc-daemon",
+ "dgc-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
 
 [[package]]
 name = "dgc-daemon"
