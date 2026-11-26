@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md) / [M4](../superpowers/plans/2026-11-26-orchestrator-m4-profiles-handoff.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,12 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 の計画作成
+- タスク: M4 Task 1（前提修正）
 - 状態: 未着手
-- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3（切替）完了、最終レビューと修正の再レビュー済み、PR #186（`feat/orchestrator-m3` → `develop`）でレビュー待ち
-  ブランチ `feat/orchestrator-m3` で完了（PR は未作成）。
-- 次の一手: M4（プロファイル、スケジュール、heartbeat、ワークスペーススクリプト、レート制限時の引き継ぎ提案）の計画を作成する。
-  M1/M2 の保留指摘から M4 の前提になるもの（例: 一覧の読み直しの積み上がり、送信モードの持ち越し、履歴の末尾読み込み）を選ぶ
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 計画作成（範囲・引き継ぎ方式・スクリプト方式・スケジュールの欠落時の扱いはユーザー決定、2026-11-26）
+- 次の一手: M4 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m4`）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -32,9 +30,10 @@
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
-| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了 | m3-cutover |
-| M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
-| M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
+| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
+| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 作業中 | m4-profiles-handoff |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 未着手 | 未作成 |
+| M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
 ## タスク
 
@@ -82,9 +81,21 @@
 | 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 完了 | `docs: describe dgc as the orchestrator and drop legacy guidance` |
 | 3 | M3 受け入れ | 完了 | `docs(orchestrator): complete M3 cutover acceptance` |
 
+### M4
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 未着手 | |
+| 2 | 上限検知（アダプタ） | 未着手 | |
+| 3 | プロファイル | 未着手 | |
+| 4 | 引き継ぎ（デーモン、CLI、TUI） | 未着手 | |
+| 5 | M4 受け入れ | 未着手 | |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 計画): ユーザー決定。M4 はプロファイル・使用量上限時の引き継ぎ・前提修正、スケジュール／heartbeat／ワークスペーススクリプトは M5、エージェント向け MCP は M6。引き継ぎは「上限を検知したら提案し、ユーザーが確認して起動」（自動切替しない）。ワークスペーススクリプトはリポジトリの `dgc.json` に置き、初回と内容変更時に内容（ハッシュ）単位で信頼を確認する。デーモン停止中に過ぎたスケジュールは実行しない（記録のみ）。
 
 - 2026-11-26 (M3): Emacs 連携（`elisp/`、旧 `dgc exec` に依存）は削除する（ユーザー決定）。旧エージェント評価・修復受け入れツールと関連文書は削除し、AGENTS.md の Product priority をオーケストレーター向けに書き直す（ユーザー決定）。
 - 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-test-integrity.py` とそのテストは削除した。検査 3 種（`DOGE_SKIP_HTTPTEST`、
