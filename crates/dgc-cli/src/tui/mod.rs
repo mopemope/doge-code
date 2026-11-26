@@ -2,11 +2,13 @@
 //!
 //! This module currently holds the pure model: [`AppState`] and
 //! [`update::update`], which turns an [`AppEvent`] into state changes and
-//! [`Effect`]s for the runtime to execute. Rendering and I/O live elsewhere.
+//! [`Effect`]s for the runtime to execute. [`render::render`] draws an
+//! [`AppState`]; I/O lives elsewhere.
 // removed in M2 Task 4 (the runtime wires these items up)
 #![allow(dead_code)]
 
 pub mod input;
+pub mod render;
 pub mod state;
 pub mod update;
 

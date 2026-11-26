@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 Task 3（描画）
+- タスク: M2 Task 4（ランタイムと起動コマンド）
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）
-- 次の一手: M2 計画の Task 3 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui::state::AppState` だけを読んで描画する
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）
+- 次の一手: M2 計画の Task 4 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui/mod.rs` の `#![allow(dead_code)]` を外し、`render::render` を端末ループから呼ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -68,7 +68,7 @@
 |---|---|---|---|
 | 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 完了 | `fix(daemon): bound event log handles and record turn starts` |
 | 2 | TUI の状態と更新（純粋部分） | 完了 | `feat(cli): add TUI state and update logic` |
-| 3 | 描画 | 未着手 | |
+| 3 | 描画 | 完了 | `feat(cli): render the TUI layout` |
 | 4 | ランタイムと起動コマンド | 未着手 | |
 | 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 未着手 | |
 
@@ -395,6 +395,23 @@
   （同じ generation）と `RpcDone{ request: RequestTag::LoadHistory{agent_id}, result: Err }` を返す（読み込み中のまま固まらず、
   ステータスに出る）。Snapshot は、要求中に届いたライブの権限イベント（追加・解決）を適用し直す（`permission_log`、要求から応答
   まで、または 20 Tick／切断まで）。
+- 2026-11-26 (M2 Task 3): 新依存 `ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }` と
+  `crossterm = "0.29"` を `[workspace.dependencies]` と `crates/dgc-cli` に追加（バージョンはルートパッケージと同一。Cargo.lock は dgc-cli
+  の依存 2 行のみ変化、新規クレートなし）。`tui::render::render(&AppState, &mut Frame)` は `AppState` だけを読む。
+  設計判断: (1) レイアウトは 左ツリー（幅 30%・18〜40 桁、端末幅 < 50 なら 16 桁で、狭いときはプロバイダ名を省き名前を `…` で切る。
+  `[auto]` は必ず残す）/ 右上ストリーム / 右下入力欄（権限ヒント表示中は 4 行）/ 最下行ステータス。ダイアログは右ペイン中央に重ねる。
+  (2) エスケープ: `Row.label`・ストリーム行・`Status.error`・`Disconnected.reason`・フォーム `error`・`ConfirmArchive.title` は state 側で
+  済んでおり二重にかけない。render 側でかけるのは、ストリーム見出しとダイアログ見出しのエージェント名（`escape_line`）、
+  権限の `summary`（`escape_text`、改行は行区切りとして保持）、入力欄・フォームの編集テキスト（`escape_line`）。`PendingPermission.raw` は
+  表示しない（利用者が答える対象は summary。raw を出すとさらに長大な未整形テキストを表示することになる）。
+  (3) 権限ダイアログは、選択中でないエージェントの要求でも「エージェント短縮 id・provider・title」、kind、summary 全文を折り返して表示し、
+  選択中でなければ黄色で `(not the selected agent)` を出す。summary が収まらない場合は先頭と末尾（プロトコルの切り詰めマーカー
+  `…(truncated, N bytes total)` や危険な引数が末尾にあることが多いため）を残し、中央に `…(N lines hidden; full text: dgc-next permit ls)`
+  を出す（スクロール状態を `AppState` に足さない選択。`permit ls` は summary 全文を 1 行で出す）。どんなに小さい端末でも黙って切らない。
+  (4) `!dialog.permission_armed()` の間は `keys enabled shortly` と、淡色（DIM）の `[a]llow [s]ession [d]eny` を出す。armed で通常表示。
+  (5) Input フォーカスで権限待ちなら `permission_hint()` を入力欄の最初の行に黒地・黄背景で、ステータスバーにも出す。
+  `input_target_missing()` のとき入力欄タイトルに赤字で `no target — select an agent`。
+  (6) `output::kind_name` を `pub` にした（権限ダイアログの kind 表示に再利用）。新規ファイル `render.rs` は約 1450 行（実装 約 800 行 + テスト）。
 
 ## 検証記録
 
@@ -598,6 +615,16 @@
     | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（61 passed） |
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 3（固定ツールチェーン 1.99.0）。テストを先に書き（`render` は何も描かないスタブ）、RED: `cargo test --locked -p dgc-cli
+  --bin dgc-next tui::render` が 16 件すべて FAIL（0 passed / 16 failed、バッファが空）。実装後 GREEN:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::render` | PASS（17 passed） |
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（78 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（rustup run 1.94.0 cargo check --locked --workspace --all-targets --all-features） |
 
 ## 保留中の小さな改善
 
